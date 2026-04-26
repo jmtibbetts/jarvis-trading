@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal
 from lib.alpaca_client import get_account, get_positions, submit_bracket_order, normalize_symbol, is_crypto
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,16 @@ def run():
             if sym in held or sym_raw in held:
                 logger.debug(f"[Execute] Skip {sym} — already held")
                 continue
+
+            # Skip equities when market is closed (weekends / outside 9:30-16:00 ET)
+            if not crypto:
+                now_utc = datetime.now(timezone.utc)
+                weekday = now_utc.weekday()  # 0=Mon, 5=Sat, 6=Sun
+                hour_et = (now_utc.hour - 4) % 24  # rough ET offset (EDT)
+                market_open = weekday < 5 and 13 <= now_utc.hour < 20  # 9:30-16:00 ET = 13:30-20:00 UTC
+                if not market_open:
+                    logger.debug(f"[Execute] Skip {sym} — equity market closed (weekday={weekday} UTC hour={now_utc.hour})")
+                    continue
 
             entry  = float(sig.get("entry_price")  or 0)
             target = float(sig.get("target_price") or 0)

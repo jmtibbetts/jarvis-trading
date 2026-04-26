@@ -360,6 +360,117 @@ def cancel_order(order_id: str):
         return {"ok":True}
     except Exception as e: raise HTTPException(500,str(e))
 
+@router.delete("/alpaca/orders")
+def cancel_all_orders():
+    """Cancel ALL open orders on Alpaca and reset their signals back to Active."""
+    try:
+        from lib.alpaca_client import get_trading_client
+        client = get_trading_client()
+        client.cancel_orders()  # cancels all open orders
+        # Also reset any PendingApproval signals back to Active so they can re-queue
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db() as db:
+            pending = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").all()
+            for s in pending:
+                s.status = "Active"
+                s.updated_date = now_iso
+            cancelled_count = len(pending)
+        return {"ok": True, "orders_cancelled": True, "signals_reset": cancelled_count}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.get("/signals/pending")
+def get_pending_signals():
+    """Get all signals queued for Monday morning approval."""
+    with get_db() as db:
+        sigs = db.query(TradingSignal).filter(
+            TradingSignal.status == "PendingApproval"
+        ).order_by(TradingSignal.confidence.desc()).all()
+        return [_sig_dict(s) for s in sigs]
+
+@router.post("/signals/{signal_id}/approve")
+def approve_signal(signal_id: str):
+    """Approve a pending signal — immediately submit the order to Alpaca."""
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404, "Signal not found")
+        if sig.status != "PendingApproval":
+            raise HTTPException(400, f"Signal is {sig.status}, not PendingApproval")
+        try:
+            from lib.alpaca_client import submit_bracket_order, normalize_symbol, is_crypto, get_account
+            sym, crypto = normalize_symbol(sig.asset_symbol)
+            entry  = float(sig.entry_price or 0)
+            target = float(sig.target_price or 0)
+            stop   = float(sig.stop_loss or 0)
+            if not entry or not target or not stop:
+                raise ValueError("Signal missing price levels")
+            # Check buying power
+            account = get_account()
+            buying_power = float(account.buying_power)
+            qty = max(1, int(min(1500, buying_power * 0.2) / entry)) if not crypto else round(min(1000, buying_power * 0.1) / entry, 6)
+            if qty <= 0:
+                raise ValueError(f"Insufficient buying power ${buying_power:.0f}")
+            result = submit_bracket_order(symbol=sym, qty=qty, entry_price=entry, take_profit=target, stop_loss=stop)
+            sig.status = "Executed"
+            sig.updated_date = datetime.now(timezone.utc).isoformat()
+            return {"ok": True, "order": result, "qty": qty, "symbol": sym}
+        except Exception as e:
+            sig.status = "Rejected"
+            sig.updated_date = datetime.now(timezone.utc).isoformat()
+            raise HTTPException(500, str(e))
+
+@router.post("/signals/{signal_id}/reject")
+def reject_signal(signal_id: str):
+    """Reject a pending signal — discard without trading."""
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404)
+        sig.status = "Rejected"
+        sig.updated_date = datetime.now(timezone.utc).isoformat()
+        return {"ok": True}
+
+@router.post("/signals/approve-all")
+def approve_all_signals():
+    """Approve ALL pending signals — submit all to Alpaca."""
+    from lib.alpaca_client import submit_bracket_order, normalize_symbol, get_account
+    account = get_account()
+    buying_power = float(account.buying_power)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    approved = rejected = 0
+    with get_db() as db:
+        sigs = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").order_by(TradingSignal.confidence.desc()).all()
+        for sig in sigs:
+            if buying_power < 100:
+                break
+            try:
+                sym, crypto = normalize_symbol(sig.asset_symbol)
+                entry  = float(sig.entry_price or 0)
+                target = float(sig.target_price or 0)
+                stop   = float(sig.stop_loss or 0)
+                if not entry or not target or not stop or stop >= entry or target <= entry:
+                    sig.status = "Rejected"; sig.updated_date = now_iso; rejected += 1; continue
+                trade_budget = min(buying_power * 0.15, 1500)
+                qty = max(1, int(trade_budget / entry)) if not crypto else round(trade_budget / entry, 6)
+                submit_bracket_order(symbol=sym, qty=qty, entry_price=entry, take_profit=target, stop_loss=stop)
+                sig.status = "Executed"; sig.updated_date = now_iso
+                buying_power -= qty * entry
+                approved += 1
+            except Exception as e:
+                sig.status = "Rejected"; sig.updated_date = now_iso; rejected += 1
+    return {"ok": True, "approved": approved, "rejected": rejected, "buying_power_remaining": round(buying_power, 2)}
+
+@router.post("/signals/reject-all")
+def reject_all_pending():
+    """Reject all pending signals."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db() as db:
+        sigs = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").all()
+        for s in sigs:
+            s.status = "Rejected"; s.updated_date = now_iso
+        return {"ok": True, "rejected": len(sigs)}
+
 class AnalyzeRequest(BaseModel):
     symbol: str; timeframes: Optional[list]=["1H","4H","1D"]; generate_signal: Optional[bool]=False
 

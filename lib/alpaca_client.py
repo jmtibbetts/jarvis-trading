@@ -42,23 +42,46 @@ def normalize_symbol(symbol: str) -> tuple[str, bool]:
     return s, False
 
 def get_alpaca_creds():
-    """Get credentials from DB or environment."""
+    """
+    Get credentials — priority order:
+    1. DB PlatformConfig (any row where platform contains 'alpaca')
+    2. .env / environment variables
+    Paper mode: DB extra_field_1 == 'paper' OR env ALPACA_PAPER=true OR ALPACA_BASE_URL contains 'paper'
+    """
+    # ── 1. Try DB ──────────────────────────────────────────────────────────────
     try:
         from app.database import get_db, PlatformConfig
         with get_db() as db:
+            # Try is_default first, then any active alpaca row
             configs = db.query(PlatformConfig).filter(
-                PlatformConfig.platform.like('alpaca%'),
                 PlatformConfig.is_active == True
             ).all()
-            cfg = next((c for c in configs if c.is_default), None) or (configs[0] if configs else None)
-            if cfg:
-                return cfg.api_key, cfg.api_secret, cfg.extra_field_1 == 'paper'
+            # Match any platform name containing 'alpaca' (case-insensitive)
+            alpaca_configs = [c for c in configs
+                              if c.platform and 'alpaca' in c.platform.lower()]
+            cfg = next((c for c in alpaca_configs if c.is_default), None)                   or (alpaca_configs[0] if alpaca_configs else None)
+
+            if cfg and cfg.api_key and cfg.api_secret:
+                # Paper detection: check extra_field_1, api_url, or default to paper
+                url = (cfg.api_url or '').lower()
+                ef1 = (cfg.extra_field_1 or '').lower()
+                paper = (ef1 == 'paper') or ('paper' in url) or (ef1 not in ('live', 'prod', 'production'))
+                logger.debug(f"[Alpaca] Creds from DB — paper={paper} platform={cfg.platform}")
+                return cfg.api_key, cfg.api_secret, paper
     except Exception as e:
-        logger.debug(f"DB creds lookup failed: {e}")
-    
-    key = os.getenv('ALPACA_API_KEY', '')
-    secret = os.getenv('ALPACA_API_SECRET', '')
-    paper = os.getenv('ALPACA_MODE', 'paper').lower() == 'paper'
+        logger.debug(f"[Alpaca] DB creds lookup failed: {e}")
+
+    # ── 2. Fall back to environment ────────────────────────────────────────────
+    key    = os.getenv('ALPACA_API_KEY', '').strip()
+    secret = os.getenv('ALPACA_API_SECRET', '').strip()
+    base   = os.getenv('ALPACA_BASE_URL', '').lower()
+    paper_env = os.getenv('ALPACA_PAPER', os.getenv('ALPACA_MODE', 'paper')).lower()
+    paper  = (paper_env in ('true', '1', 'paper')) or ('paper' in base)
+
+    if key and secret:
+        logger.debug(f"[Alpaca] Creds from .env — paper={paper}")
+    else:
+        logger.warning("[Alpaca] No credentials found in DB or .env")
     return key, secret, paper
 
 def get_trading_client() -> TradingClient:

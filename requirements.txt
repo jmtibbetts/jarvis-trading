@@ -17,11 +17,9 @@ httpx==0.27.0
 aiohttp==3.9.5
 feedparser==6.0.11
 
-# Data & TA
-# ta==0.11.0: pure Python, no numba, no Rust, all same indicators, works on any Python version
+# Data — TA lib installed separately by start.bat (TA-Lib wheel or ta fallback)
 pandas==2.2.2
 numpy==1.26.4
-ta==0.11.0
 alpaca-py==0.26.0
 
 # Telegram

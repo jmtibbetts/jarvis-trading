@@ -36,36 +36,14 @@ scheduler = None
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    """Startup and shutdown using modern FastAPI lifespan (no deprecation warnings)."""
+    """Startup / shutdown — jobs fire immediately via next_run_time=now in scheduler."""
     global scheduler
 
     # ── Startup ────────────────────────────────────────────────────────────────
     from app.scheduler import create_scheduler
     scheduler = create_scheduler()
     scheduler.start()
-    logger.info("[Server] APScheduler started — v6.0")
-
-    def initial_fetch():
-        time.sleep(3)
-        logger.info("[Startup] Initial market data fetch...")
-        try:
-            from jobs.fetch_market_data import run as mrun; mrun()
-        except Exception as e:
-            logger.error(f"[Startup] Market fetch error: {e}")
-        time.sleep(5)
-        logger.info("[Startup] Initial threat news fetch...")
-        try:
-            from jobs.fetch_threat_news import run as trun; trun()
-        except Exception as e:
-            logger.error(f"[Startup] News fetch error: {e}")
-        time.sleep(15)
-        logger.info("[Startup] Initial signal generation...")
-        try:
-            from jobs.generate_signals import run as srun; srun()
-        except Exception as e:
-            logger.error(f"[Startup] Signal gen error: {e}")
-
-    threading.Thread(target=initial_fetch, daemon=True).start()
+    logger.info("[Server] APScheduler started — jobs firing immediately")
 
     yield  # ← App runs here
 
@@ -110,16 +88,19 @@ def print_banner():
     print(f"  Dashboard:  http://localhost:{port}")
     print(f"  API docs:   http://localhost:{port}/docs")
     print("═"*65)
-    print("  Schedules:")
+    print("  Startup sequence (fires immediately):")
+    print("    T+0s    Market Data  + Threats + Telegram")
+    print("    T+30s   Position Management")
+    print("    T+90s   Signal Generation")
+    print("    T+3m    Signal Execution")
+    print("═"*65)
+    print("  Recurring schedules:")
     print("    Market Data     → every 15 min")
-    print("    Threat News     → every 15 min (offset 7m)")
+    print("    Threat News     → every 15 min")
     print("    Signal Gen      → every 30 min")
-    print("    Signal Execute  → every 30 min (offset 3m)")
+    print("    Signal Execute  → every 30 min")
     print("    Position Mgmt   → every  5 min")
     print("    Telegram Bot    → every  1 min")
-    print("═"*65)
-    print("  First run: Go to Settings tab to configure API keys")
-    print("  OHLCV cache builds automatically — gets better over time")
     print("═"*65 + "\n")
 
 

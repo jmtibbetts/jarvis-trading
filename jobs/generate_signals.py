@@ -133,29 +133,29 @@ def run():
                 n=normalize_signal(raw,ta_profiles,asset_map)
                 if not n or n.get("asset_symbol") in existing: skipped+=1; continue
                 scored=score_safe(n,ta_profiles,regime,earnings_set)
-            db.add(TradingSignal(
-                id=str(uuid.uuid4()),
-                asset_symbol=scored.get("asset_symbol"),
-                asset_name=scored.get("asset_name"),
-                asset_class=scored.get("asset_class","Equity"),
-                direction=scored.get("direction","Long"),
-                confidence=scored.get("confidence",65),
-                composite_score=scored.get("composite_score"),
-                timeframe=scored.get("timeframe","4H"),
-                entry_price=scored.get("entry_price"),
-                target_price=scored.get("target_price"),
-                stop_loss=scored.get("stop_loss"),
-                reasoning=scored.get("reasoning",""),
-                key_risks=scored.get("key_risks",""),
-                momentum=scored.get("momentum",""),
-                signal_source=scored.get("signal_source","watchlist"),
-                earnings_risk=bool(scored.get("earnings_risk",False)),
-                rr_ratio=scored.get("rr_ratio"),
-                status="Active",
-                generated_at=now_iso,
-                created_date=now_iso,
-                updated_date=now_iso,
-            ))
+                db.add(TradingSignal(
+                    id=str(uuid.uuid4()),
+                    asset_symbol=scored.get("asset_symbol"),
+                    asset_name=scored.get("asset_name"),
+                    asset_class=scored.get("asset_class","Equity"),
+                    direction=scored.get("direction","Long"),
+                    confidence=scored.get("confidence",65),
+                    composite_score=scored.get("composite_score"),
+                    timeframe=scored.get("timeframe","4H"),
+                    entry_price=scored.get("entry_price"),
+                    target_price=scored.get("target_price"),
+                    stop_loss=scored.get("stop_loss"),
+                    reasoning=scored.get("reasoning",""),
+                    key_risks=scored.get("key_risks",""),
+                    momentum=scored.get("momentum",""),
+                    signal_source=scored.get("signal_source","watchlist"),
+                    earnings_risk=bool(scored.get("earnings_risk",False)),
+                    rr_ratio=scored.get("rr_ratio"),
+                    status="Active",
+                    generated_at=now_iso,
+                    created_date=now_iso,
+                    updated_date=now_iso,
+                ))
                 existing.add(scored.get("asset_symbol")); saved+=1
             except Exception as sig_err:
                 logger.error(f"[Signals] Failed to save signal: {sig_err} | raw={raw}")

@@ -733,7 +733,15 @@ async function loadJobs() {
     }).join('');
     // Append cache + LLM status cards
     const llmOk=llm.ok!==false;
-    const cacheRows=cache.symbols?`<div class="small text-muted">Symbols: ${cache.symbols} · Bars: ${(cache.total_bars||0).toLocaleString()}</div>`:'<div class="small text-muted">No cache data yet</div>';
+    const cacheSymbols = cache.symbols_cached || cache.symbols || 0;
+    const cacheBars    = cache.total_bars || 0;
+    const cacheSize    = cache.db_size_mb != null ? cache.db_size_mb.toFixed(1) + ' MB' : '';
+    const byTf         = cache.by_timeframe || {};
+    const tfSummary    = Object.entries(byTf).map(([tf,v])=>`${tf}: ${v.bars?.toLocaleString()||0} bars`).join(' · ');
+    const cacheRows    = cacheSymbols
+      ? `<div class="small text-muted">${cacheSymbols} symbols · ${cacheBars.toLocaleString()} bars${cacheSize?' · '+cacheSize:''}</div>`+
+        (tfSummary ? `<div class="small text-muted">${tfSummary}</div>` : '')
+      : '<div class="small text-muted text-warning">No cache data yet — market job will populate on next run</div>';
     grid.innerHTML+=`
       <div class="col-lg-4 col-md-6">
         <div class="card h-100 border-${llmOk?'success':'danger'}">
@@ -755,7 +763,10 @@ async function loadJobs() {
               <button class="btn btn-outline-info btn-sm py-0" onclick="triggerBackfill()">Backfill</button>
             </div>
             ${cacheRows}
-            <div class="small text-muted mt-1">yfinance fallback: active</div>
+            <div class="small text-muted mt-1">
+              yfinance fallback: <span class="text-success fw-bold">active</span>
+              ${cache.db_path ? `<span class="text-muted ms-2" style="font-size:.7rem">${cache.db_path.split(/[\\/]/).pop()}</span>` : ''}
+            </div>
           </div>
         </div>
       </div>`;

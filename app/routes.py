@@ -263,6 +263,24 @@ def llm_health():
     except Exception as e:
         return {"ok":False,"error":str(e)}
 
+
+@router.post("/llm/test")
+def llm_test():
+    """Send a minimal test prompt to the LLM and return the raw response."""
+    try:
+        from lib.lmstudio import call_lm_studio, get_llm_config
+        cfg = get_llm_config()
+        test_prompt = 'Return this exact JSON and nothing else: [{"test": true, "status": "ok"}]'
+        result = call_lm_studio(test_prompt, system="You are a helpful assistant. Output only valid JSON.", max_tokens=100, temperature=0.0)
+        return {"ok": True, "config": {"url": cfg.get("url"), "model": cfg.get("model"), "platform": cfg.get("platform")}, "raw_response": result[:500]}
+    except Exception as e:
+        from lib.lmstudio import get_llm_config
+        try:
+            cfg = get_llm_config()
+        except:
+            cfg = {}
+        return {"ok": False, "config": {"url": cfg.get("url","?"), "model": cfg.get("model","?"), "platform": cfg.get("platform","?")}, "error": str(e)}
+
 @router.get("/cache/stats")
 def cache_stats():
     try:

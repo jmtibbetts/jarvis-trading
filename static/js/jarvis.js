@@ -132,7 +132,7 @@ document.getElementById('sig-sort').addEventListener('change',renderSignals);
 /* ── POSITIONS ────────────────────────────────────────────────────────────── */
 async function loadPositions() {
   try {
-    const data=await API('/positions');
+    const data=await API('/positions/with-signals');
     const acct=data.account||{};
     const plCls=(acct.unrealized_pl||0)>=0?'text-success':'text-danger';
     document.getElementById('account-summary').innerHTML=`
@@ -147,8 +147,52 @@ async function loadPositions() {
     if(!positions.length){tbody.innerHTML='<tr><td colspan="9" class="text-center text-muted py-4">No open positions</td></tr>';return;}
     tbody.innerHTML=positions.map(p=>{
       const plpc=p.unrealized_plpc||0; const plCls=plpc>=0?'pl-positive':'pl-negative';
-      return `<tr>
-        <td class="fw-bold">${p.symbol}</td>
+      const s=p.signal;
+      // Signal context row
+      let sigRow='';
+      if(s){
+        const sc=s.composite_score||s.confidence||0;
+        const scBadge=sc>=70?'bg-success':sc>=50?'bg-warning text-dark':'bg-danger';
+        const rr=s.rr?`<span class="badge bg-dark border border-secondary ms-2">R:R ${s.rr}</span>`:'';
+        const prog=s.progress_pct!=null?`<div class="mt-1"><div class="small text-muted d-flex justify-content-between"><span>Trade Progress</span><span>${s.progress_pct}% to target</span></div><div class="progress mt-1" style="height:4px"><div class="progress-bar ${s.progress_pct>=100?'bg-success':s.progress_pct>=0?'bg-info':'bg-danger'}" style="width:${Math.max(0,Math.min(100,s.progress_pct||0))}%"></div></div></div>`:'';
+        const timeAgoSig=s.generated_at?timeAgo(s.generated_at):'';
+        sigRow=`<tr class="signal-detail-row">
+          <td colspan="9" class="py-0">
+            <div class="signal-context-panel px-3 py-2">
+              <div class="row g-2 align-items-start">
+                <div class="col-lg-4">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="badge ${s.direction==='Long'?'bg-success':'bg-primary'}">${s.direction}</span>
+                    <span class="badge ${scBadge}">Score ${sc.toFixed(0)}%</span>
+                    <span class="badge bg-secondary">${s.timeframe||''}</span>
+                    ${rr}
+                    <span class="text-muted small ms-auto">${timeAgoSig}</span>
+                  </div>
+                  <div class="d-flex gap-3 small">
+                    <div><span class="text-muted">Entry</span><br><span class="text-info fw-bold">${fmtPrice(s.entry_price)}</span></div>
+                    <div><span class="text-muted">Target</span><br><span class="text-success fw-bold">${fmtPrice(s.target_price)}</span></div>
+                    <div><span class="text-muted">Stop</span><br><span class="text-danger fw-bold">${fmtPrice(s.stop_loss)}</span></div>
+                  </div>
+                  ${prog}
+                </div>
+                <div class="col-lg-5">
+                  <div class="small text-muted mb-1"><i class="bi bi-chat-text-fill text-info me-1"></i>Reasoning</div>
+                  <div class="small" style="line-height:1.4;color:#ccc">${(s.reasoning||'No reasoning recorded').slice(0,300)}${(s.reasoning||'').length>300?'…':''}</div>
+                </div>
+                <div class="col-lg-3">
+                  ${s.key_risks?`<div class="small text-muted mb-1"><i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>Key Risks</div><div class="small text-warning" style="line-height:1.4">${s.key_risks.slice(0,150)}</div>`:''}
+                  ${s.momentum?`<div class="small text-muted mt-2">Momentum: <span class="text-info">${s.momentum}</span></div>`:''}
+                  <div class="small text-muted mt-1">Source: ${s.signal_source||'watchlist'}</div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>`;
+      } else {
+        sigRow=`<tr class="signal-detail-row"><td colspan="9" class="py-1"><div class="signal-context-panel px-3 py-2"><span class="text-muted small"><i class="bi bi-info-circle me-1"></i>No signal record — position may have been entered manually or signal expired.</span></div></td></tr>`;
+      }
+      return `<tr class="position-row" style="cursor:pointer" onclick="toggleSignalRow(this)">
+        <td class="fw-bold">${p.symbol} <i class="bi bi-chevron-down text-muted" style="font-size:.65rem"></i></td>
         <td><span class="badge ${p.asset_class==='Crypto'?'bg-warning text-dark':'bg-primary'}">${p.asset_class}</span></td>
         <td>${Number(p.qty).toLocaleString()}</td>
         <td>${fmtPrice(p.avg_entry)}</td>
@@ -156,11 +200,25 @@ async function loadPositions() {
         <td>$${Number(p.market_value).toLocaleString('en',{maximumFractionDigits:2})}</td>
         <td class="${plCls}">$${Number(p.unrealized_pl).toFixed(2)}</td>
         <td class="${plCls} fw-bold">${fmtPct(plpc)}</td>
-        <td><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:.7rem" onclick="closePosition('${p.symbol}')"><i class="bi bi-x-circle"></i></button></td>
-      </tr>`;
+        <td><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:.7rem" onclick="event.stopPropagation();closePosition('${p.symbol}')"><i class="bi bi-x-circle"></i></button></td>
+      </tr>${sigRow}`;
     }).join('');
   } catch(e) {
     document.getElementById('positions-body').innerHTML=`<tr><td colspan="9" class="text-danger py-3">${e.message}</td></tr>`;
+  }
+}
+
+function toggleSignalRow(row) {
+  const next = row.nextElementSibling;
+  if(!next || !next.classList.contains('signal-detail-row')) return;
+  const panel = next.querySelector('.signal-context-panel');
+  const icon  = row.querySelector('.bi-chevron-down,.bi-chevron-up');
+  if(next.style.display==='none'||!next.style.display){
+    next.style.display=''; 
+    if(icon){icon.classList.remove('bi-chevron-down');icon.classList.add('bi-chevron-up');}
+  } else {
+    next.style.display='none';
+    if(icon){icon.classList.remove('bi-chevron-up');icon.classList.add('bi-chevron-down');}
   }
 }
 

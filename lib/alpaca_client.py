@@ -6,7 +6,8 @@ import os, re
 from functools import lru_cache
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+    MarketOrderRequest, LimitOrderRequest, GetOrdersRequest,
+    TrailingStopOrderRequest
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
@@ -52,17 +53,15 @@ def get_alpaca_creds():
     try:
         from app.database import get_db, PlatformConfig
         with get_db() as db:
-            # Try is_default first, then any active alpaca row
             configs = db.query(PlatformConfig).filter(
                 PlatformConfig.is_active == True
             ).all()
-            # Match any platform name containing 'alpaca' (case-insensitive)
             alpaca_configs = [c for c in configs
                               if c.platform and 'alpaca' in c.platform.lower()]
-            cfg = next((c for c in alpaca_configs if c.is_default), None)                   or (alpaca_configs[0] if alpaca_configs else None)
+            cfg = next((c for c in alpaca_configs if c.is_default), None) \
+                  or (alpaca_configs[0] if alpaca_configs else None)
 
             if cfg and cfg.api_key and cfg.api_secret:
-                # Paper detection: check extra_field_1, api_url, or default to paper
                 url = (cfg.api_url or '').lower()
                 ef1 = (cfg.extra_field_1 or '').lower()
                 paper = (ef1 == 'paper') or ('paper' in url) or (ef1 not in ('live', 'prod', 'production'))
@@ -113,27 +112,64 @@ def get_open_orders():
 def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                           take_profit: float, stop_loss: float,
                           side: str = 'buy') -> dict:
-    """Submit a bracket order with take-profit and stop-loss legs."""
+    """
+    Submit an order with take-profit and stop-loss protection.
+
+    Equities: standard bracket order (limit entry + TP limit + SL stop).
+    Crypto:   market entry first, then a separate trailing-stop order as
+              protective exit.  Alpaca does NOT support bracket orders on
+              crypto — submitting one raises an API error.
+    """
     sym, crypto = normalize_symbol(symbol)
     client = get_trading_client()
-    
     order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
-    
+
     if crypto:
-        # Crypto: market order with TP/SL (alpaca-py handles bracket for crypto)
-        from alpaca.trading.requests import MarketOrderRequest
-        req = MarketOrderRequest(
+        # ── Step 1: market entry ────────────────────────────────────────────
+        market_req = MarketOrderRequest(
             symbol=sym,
             qty=round(qty, 8),
             side=order_side,
             time_in_force=TimeInForce.GTC,
-            order_class=OrderClass.BRACKET,
-            take_profit={"limit_price": str(round(take_profit, 4))},
-            stop_loss={"stop_price": str(round(stop_loss, 4))}
         )
+        entry_order = client.submit_order(market_req)
+        logger.info(f"[Alpaca] Crypto market entry submitted — {sym} x{qty} | order_id={entry_order.id}")
+
+        # ── Step 2: trailing stop as protective exit ────────────────────────
+        # Calculate trail % from the stop_loss relative to entry_price
+        # e.g. entry=100, stop=92 → trail=8%
+        if entry_price and stop_loss and entry_price > 0:
+            trail_pct = round(abs(entry_price - stop_loss) / entry_price * 100, 2)
+            trail_pct = max(1.0, min(trail_pct, 15.0))  # clamp 1-15%
+        else:
+            trail_pct = 5.0  # sensible default
+
+        try:
+            trail_req = TrailingStopOrderRequest(
+                symbol=sym,
+                qty=round(qty, 8),
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                trail_percent=trail_pct,
+            )
+            trail_order = client.submit_order(trail_req)
+            logger.info(f"[Alpaca] Crypto trailing stop attached — {sym} trail={trail_pct}% | order_id={trail_order.id}")
+        except Exception as te:
+            logger.warning(f"[Alpaca] Trailing stop failed for {sym}: {te} — entry still filled")
+
+        return {
+            'id': str(entry_order.id),
+            'symbol': sym,
+            'qty': qty,
+            'status': str(entry_order.status),
+            'type': 'market',
+            'side': str(entry_order.side),
+            'crypto': True,
+            'trail_pct': trail_pct,
+        }
+
     else:
-        # Equity: limit entry bracket order (whole shares)
-        from alpaca.trading.requests import LimitOrderRequest
+        # ── Equity: standard bracket (limit entry) ──────────────────────────
         qty = max(1, int(qty))
         req = LimitOrderRequest(
             symbol=sym,
@@ -143,18 +179,18 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
             limit_price=round(entry_price, 2),
             order_class=OrderClass.BRACKET,
             take_profit={"limit_price": str(round(take_profit, 2))},
-            stop_loss={"stop_price": str(round(stop_loss, 2))}
+            stop_loss={"stop_price": str(round(stop_loss, 2))},
         )
-    
-    order = client.submit_order(req)
-    return {
-        'id': str(order.id),
-        'symbol': sym,
-        'qty': qty,
-        'status': str(order.status),
-        'type': str(order.type),
-        'side': str(order.side)
-    }
+        order = client.submit_order(req)
+        return {
+            'id': str(order.id),
+            'symbol': sym,
+            'qty': qty,
+            'status': str(order.status),
+            'type': str(order.type),
+            'side': str(order.side),
+            'crypto': False,
+        }
 
 def close_position(symbol: str):
     sym, _ = normalize_symbol(symbol)

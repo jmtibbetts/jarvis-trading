@@ -38,8 +38,11 @@ def clear_expired():
         n = db.query(TradingSignal).filter(TradingSignal.status.in_(["Expired","Rejected"])).delete()
     return {"ok":True,"deleted":n}
 
+class ExecuteRequest(BaseModel):
+    qty: Optional[int] = None
+
 @router.post("/signals/{signal_id}/execute")
-def manual_execute(signal_id: str):
+def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
     with get_db() as db:
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
         if not sig: raise HTTPException(404)
@@ -47,13 +50,68 @@ def manual_execute(signal_id: str):
             from lib.alpaca_client import submit_bracket_order, normalize_symbol
             sym, _ = normalize_symbol(sig.asset_symbol)
             entry  = float(sig.entry_price or 100)
-            qty    = max(1, int(1000/entry))
+            qty    = body.qty if body.qty and body.qty > 0 else max(1, int(1000/entry))
             result = submit_bracket_order(symbol=sym, qty=qty, entry_price=sig.entry_price,
                                           take_profit=sig.target_price, stop_loss=sig.stop_loss)
             sig.status = "Executed"; sig.updated_date = datetime.now(timezone.utc).isoformat()
-            return {"ok":True,"order":result}
+            return {"ok":True,"order":result,"qty":qty}
         except Exception as e:
             raise HTTPException(500, str(e))
+
+class SaveSignalRequest(BaseModel):
+    asset_symbol: Optional[str] = None
+    asset_name:   Optional[str] = None
+    asset_class:  Optional[str] = "Equity"
+    direction:    Optional[str] = "Long"
+    confidence:   Optional[int] = 65
+    timeframe:    Optional[str] = "4H"
+    entry_price:  Optional[float] = None
+    target_price: Optional[float] = None
+    stop_loss:    Optional[float] = None
+    reasoning:    Optional[str]   = ""
+    key_risks:    Optional[str]   = ""
+    momentum:     Optional[str]   = ""
+
+@router.post("/signals/save")
+def save_signal(body: SaveSignalRequest):
+    """Save a manually-scanned signal to the DB."""
+    import uuid as _uuid
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rr = None
+    if body.entry_price and body.target_price and body.stop_loss and body.entry_price > body.stop_loss:
+        try: rr = round((body.target_price - body.entry_price) / (body.entry_price - body.stop_loss), 2)
+        except: pass
+    with get_db() as db:
+        existing = db.query(TradingSignal).filter(
+            TradingSignal.asset_symbol == body.asset_symbol,
+            TradingSignal.status == "Active"
+        ).first()
+        if existing:
+            return {"error": f"Active signal for {body.asset_symbol} already exists"}
+        sig = TradingSignal(
+            id           = str(_uuid.uuid4()),
+            asset_symbol = body.asset_symbol,
+            asset_name   = body.asset_name or body.asset_symbol,
+            asset_class  = body.asset_class or "Equity",
+            direction    = body.direction or "Long",
+            confidence   = body.confidence or 65,
+            composite_score = body.confidence or 65,
+            timeframe    = body.timeframe or "4H",
+            entry_price  = body.entry_price,
+            target_price = body.target_price,
+            stop_loss    = body.stop_loss,
+            reasoning    = body.reasoning or "",
+            key_risks    = body.key_risks or "",
+            momentum     = body.momentum or "",
+            signal_source = "scanner",
+            rr_ratio     = rr,
+            status       = "Active",
+            generated_at = now_iso,
+            created_date = now_iso,
+            updated_date = now_iso,
+        )
+        db.add(sig)
+    return {"ok": True, "id": sig.id}
 
 @router.get("/threats")
 def get_threats(limit: int = 60):

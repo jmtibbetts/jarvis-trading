@@ -1,12 +1,13 @@
 """
-Job: Generate Trading Signals v6.0
+Job: Generate Trading Signals v6.1
 Wired composite scorer + earnings risk. 4 parallel LLM tracks.
+v6.1: Better LLM diagnostics — logs config used, prompt size, raw errors.
 """
 import logging, re, uuid
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
-from lib.lmstudio import call_lm_studio, parse_json
+from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ohlcv import fetch_batch
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
 
@@ -69,21 +70,35 @@ def score_safe(signal, ta_profiles, regime, earnings_set):
         return signal
 
 def run():
-    logger.info("[Signals] Starting signal generation...")
+    logger.info("[Signals] Starting signal generation v6.1...")
+
+    # ── Log which LLM we're actually hitting ──────────────────────────────────
+    try:
+        cfg = get_llm_config()
+        logger.info(f"[Signals] LLM config → platform={cfg.get('platform')} url={cfg.get('url')} model={cfg.get('model')} provider={cfg.get('provider')}")
+    except Exception as e:
+        logger.error(f"[Signals] Could not read LLM config: {e}")
+
     with get_db() as db:
         threats=[{"title":t.title,"description":t.description,"severity":t.severity,"country":t.country} for t in db.query(ThreatEvent).filter(ThreatEvent.status=="Active").order_by(ThreatEvent.published_at.desc()).limit(30).all()]
         news=[{"title":n.title,"summary":n.summary,"source":n.source,"sentiment":n.sentiment,"affected_assets":n.affected_assets.split(",") if n.affected_assets else []} for n in db.query(NewsItem).order_by(NewsItem.published_at.desc()).limit(50).all()]
         asset_map={a.symbol:{"name":a.name,"price":a.price} for a in db.query(MarketAsset).all()}
+
+    logger.info(f"[Signals] Context: {len(threats)} threats, {len(news)} news items, {len(asset_map)} assets in DB")
+
     opp=extract_opportunistic(threats,news,ALL_SYMBOLS)
     all_syms=ALL_SYMBOLS+[o["symbol"] for o in opp if o["symbol"] not in ALL_SYMBOLS]
     logger.info(f"[Signals] Fetching OHLCV for {len(all_syms)} symbols...")
     bars=fetch_batch(all_syms,timeframes=["1H","4H","1D"])
     ta_profiles={sym:analyze_symbol(sym_bars) for sym,sym_bars in bars.items()}
+    logger.info(f"[Signals] TA profiles built for {len(ta_profiles)} symbols")
+
     earnings_set=set()
     try:
         from lib.earnings_calendar import get_earnings_this_week
         earnings_set=get_earnings_this_week()
     except: pass
+
     regime={"label":"Unknown","risk":"medium"}
     try:
         from lib.market_regime import get_regime
@@ -91,13 +106,18 @@ def run():
         logger.info(f"[Signals] Regime: {regime.get('label')} | Risk: {regime.get('risk')}")
     except Exception as e:
         logger.warning(f"[Signals] Regime check failed: {e}")
+
     threat_ctx="\n".join([f"[{t.get('severity','?')}] {t.get('country','?')}:{t.get('title','')}" for t in threats[:15]]) or "No threats."
     news_ctx="\n".join([f"[{n.get('sentiment','neutral').upper()}] {n.get('title','')} ({n.get('source','')})" for n in news[:20]]) or "No news."
     bounce="\nIMPORTANT: direction must be Long or Bounce only. NEVER Short. stop_loss BELOW entry. target ABOVE entry. R:R>=2.\n"
     sys_p="You are an expert quantitative trader. Output only valid JSON arrays, no commentary."
-    def ta_block(syms): return "\n".join([build_ta_prompt_block(s,ta_profiles.get(s),asset_map.get(s,{}).get("name",s)) for s in syms if ta_profiles.get(s)]) or "No TA data."
+
+    def ta_block(syms):
+        return "\n".join([build_ta_prompt_block(s,ta_profiles.get(s),asset_map.get(s,{}).get("name",s)) for s in syms if ta_profiles.get(s)]) or "No TA data."
+
     def make_p(label,syms,task):
         return f"=== GEO/MACRO INTEL ===\n{threat_ctx}\n\n=== MARKET NEWS ===\n{news_ctx}\n\n=== TA — {label} ===\n{ta_block(syms)}\n\n=== TASK ===\n{task}{bounce}\nFormat:\n{SIGNAL_SCHEMA}\nReturn ONLY the JSON array."
+
     tracks=[
         ("A_macro",TRACK_A,make_p("MACRO/GEO/COMMODITIES",TRACK_A,"Analyze defense RTX/LMT/NOC, energy XOM/CVX, commodities GLD/SLV, rates TLT. Generate 5-7 LONG or BOUNCE signals with TA references.")),
         ("B_tech", TRACK_B,make_p("TECH/AI/GROWTH",TRACK_B,"Analyze AI/semis NVDA/AMD/AVGO/TSM/ARM, software MSFT/GOOGL/META, high-beta PLTR/COIN/TSLA. Generate 5-8 LONG or BOUNCE signals.")),
@@ -105,21 +125,37 @@ def run():
     ]
     if opp:
         tracks.append(("D_opp",[o["symbol"] for o in opp],make_p("OPPORTUNISTIC",[o["symbol"] for o in opp],f"These tickers appeared in threat/news feeds: {[o['symbol'] for o in opp[:10]]}. Generate 2-5 signals for strongest setups.")))
+
+    # ── Log prompt sizes so we know if context is blowing up ─────────────────
+    for name, syms, prompt in tracks:
+        est_tokens = len(prompt) // 4
+        logger.info(f"[Signals] Track {name}: {len(syms)} symbols | ~{est_tokens} tokens in prompt")
+
     def run_track(name,syms,prompt):
         try:
+            cfg = get_llm_config()
+            logger.info(f"[Signals] Track {name} → calling {cfg.get('url')}/chat/completions model={cfg.get('model')}")
             r=call_lm_studio(prompt,system=sys_p,max_tokens=3000,temperature=0.15)
+            logger.info(f"[Signals] Track {name} → got {len(r)} chars back")
             sigs=parse_json(r)
-            if isinstance(sigs,list): return sigs
+            if isinstance(sigs,list):
+                logger.info(f"[Signals] Track {name} → parsed {len(sigs)} signals")
+                return sigs
             if isinstance(sigs,dict):
                 for k in ["signals","trades","setups"]:
-                    if sigs.get(k): return sigs[k]
+                    if sigs.get(k):
+                        logger.info(f"[Signals] Track {name} → parsed {len(sigs[k])} signals from key '{k}'")
+                        return sigs[k]
+            logger.warning(f"[Signals] Track {name} → could not extract signal list. Raw start: {r[:300]}")
         except Exception as e:
-            logger.error(f"[Signals] Track {name} failed: {e}")
+            logger.error(f"[Signals] Track {name} FAILED: {type(e).__name__}: {e}")
         return []
+
     all_raw=[]
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:  # reduced to 2 to avoid overwhelming local LLM
         futs={ex.submit(run_track,n,s,p):n for n,s,p in tracks}
         for fut in as_completed(futs): all_raw.extend(fut.result())
+
     logger.info(f"[Signals] {len(all_raw)} raw signals from LLM")
     now_iso=datetime.now(timezone.utc).isoformat()
     saved=skipped=0
@@ -162,4 +198,3 @@ def run():
                 skipped+=1
     logger.info(f"[Signals] Done — {saved} saved, {skipped} skipped")
     return {"saved":saved,"skipped":skipped,"regime":regime.get("label")}
-

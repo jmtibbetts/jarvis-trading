@@ -335,6 +335,61 @@ def analyze(body: AnalyzeRequest):
         return {"symbol":body.symbol.upper(),"ta":ta,"prompt_block":pb,"signal":signal}
     except Exception as e: raise HTTPException(500,str(e))
 
+
+@router.get("/performance")
+def get_performance(days: int = 30):
+    """Trade performance statistics over the last N days."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_db() as db:
+        all_trades = db.query(TradingSignal).filter(
+            TradingSignal.status.in_(["Closed", "Executed", "Rejected"]),
+            TradingSignal.updated_date >= cutoff
+        ).order_by(TradingSignal.updated_date.desc()).all()
+
+    total = len(all_trades)
+    executed = [t for t in all_trades if t.status in ("Closed", "Executed")]
+    rejected = [t for t in all_trades if t.status == "Rejected"]
+
+    rr_list, scores, classes = [], [], {}
+    for t in executed:
+        cl = t.asset_class or "Equity"
+        classes[cl] = classes.get(cl, 0) + 1
+        if t.entry_price and t.target_price and t.stop_loss and t.entry_price > t.stop_loss:
+            rr = round((t.target_price - t.entry_price) / (t.entry_price - t.stop_loss), 2)
+            rr_list.append(rr)
+        if t.composite_score or t.confidence:
+            scores.append(t.composite_score or t.confidence)
+
+    avg_rr    = round(sum(rr_list) / len(rr_list), 2) if rr_list else None
+    avg_score = round(sum(scores) / len(scores), 1)   if scores  else None
+    good_rr   = [r for r in rr_list if r >= 2.0]
+    by_class  = [{"class": k, "count": v} for k, v in classes.items()]
+
+    # Daily signal volume for sparkline (last 14 days)
+    daily = {}
+    for t in executed:
+        day = (t.generated_at or "")[:10]
+        if day:
+            daily[day] = daily.get(day, 0) + 1
+    daily_list = sorted([{"date": d, "count": c} for d, c in daily.items()], key=lambda x: x["date"])
+
+    # Recent trades list
+    recent = [_sig_dict(t) for t in executed[:50]]
+
+    return {
+        "period_days":    days,
+        "total_signals":  total,
+        "executed":       len(executed),
+        "rejected":       len(rejected),
+        "avg_rr":         avg_rr,
+        "avg_score":      avg_score,
+        "good_rr_count":  len(good_rr),
+        "by_class":       by_class,
+        "daily_volume":   daily_list,
+        "recent_trades":  recent,
+    }
+
 def _sig_dict(s):
     return {
         "id":            s.id,
@@ -398,3 +453,4 @@ def _config_dict(c):
             "extra_field_1":c.extra_field_1,"extra_field_2":c.extra_field_2,
             "is_active":c.is_active,"is_default":c.is_default,"notes":c.notes,
             "created_date":c.created_date,"updated_date":c.updated_date}
+

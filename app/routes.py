@@ -111,7 +111,8 @@ def save_signal(body: SaveSignalRequest):
             updated_date = now_iso,
         )
         db.add(sig)
-    return {"ok": True, "id": sig.id}
+        sig_id = sig.id  # capture before session closes
+    return {"ok": True, "id": sig_id}
 
 @router.get("/threats")
 def get_threats(limit: int = 60):
@@ -132,9 +133,11 @@ def get_market():
 def get_market_full():
     with get_db() as db:
         assets = db.query(MarketAsset).order_by(MarketAsset.change_percent.desc()).all()
-    return {"equities":[_asset_dict(a) for a in assets if a.asset_class!="Crypto"],
-            "crypto":  [_asset_dict(a) for a in assets if a.asset_class=="Crypto"],
-            "count":   len(assets)}
+        # Serialize inside session — avoids DetachedInstanceError
+        asset_dicts = [_asset_dict(a) for a in assets]
+    equities = [a for a in asset_dicts if a.get("asset_class") != "Crypto"]
+    crypto   = [a for a in asset_dicts if a.get("asset_class") == "Crypto"]
+    return {"equities": equities, "crypto": crypto, "count": len(asset_dicts)}
 
 
 @router.get("/positions/with-signals")

@@ -1,9 +1,9 @@
 """
-Risk Manager — position sizing, Kelly criterion, correlation filter,
+Risk Manager v6.2 — position sizing, Kelly criterion, correlation filter,
 portfolio-level exposure limits.
 
-These are the things that separate a professional trading system from
-an ad-hoc signal generator. All pure Python/pandas — no JS equivalent existed.
+v6.2: Crypto R:R floor lowered to 1.0 (was 1.5) — crypto signals have
+      tighter moves; 24/7 market needs different thresholds than equities.
 """
 import logging
 import numpy as np
@@ -76,14 +76,17 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
     reward_per_share = target - entry
     rr_ratio         = reward_per_share / risk_per_share if risk_per_share > 0 else 0
     
-    # Skip signals with R:R < 1.5
-    if rr_ratio < 1.5:
+    # Crypto gets a lower R:R floor (1.0) — tighter moves, 24/7 markets
+    # Equity keeps the stricter 1.5 threshold
+    is_crypto_sig = '/' in sym or sym.upper().endswith('USD')
+    min_rr = 1.0 if is_crypto_sig else 1.5
+    if rr_ratio < min_rr:
         return SizedSignal(
             symbol=sym, direction=signal.get('direction','Long'),
             confidence=conf, entry=entry, target=target, stop=stop,
             kelly_fraction=0, kelly_capped=0, dollar_size=0, shares=0,
             risk_reward=round(rr_ratio, 2), regime_adjusted=False,
-            rejection_reason=f'R:R too low ({rr_ratio:.2f} < 1.5)'
+            rejection_reason=f'R:R too low ({rr_ratio:.2f} < {min_rr})' 
         )
     
     # ── Fixed Fractional ──────────────────────────────────────────────────────

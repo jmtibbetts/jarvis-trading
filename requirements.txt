@@ -30,3 +30,5 @@ python-dotenv==1.0.1
 pydantic==2.11.4
 pydantic-settings==2.7.0
 pytz==2024.1
+
+yfinance>=0.2.40

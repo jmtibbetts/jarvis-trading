@@ -140,20 +140,22 @@ def run():
     if not new_articles:
         return {'threats': 0, 'news': 0}
     
-    # 3. Analyze in batches of 15
+    # 3. Analyze in ONE consolidated LLM call (max 30 articles)
+    # Capping at 30 prevents context overflow and avoids hogging the local LLM
+    # with repeated calls that block signal generation.
     analyzed = []
-    batch_size = 15
-    for i in range(0, len(new_articles), batch_size):
-        batch = new_articles[i:i+batch_size]
-        results = analyze_batch(batch)
-        # Attach original article data
+    cap = new_articles[:30]
+    if cap:
+        logger.info(f"[News] Sending {len(cap)} articles to LLM for analysis (1 call)...")
+        results = analyze_batch(cap)
         for r in results:
             idx = r.get('index', 1) - 1
-            if 0 <= idx < len(batch):
-                r['source_url'] = batch[idx].get('url', '')
-                r['source']     = batch[idx].get('source', r.get('source', ''))
-                r['published']  = batch[idx].get('published', '')
+            if 0 <= idx < len(cap):
+                r['source_url'] = cap[idx].get('url', '')
+                r['source']     = cap[idx].get('source', r.get('source', ''))
+                r['published']  = cap[idx].get('published', '')
         analyzed.extend(results)
+        logger.info(f"[News] LLM returned {len(analyzed)} classified items")
     
     # 4. Save to DB
     threat_count = 0

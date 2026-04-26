@@ -24,6 +24,12 @@ def get_signals(status: str = None, limit: int = 150):
         if status: q = q.filter(TradingSignal.status == status)
         return [_sig_dict(s) for s in q.order_by(TradingSignal.generated_at.desc()).limit(limit).all()]
 
+@router.delete("/signals/clear/expired")
+def clear_expired():
+    with get_db() as db:
+        n = db.query(TradingSignal).filter(TradingSignal.status.in_(["Expired","Rejected"])).delete()
+    return {"ok":True,"deleted":n}
+
 @router.delete("/signals/{signal_id}")
 def delete_signal(signal_id: str):
     with get_db() as db:
@@ -31,12 +37,6 @@ def delete_signal(signal_id: str):
         if not sig: raise HTTPException(404)
         db.delete(sig)
     return {"ok":True}
-
-@router.delete("/signals/clear/expired")
-def clear_expired():
-    with get_db() as db:
-        n = db.query(TradingSignal).filter(TradingSignal.status.in_(["Expired","Rejected"])).delete()
-    return {"ok":True,"deleted":n}
 
 class ExecuteRequest(BaseModel):
     qty: Optional[int] = None

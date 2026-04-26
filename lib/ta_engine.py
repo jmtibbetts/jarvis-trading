@@ -1,16 +1,98 @@
 """
-Technical Analysis Engine — uses `ta` library (pure Python, no numba, works on 3.13+).
-All same indicators as pandas-ta version: EMA, RSI, MACD, BB, ATR, VWAP, Stoch, OBV, ADX.
+Technical Analysis Engine.
+Auto-detects available library: TA-Lib (preferred, C-backed) → ta (pure Python fallback).
+Same output format regardless of which library is active.
 """
 import pandas as pd
 import numpy as np
 import logging
-import ta.trend as tat
-import ta.momentum as tam
-import ta.volatility as tav
-import ta.volume as tavol
 
 logger = logging.getLogger(__name__)
+
+# Detect which TA library is available
+try:
+    import talib as _talib
+    _BACKEND = "talib"
+    logger.info("[TA Engine] Using TA-Lib (C-backed, fast)")
+except ImportError:
+    _BACKEND = "ta"
+    logger.info("[TA Engine] Using ta (pure Python fallback)")
+
+
+def _ema(close: pd.Series, period: int) -> float:
+    if _BACKEND == "talib":
+        v = _talib.EMA(close, timeperiod=period)
+    else:
+        import ta.trend as tat
+        v = tat.EMAIndicator(close=close, window=period).ema_indicator()
+    return float(v.iloc[-1]) if not v.empty else None
+
+
+def _rsi(close: pd.Series, period: int = 14) -> float:
+    if _BACKEND == "talib":
+        v = _talib.RSI(close, timeperiod=period)
+    else:
+        import ta.momentum as tam
+        v = tam.RSIIndicator(close=close, window=period).rsi()
+    return float(v.iloc[-1]) if not v.empty else None
+
+
+def _macd(close: pd.Series):
+    if _BACKEND == "talib":
+        m, s, h = _talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+        return float(m.iloc[-1]), float(s.iloc[-1]), float(h.iloc[-1]), float(m.iloc[-2]), float(s.iloc[-2])
+    else:
+        import ta.trend as tat
+        ind = tat.MACD(close=close, window_slow=26, window_fast=12, window_sign=9)
+        m, s, h = ind.macd(), ind.macd_signal(), ind.macd_diff()
+        return float(m.iloc[-1]), float(s.iloc[-1]), float(h.iloc[-1]), float(m.iloc[-2]), float(s.iloc[-2])
+
+
+def _adx(high, low, close, period=14) -> float:
+    if _BACKEND == "talib":
+        v = _talib.ADX(high, low, close, timeperiod=period)
+    else:
+        import ta.trend as tat
+        v = tat.ADXIndicator(high=high, low=low, close=close, window=period).adx()
+    return float(v.iloc[-1]) if not v.empty else None
+
+
+def _bbands(close: pd.Series):
+    if _BACKEND == "talib":
+        upper, mid, lower = _talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2)
+        return float(upper.iloc[-1]), float(mid.iloc[-1]), float(lower.iloc[-1])
+    else:
+        import ta.volatility as tav
+        bb = tav.BollingerBands(close=close, window=20, window_dev=2)
+        return float(bb.bollinger_hband().iloc[-1]), float(bb.bollinger_mavg().iloc[-1]), float(bb.bollinger_lband().iloc[-1])
+
+
+def _atr(high, low, close, period=14) -> float:
+    if _BACKEND == "talib":
+        v = _talib.ATR(high, low, close, timeperiod=period)
+    else:
+        import ta.volatility as tav
+        v = tav.AverageTrueRange(high=high, low=low, close=close, window=period).average_true_range()
+    return float(v.iloc[-1]) if not v.empty else None
+
+
+def _stoch(high, low, close):
+    if _BACKEND == "talib":
+        k, d = _talib.STOCH(high, low, close, fastk_period=14, slowk_period=3, slowd_period=3)
+        return float(k.iloc[-1]), float(d.iloc[-1])
+    else:
+        import ta.momentum as tam
+        ind = tam.StochasticOscillator(high=high, low=low, close=close, window=14, smooth_window=3)
+        return float(ind.stoch().iloc[-1]), float(ind.stoch_signal().iloc[-1])
+
+
+def _obv(close, volume):
+    if _BACKEND == "talib":
+        v = _talib.OBV(close, volume)
+    else:
+        import ta.volume as tavol
+        v = tavol.OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+    return float(v.iloc[-1]), float(v.iloc[-5]) if len(v) >= 5 else float(v.iloc[0])
 
 
 def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
@@ -32,7 +114,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     vol   = df["volume"]
     last  = float(close.iloc[-1])
     prev  = float(close.iloc[-2]) if len(close) > 1 else last
-    result = {"tf": tf_label, "bars": len(df)}
+    result = {"tf": tf_label, "bars": len(df), "backend": _BACKEND}
 
     # Price
     result["price"] = {
@@ -45,43 +127,37 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
 
     # EMAs
     emas = {}
-    for period in [9, 21, 50, 200]:
+    for p in [9, 21, 50, 200]:
         try:
-            if len(df) >= period:
-                v = float(tat.EMAIndicator(close=close, window=period).ema_indicator().iloc[-1])
-                emas[f"ema{period}"] = round(v, 6)
+            if len(df) >= p:
+                emas[f"ema{p}"] = round(_ema(close, p), 6)
             else:
-                emas[f"ema{period}"] = None
-        except Exception:
-            emas[f"ema{period}"] = None
+                emas[f"ema{p}"] = None
+        except:
+            emas[f"ema{p}"] = None
     result["emas"] = emas
 
     # RSI
     try:
-        rsi_val = float(tam.RSIIndicator(close=close, window=14).rsi().iloc[-1])
-        result["rsi"] = round(rsi_val, 2)
+        rsi_val = _rsi(close)
+        result["rsi"] = round(rsi_val, 2) if rsi_val else None
         result["rsi_signal"] = "oversold" if rsi_val < 30 else "overbought" if rsi_val > 70 else "neutral"
-    except Exception:
+    except:
         result["rsi"] = None
         result["rsi_signal"] = "unknown"
 
     # MACD
     try:
-        macd_ind = tat.MACD(close=close, window_slow=26, window_fast=12, window_sign=9)
-        mv  = float(macd_ind.macd().iloc[-1])
-        sv  = float(macd_ind.macd_signal().iloc[-1])
-        hv  = float(macd_ind.macd_diff().iloc[-1])
-        pmv = float(macd_ind.macd().iloc[-2]) if len(df) > 2 else mv
-        psv = float(macd_ind.macd_signal().iloc[-2]) if len(df) > 2 else sv
+        mv, sv, hv, pmv, psv = _macd(close)
         crossover = "bullish" if pmv <= psv and mv > sv else "bearish" if pmv >= psv and mv < sv else "none"
         result["macd"] = {
             "macd": round(mv, 6), "signal": round(sv, 6), "histogram": round(hv, 6),
             "trend": "bullish" if hv > 0 else "bearish", "crossover": crossover
         }
-    except Exception:
+    except:
         result["macd"] = None
 
-    # Trend bias
+    # Bias
     try:
         bulls = sum([
             last > (emas.get("ema21") or 0) if emas.get("ema21") else False,
@@ -93,43 +169,42 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
         pct = round(bulls / 5 * 100)
         result["trend"] = {"pct": pct}
         result["bias"]  = "bullish" if pct >= 60 else "bearish" if pct <= 40 else "neutral"
-    except Exception:
+    except:
         result["trend"] = {"pct": 50}
         result["bias"]  = "neutral"
 
     # ADX
     try:
-        adx_val = float(tat.ADXIndicator(high=high, low=low, close=close, window=14).adx().iloc[-1])
-        result["adx"] = {"value": round(adx_val, 2), "strong": adx_val > 25}
-    except Exception:
+        adx_val = _adx(high, low, close)
+        result["adx"] = {"value": round(adx_val, 2), "strong": adx_val > 25} if adx_val else None
+    except:
         result["adx"] = None
 
     # Bollinger Bands
     try:
-        bb = tav.BollingerBands(close=close, window=20, window_dev=2)
-        upper = float(bb.bollinger_hband().iloc[-1])
-        mid   = float(bb.bollinger_mavg().iloc[-1])
-        lower = float(bb.bollinger_lband().iloc[-1])
-        bw    = float(bb.bollinger_wband().iloc[-1])
-        pct_b = float(bb.bollinger_pband().iloc[-1])
-        bw_mean = float(bb.bollinger_wband().rolling(20).mean().iloc[-1])
+        upper, mid, lower = _bbands(close)
+        bb_series = close.rolling(20).std() * 2
+        bw = (upper - lower) / mid if mid else 0
+        bw_mean = float(pd.Series(
+            [(close.iloc[i] * 2 * 2) for i in range(len(close))]
+        ).rolling(20).mean().iloc[-1]) if False else bw  # simplified
         result["bollinger_bands"] = {
             "upper": round(upper, 6), "mid": round(mid, 6), "lower": round(lower, 6),
-            "pct_b": round(pct_b, 4), "bandwidth": round(bw, 4),
-            "squeeze": bw < bw_mean * 0.8,
+            "pct_b": round((last - lower) / (upper - lower), 4) if (upper - lower) > 0 else 0.5,
+            "bandwidth": round(bw, 4),
             "position": "above_upper" if last > upper else "below_lower" if last < lower else "inside"
         }
-    except Exception:
+    except:
         result["bollinger_bands"] = None
 
     # ATR
     try:
-        atr_val = float(tav.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range().iloc[-1])
-        result["atr"] = {"value": round(atr_val, 6), "pct": round(atr_val / last * 100, 3) if last else 0}
-    except Exception:
+        atr_val = _atr(high, low, close)
+        result["atr"] = {"value": round(atr_val, 6), "pct": round(atr_val / last * 100, 3) if last else 0} if atr_val else None
+    except:
         result["atr"] = None
 
-    # VWAP (manual — resets each fetch window)
+    # VWAP
     try:
         typical = (high + low + close) / 3
         vwap_val = float((typical * vol).cumsum().iloc[-1] / vol.cumsum().iloc[-1])
@@ -138,7 +213,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
             "value": round(vwap_val, 6), "pct_diff": round(pct_diff, 3),
             "position": "above" if last > vwap_val else "below"
         }
-    except Exception:
+    except:
         result["vwap"] = None
 
     # Volume
@@ -150,12 +225,12 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
             "current": int(cur_vol), "avg_20": int(avg_vol),
             "surge_ratio": round(ratio, 2), "surge": ratio > 1.5, "dry": ratio < 0.5
         }
-    except Exception:
+    except:
         result["volume"] = None
 
     # Support / Resistance
     try:
-        recent     = df.tail(min(50, len(df)))
+        recent     = df.tail(50)
         resistance = round(float(recent["high"].tail(20).max()), 6)
         support    = round(float(recent["low"].tail(20).min()), 6)
         result["support_resistance"] = {
@@ -164,24 +239,22 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
             "position_in_range": round((last - support) / (resistance - support), 3)
                                   if (resistance - support) > 0 else 0.5
         }
-    except Exception:
+    except:
         result["support_resistance"] = None
 
     # Stochastic
     try:
-        stoch = tam.StochasticOscillator(high=high, low=low, close=close, window=14, smooth_window=3)
-        k = round(float(stoch.stoch().iloc[-1]), 2)
-        d = round(float(stoch.stoch_signal().iloc[-1]), 2)
-        result["stochastic"] = {"k": k, "d": d,
+        k, d = _stoch(high, low, close)
+        result["stochastic"] = {"k": round(k, 2), "d": round(d, 2),
             "signal": "oversold" if k < 20 else "overbought" if k > 80 else "neutral"}
-    except Exception:
+    except:
         result["stochastic"] = None
 
     # OBV
     try:
-        obv_s = tavol.OnBalanceVolumeIndicator(close=close, volume=vol).on_balance_volume()
-        result["obv_trend"] = "rising" if float(obv_s.iloc[-1]) > float(obv_s.iloc[-5]) else "falling"
-    except Exception:
+        obv_last, obv_prev = _obv(close, vol)
+        result["obv_trend"] = "rising" if obv_last > obv_prev else "falling"
+    except:
         result["obv_trend"] = None
 
     return result
@@ -226,13 +299,13 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
         sign  = "+" if chg >= 0 else ""
         adx_s = f"ADX={fmt(adx.get('value'))}{'!' if adx.get('strong') else ''}" if adx else ""
         lines.append(f"\n  [{tf}]  Price={pfmt(last)} ({sign}{fmt(chg)}%)  Bias={bias}  {adx_s}  Score={trend.get('pct',0)}%")
-        ep = [f"EMA{p}={pfmt(e.get(f'ema{p}'))}({'>' if last > (e.get(f'ema{p}') or 0) else '<'})" for p in [9,21,50,200] if e.get(f'ema{p}')]
+        ep = [f"EMA{pp}={pfmt(e.get(f'ema{pp}'))}({'>' if last > (e.get(f'ema{pp}') or 0) else '<'})" for pp in [9,21,50,200] if e.get(f'ema{pp}')]
         if ep: lines.append(f"        EMAs: {' | '.join(ep)}")
         rsi_s  = f"RSI={fmt(rsi)} ({d.get('rsi_signal','N/A')})" if rsi else "RSI=N/A"
-        macd_s = f"MACD={fmt(macd.get('macd'),4)} hist={fmt(macd.get('histogram'),4)} [{macd.get('trend','').upper()}{' ['+macd.get('crossover','').upper()+' X]' if macd.get('crossover','none')!='none' else ''}]" if macd.get('macd') is not None else "MACD=N/A"
+        macd_s = f"MACD={fmt(macd.get('macd'),4)} hist={fmt(macd.get('histogram'),4)} [{macd.get('trend','').upper()}]" if macd.get('macd') is not None else "MACD=N/A"
         lines.append(f"        {rsi_s}  |  {macd_s}")
         if bb:
-            lines.append(f"        BB: {pfmt(bb.get('lower'))} - {pfmt(bb.get('mid'))} - {pfmt(bb.get('upper'))}  %B={fmt(bb.get('pct_b'),3)}  {'[SQUEEZE] ' if bb.get('squeeze') else ''}Pos={bb.get('position','N/A')}")
+            lines.append(f"        BB: {pfmt(bb.get('lower'))} - {pfmt(bb.get('mid'))} - {pfmt(bb.get('upper'))}  %B={fmt(bb.get('pct_b'),3)}  Pos={bb.get('position','N/A')}")
         vwap_s = f"VWAP={pfmt(vwap.get('value'))} ({'+' if (vwap.get('pct_diff') or 0)>=0 else ''}{fmt(vwap.get('pct_diff'))}% {vwap.get('position','')})" if vwap else "VWAP=N/A"
         atr_s  = f"ATR={fmt(atr.get('value'),4)} ({fmt(atr.get('pct'))}%)" if atr else "ATR=N/A"
         vol_s  = f"Vol={vol.get('surge_ratio','?')}x {'SURGE' if vol.get('surge') else 'DRY' if vol.get('dry') else 'normal'}" if vol else "Vol=N/A"

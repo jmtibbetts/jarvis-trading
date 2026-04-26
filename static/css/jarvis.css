@@ -72,3 +72,15 @@ body { background: var(--bs-body-bg); }
 ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
 
 .badge { font-weight: 500; }
+
+/* Position rows — signal expand panel */
+.signal-detail-row { display: none; }
+.signal-context-panel {
+  background: rgba(88, 166, 255, 0.04);
+  border-top: 1px solid #30363d;
+  border-bottom: 1px solid #30363d;
+}
+.position-row:hover td { background: rgba(255,255,255,.03); }
+
+/* Progress bar in signal panel */
+.progress { background: rgba(255,255,255,.08); }

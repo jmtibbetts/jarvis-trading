@@ -47,14 +47,20 @@ def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
         if not sig: raise HTTPException(404)
         try:
-            from lib.alpaca_client import submit_bracket_order, normalize_symbol
-            sym, _ = normalize_symbol(sig.asset_symbol)
+            from lib.alpaca_client import submit_bracket_order, normalize_symbol, is_crypto
+            sym, crypto = normalize_symbol(sig.asset_symbol)
             entry  = float(sig.entry_price or 100)
-            qty    = body.qty if body.qty and body.qty > 0 else max(1, int(1000/entry))
+            if body.qty and body.qty > 0:
+                qty = float(body.qty)
+            elif crypto:
+                # Fractional qty for crypto — $1000 notional
+                qty = round(1000.0 / entry, 6) if entry > 0 else 0.01
+            else:
+                qty = max(1, int(1000 / entry)) if entry > 0 else 1
             result = submit_bracket_order(symbol=sym, qty=qty, entry_price=sig.entry_price,
                                           take_profit=sig.target_price, stop_loss=sig.stop_loss)
             sig.status = "Executed"; sig.updated_date = datetime.now(timezone.utc).isoformat()
-            return {"ok":True,"order":result,"qty":qty}
+            return {"ok":True,"order":result,"qty":qty,"crypto":crypto}
         except Exception as e:
             raise HTTPException(500, str(e))
 
@@ -262,24 +268,6 @@ def llm_health():
         return check_health()
     except Exception as e:
         return {"ok":False,"error":str(e)}
-
-
-@router.post("/llm/test")
-def llm_test():
-    """Send a minimal test prompt to the LLM and return the raw response."""
-    try:
-        from lib.lmstudio import call_lm_studio, get_llm_config
-        cfg = get_llm_config()
-        test_prompt = 'Return this exact JSON and nothing else: [{"test": true, "status": "ok"}]'
-        result = call_lm_studio(test_prompt, system="You are a helpful assistant. Output only valid JSON.", max_tokens=100, temperature=0.0)
-        return {"ok": True, "config": {"url": cfg.get("url"), "model": cfg.get("model"), "platform": cfg.get("platform")}, "raw_response": result[:500]}
-    except Exception as e:
-        from lib.lmstudio import get_llm_config
-        try:
-            cfg = get_llm_config()
-        except:
-            cfg = {}
-        return {"ok": False, "config": {"url": cfg.get("url","?"), "model": cfg.get("model","?"), "platform": cfg.get("platform","?")}, "error": str(e)}
 
 @router.get("/cache/stats")
 def cache_stats():

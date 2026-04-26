@@ -336,12 +336,27 @@ def analyze(body: AnalyzeRequest):
     except Exception as e: raise HTTPException(500,str(e))
 
 def _sig_dict(s):
-    return {"id":s.id,"asset_symbol":s.asset_symbol,"asset_name":s.asset_name,"asset_class":s.asset_class,
-            "direction":s.direction,"confidence":s.confidence,"composite_score":s.composite_score,
-            "timeframe":s.timeframe,"reasoning":s.reasoning,"entry_price":s.entry_price,
-            "target_price":s.target_price,"stop_loss":s.stop_loss,"key_risks":s.key_risks,
-            "momentum":s.momentum,"status":s.status,"generated_at":s.generated_at,
-            "signal_source":getattr(s,"signal_source","watchlist"),"earnings_risk":None}
+    return {
+        "id":            s.id,
+        "asset_symbol":  s.asset_symbol,
+        "asset_name":    s.asset_name,
+        "asset_class":   s.asset_class,
+        "direction":     s.direction,
+        "confidence":    s.confidence,
+        "composite_score": s.composite_score,
+        "timeframe":     s.timeframe,
+        "reasoning":     s.reasoning,
+        "entry_price":   s.entry_price,
+        "target_price":  s.target_price,
+        "stop_loss":     s.stop_loss,
+        "key_risks":     s.key_risks,
+        "momentum":      s.momentum,
+        "status":        s.status,
+        "generated_at":  s.generated_at,
+        "signal_source": getattr(s, "signal_source", "watchlist"),
+        "earnings_risk": bool(getattr(s, "earnings_risk", False)),
+        "rr_ratio":      getattr(s, "rr_ratio", None),
+    }
 
 def _threat_dict(t):
     return {"id":t.id,"title":t.title,"description":t.description,"event_type":t.event_type,
@@ -360,11 +375,22 @@ def _asset_dict(a):
             "region":a.region,"last_updated":a.last_updated}
 
 def _position_dict(p):
-    sym=str(p.symbol)
-    return {"symbol":sym,"qty":float(p.qty or 0),"avg_entry":float(p.avg_entry_price or 0),
-            "market_value":float(p.market_value or 0),"unrealized_pl":float(p.unrealized_pl or 0),
-            "unrealized_plpc":float(p.unrealized_plpc or 0)*100,"side":str(p.side),
-            "asset_class":"Crypto" if "/" in sym else "Equity","current_price":float(p.current_price or 0)}
+    sym = str(p.symbol)
+    # Alpaca SDK returns unrealized_plpc as a decimal fraction (e.g. 0.025 = 2.5%)
+    plpc_raw = float(p.unrealized_plpc or 0)
+    # Convert to percentage: if abs value > 1, it's already in pct; otherwise multiply
+    plpc = plpc_raw * 100 if abs(plpc_raw) <= 1 else plpc_raw
+    return {
+        "symbol":          sym,
+        "qty":             float(p.qty or 0),
+        "avg_entry":       float(p.avg_entry_price or 0),
+        "market_value":    float(p.market_value or 0),
+        "unrealized_pl":   float(p.unrealized_pl or 0),
+        "unrealized_plpc": round(plpc, 4),
+        "side":            str(p.side),
+        "asset_class":     "Crypto" if "/" in sym else "Equity",
+        "current_price":   float(p.current_price or 0),
+    }
 
 def _config_dict(c):
     return {"id":c.id,"key":c.key,"label":c.label,"platform":c.platform,"config_type":c.config_type,

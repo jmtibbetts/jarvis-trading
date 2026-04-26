@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Jarvis Trading AI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"/>
+  <link rel="stylesheet" href="/static/css/jarvis.css"/>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-secondary">
+  <div class="container-fluid">
+    <span class="navbar-brand fw-bold">
+      <i class="bi bi-robot text-success"></i> Jarvis Trading AI <span class="badge bg-success ms-1" style="font-size:.6rem">v5.0 Python</span>
+    </span>
+    <div class="d-flex align-items-center gap-3 ms-auto">
+      <div id="job-indicators" class="d-flex gap-2 small"></div>
+      <span id="last-refresh" class="text-muted small"></span>
+    </div>
+  </div>
+</nav>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs px-3 pt-2 bg-dark border-bottom border-secondary" id="mainTabs">
+  <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-signals"><i class="bi bi-lightning-fill"></i> Signals</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-positions"><i class="bi bi-briefcase-fill"></i> Positions</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-threats"><i class="bi bi-shield-exclamation"></i> Threats</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-news"><i class="bi bi-newspaper"></i> News</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-scanner"><i class="bi bi-search"></i> Scanner</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-jobs"><i class="bi bi-cpu"></i> Jobs</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-settings"><i class="bi bi-gear-fill"></i> Settings</a></li>
+</ul>
+
+<div class="tab-content px-3 py-3">
+
+  <!-- ── SIGNALS ─────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade show active" id="tab-signals">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="d-flex gap-2">
+        <select id="sig-filter-status" class="form-select form-select-sm w-auto">
+          <option value="">All Status</option>
+          <option value="Active" selected>Active</option>
+          <option value="Executed">Executed</option>
+          <option value="Expired">Expired</option>
+        </select>
+        <select id="sig-filter-class" class="form-select form-select-sm w-auto">
+          <option value="">All Classes</option>
+          <option value="Equity">Equity</option>
+          <option value="Crypto">Crypto</option>
+        </select>
+      </div>
+      <span class="badge bg-secondary" id="signal-count">0 signals</span>
+    </div>
+    <div id="signals-grid" class="row g-3"></div>
+  </div>
+
+  <!-- ── POSITIONS ─────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-positions">
+    <div class="row g-3 mb-3" id="account-summary"></div>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover table-sm align-middle" id="positions-table">
+        <thead class="table-secondary">
+          <tr>
+            <th>Symbol</th><th>Class</th><th>Qty</th>
+            <th>Avg Entry</th><th>Market Value</th>
+            <th>Unrealized P&L</th><th>P&L %</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── THREATS ─────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-threats">
+    <div class="row g-3" id="threats-grid"></div>
+  </div>
+
+  <!-- ── NEWS ─────────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-news">
+    <div class="d-flex gap-2 mb-3">
+      <select id="news-filter-cat" class="form-select form-select-sm w-auto">
+        <option value="">All Categories</option>
+        <option value="finance">Finance</option>
+        <option value="geopolitics">Geopolitics</option>
+        <option value="crypto">Crypto</option>
+        <option value="conflict">Conflict</option>
+        <option value="energy">Energy</option>
+        <option value="tech">Tech</option>
+      </select>
+      <select id="news-filter-sent" class="form-select form-select-sm w-auto">
+        <option value="">All Sentiment</option>
+        <option value="positive">Positive</option>
+        <option value="negative">Negative</option>
+        <option value="neutral">Neutral</option>
+      </select>
+    </div>
+    <div id="news-list"></div>
+  </div>
+
+  <!-- ── SCANNER ───────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-scanner">
+    <div class="row mb-3">
+      <div class="col-auto">
+        <div class="input-group">
+          <input type="text" id="scanner-symbol" class="form-control form-control-sm" placeholder="NVDA, BTC/USD, SPY..." style="width:200px"/>
+          <select id="scanner-tfs" class="form-select form-select-sm" style="width:auto">
+            <option value="1H,4H,1D" selected>1H + 4H + 1D</option>
+            <option value="1H,2H,4H,1D">All Timeframes</option>
+            <option value="4H,1D">4H + 1D</option>
+            <option value="1D">1D Only</option>
+          </select>
+          <button class="btn btn-success btn-sm" onclick="runScanner()"><i class="bi bi-search"></i> Analyze</button>
+        </div>
+      </div>
+    </div>
+    <div id="scanner-loading" class="d-none">
+      <div class="d-flex align-items-center gap-2 text-muted">
+        <div class="spinner-border spinner-border-sm text-success"></div>
+        Fetching OHLCV + computing TA...
+      </div>
+    </div>
+    <div id="scanner-result"></div>
+  </div>
+
+  <!-- ── JOBS ──────────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-jobs">
+    <div class="row g-3" id="jobs-grid"></div>
+  </div>
+
+  <!-- ── SETTINGS ──────────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-settings">
+    <div class="d-flex justify-content-between mb-3">
+      <h5 class="mb-0">API Configurations</h5>
+      <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#addConfigModal">
+        <i class="bi bi-plus-lg"></i> Add Config
+      </button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover table-sm">
+        <thead class="table-secondary">
+          <tr><th>Label</th><th>Platform</th><th>Key</th><th>URL</th><th>Mode</th><th>Default</th><th>Active</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="settings-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /tab-content -->
+
+<!-- Add Config Modal -->
+<div class="modal fade" id="addConfigModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">Add API Configuration</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <form id="config-form">
+          <div class="mb-2">
+            <label class="form-label small">Label</label>
+            <input type="text" class="form-control form-control-sm" name="label" placeholder="My Alpaca Paper Account" required/>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small">Platform</label>
+            <select class="form-select form-select-sm" name="platform">
+              <option value="alpaca_paper">alpaca_paper</option>
+              <option value="alpaca_live">alpaca_live</option>
+              <option value="lmstudio">lmstudio</option>
+              <option value="telegram">telegram</option>
+              <option value="other">other</option>
+            </select>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small">API Key</label>
+            <input type="text" class="form-control form-control-sm" name="api_key" placeholder="PKXXXXXXXX"/>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small">API Secret</label>
+            <input type="password" class="form-control form-control-sm" name="api_secret"/>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small">API URL (optional)</label>
+            <input type="text" class="form-control form-control-sm" name="api_url" placeholder="http://localhost:1234/v1"/>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small">Extra Field 1 (e.g. "paper" / "live" / model name)</label>
+            <input type="text" class="form-control form-control-sm" name="extra_field_1" placeholder="paper"/>
+          </div>
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" name="is_default" id="cfg-is-default"/>
+            <label class="form-check-label small" for="cfg-is-default">Set as Default</label>
+          </div>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" name="is_active" id="cfg-is-active" checked/>
+            <label class="form-check-label small" for="cfg-is-active">Active</label>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-success btn-sm" onclick="saveConfig()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/jarvis.js"></script>
+</body>
+</html>

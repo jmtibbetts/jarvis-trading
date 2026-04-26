@@ -3,6 +3,12 @@
 const API  = (p) => fetch(`/api${p}`).then(r=>r.json());
 const POST = (p,b) => fetch(`/api${p}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
 const DEL  = (p)   => fetch(`/api${p}`,{method:'DELETE'}).then(r=>r.json());
+// Flexible helper used by queue actions — supports GET/POST/DELETE
+const api  = (p, opts={}) => {
+  if (!opts.method || opts.method === 'GET') return API(p);
+  if (opts.method === 'DELETE') return DEL(p);
+  return POST(p, opts.body ? JSON.parse(opts.body) : {});
+};
 
 let allSignals=[], allThreats=[], allNews=[], equityChart=null;
 

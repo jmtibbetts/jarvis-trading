@@ -59,53 +59,12 @@ def spa_fallback(full_path: str = ""):
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 scheduler = None
 
-@app.on_event("startup")
-async def startup():
-    global scheduler
-    from app.scheduler import create_scheduler
-    scheduler = create_scheduler()
-    scheduler.start()
-    logger.info("[Server] APScheduler started")
-    
-    # Initial data fetches — staggered in background threads
-    def initial_fetch():
-        time.sleep(3)
-        logger.info("[Startup] Initial market data fetch...")
-        try:
-            from jobs.fetch_market_data import run as mrun
-            mrun()
-        except Exception as e:
-            logger.error(f"[Startup] Market fetch error: {e}")
-        
-        time.sleep(5)
-        logger.info("[Startup] Initial threat news fetch...")
-        try:
-            from jobs.fetch_threat_news import run as trun
-            trun()
-        except Exception as e:
-            logger.error(f"[Startup] News fetch error: {e}")
-        
-        time.sleep(15)
-        logger.info("[Startup] Initial signal generation...")
-        try:
-            from jobs.generate_signals import run as srun
-            srun()
-        except Exception as e:
-            logger.error(f"[Startup] Signal gen error: {e}")
-    
-    threading.Thread(target=initial_fetch, daemon=True).start()
-
-@app.on_event("shutdown")
-async def shutdown():
-    if scheduler:
-        scheduler.shutdown(wait=False)
-    logger.info("[Server] Shutdown complete")
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def print_banner():
     port = int(os.getenv('PORT', 3000))
     print("\n" + "═"*65)
-    print("  🤖  JARVIS TRADING AI  v5.0  (Python Edition)")
+    print("  🤖  JARVIS TRADING AI  v6.0  (Python Edition)")
     print("═"*65)
     print(f"  Dashboard:  http://localhost:{port}")
     print(f"  API docs:   http://localhost:{port}/docs")

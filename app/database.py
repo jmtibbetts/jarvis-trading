@@ -1,6 +1,6 @@
 """
 Jarvis Trading AI — SQLAlchemy + SQLite database layer.
-v6.0: Added composite_score to TradingSignal. Added PortfolioSnapshot for equity curve.
+v6.1: Added earnings_risk column to TradingSignal. Better migration coverage.
 """
 import os, uuid, json
 from datetime import datetime, timezone
@@ -60,6 +60,8 @@ class TradingSignal(Base):
     momentum         = Column(String)
     key_risks        = Column(Text)
     signal_source    = Column(String, default="watchlist")
+    earnings_risk    = Column(Boolean, default=False)
+    rr_ratio         = Column(Float)
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
 
@@ -154,13 +156,30 @@ class PortfolioSnapshot(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Run migrations for any missing columns
+    _migrate_columns()
+    print("[DB] Schema initialized")
+
+def _migrate_columns():
+    """Add any missing columns to existing tables without data loss."""
+    migrations = {
+        "trading_signals": [
+            ("composite_score", "REAL"),
+            ("signal_source",   "TEXT DEFAULT 'watchlist'"),
+            ("earnings_risk",   "INTEGER DEFAULT 0"),
+            ("rr_ratio",        "REAL"),
+            ("momentum",        "TEXT"),
+            ("key_risks",       "TEXT"),
+        ]
+    }
     try:
         with engine.connect() as conn:
-            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(trading_signals)")).fetchall()]
-            if 'composite_score' not in cols:
-                conn.execute(text("ALTER TABLE trading_signals ADD COLUMN composite_score REAL"))
-                conn.commit()
-                print("[DB] Migrated: added composite_score")
+            for table, cols in migrations.items():
+                existing = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+                for col_name, col_def in cols:
+                    if col_name not in existing:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"))
+                        conn.commit()
+                        print(f"[DB] Migrated: added {table}.{col_name}")
     except Exception as e:
-        pass
-    print("[DB] Schema initialized")
+        print(f"[DB] Migration warning: {e}")

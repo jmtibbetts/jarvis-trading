@@ -1,68 +1,64 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
 
 echo.
-echo  Jarvis Trading AI v5.0 - Python Edition
-echo  ========================================
+echo  ============================================================
+echo   Jarvis Trading AI v5.0
+echo  ============================================================
 echo.
-
-:: Check Python
-python --version > nul 2>&1
-if %errorlevel% neq 0 (
-    echo  ERROR: Python not found. Install Python 3.11+ from python.org
-    pause
-    exit /b 1
-)
-
-:: Delete broken venv if activate script is missing
-if exist .venv (
-    if not exist .venv\Scripts\activate.bat (
-        echo  Removing broken venv...
-        rmdir /s /q .venv
-    )
-)
-
-:: Create venv if missing
-if not exist .venv (
-    echo  Creating virtual environment...
-    python -m venv .venv
-    if %errorlevel% neq 0 (
-        echo  ERROR: Failed to create virtual environment.
-        pause
-        exit /b 1
-    )
-)
 
 :: Activate venv
-echo  Activating virtual environment...
+if not exist .venv\Scripts\activate.bat (
+    echo  ERROR: .venv not found. Run: py -3.12 -m venv .venv
+    pause & exit /b 1
+)
 call .venv\Scripts\activate.bat
+
+:: Upgrade pip silently
+python -m pip install --upgrade pip --quiet
+
+:: Install base requirements
+echo  Installing base dependencies...
+pip install -r requirements.txt --quiet
 if %errorlevel% neq 0 (
-    echo  ERROR: Could not activate venv. Try deleting the .venv folder and re-running.
-    pause
-    exit /b 1
+    echo  ERROR: Base dependency install failed.
+    pause & exit /b 1
 )
 
-:: Verify pip works
-python -m pip --version > nul 2>&1
+:: Try TA-Lib pre-built wheel for Python 3.12 Windows x64
+echo  Checking for TA-Lib...
+python -c "import talib" 2>nul
 if %errorlevel% neq 0 (
-    echo  ERROR: pip not available inside venv.
-    pause
-    exit /b 1
-)
+    echo  TA-Lib not found. Installing pre-built wheel ^(Python 3.12 / Windows x64^)...
+    set TALIB_WHL=ta_lib-0.6.8-cp312-cp312-win_amd64.whl
+    set TALIB_URL=https://github.com/cgohlke/talib-build/releases/download/v0.6.8/ta_lib-0.6.8-cp312-cp312-win_amd64.whl
 
-:: Install dependencies
-echo  Installing dependencies...
-python -m pip install -r requirements.txt
-if %errorlevel% neq 0 (
-    echo.
-    echo  ERROR: Dependency install failed. See errors above.
-    pause
-    exit /b 1
+    if not exist !TALIB_WHL! (
+        echo  Downloading TA-Lib wheel...
+        curl -L -o !TALIB_WHL! !TALIB_URL!
+    )
+
+    pip install !TALIB_WHL! --quiet
+    if %errorlevel% neq 0 (
+        echo  TA-Lib wheel install failed. Falling back to pure-Python ta library...
+        pip install ta==0.11.0 --quiet
+        if %errorlevel% neq 0 (
+            echo  ERROR: Could not install any TA library.
+            pause & exit /b 1
+        )
+        echo  Using ta==0.11.0 ^(pure Python fallback^)
+    ) else (
+        echo  TA-Lib 0.6.8 installed successfully!
+    )
+) else (
+    echo  TA-Lib already installed.
 )
 
 :: Create data dir
 if not exist data mkdir data
 
+:: Launch
 echo.
 echo  Starting Jarvis...
 echo.

@@ -82,15 +82,10 @@ class BackfillStatus(CacheBase):
     bar_count  = Column(Float)
     last_updated = Column(String)
 
-_cache_initialized = False
-
 def init_cache_db():
-    global _cache_initialized
-    if _cache_initialized:
-        return  # already done — skip repeated calls
+    """Create tables if they don't exist. Safe to call multiple times (create_all is idempotent)."""
     CacheBase.metadata.create_all(bind=cache_engine)
-    logger.info(f"[OHLCVCache] Initialized at {CACHE_DB}")
-    _cache_initialized = True
+    logger.debug(f"[OHLCVCache] Ready at {CACHE_DB}")
 
 # ── Cache TTL per timeframe ────────────────────────────────────────────────────
 CACHE_KEEP_DAYS = {
@@ -270,7 +265,7 @@ def fetch_with_cache(symbol: str, tf: str,
             alpaca_df = alpaca_fetch_fn(symbol, tf)
             if alpaca_df is not None and not alpaca_df.empty:
                 _store_bars(symbol, tf, alpaca_df, source='alpaca')
-                logger.debug(f"[Cache] {symbol}/{tf} → {len(alpaca_df)} bars from Alpaca")
+                logger.info(f"[Cache] Stored {symbol}/{tf} → {len(alpaca_df)} bars (alpaca)")
         except Exception as e:
             logger.debug(f"[Cache] Alpaca fetch failed for {symbol}/{tf}: {e}")
 

@@ -1,156 +1,72 @@
 """
-Job: Execute Trading Signals → Alpaca Bracket Orders
+Job: Execute Signals v6.0 — Kelly sizing + regime check + correlation filter.
 """
-import logging, uuid
+import logging
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal
-from lib.alpaca_client import (
-    get_account, get_positions, submit_bracket_order,
-    normalize_symbol, is_crypto
-)
+from lib.alpaca_client import get_account, get_positions, submit_bracket_order, normalize_symbol
 
 logger = logging.getLogger(__name__)
 
-BUDGET_PER_TRADE  = 1000.0
-EQUITY_CAP_PCT    = 0.50
-MIN_POSITIONS_CAP = 8
-SIGNAL_MAX_AGE_H  = 4
-MIN_CONFIDENCE    = 55
-MIN_SHARES        = 1
-
 def run():
-    logger.info("[Execute] Starting signal execution job...")
-    
+    logger.info("[Execute] Starting execution job...")
     try:
-        account   = get_account()
-        equity    = float(account.equity)
-        cash      = float(account.cash)
-        positions = get_positions()
+        account=get_account(); equity=float(account.equity); positions=get_positions()
     except Exception as e:
-        logger.error(f"[Execute] Alpaca connection failed: {e}")
-        return {'error': str(e)}
-    
-    # Current positions
-    held_symbols = {p.symbol for p in positions}
-    market_value_held = sum(float(p.market_value or 0) for p in positions)
-    
-    # Max positions cap
-    max_positions = max(MIN_POSITIONS_CAP, int(equity * EQUITY_CAP_PCT / 1000))
-    available_slots = max_positions - len(positions)
-    
-    if available_slots <= 0:
-        logger.info(f"[Execute] At max positions ({max_positions}), skipping")
-        return {'executed': 0, 'reason': 'at_max_positions'}
-    
-    # Budget remaining
-    max_deployed = equity * EQUITY_CAP_PCT
-    remaining_budget = max(0, max_deployed - market_value_held)
-    
-    if remaining_budget < BUDGET_PER_TRADE:
-        logger.info(f"[Execute] Insufficient budget: ${remaining_budget:.2f}")
-        return {'executed': 0, 'reason': 'insufficient_budget'}
-    
-    # Fetch active signals
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=SIGNAL_MAX_AGE_H)).isoformat()
+        logger.error(f"[Execute] Alpaca failed: {e}"); return {"error":str(e)}
+    held={p.symbol for p in positions}
+    mv_held=sum(float(p.market_value or 0) for p in positions)
+    max_pos=max(8,int(equity*0.5/1000)); slots=max_pos-len(positions)
+    if slots<=0: logger.info(f"[Execute] Max positions ({max_pos})"); return {"executed":0,"reason":"at_max_positions"}
+    budget=max(0,equity*0.5-mv_held)
+    if budget<200: logger.info(f"[Execute] Low budget ${budget:.0f}"); return {"executed":0,"reason":"insufficient_budget"}
+    regime={"label":"Unknown","risk":"medium"}
+    try:
+        from lib.market_regime import get_regime; regime=get_regime()
+        logger.info(f"[Execute] Regime: {regime['label']} | Risk: {regime['risk']}")
+    except: pass
+    min_conf=75 if regime.get("risk")=="high" else 55
+    try:
+        from lib.risk_manager import portfolio_heat
+        heat=portfolio_heat([{"market_value":float(p.market_value or 0),"unrealized_plpc":float(p.unrealized_plpc or 0)*100} for p in positions],equity)
+        if heat.get("status")=="hot":
+            logger.warning(f"[Execute] Portfolio hot — skipping"); return {"executed":0,"reason":"portfolio_hot"}
+    except: pass
+    cutoff=(datetime.now(timezone.utc)-timedelta(hours=4)).isoformat()
     with get_db() as db:
-        signals = db.query(TradingSignal).filter(
-            TradingSignal.status == 'Active',
-            TradingSignal.generated_at >= cutoff,
-            TradingSignal.confidence >= MIN_CONFIDENCE
-        ).order_by(TradingSignal.confidence.desc()).all()
-        
-        executed = 0
-        
-        for sig in signals:
-            if executed >= available_slots:
-                break
-            if remaining_budget < BUDGET_PER_TRADE * 0.5:
-                break
-            
-            sym_raw = sig.asset_symbol
-            sym, crypto = normalize_symbol(sym_raw)
-            
-            # Skip if already held
-            if sym in held_symbols or sym_raw in held_symbols:
-                continue
-            
-            # Skip if no price data
-            entry = float(sig.entry_price or 0)
-            target = float(sig.target_price or 0)
-            stop = float(sig.stop_loss or 0)
-            
-            if not entry or not target or not stop:
-                continue
-            if stop >= entry or target <= entry:
-                continue
-            
-            # Calculate quantity
-            budget = min(BUDGET_PER_TRADE, remaining_budget)
-            if crypto:
-                qty = round(budget / entry, 8)
-                if qty * entry < 1.0:
-                    logger.debug(f"[Execute] {sym}: qty too small (${qty*entry:.4f})")
-                    continue
-            else:
-                qty = max(MIN_SHARES, int(budget / entry))
-                if qty * entry > budget * 1.1:
-                    qty = max(1, qty - 1)
-            
-            try:
-                result = submit_bracket_order(
-                    symbol=sym,
-                    qty=qty,
-                    entry_price=entry,
-                    take_profit=target,
-                    stop_loss=stop
-                )
-                sig.status = 'Executed'
-                sig.updated_date = datetime.now(timezone.utc).isoformat()
-                held_symbols.add(sym)
-                remaining_budget -= qty * entry
-                executed += 1
-                logger.info(f"[Execute] ✓ {sym} qty={qty} entry=${entry:.2f} target=${target:.2f} stop=${stop:.2f}")
-            except Exception as e:
-                sig.status = 'Rejected'
-                sig.updated_date = datetime.now(timezone.utc).isoformat()
-                logger.error(f"[Execute] ✗ {sym}: {e}")
-    
-    logger.info(f"[Execute] Done — {executed} orders submitted")
-    return {'executed': executed}
-
-# Integration hook — call this from run() after getting signals
-def size_and_filter_signals(signals: list, positions: list, equity: float) -> list:
-    """Apply Kelly sizing + correlation filter to signals before execution."""
+        sigs=db.query(TradingSignal).filter(TradingSignal.status=="Active",TradingSignal.generated_at>=cutoff,TradingSignal.confidence>=min_conf).order_by(TradingSignal.confidence.desc()).limit(50).all()
+        sig_dicts=[{"id":s.id,"asset_symbol":s.asset_symbol,"asset_class":s.asset_class or "Equity","direction":s.direction or "Long","confidence":s.composite_score or s.confidence or 65,"entry_price":s.entry_price,"target_price":s.target_price,"stop_loss":s.stop_loss} for s in sigs]
+    candidates=sig_dicts
     try:
-        from lib.market_regime import get_regime
-        from lib.risk_manager import calculate_position_size, filter_correlated, portfolio_heat
-        
-        regime = get_regime()
-        heat   = portfolio_heat([{'market_value': float(p.market_value or 0),
-                                   'unrealized_plpc': float(p.unrealized_plpc or 0)*100}
-                                  for p in positions], equity)
-        
-        if heat['status'] == 'hot':
-            logger.warning(f"[Execute] Portfolio hot ({heat['heat']:.1f}% avg loss) — skipping new entries")
-            return []
-        
-        held = {str(p.symbol) for p in positions}
-        signal_dicts = [{'asset_symbol': s.asset_symbol, 'direction': s.direction,
-                         'confidence': s.composite_score or s.confidence,
-                         'entry_price': s.entry_price, 'target_price': s.target_price,
-                         'stop_loss': s.stop_loss} for s in signals]
-        
-        filtered = filter_correlated(signal_dicts, held, max_per_sector=2)
-        
-        sized = []
-        for sig in filtered:
-            sz = calculate_position_size(sig, equity, regime)
-            if sz.rejection_reason:
-                logger.debug(f"[Execute] {sz.symbol} rejected: {sz.rejection_reason}")
-                continue
-            sized.append((sig, sz))
-        
-        return sized
-    except Exception as e:
-        logger.error(f"[Execute] Sizing/filtering failed: {e}")
-        return []
+        from lib.risk_manager import filter_correlated
+        candidates=filter_correlated(sig_dicts,held,max_per_sector=2)
+    except: pass
+    executed=0
+    with get_db() as db:
+        for sig in candidates:
+            if executed>=slots or budget<100: break
+            sym_raw=sig["asset_symbol"]; sym,crypto=normalize_symbol(sym_raw)
+            if sym in held or sym_raw in held: continue
+            entry=float(sig.get("entry_price") or 0); target=float(sig.get("target_price") or 0); stop=float(sig.get("stop_loss") or 0)
+            if not entry or not target or not stop or stop>=entry or target<=entry: continue
+            sz=None
+            try:
+                from lib.risk_manager import calculate_position_size
+                sz=calculate_position_size(sig,equity,regime)
+                if sz.rejection_reason: continue
+                trade_budget=min(sz.dollar_size,budget)
+            except:
+                conf=float(sig.get("confidence",65)); trade_budget=min(500+(conf-55)/45*1000,budget); trade_budget=max(100,min(1500,trade_budget))
+            qty=round(trade_budget/entry,8) if crypto else max(1,int(trade_budget/entry))
+            try:
+                submit_bracket_order(symbol=sym,qty=qty,entry_price=entry,take_profit=target,stop_loss=stop)
+                rec=db.query(TradingSignal).filter(TradingSignal.id==sig["id"]).first()
+                if rec: rec.status="Executed"; rec.updated_date=datetime.now(timezone.utc).isoformat()
+                held.add(sym); budget-=qty*entry; executed+=1
+                logger.info(f"[Execute] ✓ {sym} x{qty} @ ${entry:.2f} TP=${target:.2f} SL=${stop:.2f}")
+            except Exception as e:
+                rec=db.query(TradingSignal).filter(TradingSignal.id==sig["id"]).first()
+                if rec: rec.status="Rejected"; rec.updated_date=datetime.now(timezone.utc).isoformat()
+                logger.error(f"[Execute] ✗ {sym}: {e}")
+    logger.info(f"[Execute] Done — {executed} orders | budget=${budget:.0f}")
+    return {"executed":executed,"regime":regime.get("label"),"budget_remaining":round(budget,2)}

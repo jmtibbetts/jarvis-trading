@@ -78,6 +78,85 @@ def get_market_full():
             "crypto":  [_asset_dict(a) for a in assets if a.asset_class=="Crypto"],
             "count":   len(assets)}
 
+
+@router.get("/positions/with-signals")
+def get_positions_with_signals():
+    """Positions enriched with their originating signal data."""
+    try:
+        from lib.alpaca_client import get_positions, get_account
+        positions = get_positions()
+        account   = get_account()
+        equity    = float(account.equity)
+        mv_total  = sum(float(p.market_value or 0) for p in positions)
+        pl_total  = sum(float(p.unrealized_pl or 0) for p in positions)
+
+        # Build symbol → signal map from DB
+        with get_db() as db:
+            executed = db.query(TradingSignal).filter(
+                TradingSignal.status.in_(["Executed", "Active", "Closed"])
+            ).order_by(TradingSignal.generated_at.desc()).all()
+
+        sig_map = {}
+        for s in executed:
+            sym = s.asset_symbol
+            if sym not in sig_map:
+                sig_map[sym] = s
+            # also index without /USD so BTC/USD matches BTC
+            base = sym.replace("/USD", "")
+            if base not in sig_map:
+                sig_map[base] = s
+
+        result = []
+        for p in positions:
+            sym = str(p.symbol)
+            pos_dict = _position_dict(p)
+            # Find matching signal
+            sig = sig_map.get(sym) or sig_map.get(sym.replace("/USD","")) or sig_map.get(sym + "/USD")
+            if sig:
+                entry  = float(sig.entry_price or 0)
+                target = float(sig.target_price or 0)
+                stop   = float(sig.stop_loss or 0)
+                curr   = float(p.current_price or 0)
+                rr     = round((target - entry) / (entry - stop), 2) if entry > stop and target > entry else None
+                progress = round((curr - entry) / (target - entry) * 100, 1) if target > entry and curr else None
+                pos_dict["signal"] = {
+                    "id":              sig.id,
+                    "direction":       sig.direction,
+                    "confidence":      sig.confidence,
+                    "composite_score": sig.composite_score,
+                    "timeframe":       sig.timeframe,
+                    "entry_price":     sig.entry_price,
+                    "target_price":    sig.target_price,
+                    "stop_loss":       sig.stop_loss,
+                    "reasoning":       sig.reasoning,
+                    "key_risks":       sig.key_risks,
+                    "momentum":        sig.momentum,
+                    "signal_source":   getattr(sig, "signal_source", "watchlist"),
+                    "generated_at":    sig.generated_at,
+                    "status":          sig.status,
+                    "rr":              rr,
+                    "progress_pct":    progress,
+                }
+            else:
+                pos_dict["signal"] = None
+            result.append(pos_dict)
+
+        return {
+            "positions": result,
+            "account": {
+                "equity":         equity,
+                "cash":           float(account.cash),
+                "buying_power":   float(account.buying_power),
+                "market_value":   mv_total,
+                "unrealized_pl":  pl_total,
+                "unrealized_plpc": (pl_total / (equity - pl_total) * 100) if (equity - pl_total) > 0 else 0,
+                "day_trade_count": int(account.daytrade_count or 0),
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Alpaca error: {e}")
+
+
 @router.get("/positions")
 def get_positions_live():
     try:

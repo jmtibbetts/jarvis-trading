@@ -587,6 +587,103 @@ async function deleteConfig(id) {
   await DEL(`/settings/${id}`); loadSettings();
 }
 
+
+/* ── PERFORMANCE ──────────────────────────────────────────────────────────── */
+let perfChart = null;
+
+async function loadPerformance(days=30) {
+  ['30','7','90'].forEach(d=>{
+    const btn=document.getElementById(`perf-${d}d`);
+    if(btn) btn.classList.toggle('active', d===String(days));
+  });
+  const data = await API(`/performance?days=${days}`);
+  const updEl = document.getElementById('perf-updated');
+  if(updEl) updEl.textContent='Last updated '+new Date().toLocaleTimeString();
+
+  // KPI cards
+  const kpiEl = document.getElementById('perf-kpis');
+  if(!kpiEl) return;
+  const avgRR  = data.avg_rr != null ? Number(data.avg_rr).toFixed(2) : 'N/A';
+  const avgSc  = data.avg_score != null ? Number(data.avg_score).toFixed(0)+'%' : 'N/A';
+  const byClass = (data.by_class||[]).map(c=>c.class+': '+c.count).join(' · ') || '—';
+  const rrCls   = data.avg_rr>=2?'text-success':data.avg_rr>=1?'text-warning':'text-danger';
+  kpiEl.innerHTML =
+    '<div class="col-6 col-md-3"><div class="card text-center py-3">' +
+      '<div class="h3 fw-bold text-info mb-0">'+(data.executed||0)+'</div>' +
+      '<div class="small text-muted">Executed Trades</div></div></div>' +
+    '<div class="col-6 col-md-3"><div class="card text-center py-3">' +
+      '<div class="h3 fw-bold '+rrCls+' mb-0">'+avgRR+'</div>' +
+      '<div class="small text-muted">Avg R:R Ratio</div></div></div>' +
+    '<div class="col-6 col-md-3"><div class="card text-center py-3">' +
+      '<div class="h3 fw-bold text-primary mb-0">'+(data.good_rr_count||0)+'</div>' +
+      '<div class="small text-muted">Setups R:R &ge; 2.0</div></div></div>' +
+    '<div class="col-6 col-md-3"><div class="card text-center py-3">' +
+      '<div class="h3 fw-bold text-warning mb-0">'+avgSc+'</div>' +
+      '<div class="small text-muted">Avg Composite Score</div>' +
+      '<div class="text-muted" style="font-size:.65rem">'+byClass+'</div></div></div>';
+
+  // Daily volume bar chart
+  const daily  = data.daily_volume || [];
+  const labels = daily.map(function(d){return d.date.slice(5);});
+  const counts = daily.map(function(d){return d.count;});
+  const ctx = document.getElementById('perf-chart');
+  if(ctx){
+    if(perfChart) perfChart.destroy();
+    perfChart = new Chart(ctx.getContext('2d'), {
+      type:'bar',
+      data:{labels:labels,datasets:[{
+        label:'Signals executed',data:counts,
+        backgroundColor:'rgba(13,202,240,0.5)',
+        borderColor:'rgba(13,202,240,0.9)',
+        borderWidth:1,borderRadius:3
+      }]},
+      options:{
+        responsive:true,maintainAspectRatio:true,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{color:'#adb5bd',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}},
+          y:{ticks:{color:'#adb5bd',font:{size:10},stepSize:1},grid:{color:'rgba(255,255,255,0.05)'},beginAtZero:true}
+        }
+      }
+    });
+  }
+
+  // Trade history table
+  const tbody = document.getElementById('perf-trades-body');
+  if(!tbody) return;
+  const trades = data.recent_trades || [];
+  if(!trades.length){
+    tbody.innerHTML='<tr><td colspan="11" class="text-center text-muted py-4">No executed trades in this period</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(function(t){
+    const dirCls = t.direction==='Long'?'text-success':'text-primary';
+    var rr = '—', rrCls = 'text-muted';
+    if(t.entry_price&&t.target_price&&t.stop_loss&&t.entry_price>t.stop_loss){
+      rr = ((t.target_price-t.entry_price)/(t.entry_price-t.stop_loss)).toFixed(1);
+      rrCls = parseFloat(rr)>=2?'text-success':parseFloat(rr)>=1?'text-warning':'text-danger';
+    }
+    const sc = t.composite_score||t.confidence||0;
+    const scCls = sc>=70?'text-success':sc>=50?'text-warning':'text-danger';
+    const src = t.signal_source==='opportunistic'?'📰 News':'📋 Watch';
+    const earn = t.earnings_risk?' 📅':'';
+    const statCls = t.status==='Closed'?'text-success':t.status==='Executed'?'text-info':'text-danger';
+    return '<tr>'+
+      '<td class="fw-bold">'+t.asset_symbol+earn+'</td>'+
+      '<td class="'+dirCls+'">'+t.direction+'</td>'+
+      '<td>'+fmtPrice(t.entry_price)+'</td>'+
+      '<td>'+fmtPrice(t.target_price)+'</td>'+
+      '<td>'+fmtPrice(t.stop_loss)+'</td>'+
+      '<td class="'+rrCls+' fw-bold">'+rr+'</td>'+
+      '<td class="'+scCls+'">'+Number(sc).toFixed(0)+'%</td>'+
+      '<td><span class="badge bg-secondary">'+(t.timeframe||'—')+'</span></td>'+
+      '<td class="text-muted" style="font-size:.75rem">'+src+'</td>'+
+      '<td class="'+statCls+'">'+t.status+'</td>'+
+      '<td class="text-muted" style="font-size:.75rem">'+timeAgo(t.generated_at)+'</td>'+
+    '</tr>';
+  }).join('');
+}
+
 /* ── GLOBAL INIT + REFRESH ───────────────────────────────────────────────── */
 async function refreshAll() {
   const active=document.querySelector('.nav-link.active')?.getAttribute('href')?.replace('#tab-','');
@@ -600,6 +697,7 @@ async function refreshAll() {
   else if(active==='news')     loadNews();
   else if(active==='jobs')     loadJobs();
   else if(active==='settings') loadSettings();
+  else if(active==='performance') loadPerformance(30);
 }
 
 // Tab change — load relevant data
@@ -614,6 +712,7 @@ document.querySelectorAll('[data-bs-toggle="tab"]').forEach(el=>{
     else if(tab==='scanner')  {} 
     else if(tab==='jobs')     loadJobs();
     else if(tab==='settings'){loadSettings();updatePlatformFields();}
+    else if(tab==='performance') loadPerformance(30);
   });
 });
 

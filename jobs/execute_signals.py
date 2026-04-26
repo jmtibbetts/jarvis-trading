@@ -23,8 +23,9 @@ def _normalize_held(positions):
 def run():
     logger.info("[Execute] Starting execution job...")
     try:
-        account  = get_account()
-        equity   = float(account.equity)
+        account   = get_account()
+        equity    = float(account.equity)
+        buying_power = float(account.buying_power)
         positions = get_positions()
     except Exception as e:
         logger.error(f"[Execute] Alpaca account fetch failed: {e}")
@@ -35,15 +36,17 @@ def run():
     max_pos   = max(8, int(equity * 0.5 / 1000))
     slots     = max_pos - len(positions)
 
-    logger.info(f"[Execute] equity=${equity:.0f} | positions={len(positions)}/{max_pos} | slots={slots} | held={held}")
+    # Real spendable cash — use actual buying power, not equity math
+    budget = min(buying_power * 0.95, max(0, equity * 0.5 - mv_held))
+
+    logger.info(f"[Execute] equity=${equity:.0f} | buying_power=${buying_power:.0f} | budget=${budget:.0f} | positions={len(positions)}/{max_pos} | slots={slots}")
 
     if slots <= 0:
         logger.info(f"[Execute] At max positions ({max_pos}) — skipping")
         return {"executed": 0, "reason": "at_max_positions"}
 
-    budget = max(0, equity * 0.5 - mv_held)
-    if budget < 200:
-        logger.info(f"[Execute] Low budget ${budget:.0f} — skipping")
+    if budget < 50:
+        logger.info(f"[Execute] Insufficient buying power ${buying_power:.0f} — skipping")
         return {"executed": 0, "reason": "insufficient_budget"}
 
     regime = {"label": "Unknown", "risk": "medium"}
@@ -140,14 +143,25 @@ def run():
                 trade_budget = max(100, min(1500, 500 + (conf - 55) / 45 * 1000))
                 trade_budget = min(trade_budget, budget)
 
+            # Hard cap per trade: don't spend more than remaining buying power
+            # Spread remaining budget evenly across remaining slots to avoid
+            # blowing it all on the first trade
+            remaining_slots = max(1, slots - executed)
+            per_trade_cap = min(trade_budget, budget / remaining_slots, budget)
+            per_trade_cap = max(50.0, per_trade_cap)
+
             # Qty: fractional for crypto, integer for equities
             if crypto:
-                qty = round(trade_budget / entry, 6)
+                qty = round(per_trade_cap / entry, 6)
                 if qty < 0.0001:
-                    logger.warning(f"[Execute] Skip {sym} — qty too small ({qty})")
+                    logger.warning(f"[Execute] Skip {sym} — qty too small ({qty}) per_trade_cap=${per_trade_cap:.0f} entry=${entry}")
                     continue
             else:
-                qty = max(1, int(trade_budget / entry))
+                qty = max(1, int(per_trade_cap / entry))
+                cost = qty * entry
+                if cost > budget:
+                    logger.warning(f"[Execute] Skip {sym} — {qty} shares × ${entry} = ${cost:.0f} > budget ${budget:.0f}")
+                    continue
 
             try:
                 submit_bracket_order(

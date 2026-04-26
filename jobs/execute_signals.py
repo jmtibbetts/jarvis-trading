@@ -1,6 +1,6 @@
 """
-Job: Execute Signals v6.1 — Kelly sizing + regime check + correlation filter.
-v6.1: Fixed crypto held-set check (SOLUSD vs SOL/USD), fractional qty, better error logging.
+Job: Execute Signals v6.2 — Kelly sizing + regime check + correlation filter.
+v6.2: Crypto R:R floor 1.0, 6h signal age window, per-signal INFO logging.
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -73,11 +73,13 @@ def run():
     except Exception as e:
         logger.debug(f"[Execute] Portfolio heat check skipped: {e}")
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    # Crypto signals valid for 6h (24/7 market), equity 4h
+    cutoff_equity = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    cutoff_crypto = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
     with get_db() as db:
         sigs = db.query(TradingSignal).filter(
             TradingSignal.status == "Active",
-            TradingSignal.generated_at >= cutoff,
+            TradingSignal.generated_at >= cutoff_crypto,  # use wider window; equity filtered below
             TradingSignal.confidence >= min_conf
         ).order_by(TradingSignal.confidence.desc()).limit(50).all()
 
@@ -111,10 +113,18 @@ def run():
             sym_raw = sig["asset_symbol"]
             sym, crypto = normalize_symbol(sym_raw)
 
+            logger.info(f"[Execute] Evaluating {sym} ({'crypto' if crypto else 'equity'}) conf={sig['confidence']:.0f}%")
+
             # Skip already held (check both formats)
             if sym in held or sym_raw in held:
-                logger.debug(f"[Execute] Skip {sym} — already held")
+                logger.info(f"[Execute] Skip {sym} — already held")
                 continue
+
+            # For equity: also enforce 4h age limit (crypto gets the full 6h)
+            if not crypto:
+                if sig.get("generated_at","") < cutoff_equity:
+                    logger.info(f"[Execute] Skip {sym} — equity signal too old (>4h)")
+                    continue
 
             # Skip equities when market is closed (weekends / outside 9:30-16:00 ET)
             if not crypto:

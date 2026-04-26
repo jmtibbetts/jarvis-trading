@@ -52,6 +52,7 @@ async function loadSignals() {
   const data = await API('/signals?limit=150');
   allSignals = data;
   renderSignals();
+  loadQueue();
 }
 
 function renderSignals() {
@@ -73,7 +74,7 @@ function renderSignals() {
     const rr     = s.entry_price&&s.target_price&&s.stop_loss&&s.entry_price>s.stop_loss
                    ? ((s.target_price-s.entry_price)/(s.entry_price-s.stop_loss)).toFixed(1) : 'N/A';
     const rrCls  = rr!=='N/A'&&parseFloat(rr)>=2?'text-success':rr!=='N/A'&&parseFloat(rr)>=1?'text-warning':'text-danger';
-    const statusBadge={Active:'bg-success',Executed:'bg-primary',Expired:'bg-secondary',Rejected:'bg-danger',Closed:'bg-dark border border-secondary'}[s.status]||'bg-secondary';
+    const statusBadge={Active:'bg-success',Executed:'bg-primary',Expired:'bg-secondary',Rejected:'bg-danger',Closed:'bg-dark border border-secondary',PendingApproval:'bg-warning text-dark'}[s.status]||'bg-secondary';
     const scorePct=Math.round(score);
     const earningsBadge=s.earnings_risk?'<span class="badge bg-warning text-dark ms-1" title="Earnings risk">📅</span>':'';
     const srcBadge=s.signal_source==='opportunistic'?'<span class="badge bg-info text-dark ms-1" title="News-discovered">📰</span>':'';
@@ -204,6 +205,130 @@ async function submitTradeModal() {
   }
 }
 
+
+/* ── Monday Approval Queue ─────────────────────────────────────────────────── */
+async function loadQueue() {
+  try {
+    const data = await api('/signals/pending');
+    const sigs  = Array.isArray(data) ? data : [];
+    const badge = document.getElementById('queue-badge');
+    const grid  = document.getElementById('queue-grid');
+    const summary = document.getElementById('queue-summary');
+    if (badge) { badge.textContent = sigs.length; badge.style.display = sigs.length ? '' : 'none'; }
+    if (!sigs.length) {
+      grid.innerHTML = '<div class="col-12 text-center text-muted py-5"><i class="bi bi-calendar-check display-6 d-block mb-2 opacity-25"></i>No signals pending approval</div>';
+      if (summary) summary.style.display = 'none';
+      return;
+    }
+    // Summary bar
+    if (summary) {
+      const totalRisk = sigs.reduce((a,s) => a + (s.entry_price||0), 0);
+      summary.innerHTML = `<i class="bi bi-info-circle"></i> <strong>${sigs.length}</strong> signals queued · ` +
+        `Avg confidence: <strong>${Math.round(sigs.reduce((a,s)=>a+(s.confidence||0),0)/sigs.length)}%</strong> · ` +
+        `Review each signal before approving. Market opens Monday 9:30 AM ET.`;
+      summary.style.display = '';
+    }
+    grid.innerHTML = sigs.map(s => {
+      const rr = s.entry_price && s.target_price && s.stop_loss && s.entry_price > s.stop_loss
+        ? ((s.target_price - s.entry_price)/(s.entry_price - s.stop_loss)).toFixed(1) : 'N/A';
+      const rrCls = rr !== 'N/A' && parseFloat(rr) >= 2 ? 'text-success' : rr !== 'N/A' && parseFloat(rr) >= 1 ? 'text-warning' : 'text-danger';
+      const score = s.composite_score || s.confidence || 0;
+      return `<div class="col-xl-3 col-lg-4 col-md-6">
+        <div class="card h-100 border-warning">
+          <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <div>
+              <span class="fw-bold">${s.asset_symbol}</span>
+              <span class="badge bg-success ms-1">${s.direction||'Long'}</span>
+              <span class="badge bg-warning text-dark ms-1">⏳ Pending</span>
+            </div>
+            <small class="text-muted">${timeAgo(s.generated_at)}</small>
+          </div>
+          <div class="card-body py-2 px-3">
+            <div class="d-flex justify-content-between mb-1">
+              <small class="text-muted">Score</small>
+              <span class="badge ${score>=70?'bg-success':score>=50?'bg-warning text-dark':'bg-danger'}">${Math.round(score)}%</span>
+            </div>
+            <div class="small text-muted mb-2">${s.asset_name||s.asset_symbol} · ${s.asset_class||''} · ${s.timeframe||''} · <span class="text-warning">LLM:${s.confidence}%</span></div>
+            <div class="row g-1 mb-2">
+              <div class="col-4 text-center p-1 rounded" style="background:rgba(13,202,240,.08)">
+                <div class="text-muted" style="font-size:.65rem">ENTRY</div>
+                <div class="fw-bold text-info" style="font-size:.8rem">${fmtPrice(s.entry_price)}</div>
+              </div>
+              <div class="col-4 text-center p-1 rounded" style="background:rgba(25,135,84,.08)">
+                <div class="text-muted" style="font-size:.65rem">TARGET</div>
+                <div class="fw-bold text-success" style="font-size:.8rem">${fmtPrice(s.target_price)}</div>
+              </div>
+              <div class="col-4 text-center p-1 rounded" style="background:rgba(220,53,69,.08)">
+                <div class="text-muted" style="font-size:.65rem">STOP</div>
+                <div class="fw-bold text-danger" style="font-size:.8rem">${fmtPrice(s.stop_loss)}</div>
+              </div>
+            </div>
+            <div class="d-flex justify-content-between small mb-2">
+              <span class="text-muted">R:R</span>
+              <span class="fw-bold ${rrCls}">${rr === 'N/A' ? 'N/A' : rr+':1'}</span>
+            </div>
+            <p class="small text-muted mb-0" style="font-size:.72rem;line-height:1.4;max-height:55px;overflow:hidden">${(s.reasoning||'').slice(0,160)}</p>
+          </div>
+          <div class="card-footer py-1 d-flex gap-1">
+            <button class="btn btn-warning btn-sm flex-fill py-0 text-dark" style="font-size:.75rem" onclick="approveSignal('${s.id}')">
+              <i class="bi bi-check-circle-fill"></i> Approve
+            </button>
+            <button class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size:.75rem" onclick="rejectSignal('${s.id}')">
+              <i class="bi bi-x-lg"></i>
+            </button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('Queue load error:', e); }
+}
+
+async function approveSignal(id) {
+  if (!confirm('Submit this order to Alpaca now?')) return;
+  try {
+    const r = await api('/signals/'+id+'/approve', {method:'POST'});
+    toast(r.ok ? `✅ Order submitted: ${r.symbol} x${r.qty}` : '❌ Approve failed', r.ok ? 'success' : 'danger');
+    loadQueue(); loadSignals();
+  } catch(e) { toast('❌ ' + e.message, 'danger'); }
+}
+
+async function rejectSignal(id) {
+  try {
+    await api('/signals/'+id+'/reject', {method:'POST'});
+    toast('Signal rejected', 'secondary');
+    loadQueue(); loadSignals();
+  } catch(e) { toast('❌ ' + e.message, 'danger'); }
+}
+
+async function approveAllPending() {
+  const sigs = document.querySelectorAll('#queue-grid .col-xl-3');
+  if (!sigs.length) { toast('No pending signals', 'secondary'); return; }
+  if (!confirm(`Approve and submit ALL ${sigs.length} pending signals to Alpaca?`)) return;
+  try {
+    const r = await api('/signals/approve-all', {method:'POST'});
+    toast(`✅ Approved: ${r.approved} | Rejected: ${r.rejected} | BP remaining: $${r.buying_power_remaining?.toFixed(0)}`, 'success');
+    loadQueue(); loadSignals();
+  } catch(e) { toast('❌ ' + e.message, 'danger'); }
+}
+
+async function rejectAllPending() {
+  if (!confirm('Reject ALL pending signals?')) return;
+  try {
+    const r = await api('/signals/reject-all', {method:'POST'});
+    toast(`Rejected ${r.rejected} signals`, 'secondary');
+    loadQueue(); loadSignals();
+  } catch(e) { toast('❌ ' + e.message, 'danger'); }
+}
+
+async function cancelAllOrders() {
+  if (!confirm('Cancel ALL open Alpaca orders? This will free up buying power but cancel any working orders.')) return;
+  try {
+    const r = await api('/alpaca/orders', {method:'DELETE'});
+    toast(`✅ All open orders cancelled. ${r.signals_reset} signals reset to Active.`, 'success');
+    loadQueue(); loadSignals(); if (typeof loadOrders === 'function') loadOrders();
+  } catch(e) { toast('❌ ' + e.message, 'danger'); }
+}
+
 async function executeSignal(id) {
   // legacy fallback — kept for scanner-generated signals
   const res = await POST('/signals/'+id+'/execute', {});
@@ -221,6 +346,7 @@ async function clearExpiredSignals() {
 }
 
 document.getElementById('sig-filter-status').addEventListener('change',renderSignals);
+document.getElementById('queue-tab-link')?.addEventListener('click', loadQueue);
 document.getElementById('sig-filter-class').addEventListener('change',renderSignals);
 document.getElementById('sig-sort').addEventListener('change',renderSignals);
 

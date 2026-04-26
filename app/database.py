@@ -1,14 +1,11 @@
 """
-Jarvis Trading AI — SQLAlchemy + SQLite database layer (async-compatible).
-Uses synchronous SQLAlchemy with a thread pool for simplicity on Windows.
+Jarvis Trading AI — SQLAlchemy + SQLite database layer.
+v6.0: Added composite_score to TradingSignal. Added PortfolioSnapshot for equity curve.
 """
 import os, uuid, json
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import (
-    create_engine, Column, String, Float, Boolean, Text, DateTime,
-    event, text
-)
+from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, event, text)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from contextlib import contextmanager
 
@@ -16,13 +13,8 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "jarvis.db"
 
-engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
-    echo=False
-)
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, echo=False)
 
-# Enable WAL mode for concurrent reads
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(conn, _):
     conn.execute("PRAGMA journal_mode=WAL")
@@ -42,39 +34,34 @@ def get_db() -> Session:
     finally:
         db.close()
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+def now_iso(): return datetime.now(timezone.utc).isoformat()
+def new_id():  return str(uuid.uuid4())
 
-def new_id():
-    return str(uuid.uuid4())
-
-# ─── Models ───────────────────────────────────────────────────────────────────
-
-class Base(DeclarativeBase):
-    pass
+class Base(DeclarativeBase): pass
 
 class TradingSignal(Base):
     __tablename__ = "trading_signals"
-    id              = Column(String, primary_key=True, default=new_id)
-    asset_symbol    = Column(String, nullable=False)
-    asset_name      = Column(String)
-    asset_class     = Column(String)
-    direction       = Column(String)
-    confidence      = Column(Float)
-    timeframe       = Column(String)
-    reasoning       = Column(Text)
-    trigger_event   = Column(Text)
-    trigger_event_id= Column(String)
-    entry_price     = Column(Float)
-    target_price    = Column(Float)
-    stop_loss       = Column(Float)
-    status          = Column(String, default="Active")
-    generated_at    = Column(String)
-    momentum        = Column(String)
-    key_risks       = Column(Text)
-    signal_source   = Column(String, default="watchlist")
-    created_date    = Column(String, default=now_iso)
-    updated_date    = Column(String, default=now_iso)
+    id               = Column(String, primary_key=True, default=new_id)
+    asset_symbol     = Column(String, nullable=False)
+    asset_name       = Column(String)
+    asset_class      = Column(String)
+    direction        = Column(String)
+    confidence       = Column(Float)
+    composite_score  = Column(Float)
+    timeframe        = Column(String)
+    reasoning        = Column(Text)
+    trigger_event    = Column(Text)
+    trigger_event_id = Column(String)
+    entry_price      = Column(Float)
+    target_price     = Column(Float)
+    stop_loss        = Column(Float)
+    status           = Column(String, default="Active")
+    generated_at     = Column(String)
+    momentum         = Column(String)
+    key_risks        = Column(Text)
+    signal_source    = Column(String, default="watchlist")
+    created_date     = Column(String, default=now_iso)
+    updated_date     = Column(String, default=now_iso)
 
 class ThreatEvent(Base):
     __tablename__ = "threat_events"
@@ -103,7 +90,7 @@ class NewsItem(Base):
     url             = Column(String)
     category        = Column(String)
     sentiment       = Column(String)
-    affected_assets = Column(Text)  # JSON array stored as string
+    affected_assets = Column(Text)
     region          = Column(String)
     published_at    = Column(String)
     created_date    = Column(String, default=now_iso)
@@ -145,17 +132,35 @@ class PlatformConfig(Base):
 
 class Position(Base):
     __tablename__ = "positions_cache"
-    symbol       = Column(String, primary_key=True)
-    qty          = Column(Float)
-    avg_entry    = Column(Float)
-    market_value = Column(Float)
-    unrealized_pl= Column(Float)
+    symbol          = Column(String, primary_key=True)
+    qty             = Column(Float)
+    avg_entry       = Column(Float)
+    market_value    = Column(Float)
+    unrealized_pl   = Column(Float)
     unrealized_plpc = Column(Float)
-    side         = Column(String)
-    asset_class  = Column(String)
-    updated_at   = Column(String, default=now_iso)
+    side            = Column(String)
+    asset_class     = Column(String)
+    updated_at      = Column(String, default=now_iso)
+
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+    id             = Column(String, primary_key=True, default=new_id)
+    equity         = Column(Float)
+    cash           = Column(Float)
+    market_value   = Column(Float)
+    unrealized_pl  = Column(Float)
+    position_count = Column(Float)
+    snapshot_at    = Column(String, default=now_iso)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    try:
+        with engine.connect() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(trading_signals)")).fetchall()]
+            if 'composite_score' not in cols:
+                conn.execute(text("ALTER TABLE trading_signals ADD COLUMN composite_score REAL"))
+                conn.commit()
+                print("[DB] Migrated: added composite_score")
+    except Exception as e:
+        pass
     print("[DB] Schema initialized")
-

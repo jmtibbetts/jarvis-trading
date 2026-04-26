@@ -82,9 +82,15 @@ class BackfillStatus(CacheBase):
     bar_count  = Column(Float)
     last_updated = Column(String)
 
+_cache_initialized = False
+
 def init_cache_db():
+    global _cache_initialized
+    if _cache_initialized:
+        return  # already done — skip repeated calls
     CacheBase.metadata.create_all(bind=cache_engine)
     logger.info(f"[OHLCVCache] Initialized at {CACHE_DB}")
+    _cache_initialized = True
 
 # ── Cache TTL per timeframe ────────────────────────────────────────────────────
 CACHE_KEEP_DAYS = {

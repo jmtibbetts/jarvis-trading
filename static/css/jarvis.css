@@ -1,0 +1,74 @@
+:root {
+  --bs-body-bg: #0d0f11;
+  --bs-body-color: #e2e8f0;
+  --card-bg: #161b22;
+  --card-border: #30363d;
+}
+
+body { background: var(--bs-body-bg); }
+
+.nav-tabs .nav-link { color: #8b949e; border: none; border-bottom: 2px solid transparent; }
+.nav-tabs .nav-link.active { color: #58a6ff; border-bottom-color: #58a6ff; background: transparent; }
+.nav-tabs .nav-link:hover { color: #e2e8f0; }
+
+.card { background: var(--card-bg); border: 1px solid var(--card-border); }
+.card-header { background: rgba(255,255,255,.04); border-bottom: 1px solid var(--card-border); }
+
+/* Signal cards */
+.signal-card { transition: transform .15s, box-shadow .15s; cursor: default; }
+.signal-card:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+.signal-card.long   { border-left: 3px solid #3fb950; }
+.signal-card.bounce { border-left: 3px solid #58a6ff; }
+
+/* Confidence bar */
+.conf-bar { height: 4px; border-radius: 2px; }
+.conf-bar.high   { background: linear-gradient(90deg, #3fb950, #26a641); }
+.conf-bar.medium { background: linear-gradient(90deg, #f0a444, #d29922); }
+.conf-bar.low    { background: linear-gradient(90deg, #f85149, #da3633); }
+
+/* Threat severity badges */
+.sev-Critical { background: #da3633; }
+.sev-High     { background: #d29922; }
+.sev-Medium   { background: #1f6feb; }
+.sev-Low      { background: #3fb950; }
+
+/* Sentiment */
+.sent-positive { color: #3fb950; }
+.sent-negative { color: #f85149; }
+.sent-neutral  { color: #8b949e; }
+
+/* Job status dots */
+.job-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.job-dot.ok      { background: #3fb950; }
+.job-dot.running { background: #f0a444; animation: pulse .8s infinite; }
+.job-dot.error   { background: #f85149; }
+.job-dot.idle    { background: #484f58; }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* Scanner result */
+#scanner-result pre {
+  background: #0d1117;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 1rem;
+  font-size: .78rem;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+/* P&L colors */
+.pl-positive { color: #3fb950; }
+.pl-negative { color: #f85149; }
+
+.table { --bs-table-bg: transparent; }
+.table-dark { --bs-table-striped-bg: rgba(255,255,255,.03); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0d0f11; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+.badge { font-weight: 500; }

@@ -17,9 +17,9 @@ httpx==0.27.0
 aiohttp==3.9.5
 feedparser==6.0.11
 
-# Data & TA
+# Data & TA  (ta library — pure Python, no numba, works on Python 3.14)
 pandas==2.2.2
-pandas-ta==0.4.71b0
+ta==0.11.0
 numpy==1.26.4
 alpaca-py==0.26.0
 

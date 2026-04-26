@@ -123,7 +123,13 @@ def run():
                 hour_et = (now_utc.hour - 4) % 24  # rough ET offset (EDT)
                 market_open = weekday < 5 and 13 <= now_utc.hour < 20  # 9:30-16:00 ET = 13:30-20:00 UTC
                 if not market_open:
-                    logger.debug(f"[Execute] Skip {sym} — equity market closed (weekday={weekday} UTC hour={now_utc.hour})")
+                    # Queue for Monday morning approval instead of skipping silently
+                    with get_db() as qdb:
+                        rec = qdb.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
+                        if rec and rec.status == "Active":
+                            rec.status = "PendingApproval"
+                            rec.updated_date = datetime.now(timezone.utc).isoformat()
+                            logger.info(f"[Execute] ⏳ {sym} → PendingApproval (market closed, queued for Monday)")
                     continue
 
             entry  = float(sig.get("entry_price")  or 0)
@@ -194,5 +200,9 @@ def run():
                     rec.updated_date = datetime.now(timezone.utc).isoformat()
                 logger.error(f"[Execute] ✗ {sym}: {type(e).__name__}: {e}")
 
-    logger.info(f"[Execute] Done — {executed} executed | budget=${budget:.0f}")
-    return {"executed": executed, "regime": regime.get("label"), "budget_remaining": round(budget, 2)}
+    # Count pending approval signals
+    with get_db() as db:
+        pending_count = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").count()
+
+    logger.info(f"[Execute] Done — {executed} executed | {pending_count} pending approval | budget=${budget:.0f}")
+    return {"executed": executed, "pending_approval": pending_count, "regime": regime.get("label"), "budget_remaining": round(budget, 2)}

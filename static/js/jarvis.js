@@ -1,38 +1,53 @@
 'use strict';
 
-const API  = (path) => fetch(`/api${path}`).then(r => r.json());
-const POST = (path, body) => fetch(`/api${path}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}).then(r => r.json());
-const DEL  = (path) => fetch(`/api${path}`, {method:'DELETE'}).then(r => r.json());
+const API  = (p) => fetch(`/api${p}`).then(r=>r.json());
+const POST = (p,b) => fetch(`/api${p}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
+const DEL  = (p)   => fetch(`/api${p}`,{method:'DELETE'}).then(r=>r.json());
 
 let allSignals=[], allThreats=[], allNews=[], equityChart=null;
 
-// ── Formatters ──────────────────────────────────────────────────────────────
-const fmt2   = v => v != null ? Number(v).toFixed(2) : 'N/A';
-const fmtPct = v => v != null ? `${v>=0?'+':''}${Number(v).toFixed(2)}%` : 'N/A';
+/* ── Formatters ─────────────────────────────────────────────────────────── */
+const fmt2   = v => v!=null ? Number(v).toFixed(2) : 'N/A';
+const fmtPct = v => v!=null ? `${v>=0?'+':''}${Number(v).toFixed(2)}%` : 'N/A';
 const fmtPrice = v => {
-  if (v==null) return 'N/A';
-  v=Number(v);
+  if(v==null) return 'N/A'; v=Number(v);
   return v>1000?`$${v.toLocaleString('en',{maximumFractionDigits:0})}`:v>1?`$${v.toFixed(2)}`:`$${v.toFixed(6)}`;
 };
-const fmtVol = v => {
-  if (!v) return '';
-  v=Number(v);
-  return v>1e9?`${(v/1e9).toFixed(1)}B`:v>1e6?`${(v/1e6).toFixed(1)}M`:v>1e3?`${(v/1e3).toFixed(0)}K`:`${v}`;
-};
 const timeAgo = iso => {
-  if (!iso) return '';
-  const diff = Date.now()-new Date(iso).getTime();
-  const m = Math.floor(diff/60000);
-  if (m<1) return 'just now';
-  if (m<60) return `${m}m ago`;
-  const h=Math.floor(m/60);
-  if (h<24) return `${h}h ago`;
+  if(!iso) return '';
+  const m=Math.floor((Date.now()-new Date(iso).getTime())/60000);
+  if(m<1) return 'just now'; if(m<60) return `${m}m ago`;
+  const h=Math.floor(m/60); if(h<24) return `${h}h ago`;
   return `${Math.floor(h/24)}d ago`;
 };
 const sevColor = {Critical:'danger',High:'warning',Medium:'primary',Low:'success'};
-const sentIcon = {positive:'bi-arrow-up-circle-fill text-success',negative:'bi-arrow-down-circle-fill text-danger',neutral:'bi-dash-circle text-secondary'};
 
-// ── SIGNALS ─────────────────────────────────────────────────────────────────
+/* ── Job Indicators ──────────────────────────────────────────────────────── */
+async function refreshJobIndicators() {
+  try {
+    const jobs = await API('/jobs/status');
+    const el = document.getElementById('job-indicators');
+    if(!el) return;
+    el.innerHTML = Object.entries(jobs).map(([name,info])=>{
+      const c={ok:'success',running:'warning',error:'danger',idle:'secondary'}[info.status]||'secondary';
+      const icon={ok:'✓',running:'⏳',error:'✗',idle:'·'}[info.status]||'·';
+      return `<span class="badge bg-${c}" title="${name}: ${info.last||'never'}${info.error?' — '+info.error:''}">${icon} ${name}</span>`;
+    }).join('');
+  } catch(e){}
+}
+
+/* ── Regime Badge ────────────────────────────────────────────────────────── */
+async function refreshRegimeBadge() {
+  try {
+    const r = await API('/regime');
+    const el = document.getElementById('regime-badge');
+    if(!el) return;
+    const c = {low:'success','medium':'info','medium-high':'warning',high:'danger'}[r.risk]||'secondary';
+    el.innerHTML = `<span class="badge bg-${c}">${r.label||'Unknown'}</span>`;
+  } catch(e){}
+}
+
+/* ── SIGNALS ──────────────────────────────────────────────────────────────── */
 async function loadSignals() {
   const data = await API('/signals?limit=150');
   allSignals = data;
@@ -44,50 +59,46 @@ function renderSignals() {
   const cls    = document.getElementById('sig-filter-class').value;
   const sort   = document.getElementById('sig-sort').value;
   let filtered = allSignals.filter(s=>(!status||s.status===status)&&(!cls||s.asset_class===cls));
-  filtered.sort((a,b)=>{
-    if (sort==='score')      return (b.composite_score||b.confidence||0)-(a.composite_score||a.confidence||0);
-    if (sort==='confidence') return (b.confidence||0)-(a.confidence||0);
-    return new Date(b.generated_at)-new Date(a.generated_at);
-  });
+  if(sort==='score')      filtered.sort((a,b)=>(b.composite_score||b.confidence||0)-(a.composite_score||a.confidence||0));
+  else if(sort==='confidence') filtered.sort((a,b)=>(b.confidence||0)-(a.confidence||0));
+  else filtered.sort((a,b)=>new Date(b.generated_at)-new Date(a.generated_at));
   document.getElementById('signal-count').textContent=`${filtered.length} signals`;
   const grid=document.getElementById('signals-grid');
-  if (!filtered.length){grid.innerHTML='<div class="col-12 text-muted text-center py-5">No signals found</div>';return;}
+  if(!filtered.length){grid.innerHTML='<div class="col-12 text-center text-muted py-5">No signals</div>';return;}
   grid.innerHTML=filtered.map(s=>{
-    const dir=(s.direction||'Long').toLowerCase();
     const score=s.composite_score||s.confidence||0;
+    const dir=(s.direction||'Long').toLowerCase();
     const conf=s.confidence||0;
-    const scoreCls=score>=75?'high':score>=55?'medium':'low';
+    const confCls=conf>=75?'high':conf>=55?'medium':'low';
     const rr=s.entry_price&&s.target_price&&s.stop_loss&&s.entry_price>s.stop_loss
-              ?((s.target_price-s.entry_price)/(s.entry_price-s.stop_loss)).toFixed(1):'?';
+      ?((s.target_price-s.entry_price)/(s.entry_price-s.stop_loss)).toFixed(1):'N/A';
     const statusBadge={Active:'bg-success',Executed:'bg-primary',Expired:'bg-secondary',Rejected:'bg-danger',Closed:'bg-dark border border-secondary'}[s.status]||'bg-secondary';
-    const earnBadge=s.earnings_risk?`<span class="badge bg-warning text-dark ms-1" title="Earnings this week">⚠️ Earnings</span>`:'';
-    return `
-    <div class="col-xl-3 col-lg-4 col-md-6">
+    const scorePct=Math.round(score);
+    const earningsBadge=s.earnings_risk?'<span class="badge bg-warning text-dark ms-1" title="Earnings risk">📅</span>':'';
+    return `<div class="col-xl-3 col-lg-4 col-md-6">
       <div class="card signal-card ${dir} h-100">
         <div class="card-header d-flex justify-content-between align-items-center py-2">
-          <div class="d-flex align-items-center gap-1 flex-wrap">
+          <div>
             <span class="fw-bold">${s.asset_symbol}</span>
-            <span class="badge ${dir==='long'?'bg-success':'bg-primary'}">${s.direction}</span>
-            <span class="badge ${statusBadge}">${s.status}</span>
-            ${earnBadge}
+            <span class="badge ${dir==='long'?'bg-success':'bg-primary'} ms-1">${s.direction}</span>
+            <span class="badge ${statusBadge} ms-1">${s.status}</span>
+            ${earningsBadge}
           </div>
           <small class="text-muted">${timeAgo(s.generated_at)}</small>
         </div>
         <div class="card-body py-2 px-3">
-          <div class="conf-bar ${scoreCls} mb-1" style="width:${score}%"></div>
-          <div class="small mb-2 text-muted">
-            ${s.asset_name||''} · ${s.asset_class||''} · ${s.timeframe||''}
-            <span class="text-warning ms-1">${score.toFixed(0)}% score</span>
-            ${score!==conf?`<span class="text-muted ms-1">(LLM: ${conf}%)</span>`:''}
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <small class="text-muted">Composite Score</small>
+            <span class="badge ${scorePct>=70?'bg-success':scorePct>=50?'bg-warning text-dark':'bg-danger'}">${scorePct}%</span>
           </div>
+          <div class="conf-bar ${confCls} mb-2" style="width:${conf}%"></div>
+          <div class="small mb-2 text-muted">${s.asset_name||''} · ${s.asset_class||''} · ${s.timeframe||''} · <span class="text-warning">LLM:${conf}%</span></div>
           <div class="d-flex justify-content-between small mb-1"><span>Entry</span><span class="fw-bold text-info">${fmtPrice(s.entry_price)}</span></div>
           <div class="d-flex justify-content-between small mb-1"><span>Target</span><span class="fw-bold text-success">${fmtPrice(s.target_price)}</span></div>
           <div class="d-flex justify-content-between small mb-2"><span>Stop</span><span class="fw-bold text-danger">${fmtPrice(s.stop_loss)}</span></div>
-          <div class="d-flex justify-content-between small mb-2">
-            <span class="text-muted">R:R</span><span class="badge bg-dark border border-secondary">${rr}x</span>
-          </div>
-          <p class="small text-muted mb-2" style="font-size:.72rem;line-height:1.4;max-height:80px;overflow:hidden">${(s.reasoning||'').slice(0,220)}${(s.reasoning||'').length>220?'…':''}</p>
-          ${s.key_risks?`<p class="small text-warning mb-1" style="font-size:.7rem"><i class="bi bi-exclamation-triangle-fill"></i> ${s.key_risks.slice(0,120)}</p>`:''}
+          <div class="d-flex justify-content-between small mb-2"><span class="text-muted">R:R</span><span class="badge bg-dark border border-secondary">${rr}</span></div>
+          <p class="small text-muted mb-1" style="font-size:.72rem;line-height:1.4;max-height:72px;overflow:hidden">${(s.reasoning||'').slice(0,200)}${(s.reasoning||'').length>200?'…':''}</p>
+          ${s.key_risks?`<p class="small text-warning mb-0" style="font-size:.7rem"><i class="bi bi-exclamation-triangle-fill"></i> ${s.key_risks.slice(0,100)}</p>`:''}
         </div>
         <div class="card-footer py-1 d-flex gap-1">
           ${s.status==='Active'?`<button class="btn btn-success btn-sm flex-fill py-0" style="font-size:.72rem" onclick="executeSignal('${s.id}')"><i class="bi bi-play-fill"></i> Execute</button>`:''}
@@ -99,47 +110,43 @@ function renderSignals() {
 }
 
 async function executeSignal(id) {
-  if (!confirm('Submit bracket order?')) return;
+  if(!confirm('Submit bracket order for this signal?')) return;
   const res=await POST(`/signals/${id}/execute`,{});
-  alert(res.error||`Order submitted`);
+  alert(res.error||`Order submitted!`);
   loadSignals();
 }
 async function deleteSignal(id) {
-  if (!confirm('Delete signal?')) return;
-  await DEL(`/signals/${id}`);
-  loadSignals();
+  if(!confirm('Delete this signal?')) return;
+  await DEL(`/signals/${id}`); loadSignals();
 }
 async function clearExpiredSignals() {
-  if (!confirm('Clear all Expired + Rejected signals?')) return;
+  if(!confirm('Delete all Expired and Rejected signals?')) return;
   const res=await DEL('/signals/clear/expired');
-  alert(`Deleted ${res.deleted||0} signals`);
-  loadSignals();
+  alert(`Deleted ${res.deleted||0} signals`); loadSignals();
 }
 
-document.getElementById('sig-filter-status').addEventListener('change', renderSignals);
-document.getElementById('sig-filter-class').addEventListener('change', renderSignals);
-document.getElementById('sig-sort').addEventListener('change', renderSignals);
+document.getElementById('sig-filter-status').addEventListener('change',renderSignals);
+document.getElementById('sig-filter-class').addEventListener('change',renderSignals);
+document.getElementById('sig-sort').addEventListener('change',renderSignals);
 
-// ── POSITIONS ────────────────────────────────────────────────────────────────
+/* ── POSITIONS ────────────────────────────────────────────────────────────── */
 async function loadPositions() {
   try {
     const data=await API('/positions');
     const acct=data.account||{};
     const plCls=(acct.unrealized_pl||0)>=0?'text-success':'text-danger';
     document.getElementById('account-summary').innerHTML=`
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Equity</div><div class="fw-bold text-info">${fmtPrice(acct.equity)}</div></div></div>
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Cash</div><div class="fw-bold text-success">${fmtPrice(acct.cash)}</div></div></div>
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Market Value</div><div class="fw-bold">${fmtPrice(acct.market_value)}</div></div></div>
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Unrealized P&L</div><div class="fw-bold ${plCls}">${fmtPrice(acct.unrealized_pl)} (${fmtPct(acct.unrealized_plpc)})</div></div></div>
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Day Trades</div><div class="fw-bold">${acct.day_trade_count||0}/3</div></div></div>
-      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Buying Power</div><div class="fw-bold">${fmtPrice(acct.buying_power)}</div></div></div>
-    `;
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Equity</div><div class="fw-bold text-info">$${(acct.equity||0).toLocaleString('en',{maximumFractionDigits:2})}</div></div></div>
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Cash</div><div class="fw-bold text-success">$${(acct.cash||0).toLocaleString('en',{maximumFractionDigits:2})}</div></div></div>
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Market Value</div><div class="fw-bold">$${(acct.market_value||0).toLocaleString('en',{maximumFractionDigits:2})}</div></div></div>
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Unrealized P&L</div><div class="fw-bold ${plCls}">$${(acct.unrealized_pl||0).toFixed(2)} (${(acct.unrealized_plpc||0).toFixed(2)}%)</div></div></div>
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Buying Power</div><div class="fw-bold">$${(acct.buying_power||0).toLocaleString('en',{maximumFractionDigits:2})}</div></div></div>
+      <div class="col-auto"><div class="card px-3 py-2"><div class="small text-muted">Day Trades</div><div class="fw-bold">${acct.day_trade_count||0}</div></div></div>`;
     const tbody=document.getElementById('positions-body');
     const positions=data.positions||[];
-    if (!positions.length){tbody.innerHTML='<tr><td colspan="9" class="text-center text-muted py-4">No open positions</td></tr>';return;}
+    if(!positions.length){tbody.innerHTML='<tr><td colspan="9" class="text-center text-muted py-4">No open positions</td></tr>';return;}
     tbody.innerHTML=positions.map(p=>{
-      const plpc=p.unrealized_plpc||0;
-      const plCls2=plpc>=0?'pl-positive':'pl-negative';
+      const plpc=p.unrealized_plpc||0; const plCls=plpc>=0?'pl-positive':'pl-negative';
       return `<tr>
         <td class="fw-bold">${p.symbol}</td>
         <td><span class="badge ${p.asset_class==='Crypto'?'bg-warning text-dark':'bg-primary'}">${p.asset_class}</span></td>
@@ -147,114 +154,87 @@ async function loadPositions() {
         <td>${fmtPrice(p.avg_entry)}</td>
         <td>${fmtPrice(p.current_price)}</td>
         <td>$${Number(p.market_value).toLocaleString('en',{maximumFractionDigits:2})}</td>
-        <td class="${plCls2}">$${Number(p.unrealized_pl).toFixed(2)}</td>
-        <td class="${plCls2} fw-bold">${fmtPct(plpc)}</td>
-        <td><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:.7rem" onclick="closePosition('${p.symbol}')"><i class="bi bi-x-circle"></i> Close</button></td>
+        <td class="${plCls}">$${Number(p.unrealized_pl).toFixed(2)}</td>
+        <td class="${plCls} fw-bold">${fmtPct(plpc)}</td>
+        <td><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:.7rem" onclick="closePosition('${p.symbol}')"><i class="bi bi-x-circle"></i></button></td>
       </tr>`;
     }).join('');
-    loadEquityCurve(24);
   } catch(e) {
     document.getElementById('positions-body').innerHTML=`<tr><td colspan="9" class="text-danger py-3">${e.message}</td></tr>`;
   }
 }
 
-async function closePosition(symbol) {
-  if (!confirm(`Close ${symbol}?`)) return;
-  const res=await POST(`/positions/${symbol}/close`,{});
-  alert(res.error||`${symbol} closed`);
-  loadPositions();
+async function closePosition(sym) {
+  if(!confirm(`Close ${sym}?`)) return;
+  const res=await POST(`/positions/${sym}/close`,{});
+  alert(res.error||`${sym} closed`); loadPositions();
 }
 
 async function loadOrders() {
   try {
     const orders=await API('/alpaca/orders');
     const el=document.getElementById('orders-list');
-    if (!orders.length){el.innerHTML='<span class="text-muted">No open orders</span>';return;}
-    el.innerHTML=orders.map(o=>`
-      <div class="d-flex justify-content-between align-items-center border-bottom border-secondary py-1">
-        <span><b>${o.symbol}</b> ${o.side} ${o.qty} @ ${o.type} <span class="badge bg-secondary">${o.status}</span></span>
-        <button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="cancelOrder('${o.id}')">Cancel</button>
-      </div>`).join('');
-  } catch(e){document.getElementById('orders-list').textContent=e.message;}
-}
-async function cancelOrder(id){
-  await DEL(`/alpaca/orders/${id}`);
-  loadOrders();
+    if(!orders.length){el.innerHTML='<span class="text-muted">No open orders</span>';return;}
+    el.innerHTML=orders.map(o=>`<span class="badge bg-dark border border-secondary me-2">${o.symbol} ${o.side} x${o.qty} [${o.status}]
+      <button class="btn btn-link btn-sm p-0 text-danger ms-1" onclick="cancelOrder('${o.id}')">✕</button></span>`).join('');
+  } catch(e){document.getElementById('orders-list').innerHTML=`<span class="text-danger">${e.message}</span>`;}
 }
 
-// ── EQUITY CURVE ─────────────────────────────────────────────────────────────
+async function cancelOrder(id) {
+  await DEL(`/alpaca/orders/${id}`); loadOrders();
+}
+
+/* ── EQUITY CURVE ─────────────────────────────────────────────────────────── */
 async function loadEquityCurve(hours=24) {
-  ['eq-24h','eq-7d','eq-30d'].forEach(id=>{
-    const btn=document.getElementById(id);
-    if(btn) btn.classList.remove('active');
-  });
-  const btnMap={24:'eq-24h',168:'eq-7d',720:'eq-30d'};
-  if(document.getElementById(btnMap[hours])) document.getElementById(btnMap[hours]).classList.add('active');
-
   try {
     const data=await API(`/portfolio/equity?hours=${hours}`);
     const canvas=document.getElementById('equity-chart');
     const noData=document.getElementById('equity-no-data');
-    if (!data||!data.length){canvas.style.display='none';noData.style.display='block';return;}
-    canvas.style.display='block';noData.style.display='none';
+    if(!data.length){canvas.style.display='none';noData.style.display='block';return;}
+    canvas.style.display='block'; noData.style.display='none';
     const labels=data.map(d=>new Date(d.time).toLocaleTimeString('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));
     const equities=data.map(d=>d.equity);
-    const first=equities[0]||0;
-    const last=equities[equities.length-1]||0;
-    const trend=last>=first?'rgba(25,135,84,1)':'rgba(220,53,69,1)';
-    const trendBg=last>=first?'rgba(25,135,84,0.15)':'rgba(220,53,69,0.15)';
-    if (equityChart) equityChart.destroy();
-    equityChart=new Chart(canvas,{
-      type:'line',
-      data:{labels,datasets:[{label:'Equity',data:equities,borderColor:trend,backgroundColor:trendBg,fill:true,tension:0.3,pointRadius:0}]},
-      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>`$${v.toLocaleString()}`}}}}
-    });
-  } catch(e){console.error('Equity chart error:',e);}
-}
-
-// ── MARKET ───────────────────────────────────────────────────────────────────
-async function loadMarket() {
-  try {
-    const data=await API('/market/full');
-    const filter=document.getElementById('market-filter').value;
-    let eq=data.equities||[];
-    if(filter==='positive') eq=eq.filter(a=>(a.change_percent||0)>0);
-    if(filter==='negative') eq=eq.filter(a=>(a.change_percent||0)<0);
-    document.getElementById('equities-body').innerHTML=eq.map(a=>{
-      const chg=a.change_percent||0;
-      const cls=chg>0?'text-success':chg<0?'text-danger':'text-muted';
-      return `<tr><td class="fw-bold">${a.symbol}</td><td class="text-muted small">${(a.name||'').slice(0,20)}</td><td>${fmtPrice(a.price)}</td><td class="${cls} fw-bold">${fmtPct(chg)}</td><td class="text-muted small">${fmtVol(a.volume)}</td></tr>`;
-    }).join('')||'<tr><td colspan="5" class="text-muted text-center py-3">No data yet</td></tr>';
-    document.getElementById('crypto-body').innerHTML=(data.crypto||[]).map(a=>{
-      const chg=a.change_percent||0;
-      const cls=chg>0?'text-success':chg<0?'text-danger':'text-muted';
-      return `<tr><td class="fw-bold">${a.symbol}</td><td>${fmtPrice(a.price)}</td><td class="${cls} fw-bold">${fmtPct(chg)}</td></tr>`;
-    }).join('')||'<tr><td colspan="3" class="text-muted text-center py-3">No data yet</td></tr>';
-    loadRegime();
-  } catch(e){console.error('Market load error:',e);}
-}
-
-async function loadRegime() {
-  try {
-    const r=await API('/regime');
-    const risk=r.risk||'unknown';
-    const color={low:'success',medium:'warning','medium-high':'warning',high:'danger',unknown:'secondary'}[risk]||'secondary';
-    const badge=`<span class="badge bg-${color} me-2">${r.label||'Unknown'}</span>`;
-    document.getElementById('regime-badge').innerHTML=badge+`<span class="text-muted small">${r.recommendation||''}</span>`;
-    document.getElementById('regime-detail').innerHTML=`
-      ${badge}
-      <span class="text-muted small">SPY $${r.spy_last||'?'} | RSI ${r.spy_rsi||'?'} | ADX ${r.spy_adx||'?'} | EMA21 $${r.spy_ema21||'?'} | Drawdown ${r.spy_drawdown_pct||'?'}%</span>
-      <span class="ms-3 text-info small">${r.recommendation||''}</span>
-    `;
+    const first=equities[0]||0; const last=equities[equities.length-1]||0;
+    const color=last>=first?'rgba(25,135,84,1)':'rgba(220,53,69,1)';
+    const fillColor=last>=first?'rgba(25,135,84,0.15)':'rgba(220,53,69,0.15)';
+    if(equityChart){equityChart.destroy();}
+    equityChart=new Chart(canvas,{type:'line',data:{labels,datasets:[{label:'Equity',data:equities,borderColor:color,backgroundColor:fillColor,borderWidth:2,pointRadius:1,fill:true,tension:0.3}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>`$${v.toLocaleString('en',{maximumFractionDigits:0})}`}}}}});
   } catch(e){}
 }
 
-document.getElementById('market-filter').addEventListener('change', loadMarket);
+/* ── MARKET TAB ───────────────────────────────────────────────────────────── */
+async function loadMarket() {
+  try {
+    const [mkt, regime] = await Promise.all([API('/market/full'), API('/regime')]);
+    // Regime card
+    const rc=document.getElementById('regime-detail');
+    if(rc&&regime){
+      const risk=regime.risk||'medium';
+      const em={low:'🟢',medium:'🟡','medium-high':'🟠',high:'🔴'}[risk]||'⚪';
+      rc.innerHTML=`${em} <b>${regime.label||'Unknown'}</b> &nbsp;|&nbsp; SPY $${regime.spy_last||'?'} &nbsp; RSI:${regime.spy_rsi||'?'} &nbsp; ADX:${regime.spy_adx||'?'} &nbsp; Drawdown:${regime.spy_drawdown_pct||'?'}% &nbsp;|&nbsp; <span class="text-info">${regime.recommendation||''}</span>`;
+    }
+    const filter=document.getElementById('market-filter').value;
+    // Equities
+    let eq=mkt.equities||[];
+    if(filter==='positive') eq=eq.filter(a=>(a.change_percent||0)>0);
+    if(filter==='negative') eq=eq.filter(a=>(a.change_percent||0)<0);
+    document.getElementById('equities-body').innerHTML=eq.map(a=>{
+      const chg=a.change_percent||0; const cc=chg>0?'text-success':chg<0?'text-danger':'text-muted';
+      return `<tr><td class="fw-bold">${a.symbol}</td><td class="text-muted small">${(a.name||'').slice(0,20)}</td><td>${fmtPrice(a.price)}</td><td class="${cc} fw-bold">${fmtPct(chg)}</td><td class="text-muted small">${a.volume?Number(a.volume).toLocaleString('en',{notation:'compact'}):'—'}</td></tr>`;
+    }).join('');
+    // Crypto
+    document.getElementById('crypto-body').innerHTML=(mkt.crypto||[]).map(a=>{
+      const chg=a.change_percent||0; const cc=chg>0?'text-success':chg<0?'text-danger':'text-muted';
+      return `<tr><td class="fw-bold">${a.symbol}</td><td>${fmtPrice(a.price)}</td><td class="${cc} fw-bold">${fmtPct(chg)}</td></tr>`;
+    }).join('');
+  } catch(e){ console.error('Market load error',e); }
+}
 
-// ── THREATS ──────────────────────────────────────────────────────────────────
+document.getElementById('market-filter').addEventListener('change',loadMarket);
+
+/* ── THREATS ──────────────────────────────────────────────────────────────── */
 async function loadThreats() {
-  const data=await API('/threats?limit=80');
-  allThreats=data;
+  allThreats=await API('/threats?limit=80');
   renderThreats();
 }
 function renderThreats() {
@@ -263,17 +243,17 @@ function renderThreats() {
   let filtered=allThreats.filter(t=>(!sev||t.severity===sev)&&(!reg||t.region===reg));
   document.getElementById('threat-count').textContent=`${filtered.length} threats`;
   const grid=document.getElementById('threats-grid');
-  if (!filtered.length){grid.innerHTML='<div class="col-12 text-muted text-center py-5">No active threats</div>';return;}
+  if(!filtered.length){grid.innerHTML='<div class="col-12 text-center text-muted py-5">No threats</div>';return;}
   grid.innerHTML=filtered.map(t=>`
     <div class="col-xl-3 col-lg-4 col-md-6">
       <div class="card h-100 border-${sevColor[t.severity]||'secondary'}">
         <div class="card-header py-2 d-flex justify-content-between">
           <span class="badge sev-${t.severity}">${t.severity}</span>
-          <small class="text-muted">${t.country||''} · ${timeAgo(t.published_at)}</small>
+          <small class="text-muted">${t.country||''}</small>
         </div>
         <div class="card-body py-2">
           <p class="fw-bold mb-1 small">${t.source_url?`<a href="${t.source_url}" target="_blank" class="text-info text-decoration-none">${t.title}</a>`:t.title}</p>
-          <p class="text-muted small mb-1" style="font-size:.72rem">${(t.description||'').slice(0,200)}</p>
+          <p class="text-muted small mb-2" style="font-size:.72rem">${(t.description||'').slice(0,180)}</p>
           <div class="d-flex gap-1 flex-wrap">
             <span class="badge bg-dark border border-secondary small">${t.event_type||''}</span>
             <span class="badge bg-dark border border-secondary small">${t.region||''}</span>
@@ -283,307 +263,306 @@ function renderThreats() {
       </div>
     </div>`).join('');
 }
-document.getElementById('threat-filter-sev').addEventListener('change', renderThreats);
-document.getElementById('threat-filter-region').addEventListener('change', renderThreats);
+document.getElementById('threat-filter-sev').addEventListener('change',renderThreats);
+document.getElementById('threat-filter-region').addEventListener('change',renderThreats);
 
-// ── NEWS ─────────────────────────────────────────────────────────────────────
+/* ── NEWS ─────────────────────────────────────────────────────────────────── */
 async function loadNews() {
-  const data=await API('/news?limit=80');
-  allNews=data;
+  allNews=await API('/news?limit=80');
   renderNews();
 }
 function renderNews() {
   const cat=document.getElementById('news-filter-cat').value;
   const sent=document.getElementById('news-filter-sent').value;
   let filtered=allNews.filter(n=>(!cat||n.category===cat)&&(!sent||n.sentiment===sent));
-  const el=document.getElementById('news-list');
-  if (!filtered.length){el.innerHTML='<div class="text-muted text-center py-5">No news</div>';return;}
-  el.innerHTML=filtered.map(n=>{
-    const sentClass={positive:'text-success',negative:'text-danger',neutral:'text-muted'}[n.sentiment]||'text-muted';
-    const icon=sentIcon[n.sentiment]||'';
-    const assets=(n.affected_assets||[]).filter(Boolean).slice(0,5).map(a=>`<span class="badge bg-dark border border-secondary">${a}</span>`).join(' ');
-    return `
-    <div class="border-bottom border-secondary py-2">
-      <div class="d-flex justify-content-between align-items-start">
-        <div class="flex-grow-1 me-3">
-          <a href="${n.url||'#'}" target="_blank" class="text-info text-decoration-none small fw-bold">${n.title}</a>
-          <p class="text-muted mb-1" style="font-size:.72rem">${(n.summary||'').slice(0,200)}</p>
-          <div class="d-flex gap-2 align-items-center flex-wrap">
-            <span class="badge bg-secondary">${n.category||''}</span>
-            <span class="small ${sentClass}"><i class="bi ${icon}"></i> ${n.sentiment||''}</span>
-            ${assets}
-          </div>
-        </div>
-        <div class="text-end text-muted" style="font-size:.7rem;white-space:nowrap">
-          <div>${n.source||''}</div>
-          <div>${timeAgo(n.published_at)}</div>
+  const sentIcon={positive:'bi-arrow-up-circle-fill text-success',negative:'bi-arrow-down-circle-fill text-danger',neutral:'bi-dash-circle text-secondary'};
+  document.getElementById('news-list').innerHTML=filtered.map(n=>`
+    <div class="d-flex align-items-start gap-2 py-2 border-bottom border-secondary">
+      <i class="bi ${sentIcon[n.sentiment]||'bi-dash-circle text-muted'} mt-1 flex-shrink-0"></i>
+      <div class="flex-grow-1">
+        <div class="small fw-bold">${n.url?`<a href="${n.url}" target="_blank" class="text-info text-decoration-none">${n.title}</a>`:n.title}</div>
+        <div class="small text-muted mt-1">${(n.summary||'').slice(0,160)}</div>
+        <div class="d-flex gap-2 mt-1 flex-wrap">
+          <span class="badge bg-dark border border-secondary" style="font-size:.65rem">${n.source||''}</span>
+          <span class="badge bg-dark border border-secondary" style="font-size:.65rem">${n.category||''}</span>
+          ${(n.affected_assets||[]).slice(0,3).map(a=>`<span class="badge bg-dark border border-warning text-warning" style="font-size:.65rem">${a}</span>`).join('')}
+          <span class="text-muted" style="font-size:.65rem">${timeAgo(n.published_at)}</span>
         </div>
       </div>
-    </div>`;
-  }).join('');
+    </div>`).join('');
 }
-document.getElementById('news-filter-cat').addEventListener('change', renderNews);
-document.getElementById('news-filter-sent').addEventListener('change', renderNews);
+document.getElementById('news-filter-cat').addEventListener('change',renderNews);
+document.getElementById('news-filter-sent').addEventListener('change',renderNews);
 
-// ── SCANNER ──────────────────────────────────────────────────────────────────
+/* ── SCANNER ──────────────────────────────────────────────────────────────── */
 async function runScan() {
-  const sym=(document.getElementById('scan-symbol').value||'').toUpperCase().trim();
-  if (!sym){alert('Enter a symbol');return;}
-  const tfs=['1H','4H','1D'].filter(tf=>document.getElementById(`tf-${tf.toLowerCase().replace('h','h')}`).checked);
-  const tfsChecked=['tf-1h','tf-4h','tf-1d'].filter(id=>document.getElementById(id).checked).map(id=>id.replace('tf-','').toUpperCase());
+  const sym=document.getElementById('scan-symbol').value.toUpperCase().trim();
+  if(!sym){alert('Enter a symbol');return;}
+  const tfs=[...document.querySelectorAll('[id^="tf-"]:checked')].map(e=>e.value);
   const genSig=document.getElementById('gen-signal-check').checked;
   const el=document.getElementById('scan-result');
-  el.innerHTML=`<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Analyzing ${sym}${genSig?' + generating signal':''}... (may take 30-60s)</div>`;
+  el.innerHTML='<div class="text-warning"><i class="bi bi-hourglass-split"></i> Fetching OHLCV + running TA... (may take 10-30s)</div>';
   try {
-    const res=await POST('/analyze',{symbol:sym,timeframes:tfsChecked,generate_signal:genSig});
-    const ta=res.ta||{};
-    let html=`<div class="fw-bold mb-2">${sym} Analysis</div>`;
-    for (const [tf, td] of Object.entries(ta)) {
-      if (!td||td.error) continue;
-      const price=td.price||{};
-      const rsi=td.rsi;const macd=td.macd||{};const bias=td.bias||'';
-      const biasClass={bullish:'text-success',bearish:'text-danger',neutral:'text-muted'}[bias]||'';
+    const data=await POST('/analyze',{symbol:sym,timeframes:tfs,generate_signal:genSig});
+    const ta=data.ta||{};
+    let html=`<div class="mb-3"><span class="badge bg-info text-dark me-2">${sym}</span> <span class="text-muted small">Analyzed ${tfs.join(', ')}</span></div>`;
+    // TA summary per timeframe
+    for(const [tf,td] of Object.entries(ta)){
+      if(!td||td.error) continue;
+      const bias=td.bias||'neutral'; const bc=bias==='bullish'?'success':bias==='bearish'?'danger':'secondary';
+      const p=td.price||{}; const rsi=td.rsi; const macd=td.macd||{};
       html+=`<div class="card mb-2">
         <div class="card-header py-1 d-flex justify-content-between">
-          <span class="fw-bold small">${tf}</span>
-          <span class="small ${biasClass}">${bias.toUpperCase()}</span>
+          <span class="small fw-bold">${tf}</span>
+          <span class="badge bg-${bc}">${bias.toUpperCase()}</span>
         </div>
         <div class="card-body py-2 small">
           <div class="row g-2">
-            <div class="col-6">Price: <b>${fmtPrice(price.last)}</b></div>
-            <div class="col-6">RSI: <b>${rsi?rsi.toFixed(1):'N/A'}</b></div>
-            <div class="col-6">EMA20: ${fmtPrice(td.ema?.ema20)}</div>
-            <div class="col-6">EMA50: ${fmtPrice(td.ema?.ema50)}</div>
-            <div class="col-6">ATR: ${td.atr?.value?td.atr.value.toFixed(2):'N/A'}</div>
-            <div class="col-6">ADX: ${td.adx?.toFixed(1)||'N/A'}</div>
-            <div class="col-12 text-muted" style="font-size:.7rem">${td.summary||''}</div>
+            <div class="col-6"><b>Price:</b> ${fmtPrice(p.last)} &nbsp; <span class="text-muted">EMA20:${fmtPrice(p.ema20)} EMA50:${fmtPrice(p.ema50)}</span></div>
+            <div class="col-6"><b>RSI:</b> <span class="${rsi>70?'text-danger':rsi<30?'text-success':'text-muted'}">${rsi!=null?rsi.toFixed(1):'N/A'}</span> &nbsp; <b>ATR:</b> ${td.atr?.pct!=null?td.atr.pct.toFixed(2)+'%':'N/A'}</div>
+            <div class="col-6"><b>MACD:</b> ${macd.value!=null?macd.value.toFixed(4):'N/A'} signal:${macd.signal!=null?macd.signal.toFixed(4):'N/A'}</div>
+            <div class="col-6"><b>Volume:</b> ${td.volume?.surge?'<span class="text-success">SURGE</span>':td.volume?.dry?'<span class="text-warning">DRY</span>':'Normal'}</div>
           </div>
         </div>
       </div>`;
     }
-    if (res.signal) {
-      const s=res.signal;
-      html+=`<div class="card border-success mt-2">
-        <div class="card-header py-1 bg-success bg-opacity-25 small fw-bold">Generated Signal</div>
-        <div class="card-body py-2 small">
-          <div class="row g-1">
-            <div class="col-6">Direction: <b class="${s.direction==='Long'?'text-success':'text-primary'}">${s.direction||''}</b></div>
-            <div class="col-6">Confidence: <b>${s.confidence||0}%</b></div>
-            <div class="col-4">Entry: <b class="text-info">${fmtPrice(s.entry_price)}</b></div>
-            <div class="col-4">Target: <b class="text-success">${fmtPrice(s.target_price)}</b></div>
-            <div class="col-4">Stop: <b class="text-danger">${fmtPrice(s.stop_loss)}</b></div>
-            <div class="col-12 text-muted mt-1">${(s.reasoning||'').slice(0,300)}</div>
+    if(data.signal){
+      const sig=data.signal;
+      if(sig.error){
+        html+=`<div class="alert alert-warning mt-2">LLM error: ${sig.error}</div>`;
+      } else {
+        html+=`<div class="card mt-3 border-success">
+          <div class="card-header py-2 bg-success bg-opacity-10"><span class="fw-bold"><i class="bi bi-lightning-fill text-success"></i> Generated Signal</span></div>
+          <div class="card-body small">
+            <div class="row g-2">
+              <div class="col-6"><b>Direction:</b> <span class="${sig.direction==='Long'?'text-success':'text-primary'}">${sig.direction}</span></div>
+              <div class="col-6"><b>Confidence:</b> ${sig.confidence}%</div>
+              <div class="col-6"><b>Entry:</b> ${fmtPrice(sig.entry_price)}</div>
+              <div class="col-6"><b>Target:</b> <span class="text-success">${fmtPrice(sig.target_price)}</span></div>
+              <div class="col-12"><b>Stop:</b> <span class="text-danger">${fmtPrice(sig.stop_loss)}</span></div>
+              <div class="col-12 text-muted">${sig.reasoning||''}</div>
+              ${sig.key_risks?`<div class="col-12 text-warning"><i class="bi bi-exclamation-triangle-fill"></i> ${sig.key_risks}</div>`:''}
+            </div>
           </div>
-        </div>
-      </div>`;
+        </div>`;
+      }
     }
     el.innerHTML=html;
-  } catch(e){el.innerHTML=`<div class="text-danger">${e.message}</div>`;}
+  } catch(e){el.innerHTML=`<div class="text-danger">Error: ${e.message}</div>`;}
 }
 
-// ── JOBS ─────────────────────────────────────────────────────────────────────
+/* ── JOBS TAB ─────────────────────────────────────────────────────────────── */
 async function loadJobs() {
   try {
-    const data=await API('/jobs/status');
-    const jobMeta={
-      market:   {icon:'bi-database',label:'Market Data',schedule:'Every 15 min'},
-      threats:  {icon:'bi-shield-exclamation',label:'Threat News',schedule:'Every 15 min'},
-      signals:  {icon:'bi-lightning-fill',label:'Signal Gen',schedule:'Every 30 min'},
-      execute:  {icon:'bi-play-circle-fill',label:'Execute',schedule:'Every 30 min'},
-      positions:{icon:'bi-briefcase-fill',label:'Position Mgmt',schedule:'Every 5 min'},
-      telegram: {icon:'bi-telegram',label:'Telegram Bot',schedule:'Every 1 min'},
-    };
-    const statusInfo={
-      ok:      {badge:'bg-success',icon:'bi-check-circle-fill',text:'OK'},
-      running: {badge:'bg-warning text-dark',icon:'bi-arrow-repeat',text:'Running'},
-      error:   {badge:'bg-danger',icon:'bi-x-circle-fill',text:'Error'},
-      idle:    {badge:'bg-secondary',icon:'bi-pause-circle',text:'Idle'},
-    };
-    document.getElementById('jobs-grid').innerHTML=Object.entries(data).map(([name,info])=>{
-      const meta=jobMeta[name]||{icon:'bi-cpu',label:name,schedule:''};
-      const st=statusInfo[info.status||'idle']||statusInfo.idle;
-      return `
-      <div class="col-lg-4 col-md-6">
-        <div class="card h-100">
-          <div class="card-body py-2">
+    const [jobs, cache, llm] = await Promise.all([
+      API('/jobs/status'),
+      API('/cache/stats').catch(()=>({})),
+      API('/llm/health').catch(()=>({}))
+    ]);
+    const jobNames={market:'Market Data',threats:'Threat News',signals:'Signal Gen',execute:'Execute',positions:'Positions',telegram:'Telegram'};
+    const schedules={market:'every 15m',threats:'every 15m +7m',signals:'every 30m',execute:'every 30m +3m',positions:'every 5m',telegram:'every 1m'};
+    const grid=document.getElementById('jobs-grid');
+    grid.innerHTML=Object.entries(jobs).map(([name,info])=>{
+      const sc={ok:'success',running:'warning',error:'danger',idle:'secondary'}[info.status]||'secondary';
+      const icon={ok:'bi-check-circle-fill',running:'bi-hourglass-split',error:'bi-x-circle-fill',idle:'bi-pause-circle'}[info.status]||'bi-pause-circle';
+      return `<div class="col-lg-4 col-md-6">
+        <div class="card h-100 border-${sc}">
+          <div class="card-body py-3">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <span class="fw-bold small"><i class="bi ${meta.icon} me-1"></i>${meta.label}</span>
-              <span class="badge ${st.badge}"><i class="bi ${st.icon} me-1"></i>${st.text}</span>
+              <span class="fw-bold"><i class="bi ${icon} text-${sc} me-2"></i>${jobNames[name]||name}</span>
+              <span class="badge bg-${sc}">${info.status}</span>
             </div>
-            <div class="small text-muted mb-1">Schedule: ${meta.schedule}</div>
-            <div class="small text-muted mb-2">Last: ${info.last?timeAgo(info.last):'Never'}</div>
-            ${info.error?`<div class="small text-danger text-truncate mb-2" title="${info.error}"><i class="bi bi-exclamation-triangle me-1"></i>${info.error.slice(0,80)}</div>`:''}
-            <button class="btn btn-outline-success btn-sm w-100 py-0" onclick="triggerJob('${name}')">
-              <i class="bi bi-play-fill"></i> Run Now
-            </button>
+            <div class="small text-muted mb-1">Schedule: ${schedules[name]||'—'}</div>
+            <div class="small text-muted mb-2">Last run: ${info.last?timeAgo(info.last):'Never'}</div>
+            ${info.error?`<div class="alert alert-danger py-1 small mb-2">${info.error}</div>`:''}
+            <button class="btn btn-outline-primary btn-sm w-100" onclick="triggerJob('${name}')"><i class="bi bi-play-fill"></i> Run Now</button>
           </div>
         </div>
       </div>`;
     }).join('');
-  } catch(e){console.error('Jobs load error:',e);}
+    // Append cache + LLM status cards
+    const llmOk=llm.ok!==false;
+    const cacheRows=cache.symbols?`<div class="small text-muted">Symbols: ${cache.symbols} · Bars: ${(cache.total_bars||0).toLocaleString()}</div>`:'<div class="small text-muted">No cache data yet</div>';
+    grid.innerHTML+=`
+      <div class="col-lg-4 col-md-6">
+        <div class="card h-100 border-${llmOk?'success':'danger'}">
+          <div class="card-body py-3">
+            <div class="d-flex justify-content-between mb-2">
+              <span class="fw-bold"><i class="bi bi-robot me-2 text-${llmOk?'success':'danger'}"></i>LM Studio</span>
+              <span class="badge bg-${llmOk?'success':'danger'}">${llmOk?'Online':'Offline'}</span>
+            </div>
+            <div class="small text-muted mb-1">${llm.model||llm.url||'No config'}</div>
+            <div class="small text-muted">${llm.error||''}</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-4 col-md-6">
+        <div class="card h-100 border-info">
+          <div class="card-body py-3">
+            <div class="d-flex justify-content-between mb-2">
+              <span class="fw-bold"><i class="bi bi-database me-2 text-info"></i>OHLCV Cache</span>
+              <button class="btn btn-outline-info btn-sm py-0" onclick="triggerBackfill()">Backfill</button>
+            </div>
+            ${cacheRows}
+            <div class="small text-muted mt-1">yfinance fallback: active</div>
+          </div>
+        </div>
+      </div>`;
+  } catch(e){ document.getElementById('jobs-grid').innerHTML=`<div class="col-12 text-danger">${e.message}</div>`; }
 }
 
 async function triggerJob(name) {
-  const btn=event.target.closest('button');
-  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm"></span>';}
-  await POST(`/jobs/${name}/trigger`,{});
-  setTimeout(()=>{loadJobs();},1000);
+  const res=await POST(`/jobs/${name}/trigger`,{});
+  if(res.ok) { setTimeout(loadJobs,1500); }
 }
 
-// ── SETTINGS ─────────────────────────────────────────────────────────────────
-let allConfigs=[];
+async function triggerBackfill() {
+  const res=await POST('/cache/backfill',{});
+  alert(res.message||'Backfill started');
+}
+
+/* ── SETTINGS ─────────────────────────────────────────────────────────────── */
+const PLATFORM_DEFS = {
+  alpaca_paper:  {label:'Alpaca Paper',  fields:{api_key:'API Key (PKTEST...)',api_secret:'Secret Key',api_url:'https://paper-api.alpaca.markets',extra_field_1:'paper',extra_field_2:'Chat/Notes'},desc:'Alpaca paper trading — free tier'},
+  alpaca_live:   {label:'Alpaca Live',   fields:{api_key:'API Key (PK...)',api_secret:'Secret Key',api_url:'https://api.alpaca.markets',extra_field_1:'live',extra_field_2:'Notes'},desc:'Alpaca live trading — real money'},
+  lmstudio:      {label:'LM Studio',     fields:{api_url:'http://localhost:1234/v1',extra_field_1:'Model name (e.g. mistral-7b)',extra_field_2:'Notes'},desc:'Local LM Studio — OpenAI-compatible endpoint'},
+  openai:        {label:'OpenAI',        fields:{api_key:'API Key (sk-...)',api_url:'https://api.openai.com/v1',extra_field_1:'Model (gpt-4o / gpt-4-turbo)',extra_field_2:'Notes'},desc:'OpenAI cloud LLM'},
+  anthropic:     {label:'Anthropic',     fields:{api_key:'API Key (sk-ant-...)',api_url:'https://api.anthropic.com',extra_field_1:'Model (claude-3-5-sonnet-20241022)',extra_field_2:'Notes'},desc:'Anthropic Claude'},
+  groq:          {label:'Groq',          fields:{api_key:'API Key',api_url:'https://api.groq.com/openai/v1',extra_field_1:'Model (llama-3.1-70b-versatile)',extra_field_2:'Notes'},desc:'Groq — ultra-fast inference'},
+  deepseek:      {label:'DeepSeek',      fields:{api_key:'API Key',api_url:'https://api.deepseek.com/v1',extra_field_1:'Model (deepseek-reasoner / deepseek-chat)',extra_field_2:'Notes'},desc:'DeepSeek — strong reasoning model'},
+  ollama:        {label:'Ollama',        fields:{api_url:'http://localhost:11434/v1',extra_field_1:'Model (llama3.2 / mistral / phi4)',extra_field_2:'Notes'},desc:'Ollama — local model runner'},
+  telegram:      {label:'Telegram',      fields:{api_key:'Bot Token (from @BotFather)',extra_field_1:'Default Chat ID',extra_field_2:'Notes'},desc:'Telegram bot for alerts & commands'},
+  coinbase:      {label:'Coinbase Adv.', fields:{api_key:'API Key',api_secret:'API Secret',api_url:'https://api.coinbase.com',extra_field_1:'passphrase (if CDP)',extra_field_2:'Notes'},desc:'Coinbase Advanced Trade'},
+  kraken:        {label:'Kraken',        fields:{api_key:'API Key',api_secret:'Private Key',api_url:'https://api.kraken.com',extra_field_1:'Notes'},desc:'Kraken exchange'},
+  binance:       {label:'Binance',       fields:{api_key:'API Key',api_secret:'Secret Key',api_url:'https://api.binance.com',extra_field_1:'testnet? (yes/no)',extra_field_2:'Notes'},desc:'Binance spot/futures'},
+  interactive:   {label:'IBKR',          fields:{api_url:'http://localhost:5000/v1/api',extra_field_1:'Account ID',extra_field_2:'Notes'},desc:'Interactive Brokers — Client Portal API'},
+  tradier:       {label:'Tradier',       fields:{api_key:'Access Token',api_url:'https://api.tradier.com/v1',extra_field_1:'Account ID',extra_field_2:'sandbox (yes/no)'},desc:'Tradier broker — equities + options'},
+  tradovate:     {label:'Tradovate',     fields:{api_key:'Username',api_secret:'Password',api_url:'https://live.tradovateapi.com/v1',extra_field_1:'CID',extra_field_2:'Notes'},desc:'Tradovate — futures'},
+};
+
+function updatePlatformFields() {
+  const sel=document.getElementById('cfg-platform').value;
+  const def=PLATFORM_DEFS[sel]||{};
+  const f=def.fields||{};
+  if(f.api_key!==undefined){document.getElementById('cfg-key').placeholder=f.api_key;}
+  if(f.extra_field_1!==undefined){document.getElementById('cfg-extra1').placeholder=f.extra_field_1;document.getElementById('extra1-label').textContent=f.extra_field_1.split('(')[0].trim()||'Extra Field 1';}
+  if(f.api_url!==undefined&&!document.getElementById('cfg-url').value){document.getElementById('cfg-url').placeholder=f.api_url;}
+}
+document.getElementById('cfg-platform').addEventListener('change',updatePlatformFields);
 
 async function loadSettings() {
-  allConfigs=await API('/settings');
-  renderConfigs();
-}
-
-function renderConfigs() {
+  const configs=await API('/settings');
   const el=document.getElementById('configs-list');
-  if (!allConfigs.length){el.innerHTML='<div class="text-muted small">No configurations yet. Add one on the left.</div>';return;}
+  if(!configs.length){el.innerHTML='<div class="text-muted small p-3">No configurations yet. Add your API credentials on the left.</div>';return;}
   const grouped={};
-  for (const c of allConfigs){
-    const p=c.platform||'other';
-    if (!grouped[p]) grouped[p]=[];
-    grouped[p].push(c);
-  }
-  el.innerHTML=Object.entries(grouped).map(([plat,cfgs])=>`
-    <div class="mb-3">
-      <div class="small fw-bold text-uppercase text-muted mb-1">${plat.replace('_',' ')}</div>
-      ${cfgs.map(c=>`
-        <div class="card mb-1">
-          <div class="card-body py-2 d-flex justify-content-between align-items-center">
+  configs.forEach(c=>{(grouped[c.platform]=grouped[c.platform]||[]).push(c);});
+  el.innerHTML=Object.entries(grouped).map(([platform,cfgs])=>`
+    <div class="card mb-3">
+      <div class="card-header py-2 small fw-bold">${PLATFORM_DEFS[platform]?.label||platform}</div>
+      <div class="list-group list-group-flush">
+        ${cfgs.map(c=>`<div class="list-group-item bg-dark py-2">
+          <div class="d-flex justify-content-between align-items-start">
             <div>
-              <span class="fw-bold small me-2">${c.label}</span>
-              ${c.is_default?'<span class="badge bg-success me-1">Default</span>':''}
-              ${c.is_active?'<span class="badge bg-secondary">Active</span>':'<span class="badge bg-dark">Inactive</span>'}
-              ${c.api_key?`<div class="text-muted font-monospace mt-1" style="font-size:.7rem">${c.api_key.slice(0,8)}…</div>`:''}
-              ${c.notes?`<div class="text-muted mt-1" style="font-size:.7rem">${c.notes}</div>`:''}
+              <span class="fw-bold small">${c.label}</span>
+              ${c.is_default?'<span class="badge bg-success ms-1" style="font-size:.6rem">DEFAULT</span>':''}
+              ${!c.is_active?'<span class="badge bg-secondary ms-1" style="font-size:.6rem">INACTIVE</span>':''}
+              <div class="small text-muted mt-1">${c.api_key?'Key: '+c.api_key.slice(0,8)+'…':''} ${c.api_url?'| URL: '+c.api_url.slice(0,30):''}${c.extra_field_1?' | '+c.extra_field_1:''}</div>
+              ${c.notes?`<div class="small text-muted">${c.notes}</div>`:''}
             </div>
-            <div class="d-flex gap-1">
-              <button class="btn btn-outline-secondary btn-sm py-0 px-1" title="Set default" onclick="setDefault('${c.id}')"><i class="bi bi-star${c.is_default?'-fill text-warning':''}"></i></button>
-              <button class="btn btn-outline-primary btn-sm py-0 px-1" onclick="editConfig('${c.id}')"><i class="bi bi-pencil"></i></button>
-              <button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="deleteConfig('${c.id}')"><i class="bi bi-trash"></i></button>
+            <div class="d-flex gap-1 ms-2 flex-shrink-0">
+              ${!c.is_default?`<button class="btn btn-outline-success btn-sm py-0 px-1" style="font-size:.7rem" onclick="setDefault('${c.id}')">★</button>`:''}
+              <button class="btn btn-outline-primary btn-sm py-0 px-1" style="font-size:.7rem" onclick="editConfig(${JSON.stringify(c).replace(/"/g,'&quot;')})">✎</button>
+              <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:.7rem" onclick="deleteConfig('${c.id}')">✕</button>
             </div>
           </div>
         </div>`).join('')}
+      </div>
     </div>`).join('');
 }
 
-function editConfig(id) {
-  const c=allConfigs.find(x=>x.id===id);
-  if (!c) return;
+function editConfig(c) {
   document.getElementById('cfg-edit-id').value=c.id;
   document.getElementById('cfg-label').value=c.label||'';
-  document.getElementById('cfg-platform').value=c.platform||'other';
+  document.getElementById('cfg-platform').value=c.platform||'alpaca_paper';
   document.getElementById('cfg-key').value=c.api_key||'';
   document.getElementById('cfg-secret').value=c.api_secret||'';
   document.getElementById('cfg-url').value=c.api_url||'';
   document.getElementById('cfg-extra1').value=c.extra_field_1||'';
   document.getElementById('cfg-notes').value=c.notes||'';
-  document.getElementById('cfg-active').checked=c.is_active;
-  document.getElementById('cfg-default').checked=c.is_default;
+  document.getElementById('cfg-active').checked=c.is_active!==false;
+  document.getElementById('cfg-default').checked=c.is_default===true;
+  updatePlatformFields();
 }
 
 function clearConfigForm() {
-  document.getElementById('cfg-edit-id').value='';
-  ['cfg-label','cfg-key','cfg-secret','cfg-url','cfg-extra1','cfg-notes'].forEach(id=>document.getElementById(id).value='');
+  ['cfg-edit-id','cfg-label','cfg-key','cfg-secret','cfg-url','cfg-extra1','cfg-notes'].forEach(id=>{document.getElementById(id).value='';});
   document.getElementById('cfg-active').checked=true;
   document.getElementById('cfg-default').checked=false;
 }
 
 async function saveConfig() {
-  const editId=document.getElementById('cfg-edit-id').value;
+  const id=document.getElementById('cfg-edit-id').value;
   const body={
-    label:         document.getElementById('cfg-label').value.trim(),
-    platform:      document.getElementById('cfg-platform').value,
-    api_key:       document.getElementById('cfg-key').value.trim(),
-    api_secret:    document.getElementById('cfg-secret').value.trim(),
-    api_url:       document.getElementById('cfg-url').value.trim(),
-    extra_field_1: document.getElementById('cfg-extra1').value.trim(),
-    notes:         document.getElementById('cfg-notes').value.trim(),
-    is_active:     document.getElementById('cfg-active').checked,
-    is_default:    document.getElementById('cfg-default').checked,
+    label:document.getElementById('cfg-label').value,
+    platform:document.getElementById('cfg-platform').value,
+    api_key:document.getElementById('cfg-key').value,
+    api_secret:document.getElementById('cfg-secret').value,
+    api_url:document.getElementById('cfg-url').value,
+    extra_field_1:document.getElementById('cfg-extra1').value,
+    notes:document.getElementById('cfg-notes').value,
+    is_active:document.getElementById('cfg-active').checked,
+    is_default:document.getElementById('cfg-default').checked,
   };
-  if (!body.label){alert('Label is required');return;}
-  if (editId) await fetch(`/api/settings/${editId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  else await POST('/settings',body);
-  clearConfigForm();
-  loadSettings();
-}
-
-async function deleteConfig(id) {
-  if (!confirm('Delete this config?')) return;
-  await DEL(`/settings/${id}`);
-  loadSettings();
+  if(!body.label||!body.platform){alert('Label and Platform are required');return;}
+  const res=id?await fetch(`/api/settings/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json())
+               :await POST('/settings',body);
+  if(res.error){alert('Error: '+res.error);return;}
+  clearConfigForm(); loadSettings();
 }
 
 async function setDefault(id) {
-  await POST(`/settings/${id}/set-default`,{});
-  loadSettings();
+  await POST(`/settings/${id}/set-default`,{}); loadSettings();
 }
 
-// ── Job indicators in navbar ──────────────────────────────────────────────────
-async function updateJobIndicators() {
-  try {
-    const data=await API('/jobs/status');
-    const colors={ok:'#198754',running:'#ffc107',error:'#dc3545',idle:'#6c757d'};
-    document.getElementById('job-indicators').innerHTML=Object.entries(data).map(([name,info])=>`
-      <span title="${name}: ${info.status}${info.error?' — '+info.error:''}" style="width:8px;height:8px;border-radius:50%;background:${colors[info.status||'idle']};display:inline-block"></span>
-    `).join('');
-  } catch(e){}
+async function deleteConfig(id) {
+  if(!confirm('Delete this config?')) return;
+  await DEL(`/settings/${id}`); loadSettings();
 }
 
-// ── Init & Refresh ────────────────────────────────────────────────────────────
-const REFRESH_INTERVALS = {
-  signals:   60000,
-  positions: 60000,
-  market:    120000,
-  threats:   120000,
-  news:      120000,
-  jobs:      15000,
-};
+/* ── GLOBAL INIT + REFRESH ───────────────────────────────────────────────── */
+async function refreshAll() {
+  const active=document.querySelector('.nav-link.active')?.getAttribute('href')?.replace('#tab-','');
+  document.getElementById('last-refresh').textContent='Updated '+new Date().toLocaleTimeString();
+  refreshJobIndicators();
+  refreshRegimeBadge();
+  if(active==='signals'||!active) loadSignals();
+  else if(active==='positions'){loadPositions();loadEquityCurve(24);}
+  else if(active==='market')   loadMarket();
+  else if(active==='threats')  loadThreats();
+  else if(active==='news')     loadNews();
+  else if(active==='jobs')     loadJobs();
+  else if(active==='settings') loadSettings();
+}
 
-function init() {
-  loadSignals();
-  loadJobs();
-  updateJobIndicators();
-  loadSettings();
-  
-  // Tab-based lazy loading
-  document.querySelectorAll('a[data-bs-toggle="tab"]').forEach(tab=>{
-    tab.addEventListener('shown.bs.tab', e=>{
-      const target=e.target.getAttribute('href');
-      if (target==='#tab-positions') {loadPositions();loadOrders();}
-      if (target==='#tab-market')    loadMarket();
-      if (target==='#tab-threats')   loadThreats();
-      if (target==='#tab-news')      loadNews();
-      if (target==='#tab-jobs')      loadJobs();
-      if (target==='#tab-settings')  loadSettings();
-    });
+// Tab change — load relevant data
+document.querySelectorAll('[data-bs-toggle="tab"]').forEach(el=>{
+  el.addEventListener('shown.bs.tab',e=>{
+    const tab=e.target.getAttribute('href')?.replace('#tab-','');
+    if(tab==='signals')   loadSignals();
+    else if(tab==='positions'){loadPositions();loadEquityCurve(24);}
+    else if(tab==='market')   loadMarket();
+    else if(tab==='threats')  loadThreats();
+    else if(tab==='news')     loadNews();
+    else if(tab==='scanner')  {} 
+    else if(tab==='jobs')     loadJobs();
+    else if(tab==='settings'){loadSettings();updatePlatformFields();}
   });
-  
-  // Auto refresh
-  setInterval(loadSignals,   REFRESH_INTERVALS.signals);
-  setInterval(loadJobs,      REFRESH_INTERVALS.jobs);
-  setInterval(updateJobIndicators, 15000);
-  
-  // Refresh visible tab data
-  setInterval(()=>{
-    const active=document.querySelector('.tab-pane.active');
-    if (!active) return;
-    const id=active.id;
-    if (id==='tab-positions') loadPositions();
-    if (id==='tab-market')    loadMarket();
-    if (id==='tab-threats')   loadThreats();
-    if (id==='tab-news')      loadNews();
-  }, 60000);
-  
-  // Clock
-  setInterval(()=>{
-    const el=document.getElementById('last-refresh');
-    if(el) el.textContent=new Date().toLocaleTimeString();
-  }, 1000);
-}
+});
 
-document.addEventListener('DOMContentLoaded', init);
+// Initial load
+loadSignals();
+refreshJobIndicators();
+refreshRegimeBadge();
+
+// Auto-refresh every 60s
+setInterval(refreshAll, 60000);

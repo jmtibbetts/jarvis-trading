@@ -1,0 +1,33 @@
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+jinja2==3.1.4
+python-multipart==0.0.9
+aiofiles==23.2.1
+
+# Scheduling
+apscheduler==3.10.4
+
+# Database
+sqlalchemy==2.0.30
+aiosqlite==0.20.0
+
+# HTTP
+httpx==0.27.0
+aiohttp==3.9.5
+feedparser==6.0.11
+
+# Data & TA
+pandas==2.2.2
+pandas-ta==0.3.14b
+numpy==1.26.4
+alpaca-py==0.26.0
+
+# Telegram
+python-telegram-bot==21.3
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.7.1
+pydantic-settings==2.2.1
+pytz==2024.1

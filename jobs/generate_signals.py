@@ -276,12 +276,12 @@ def run():
         logger.warning("[Signals] No signals generated — check LLM connection and logs above")
         return {"saved": 0, "skipped": 0, "regime": regime.get("label"), "error": "no_llm_output"}
 
-    # ── Save to DB ────────────────────────────────────────────────────────────
+    # ── Save to DB (upsert logic) ─────────────────────────────────────────────
     now_iso = datetime.now(timezone.utc).isoformat()
-    saved = skipped = 0
+    saved = updated = skipped = 0
 
     with get_db() as db:
-        # Expire stale signals
+        # Expire stale Active signals (>6h old)
         stale = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
         expired = db.query(TradingSignal).filter(
             TradingSignal.status == "Active",
@@ -293,8 +293,11 @@ def run():
         if expired:
             logger.info(f"[Signals] Expired {len(expired)} stale signals")
 
-        existing = {s.asset_symbol for s in db.query(TradingSignal)
-                    .filter(TradingSignal.status == "Active").all()}
+        # Build upsert map: symbol → existing record (Active OR PendingApproval)
+        live_records = db.query(TradingSignal).filter(
+            TradingSignal.status.in_(["Active", "PendingApproval"])
+        ).all()
+        existing_map = {rec.asset_symbol: rec for rec in live_records}
 
         for raw in all_raw:
             try:
@@ -302,39 +305,62 @@ def run():
                 if not n:
                     skipped += 1
                     continue
-                if n.get("asset_symbol") in existing:
-                    logger.debug(f"[Signals] Skip dup: {n.get('asset_symbol')}")
-                    skipped += 1
-                    continue
+                sym = n.get("asset_symbol")
                 scored = score_safe(n, ta_profiles, regime, earnings_set)
-                db.add(TradingSignal(
-                    id=str(uuid.uuid4()),
-                    asset_symbol=scored.get("asset_symbol"),
-                    asset_name=scored.get("asset_name"),
-                    asset_class=scored.get("asset_class", "Equity"),
-                    direction=scored.get("direction", "Long"),
-                    confidence=scored.get("confidence", 65),
-                    composite_score=scored.get("composite_score"),
-                    timeframe=scored.get("timeframe", "4H"),
-                    entry_price=scored.get("entry_price"),
-                    target_price=scored.get("target_price"),
-                    stop_loss=scored.get("stop_loss"),
-                    reasoning=scored.get("reasoning", ""),
-                    key_risks=scored.get("key_risks", ""),
-                    momentum=scored.get("momentum", ""),
-                    signal_source=scored.get("signal_source", "watchlist"),
-                    earnings_risk=bool(scored.get("earnings_risk", False)),
-                    rr_ratio=scored.get("rr_ratio"),
-                    status="Active",
-                    generated_at=now_iso,
-                    created_date=now_iso,
-                    updated_date=now_iso,
-                ))
-                existing.add(scored.get("asset_symbol"))
-                saved += 1
+
+                if sym in existing_map:
+                    # ── UPDATE existing record (preserve status / id) ─────────
+                    rec = existing_map[sym]
+                    rec.asset_name       = scored.get("asset_name", rec.asset_name)
+                    rec.direction        = scored.get("direction", rec.direction)
+                    rec.confidence       = scored.get("confidence", rec.confidence)
+                    rec.composite_score  = scored.get("composite_score", rec.composite_score)
+                    rec.timeframe        = scored.get("timeframe", rec.timeframe)
+                    rec.entry_price      = scored.get("entry_price", rec.entry_price)
+                    rec.target_price     = scored.get("target_price", rec.target_price)
+                    rec.stop_loss        = scored.get("stop_loss", rec.stop_loss)
+                    rec.reasoning        = scored.get("reasoning", rec.reasoning)
+                    rec.key_risks        = scored.get("key_risks", rec.key_risks)
+                    rec.momentum         = scored.get("momentum", rec.momentum)
+                    rec.signal_source    = scored.get("signal_source", rec.signal_source)
+                    rec.earnings_risk    = bool(scored.get("earnings_risk", False))
+                    rec.rr_ratio         = scored.get("rr_ratio", rec.rr_ratio)
+                    rec.generated_at     = now_iso   # refresh age
+                    rec.updated_date     = now_iso
+                    # Keep status as-is (PendingApproval stays pending, Active stays active)
+                    logger.debug(f"[Signals] Upsert ↺ {sym} (status={rec.status})")
+                    updated += 1
+                else:
+                    # ── INSERT new record ─────────────────────────────────────
+                    db.add(TradingSignal(
+                        id=str(uuid.uuid4()),
+                        asset_symbol=scored.get("asset_symbol"),
+                        asset_name=scored.get("asset_name"),
+                        asset_class=scored.get("asset_class", "Equity"),
+                        direction=scored.get("direction", "Long"),
+                        confidence=scored.get("confidence", 65),
+                        composite_score=scored.get("composite_score"),
+                        timeframe=scored.get("timeframe", "4H"),
+                        entry_price=scored.get("entry_price"),
+                        target_price=scored.get("target_price"),
+                        stop_loss=scored.get("stop_loss"),
+                        reasoning=scored.get("reasoning", ""),
+                        key_risks=scored.get("key_risks", ""),
+                        momentum=scored.get("momentum", ""),
+                        signal_source=scored.get("signal_source", "watchlist"),
+                        earnings_risk=bool(scored.get("earnings_risk", False)),
+                        rr_ratio=scored.get("rr_ratio"),
+                        status="Active",
+                        generated_at=now_iso,
+                        created_date=now_iso,
+                        updated_date=now_iso,
+                    ))
+                    existing_map[sym] = True  # prevent double-insert in same run
+                    saved += 1
             except Exception as e:
                 logger.error(f"[Signals] Save error: {e} | raw={raw}")
                 skipped += 1
 
-    logger.info(f"[Signals] Done — {saved} saved, {skipped} skipped")
-    return {"saved": saved, "skipped": skipped, "regime": regime.get("label")}
+    logger.info(f"[Signals] Done — {saved} new | {updated} updated/upserted | {skipped} skipped")
+    return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label")}
+

@@ -18,11 +18,11 @@ aiohttp==3.9.5
 feedparser==6.0.11
 
 # Data & TA
-# numpy unpinned — pandas-ta 0.4.71b0 requires >=2.2.6, pandas 2.2.2 needs >=1.26
-# Let pip resolve a compatible version automatically
-pandas==2.2.2
-numpy>=2.2.6
-pandas-ta==0.4.71b0
+# pandas-ta 0.3.14b = last version before numba became a hard dependency
+# works on Python 3.13, no Rust, no compilation required
+pandas>=2.0.0
+numpy>=1.26.0
+pandas-ta==0.3.14b
 alpaca-py==0.26.0
 
 # Telegram

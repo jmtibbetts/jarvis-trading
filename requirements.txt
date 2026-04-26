@@ -19,7 +19,7 @@ feedparser==6.0.11
 
 # Data & TA
 pandas==2.2.2
-pandas-ta==0.3.14b
+pandas-ta==0.4.71b0
 numpy==1.26.4
 alpaca-py==0.26.0
 

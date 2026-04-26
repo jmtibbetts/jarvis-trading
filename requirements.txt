@@ -17,12 +17,10 @@ httpx==0.27.0
 aiohttp==3.9.5
 feedparser==6.0.11
 
-# Data & TA
-# pandas-ta 0.3.14b = last version before numba became a hard dependency
-# works on Python 3.13, no Rust, no compilation required
+# Data & TA — `ta` library: pure Python, no numba, no Rust, works on 3.13/3.14
 pandas>=2.0.0
 numpy>=1.26.0
-pandas-ta==0.3.14b
+ta==0.11.0
 alpaca-py==0.26.0
 
 # Telegram

@@ -148,53 +148,36 @@ def get_positions_with_signals():
         mv_total  = sum(float(p.market_value or 0) for p in positions)
         pl_total  = sum(float(p.unrealized_pl or 0) for p in positions)
 
-        # Build symbol → signal map from DB
+        # Build symbol → signal map — serialize to dicts INSIDE session
         with get_db() as db:
-            executed = db.query(TradingSignal).filter(
+            db_sigs = db.query(TradingSignal).filter(
                 TradingSignal.status.in_(["Executed", "Active", "Closed"])
             ).order_by(TradingSignal.generated_at.desc()).all()
+            # Convert to plain dicts while session is still open
+            sig_dicts = [_sig_dict(s) for s in db_sigs]
 
         sig_map = {}
-        for s in executed:
-            sym = s.asset_symbol
-            if sym not in sig_map:
+        for s in sig_dicts:
+            sym = s.get("asset_symbol", "")
+            if sym and sym not in sig_map:
                 sig_map[sym] = s
-            # also index without /USD so BTC/USD matches BTC
             base = sym.replace("/USD", "")
-            if base not in sig_map:
+            if base and base not in sig_map:
                 sig_map[base] = s
 
         result = []
         for p in positions:
             sym = str(p.symbol)
             pos_dict = _position_dict(p)
-            # Find matching signal
             sig = sig_map.get(sym) or sig_map.get(sym.replace("/USD","")) or sig_map.get(sym + "/USD")
             if sig:
-                entry  = float(sig.entry_price or 0)
-                target = float(sig.target_price or 0)
-                stop   = float(sig.stop_loss or 0)
+                entry  = float(sig.get("entry_price") or 0)
+                target = float(sig.get("target_price") or 0)
+                stop   = float(sig.get("stop_loss") or 0)
                 curr   = float(p.current_price or 0)
                 rr     = round((target - entry) / (entry - stop), 2) if entry > stop and target > entry else None
                 progress = round((curr - entry) / (target - entry) * 100, 1) if target > entry and curr else None
-                pos_dict["signal"] = {
-                    "id":              sig.id,
-                    "direction":       sig.direction,
-                    "confidence":      sig.confidence,
-                    "composite_score": sig.composite_score,
-                    "timeframe":       sig.timeframe,
-                    "entry_price":     sig.entry_price,
-                    "target_price":    sig.target_price,
-                    "stop_loss":       sig.stop_loss,
-                    "reasoning":       sig.reasoning,
-                    "key_risks":       sig.key_risks,
-                    "momentum":        sig.momentum,
-                    "signal_source":   getattr(sig, "signal_source", "watchlist"),
-                    "generated_at":    sig.generated_at,
-                    "status":          sig.status,
-                    "rr":              rr,
-                    "progress_pct":    progress,
-                }
+                pos_dict["signal"] = dict(sig, rr=rr, progress_pct=progress)
             else:
                 pos_dict["signal"] = None
             result.append(pos_dict)
@@ -399,53 +382,55 @@ def get_performance(days: int = 30):
     """Trade performance statistics over the last N days."""
     from datetime import datetime, timezone, timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    # Serialize everything INSIDE the session — avoids DetachedInstanceError
     with get_db() as db:
         all_trades = db.query(TradingSignal).filter(
             TradingSignal.status.in_(["Closed", "Executed", "Rejected"]),
             TradingSignal.updated_date >= cutoff
         ).order_by(TradingSignal.updated_date.desc()).all()
 
-    total = len(all_trades)
-    executed = [t for t in all_trades if t.status in ("Closed", "Executed")]
-    rejected = [t for t in all_trades if t.status == "Rejected"]
+        total    = len(all_trades)
+        executed = [_sig_dict(t) for t in all_trades if t.status in ("Closed", "Executed")]
+        rejected = [t for t in all_trades if t.status == "Rejected"]
+        rej_count = len(rejected)
 
+    # All computation now works on plain dicts — no ORM access after session close
     rr_list, scores, classes = [], [], {}
     for t in executed:
-        cl = t.asset_class or "Equity"
+        cl = t.get("asset_class") or "Equity"
         classes[cl] = classes.get(cl, 0) + 1
-        if t.entry_price and t.target_price and t.stop_loss and t.entry_price > t.stop_loss:
-            rr = round((t.target_price - t.entry_price) / (t.entry_price - t.stop_loss), 2)
+        ep = t.get("entry_price"); tp = t.get("target_price"); sl = t.get("stop_loss")
+        if ep and tp and sl and ep > sl:
+            rr = round((tp - ep) / (ep - sl), 2)
             rr_list.append(rr)
-        if t.composite_score or t.confidence:
-            scores.append(t.composite_score or t.confidence)
+        sc = t.get("composite_score") or t.get("confidence")
+        if sc:
+            scores.append(sc)
 
     avg_rr    = round(sum(rr_list) / len(rr_list), 2) if rr_list else None
-    avg_score = round(sum(scores) / len(scores), 1)   if scores  else None
+    avg_score = round(sum(scores)  / len(scores),  1) if scores  else None
     good_rr   = [r for r in rr_list if r >= 2.0]
     by_class  = [{"class": k, "count": v} for k, v in classes.items()]
 
-    # Daily signal volume for sparkline (last 14 days)
     daily = {}
     for t in executed:
-        day = (t.generated_at or "")[:10]
+        day = (t.get("generated_at") or "")[:10]
         if day:
             daily[day] = daily.get(day, 0) + 1
     daily_list = sorted([{"date": d, "count": c} for d, c in daily.items()], key=lambda x: x["date"])
-
-    # Recent trades list
-    recent = [_sig_dict(t) for t in executed[:50]]
 
     return {
         "period_days":    days,
         "total_signals":  total,
         "executed":       len(executed),
-        "rejected":       len(rejected),
+        "rejected":       rej_count,
         "avg_rr":         avg_rr,
         "avg_score":      avg_score,
         "good_rr_count":  len(good_rr),
         "by_class":       by_class,
         "daily_volume":   daily_list,
-        "recent_trades":  recent,
+        "recent_trades":  executed[:50],
     }
 
 def _sig_dict(s):

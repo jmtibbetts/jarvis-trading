@@ -1,7 +1,9 @@
 """
 APScheduler-based job scheduler. No Windows libuv issues.
+Jobs fire immediately on startup (next_run_time=now) — no waiting for first interval.
 """
 import logging
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
@@ -25,7 +27,6 @@ def make_job_runner(name: str, fn):
         job_status[name]['error'] = None
         try:
             fn()
-            from datetime import datetime, timezone
             job_status[name]['last'] = datetime.now(timezone.utc).isoformat()
             job_status[name]['status'] = 'ok'
         except Exception as e:
@@ -37,19 +38,47 @@ def make_job_runner(name: str, fn):
 def create_scheduler() -> BackgroundScheduler:
     executors = {'default': ThreadPoolExecutor(max_workers=4)}
     sched = BackgroundScheduler(executors=executors, timezone='UTC')
-    
+
     from jobs.fetch_market_data import run as market_run
     from jobs.fetch_threat_news import run as threats_run
     from jobs.generate_signals  import run as signals_run
     from jobs.execute_signals   import run as execute_run
     from jobs.manage_positions  import run as positions_run
     from jobs.telegram_bot      import run as telegram_run
-    
-    sched.add_job(make_job_runner('market',    market_run),    'interval', minutes=15,   id='market')
-    sched.add_job(make_job_runner('threats',   threats_run),   'interval', minutes=15,   id='threats',   start_date='2000-01-01 00:07:00')
-    sched.add_job(make_job_runner('signals',   signals_run),   'interval', minutes=30,   id='signals')
-    sched.add_job(make_job_runner('execute',   execute_run),   'interval', minutes=30,   id='execute',   start_date='2000-01-01 00:03:00')
-    sched.add_job(make_job_runner('positions', positions_run), 'interval', minutes=5,    id='positions')
-    sched.add_job(make_job_runner('telegram',  telegram_run),  'interval', minutes=1,    id='telegram')
-    
+
+    now = datetime.now(timezone.utc)
+
+    # next_run_time=now means each job fires immediately when the scheduler starts.
+    # Stagger the heavy jobs by a few seconds using start_date offsets so they
+    # don't all hammer APIs at the exact same moment.
+    sched.add_job(make_job_runner('market',    market_run),
+                  'interval', minutes=15,  id='market',
+                  next_run_time=now)
+
+    sched.add_job(make_job_runner('threats',   threats_run),
+                  'interval', minutes=15,  id='threats',
+                  next_run_time=now)
+
+    # Signals run after market data — give it a 90s head-start on first run
+    from datetime import timedelta
+    sched.add_job(make_job_runner('signals',   signals_run),
+                  'interval', minutes=30,  id='signals',
+                  next_run_time=now + timedelta(seconds=90))
+
+    # Execute runs right after signals — 3 min after startup
+    sched.add_job(make_job_runner('execute',   execute_run),
+                  'interval', minutes=30,  id='execute',
+                  next_run_time=now + timedelta(minutes=3))
+
+    # Position management every 5 min, starts immediately
+    sched.add_job(make_job_runner('positions', positions_run),
+                  'interval', minutes=5,   id='positions',
+                  next_run_time=now + timedelta(seconds=30))
+
+    # Telegram every 1 min, starts immediately
+    sched.add_job(make_job_runner('telegram',  telegram_run),
+                  'interval', minutes=1,   id='telegram',
+                  next_run_time=now)
+
+    logger.info("[Scheduler] All jobs registered — firing immediately on startup")
     return sched

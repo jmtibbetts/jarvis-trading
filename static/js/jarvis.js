@@ -59,60 +59,155 @@ function renderSignals() {
   const cls    = document.getElementById('sig-filter-class').value;
   const sort   = document.getElementById('sig-sort').value;
   let filtered = allSignals.filter(s=>(!status||s.status===status)&&(!cls||s.asset_class===cls));
-  if(sort==='score')      filtered.sort((a,b)=>(b.composite_score||b.confidence||0)-(a.composite_score||a.confidence||0));
+  if(sort==='score')           filtered.sort((a,b)=>(b.composite_score||b.confidence||0)-(a.composite_score||a.confidence||0));
   else if(sort==='confidence') filtered.sort((a,b)=>(b.confidence||0)-(a.confidence||0));
-  else filtered.sort((a,b)=>new Date(b.generated_at)-new Date(a.generated_at));
-  document.getElementById('signal-count').textContent=`${filtered.length} signals`;
+  else                         filtered.sort((a,b)=>new Date(b.generated_at)-new Date(a.generated_at));
+  document.getElementById('signal-count').textContent=filtered.length+' signals';
   const grid=document.getElementById('signals-grid');
   if(!filtered.length){grid.innerHTML='<div class="col-12 text-center text-muted py-5">No signals</div>';return;}
-  grid.innerHTML=filtered.map(s=>{
-    const score=s.composite_score||s.confidence||0;
-    const dir=(s.direction||'Long').toLowerCase();
-    const conf=s.confidence||0;
-    const confCls=conf>=75?'high':conf>=55?'medium':'low';
-    const rr=s.entry_price&&s.target_price&&s.stop_loss&&s.entry_price>s.stop_loss
-      ?((s.target_price-s.entry_price)/(s.entry_price-s.stop_loss)).toFixed(1):'N/A';
+  grid.innerHTML=filtered.map(function(s){
+    const score  = s.composite_score||s.confidence||0;
+    const dir    = (s.direction||'Long').toLowerCase();
+    const conf   = s.confidence||0;
+    const confCls= conf>=75?'high':conf>=55?'medium':'low';
+    const rr     = s.entry_price&&s.target_price&&s.stop_loss&&s.entry_price>s.stop_loss
+                   ? ((s.target_price-s.entry_price)/(s.entry_price-s.stop_loss)).toFixed(1) : 'N/A';
+    const rrCls  = rr!=='N/A'&&parseFloat(rr)>=2?'text-success':rr!=='N/A'&&parseFloat(rr)>=1?'text-warning':'text-danger';
     const statusBadge={Active:'bg-success',Executed:'bg-primary',Expired:'bg-secondary',Rejected:'bg-danger',Closed:'bg-dark border border-secondary'}[s.status]||'bg-secondary';
     const scorePct=Math.round(score);
     const earningsBadge=s.earnings_risk?'<span class="badge bg-warning text-dark ms-1" title="Earnings risk">📅</span>':'';
-    return `<div class="col-xl-3 col-lg-4 col-md-6">
-      <div class="card signal-card ${dir} h-100">
-        <div class="card-header d-flex justify-content-between align-items-center py-2">
-          <div>
-            <span class="fw-bold">${s.asset_symbol}</span>
-            <span class="badge ${dir==='long'?'bg-success':'bg-primary'} ms-1">${s.direction}</span>
-            <span class="badge ${statusBadge} ms-1">${s.status}</span>
-            ${earningsBadge}
-          </div>
-          <small class="text-muted">${timeAgo(s.generated_at)}</small>
-        </div>
-        <div class="card-body py-2 px-3">
-          <div class="d-flex justify-content-between align-items-center mb-1">
-            <small class="text-muted">Composite Score</small>
-            <span class="badge ${scorePct>=70?'bg-success':scorePct>=50?'bg-warning text-dark':'bg-danger'}">${scorePct}%</span>
-          </div>
-          <div class="conf-bar ${confCls} mb-2" style="width:${conf}%"></div>
-          <div class="small mb-2 text-muted">${s.asset_name||''} · ${s.asset_class||''} · ${s.timeframe||''} · <span class="text-warning">LLM:${conf}%</span></div>
-          <div class="d-flex justify-content-between small mb-1"><span>Entry</span><span class="fw-bold text-info">${fmtPrice(s.entry_price)}</span></div>
-          <div class="d-flex justify-content-between small mb-1"><span>Target</span><span class="fw-bold text-success">${fmtPrice(s.target_price)}</span></div>
-          <div class="d-flex justify-content-between small mb-2"><span>Stop</span><span class="fw-bold text-danger">${fmtPrice(s.stop_loss)}</span></div>
-          <div class="d-flex justify-content-between small mb-2"><span class="text-muted">R:R</span><span class="badge bg-dark border border-secondary">${rr}</span></div>
-          <p class="small text-muted mb-1" style="font-size:.72rem;line-height:1.4;max-height:72px;overflow:hidden">${(s.reasoning||'').slice(0,200)}${(s.reasoning||'').length>200?'…':''}</p>
-          ${s.key_risks?`<p class="small text-warning mb-0" style="font-size:.7rem"><i class="bi bi-exclamation-triangle-fill"></i> ${s.key_risks.slice(0,100)}</p>`:''}
-        </div>
-        <div class="card-footer py-1 d-flex gap-1">
-          ${s.status==='Active'?`<button class="btn btn-success btn-sm flex-fill py-0" style="font-size:.72rem" onclick="executeSignal('${s.id}')"><i class="bi bi-play-fill"></i> Execute</button>`:''}
-          <button class="btn btn-outline-danger btn-sm py-0" style="font-size:.72rem" onclick="deleteSignal('${s.id}')"><i class="bi bi-trash"></i></button>
-        </div>
-      </div>
-    </div>`;
+    const srcBadge=s.signal_source==='opportunistic'?'<span class="badge bg-info text-dark ms-1" title="News-discovered">📰</span>':'';
+    // default qty guess for modal prefill
+    const defDollar = conf>=75?1500:conf>=55?1000:500;
+    const defQty    = s.entry_price ? Math.max(1,Math.round(defDollar/s.entry_price)) : 1;
+    return '<div class="col-xl-3 col-lg-4 col-md-6">' +
+      '<div class="card signal-card '+dir+' h-100">' +
+        '<div class="card-header d-flex justify-content-between align-items-center py-2">' +
+          '<div>' +
+            '<span class="fw-bold">'+s.asset_symbol+'</span>' +
+            '<span class="badge '+(dir==='long'?'bg-success':'bg-primary')+' ms-1">'+s.direction+'</span>' +
+            '<span class="badge '+statusBadge+' ms-1">'+s.status+'</span>' +
+            earningsBadge+srcBadge +
+          '</div>' +
+          '<small class="text-muted">'+timeAgo(s.generated_at)+'</small>' +
+        '</div>' +
+        '<div class="card-body py-2 px-3">' +
+          '<div class="d-flex justify-content-between align-items-center mb-1">' +
+            '<small class="text-muted">Composite Score</small>' +
+            '<span class="badge '+(scorePct>=70?'bg-success':scorePct>=50?'bg-warning text-dark':'bg-danger')+'">'+scorePct+'%</span>' +
+          '</div>' +
+          '<div class="conf-bar '+confCls+' mb-2" style="width:'+conf+'%"></div>' +
+          '<div class="small mb-2 text-muted">'+( s.asset_name||'')+' · '+(s.asset_class||'')+' · '+(s.timeframe||'')+' · <span class="text-warning">LLM:'+conf+'%</span></div>' +
+          // ── Price levels ──────────────────────────────────────────────────
+          '<div class="row g-1 mb-2">' +
+            '<div class="col-4 text-center p-1 rounded" style="background:rgba(13,202,240,.08)">' +
+              '<div class="text-muted" style="font-size:.65rem">ENTRY</div>' +
+              '<div class="fw-bold text-info" style="font-size:.8rem">'+fmtPrice(s.entry_price)+'</div>' +
+            '</div>' +
+            '<div class="col-4 text-center p-1 rounded" style="background:rgba(25,135,84,.08)">' +
+              '<div class="text-muted" style="font-size:.65rem">TARGET</div>' +
+              '<div class="fw-bold text-success" style="font-size:.8rem">'+fmtPrice(s.target_price)+'</div>' +
+            '</div>' +
+            '<div class="col-4 text-center p-1 rounded" style="background:rgba(220,53,69,.08)">' +
+              '<div class="text-muted" style="font-size:.65rem">STOP</div>' +
+              '<div class="fw-bold text-danger" style="font-size:.8rem">'+fmtPrice(s.stop_loss)+'</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="d-flex justify-content-between small mb-2">' +
+            '<span class="text-muted">R:R Ratio</span>' +
+            '<span class="fw-bold '+rrCls+'">'+(rr==='N/A'?'N/A':rr+':1')+'</span>' +
+          '</div>' +
+          '<p class="small text-muted mb-1" style="font-size:.72rem;line-height:1.4;max-height:60px;overflow:hidden">'+(s.reasoning||'').slice(0,180)+((s.reasoning||'').length>180?'…':'')+'</p>' +
+          (s.key_risks?'<p class="small text-warning mb-0" style="font-size:.7rem"><i class="bi bi-exclamation-triangle-fill"></i> '+s.key_risks.slice(0,100)+'</p>':'') +
+        '</div>' +
+        '<div class="card-footer py-1 d-flex gap-1">' +
+          (s.status==='Active'?
+            '<button class="btn btn-success btn-sm flex-fill py-0" style="font-size:.72rem" '+
+              'onclick="openTradeModal(\''+s.id+'\',\''+s.asset_symbol+'\','+s.entry_price+','+s.target_price+','+s.stop_loss+','+defDollar+','+defQty+')">'+
+              '<i class="bi bi-play-fill"></i> Execute</button>'
+          :'') +
+          '<button class="btn btn-outline-danger btn-sm py-0" style="font-size:.72rem" onclick="deleteSignal(\''+s.id+'\')"><i class="bi bi-trash"></i></button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
   }).join('');
 }
 
+/* ── Trade Execution Modal ────────────────────────────────────────────────── */
+let _tradeModalSigId = null;
+
+function openTradeModal(id, sym, entry, target, stop, defDollar, defQty) {
+  _tradeModalSigId = id;
+  document.getElementById('tm-symbol').textContent = sym;
+  document.getElementById('tm-entry').textContent  = fmtPrice(entry);
+  document.getElementById('tm-target').textContent = fmtPrice(target);
+  document.getElementById('tm-stop').textContent   = fmtPrice(stop);
+  const rr = entry&&target&&stop&&entry>stop ? ((target-entry)/(entry-stop)).toFixed(1)+':1' : 'N/A';
+  document.getElementById('tm-rr').textContent = rr;
+  // default to dollar mode
+  document.getElementById('tm-mode-dollar').checked = true;
+  document.getElementById('tm-dollar-row').style.display = '';
+  document.getElementById('tm-qty-row').style.display = 'none';
+  document.getElementById('tm-dollar').value = defDollar;
+  document.getElementById('tm-qty').value = defQty;
+  // update qty hint
+  updateTradeModalHint(entry, defDollar);
+  const modal = new bootstrap.Modal(document.getElementById('tradeModal'));
+  modal.show();
+}
+
+function updateTradeModalHint(entry, dollars) {
+  const qty = entry ? Math.max(1, Math.round(dollars/entry)) : '?';
+  document.getElementById('tm-qty-hint').textContent = '≈ '+qty+' shares/units @ '+fmtPrice(entry);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const dollarInput = document.getElementById('tm-dollar');
+  if(dollarInput) {
+    dollarInput.addEventListener('input', function() {
+      const entry = parseFloat(document.getElementById('tm-entry').textContent.replace(/[$,]/g,''))||0;
+      updateTradeModalHint(entry, parseFloat(this.value)||0);
+    });
+  }
+  document.querySelectorAll('input[name="tm-mode"]').forEach(function(el){
+    el.addEventListener('change', function() {
+      const isDollar = document.getElementById('tm-mode-dollar').checked;
+      document.getElementById('tm-dollar-row').style.display = isDollar ? '' : 'none';
+      document.getElementById('tm-qty-row').style.display    = isDollar ? 'none' : '';
+    });
+  });
+});
+
+async function submitTradeModal() {
+  const id = _tradeModalSigId;
+  if(!id) return;
+  const isDollar = document.getElementById('tm-mode-dollar').checked;
+  const entry    = parseFloat(document.getElementById('tm-entry').textContent.replace(/[$,]/g,''))||0;
+  let qty;
+  if(isDollar) {
+    const dollars = parseFloat(document.getElementById('tm-dollar').value)||500;
+    qty = entry ? Math.max(1, Math.round(dollars/entry)) : 1;
+  } else {
+    qty = Math.max(1, parseInt(document.getElementById('tm-qty').value)||1);
+  }
+  const btn = document.getElementById('tm-submit-btn');
+  btn.disabled = true; btn.textContent = 'Submitting...';
+  try {
+    const res = await POST('/signals/'+id+'/execute', {qty: qty});
+    bootstrap.Modal.getInstance(document.getElementById('tradeModal')).hide();
+    alert(res.error || 'Order submitted! Qty: '+qty);
+    loadSignals();
+  } catch(e) {
+    alert('Error: '+e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Submit Order';
+  }
+}
+
 async function executeSignal(id) {
-  if(!confirm('Submit bracket order for this signal?')) return;
-  const res=await POST(`/signals/${id}/execute`,{});
-  alert(res.error||`Order submitted!`);
+  // legacy fallback — kept for scanner-generated signals
+  const res = await POST('/signals/'+id+'/execute', {});
+  alert(res.error || 'Order submitted!');
   loadSignals();
 }
 async function deleteSignal(id) {
@@ -353,60 +448,126 @@ document.getElementById('news-filter-cat').addEventListener('change',renderNews)
 document.getElementById('news-filter-sent').addEventListener('change',renderNews);
 
 /* ── SCANNER ──────────────────────────────────────────────────────────────── */
+let _lastScanSignal = null;
+
 async function runScan() {
-  const sym=document.getElementById('scan-symbol').value.toUpperCase().trim();
+  const sym = document.getElementById('scan-symbol').value.toUpperCase().trim();
   if(!sym){alert('Enter a symbol');return;}
-  const tfs=[...document.querySelectorAll('[id^="tf-"]:checked')].map(e=>e.value);
-  const genSig=document.getElementById('gen-signal-check').checked;
-  const el=document.getElementById('scan-result');
-  el.innerHTML='<div class="text-warning"><i class="bi bi-hourglass-split"></i> Fetching OHLCV + running TA... (may take 10-30s)</div>';
+  const tfs = [...document.querySelectorAll('[id^="tf-"]:checked')].map(function(e){return e.value;});
+  const genSig = document.getElementById('gen-signal-check').checked;
+  const el = document.getElementById('scan-result');
+  _lastScanSignal = null;
+  el.innerHTML = '<div class="text-warning py-3 text-center"><i class="bi bi-hourglass-split"></i> Fetching OHLCV + running TA engine... (10-30s)</div>';
+
   try {
-    const data=await POST('/analyze',{symbol:sym,timeframes:tfs,generate_signal:genSig});
-    const ta=data.ta||{};
-    let html=`<div class="mb-3"><span class="badge bg-info text-dark me-2">${sym}</span> <span class="text-muted small">Analyzed ${tfs.join(', ')}</span></div>`;
-    // TA summary per timeframe
-    for(const [tf,td] of Object.entries(ta)){
-      if(!td||td.error) continue;
-      const bias=td.bias||'neutral'; const bc=bias==='bullish'?'success':bias==='bearish'?'danger':'secondary';
-      const p=td.price||{}; const rsi=td.rsi; const macd=td.macd||{};
-      html+=`<div class="card mb-2">
-        <div class="card-header py-1 d-flex justify-content-between">
-          <span class="small fw-bold">${tf}</span>
-          <span class="badge bg-${bc}">${bias.toUpperCase()}</span>
-        </div>
-        <div class="card-body py-2 small">
-          <div class="row g-2">
-            <div class="col-6"><b>Price:</b> ${fmtPrice(p.last)} &nbsp; <span class="text-muted">EMA20:${fmtPrice(p.ema20)} EMA50:${fmtPrice(p.ema50)}</span></div>
-            <div class="col-6"><b>RSI:</b> <span class="${rsi>70?'text-danger':rsi<30?'text-success':'text-muted'}">${rsi!=null?rsi.toFixed(1):'N/A'}</span> &nbsp; <b>ATR:</b> ${td.atr?.pct!=null?td.atr.pct.toFixed(2)+'%':'N/A'}</div>
-            <div class="col-6"><b>MACD:</b> ${macd.value!=null?macd.value.toFixed(4):'N/A'} signal:${macd.signal!=null?macd.signal.toFixed(4):'N/A'}</div>
-            <div class="col-6"><b>Volume:</b> ${td.volume?.surge?'<span class="text-success">SURGE</span>':td.volume?.dry?'<span class="text-warning">DRY</span>':'Normal'}</div>
-          </div>
-        </div>
-      </div>`;
-    }
+    // POST() already prepends /api — use path without /api prefix
+    const data = await POST('/analyze', {symbol:sym, timeframes:tfs, generate_signal:genSig});
+    const ta = data.ta || {};
+    let html = '<div class="d-flex align-items-center gap-2 mb-3">' +
+      '<span class="badge bg-info text-dark fs-6">'+sym+'</span>' +
+      '<span class="text-muted small">Analyzed: '+tfs.join(', ')+'</span>' +
+    '</div>';
+
+    // TA per timeframe
+    const tfOrder = ['1H','4H','1D','1W'];
+    const taSorted = tfOrder.filter(function(k){return ta[k];}).concat(Object.keys(ta).filter(function(k){return tfOrder.indexOf(k)===-1&&ta[k];}));
+    taSorted.forEach(function(tf){
+      const td = ta[tf];
+      if(!td||td.error) return;
+      const bias = td.bias||'neutral';
+      const bc   = bias==='bullish'?'success':bias==='bearish'?'danger':'secondary';
+      const p    = td.price||{};
+      const rsi  = td.rsi;
+      const macd = td.macd||{};
+      const bb   = td.bollinger||{};
+      const vol  = td.volume||{};
+      const atr  = td.atr||{};
+      const srUp = (td.support_resistance||{}).resistance;
+      const srDn = (td.support_resistance||{}).support;
+      html += '<div class="card mb-2">' +
+        '<div class="card-header py-1 d-flex justify-content-between align-items-center">' +
+          '<span class="fw-bold">'+tf+'</span>' +
+          '<span class="badge bg-'+bc+'">'+bias.toUpperCase()+'</span>' +
+        '</div>' +
+        '<div class="card-body py-2" style="font-size:.8rem">' +
+          '<div class="row g-1">' +
+            '<div class="col-sm-6">' +
+              '<table class="table table-dark table-sm mb-0" style="font-size:.78rem">' +
+                '<tr><td class="text-muted">Price</td><td class="fw-bold text-info">'+fmtPrice(p.last)+'</td></tr>' +
+                '<tr><td class="text-muted">EMA20</td><td>'+fmtPrice(p.ema20)+'</td></tr>' +
+                '<tr><td class="text-muted">EMA50</td><td>'+fmtPrice(p.ema50)+'</td></tr>' +
+                '<tr><td class="text-muted">RSI</td><td class="'+(rsi>70?'text-danger':rsi<30?'text-success':'')+'fw-bold">'+(rsi!=null?rsi.toFixed(1):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">ATR %</td><td>'+(atr.pct!=null?atr.pct.toFixed(2)+'%':'N/A')+'</td></tr>' +
+              '</table>' +
+            '</div>' +
+            '<div class="col-sm-6">' +
+              '<table class="table table-dark table-sm mb-0" style="font-size:.78rem">' +
+                '<tr><td class="text-muted">MACD</td><td>'+(macd.value!=null?macd.value.toFixed(4):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">Signal</td><td>'+(macd.signal!=null?macd.signal.toFixed(4):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">BB Upper</td><td>'+(bb.upper!=null?fmtPrice(bb.upper):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">BB Lower</td><td>'+(bb.lower!=null?fmtPrice(bb.lower):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">Volume</td><td>'+(vol.surge?'<span class="text-success fw-bold">SURGE</span>':vol.dry?'<span class="text-warning">DRY</span>':'Normal')+'</td></tr>' +
+              '</table>' +
+            '</div>' +
+            (srDn||srUp?'<div class="col-12 mt-1 small">' +
+              (srDn?'<span class="text-success me-3">⬇ Support: '+fmtPrice(srDn)+'</span>':'') +
+              (srUp?'<span class="text-danger">⬆ Resistance: '+fmtPrice(srUp)+'</span>':'') +
+            '</div>':'') +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    });
+
+    // Generated signal
     if(data.signal){
-      const sig=data.signal;
+      const sig = data.signal;
       if(sig.error){
-        html+=`<div class="alert alert-warning mt-2">LLM error: ${sig.error}</div>`;
+        html += '<div class="alert alert-warning mt-2"><i class="bi bi-exclamation-triangle"></i> LLM error: '+sig.error+'</div>';
       } else {
-        html+=`<div class="card mt-3 border-success">
-          <div class="card-header py-2 bg-success bg-opacity-10"><span class="fw-bold"><i class="bi bi-lightning-fill text-success"></i> Generated Signal</span></div>
-          <div class="card-body small">
-            <div class="row g-2">
-              <div class="col-6"><b>Direction:</b> <span class="${sig.direction==='Long'?'text-success':'text-primary'}">${sig.direction}</span></div>
-              <div class="col-6"><b>Confidence:</b> ${sig.confidence}%</div>
-              <div class="col-6"><b>Entry:</b> ${fmtPrice(sig.entry_price)}</div>
-              <div class="col-6"><b>Target:</b> <span class="text-success">${fmtPrice(sig.target_price)}</span></div>
-              <div class="col-12"><b>Stop:</b> <span class="text-danger">${fmtPrice(sig.stop_loss)}</span></div>
-              <div class="col-12 text-muted">${sig.reasoning||''}</div>
-              ${sig.key_risks?`<div class="col-12 text-warning"><i class="bi bi-exclamation-triangle-fill"></i> ${sig.key_risks}</div>`:''}
-            </div>
-          </div>
-        </div>`;
+        _lastScanSignal = sig;
+        const rr = sig.entry_price&&sig.target_price&&sig.stop_loss&&sig.entry_price>sig.stop_loss
+          ? ((sig.target_price-sig.entry_price)/(sig.entry_price-sig.stop_loss)).toFixed(1)+':1' : 'N/A';
+        const dirCls = sig.direction==='Long'?'text-success':'text-primary';
+        html += '<div class="card mt-3 border-success">' +
+          '<div class="card-header py-2 d-flex justify-content-between align-items-center" style="background:rgba(25,135,84,.12)">' +
+            '<span class="fw-bold"><i class="bi bi-lightning-fill text-success"></i> Generated Signal</span>' +
+            '<button class="btn btn-success btn-sm" onclick="saveScannedSignal()"><i class="bi bi-bookmark-plus"></i> Save to Signals</button>' +
+          '</div>' +
+          '<div class="card-body">' +
+            '<div class="row g-2 mb-3">' +
+              '<div class="col-4 text-center p-2 rounded" style="background:rgba(13,202,240,.08)">' +
+                '<div class="text-muted small">ENTRY</div><div class="fw-bold text-info">'+fmtPrice(sig.entry_price)+'</div>' +
+              '</div>' +
+              '<div class="col-4 text-center p-2 rounded" style="background:rgba(25,135,84,.08)">' +
+                '<div class="text-muted small">TARGET</div><div class="fw-bold text-success">'+fmtPrice(sig.target_price)+'</div>' +
+              '</div>' +
+              '<div class="col-4 text-center p-2 rounded" style="background:rgba(220,53,69,.08)">' +
+                '<div class="text-muted small">STOP</div><div class="fw-bold text-danger">'+fmtPrice(sig.stop_loss)+'</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="row g-2 small">' +
+              '<div class="col-6"><b>Direction:</b> <span class="'+dirCls+'">'+sig.direction+'</span></div>' +
+              '<div class="col-6"><b>Confidence:</b> '+sig.confidence+'%</div>' +
+              '<div class="col-6"><b>Timeframe:</b> '+(sig.timeframe||'N/A')+'</div>' +
+              '<div class="col-6"><b>R:R:</b> <span class="fw-bold '+(rr!=='N/A'&&parseFloat(rr)>=2?'text-success':'text-warning')+'">'+rr+'</span></div>' +
+              '<div class="col-12 text-muted mt-1">'+(sig.reasoning||'')+'</div>' +
+              (sig.key_risks?'<div class="col-12 text-warning"><i class="bi bi-exclamation-triangle-fill"></i> '+sig.key_risks+'</div>':'') +
+            '</div>' +
+          '</div>' +
+        '</div>';
       }
     }
-    el.innerHTML=html;
-  } catch(e){el.innerHTML=`<div class="text-danger">Error: ${e.message}</div>`;}
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> Error: '+e.message+'<br><small class="text-muted">Check that the local server is running and the symbol is valid.</small></div>';
+  }
+}
+
+async function saveScannedSignal() {
+  if(!_lastScanSignal){alert('No signal to save');return;}
+  const res = await POST('/signals/save', _lastScanSignal);
+  if(res.error) alert('Error: '+res.error);
+  else { alert('Signal saved! Check the Signals tab.'); loadSignals(); }
 }
 
 /* ── JOBS TAB ─────────────────────────────────────────────────────────────── */

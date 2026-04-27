@@ -60,6 +60,12 @@ def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
             result = submit_bracket_order(symbol=sym, qty=qty, entry_price=sig.entry_price,
                                           take_profit=sig.target_price, stop_loss=sig.stop_loss)
             sig.status = "Executed"; sig.updated_date = datetime.now(timezone.utc).isoformat()
+            # Store Alpaca order ID on the signal for position linking
+            try:
+                order_id = result.get("id") or result.get("order_id") if isinstance(result, dict) else getattr(result, "id", None)
+                if order_id:
+                    sig.alpaca_order_id = str(order_id)
+            except: pass
             return {"ok":True,"order":result,"qty":qty,"crypto":crypto}
         except Exception as e:
             raise HTTPException(500, str(e))
@@ -178,7 +184,7 @@ def get_positions_with_signals():
         for p in positions:
             sym = str(p.symbol)
             pos_dict = _position_dict(p)
-            sig = sig_map.get(sym) or sig_map.get(sym.replace("/USD","")) or sig_map.get(sym + "/USD")
+            sig = sig_map.get(sym) or sig_map.get(sym.replace("/USD","")) or sig_map.get(sym + "/USD") or sig_map.get(sym.lower()) or sig_map.get(sym.upper())
             if sig:
                 entry  = float(sig.get("entry_price") or 0)
                 target = float(sig.get("target_price") or 0)
@@ -188,7 +194,28 @@ def get_positions_with_signals():
                 progress = round((curr - entry) / (target - entry) * 100, 1) if target > entry and curr else None
                 pos_dict["signal"] = dict(sig, rr=rr, progress_pct=progress)
             else:
-                pos_dict["signal"] = None
+                # No DB signal — build synthetic context from Alpaca position data
+                avg = float(p.avg_entry_price or 0)
+                curr = float(p.current_price or 0)
+                cost_basis = float(p.cost_basis or 0)
+                pos_dict["signal"] = {
+                    "asset_symbol": sym,
+                    "direction": "Long" if float(p.qty or 0) > 0 else "Short",
+                    "entry_price": avg,
+                    "target_price": None,
+                    "stop_loss": None,
+                    "confidence": None,
+                    "composite_score": None,
+                    "timeframe": None,
+                    "rr": None,
+                    "progress_pct": None,
+                    "reasoning": f"Position entered manually or via external order. Cost basis: ${cost_basis:,.2f}",
+                    "key_risks": None,
+                    "momentum": None,
+                    "signal_source": "manual",
+                    "generated_at": None,
+                    "_manual": True,
+                }
             result.append(pos_dict)
 
         return {
@@ -616,4 +643,5 @@ def _config_dict(c):
             "extra_field_1":c.extra_field_1,"extra_field_2":c.extra_field_2,
             "is_active":c.is_active,"is_default":c.is_default,"notes":c.notes,
             "created_date":c.created_date,"updated_date":c.updated_date}
+
 

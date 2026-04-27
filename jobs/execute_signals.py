@@ -1,8 +1,8 @@
 """
-Job: Execute Signals v6.3
-- Fixed NULL generated_at killing valid signals (use created_date as fallback, or treat NULL as fresh)
-- Corrupt price levels (stop >= entry, entry=0) now logged clearly
-- Crypto R:R floor 1.0, equity 4h age window, crypto 6h
+Job: Execute Signals v6.4
+- generate_signals owns the PendingApproval queue (not execute)
+- execute promotes PendingApproval → Active when market opens
+- No more duplicate PendingApproval writes from execute job
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -72,15 +72,32 @@ def run():
     except Exception as e:
         logger.debug(f"[Execute] Portfolio heat check skipped: {e}")
 
-    # Pull ALL Active signals with conf >= min — do NOT filter by generated_at in SQL
-    # Many signals have NULL generated_at; we handle age filtering in Python below
+    # Market hours check
+    now_utc     = datetime.now(timezone.utc)
+    weekday     = now_utc.weekday()
+    market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
+    logger.info(f"[Execute] Market: {'OPEN' if market_open else 'CLOSED'}")
+
+    # Pull Active signals + PendingApproval equities (promote them when market opens)
     with get_db() as db:
         sigs = db.query(TradingSignal).filter(
-            TradingSignal.status == "Active",
+            TradingSignal.status.in_(["Active", "PendingApproval"]),
             TradingSignal.confidence >= min_conf
         ).order_by(TradingSignal.confidence.desc()).limit(100).all()
 
-        now_utc = datetime.now(timezone.utc)
+        # Promote PendingApproval → Active now that market is open
+        if market_open:
+            promoted = 0
+            for s in sigs:
+                if s.status == "PendingApproval":
+                    _, is_c = normalize_symbol(s.asset_symbol or "")
+                    if not is_c:  # equity only
+                        s.status = "Active"
+                        s.updated_date = now_utc.isoformat()
+                        promoted += 1
+            if promoted:
+                logger.info(f"[Execute] ↑ Promoted {promoted} PendingApproval signals → Active (market open)")
+
         cutoff_equity = now_utc - timedelta(hours=4)
         cutoff_crypto = now_utc - timedelta(hours=6)
 
@@ -146,16 +163,12 @@ def run():
                 logger.info(f"[Execute] Skip {sym} — already held")
                 continue
 
-            # Skip equities when market is closed
+            # Skip equities when market is closed — generate_signals owns the queue
             if not crypto:
-                weekday = now_utc.weekday()  # 0=Mon … 6=Sun
-                market_open = weekday < 5 and 13 <= now_utc.hour < 20  # 9:30-16:00 ET
+                weekday    = now_utc.weekday()
+                market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
                 if not market_open:
-                    rec = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
-                    if rec and rec.status == "Active":
-                        rec.status = "PendingApproval"
-                        rec.updated_date = now_utc.isoformat()
-                        logger.info(f"[Execute] ⏳ {sym} → PendingApproval (market closed)")
+                    logger.debug(f"[Execute] Skip {sym} — equity, market closed")
                     continue
 
             entry  = float(sig.get("entry_price")  or 0)

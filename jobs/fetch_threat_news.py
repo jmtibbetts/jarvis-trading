@@ -1,5 +1,6 @@
 """
-Job: Fetch Threat News — RSS + GDELT → LLM analysis → DB storage.
+Job: Fetch Threat News v6.1 — RSS → LLM analysis → DB storage.
+v6.1: Dedup window reduced from 24h to 2h so new articles get through each run.
 """
 import feedparser, uuid, logging, hashlib, re
 from datetime import datetime, timezone, timedelta
@@ -121,23 +122,27 @@ def run():
     
     logger.info(f"[News] Fetched {len(all_articles)} raw articles")
     
-    # 2. Dedup by title hash
+    # 2. Dedup — compare against last 2h of DB titles only
+    #    (24h window caused all articles to be marked seen after first run)
     seen_hashes = set()
     with get_db() as db:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        existing = db.query(ThreatEvent.title).filter(ThreatEvent.created_date > cutoff).all()
+        cutoff_2h = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        existing = db.query(NewsItem.title).filter(NewsItem.created_date > cutoff_2h).all()
         for (t,) in existing:
             seen_hashes.add(hashlib.md5(t.lower().encode()).hexdigest())
-    
+
+    logger.info(f"[News] {len(seen_hashes)} titles seen in last 2h (dedup window)")
+
     new_articles = []
     for a in all_articles:
         h = hashlib.md5(a['title'].lower().encode()).hexdigest()
         if h not in seen_hashes:
             seen_hashes.add(h)
             new_articles.append(a)
-    
-    logger.info(f"[News] {len(new_articles)} new articles to analyze")
+
+    logger.info(f"[News] {len(new_articles)} new articles to analyze (of {len(all_articles)} fetched)")
     if not new_articles:
+        logger.info("[News] No new articles since last run — skipping LLM call")
         return {'threats': 0, 'news': 0}
     
     # 3. Analyze in ONE consolidated LLM call (max 30 articles)

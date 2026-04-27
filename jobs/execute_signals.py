@@ -1,12 +1,13 @@
 """
-Job: Execute Signals v6.2 — Kelly sizing + regime check + correlation filter.
-v6.2: Crypto R:R floor 1.0, 6h signal age window, per-signal INFO logging.
+Job: Execute Signals v6.3
+- Fixed NULL generated_at killing valid signals (use created_date as fallback, or treat NULL as fresh)
+- Corrupt price levels (stop >= entry, entry=0) now logged clearly
+- Crypto R:R floor 1.0, equity 4h age window, crypto 6h
 """
 import logging
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal
 from lib.alpaca_client import get_account, get_positions, submit_bracket_order, normalize_symbol, is_crypto
-from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +16,7 @@ def _normalize_held(positions):
     held = set()
     for p in positions:
         sym = str(p.symbol).upper().strip()
-        held.add(sym)  # as returned by Alpaca e.g. SOLUSD, BTCUSD, NVDA
-        # Also add slash format for crypto
+        held.add(sym)
         if len(sym) > 3 and sym.endswith('USD') and sym[:-3].isalpha():
             held.add(f"{sym[:-3]}/USD")
     return held
@@ -24,20 +24,19 @@ def _normalize_held(positions):
 def run():
     logger.info("[Execute] Starting execution job...")
     try:
-        account   = get_account()
-        equity    = float(account.equity)
+        account      = get_account()
+        equity       = float(account.equity)
         buying_power = float(account.buying_power)
-        positions = get_positions()
+        positions    = get_positions()
     except Exception as e:
         logger.error(f"[Execute] Alpaca account fetch failed: {e}")
         return {"error": str(e)}
 
-    held      = _normalize_held(positions)
-    mv_held   = sum(float(p.market_value or 0) for p in positions)
-    max_pos   = max(8, int(equity * 0.5 / 1000))
-    slots     = max_pos - len(positions)
+    held     = _normalize_held(positions)
+    mv_held  = sum(float(p.market_value or 0) for p in positions)
+    max_pos  = max(8, int(equity * 0.5 / 1000))
+    slots    = max_pos - len(positions)
 
-    # Real spendable cash — use actual buying power, not equity math
     budget = min(buying_power * 0.95, max(0, equity * 0.5 - mv_held))
 
     logger.info(f"[Execute] equity=${equity:.0f} | buying_power=${buying_power:.0f} | budget=${budget:.0f} | positions={len(positions)}/{max_pos} | slots={slots}")
@@ -73,28 +72,54 @@ def run():
     except Exception as e:
         logger.debug(f"[Execute] Portfolio heat check skipped: {e}")
 
-    # Crypto signals valid for 6h (24/7 market), equity 4h
-    cutoff_equity = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
-    cutoff_crypto = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    # Pull ALL Active signals with conf >= min — do NOT filter by generated_at in SQL
+    # Many signals have NULL generated_at; we handle age filtering in Python below
     with get_db() as db:
         sigs = db.query(TradingSignal).filter(
             TradingSignal.status == "Active",
-            TradingSignal.generated_at >= cutoff_crypto,  # use wider window; equity filtered below
             TradingSignal.confidence >= min_conf
-        ).order_by(TradingSignal.confidence.desc()).limit(50).all()
+        ).order_by(TradingSignal.confidence.desc()).limit(100).all()
 
-        sig_dicts = [{
-            "id":           s.id,
-            "asset_symbol": s.asset_symbol,
-            "asset_class":  s.asset_class or "Equity",
-            "direction":    s.direction or "Long",
-            "confidence":   float(s.composite_score or s.confidence or 65),
-            "entry_price":  s.entry_price,
-            "target_price": s.target_price,
-            "stop_loss":    s.stop_loss,
-        } for s in sigs]
+        now_utc = datetime.now(timezone.utc)
+        cutoff_equity = now_utc - timedelta(hours=4)
+        cutoff_crypto = now_utc - timedelta(hours=6)
 
-    logger.info(f"[Execute] {len(sig_dicts)} active signals qualify (conf>={min_conf}, age<4h)")
+        sig_dicts = []
+        for s in sigs:
+            # Resolve generated_at — fall back to created_date, then treat as fresh
+            gen_str = s.generated_at or s.created_date or None
+            if gen_str:
+                try:
+                    gen_dt = datetime.fromisoformat(gen_str.replace("Z", "+00:00"))
+                    if gen_dt.tzinfo is None:
+                        gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    gen_dt = None
+            else:
+                gen_dt = None  # NULL = treat as ageless (generated offline / manually)
+
+            sym_raw = s.asset_symbol or ""
+            _, is_c = normalize_symbol(sym_raw)
+            cutoff = cutoff_crypto if is_c else cutoff_equity
+
+            # Only skip if we have a timestamp AND it's definitively stale
+            if gen_dt is not None and gen_dt < cutoff:
+                logger.debug(f"[Execute] Skip {sym_raw} — signal too old ({gen_dt.isoformat()})")
+                continue
+
+            sig_dicts.append({
+                "id":           s.id,
+                "asset_symbol": sym_raw,
+                "asset_class":  s.asset_class or "Equity",
+                "direction":    s.direction or "Long",
+                "confidence":   float(s.composite_score or s.confidence or 65),
+                "entry_price":  s.entry_price,
+                "target_price": s.target_price,
+                "stop_loss":    s.stop_loss,
+                "generated_at": gen_str or "",
+            })
+
+    logger.info(f"[Execute] {len(sig_dicts)} active signals qualify (conf>={min_conf})")
 
     candidates = sig_dicts
     try:
@@ -105,6 +130,7 @@ def run():
         logger.debug(f"[Execute] Correlation filter skipped: {e}")
 
     executed = 0
+    now_utc  = datetime.now(timezone.utc)
     with get_db() as db:
         for sig in candidates:
             if executed >= slots or budget < 100:
@@ -115,31 +141,21 @@ def run():
 
             logger.info(f"[Execute] Evaluating {sym} ({'crypto' if crypto else 'equity'}) conf={sig['confidence']:.0f}%")
 
-            # Skip already held (check both formats)
+            # Skip already held
             if sym in held or sym_raw in held:
                 logger.info(f"[Execute] Skip {sym} — already held")
                 continue
 
-            # For equity: also enforce 4h age limit (crypto gets the full 6h)
+            # Skip equities when market is closed
             if not crypto:
-                if sig.get("generated_at","") < cutoff_equity:
-                    logger.info(f"[Execute] Skip {sym} — equity signal too old (>4h)")
-                    continue
-
-            # Skip equities when market is closed (weekends / outside 9:30-16:00 ET)
-            if not crypto:
-                now_utc = datetime.now(timezone.utc)
-                weekday = now_utc.weekday()  # 0=Mon, 5=Sat, 6=Sun
-                hour_et = (now_utc.hour - 4) % 24  # rough ET offset (EDT)
-                market_open = weekday < 5 and 13 <= now_utc.hour < 20  # 9:30-16:00 ET = 13:30-20:00 UTC
+                weekday = now_utc.weekday()  # 0=Mon … 6=Sun
+                market_open = weekday < 5 and 13 <= now_utc.hour < 20  # 9:30-16:00 ET
                 if not market_open:
-                    # Queue for Monday morning approval instead of skipping silently
-                    with get_db() as qdb:
-                        rec = qdb.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
-                        if rec and rec.status == "Active":
-                            rec.status = "PendingApproval"
-                            rec.updated_date = datetime.now(timezone.utc).isoformat()
-                            logger.info(f"[Execute] ⏳ {sym} → PendingApproval (market closed, queued for Monday)")
+                    rec = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
+                    if rec and rec.status == "Active":
+                        rec.status = "PendingApproval"
+                        rec.updated_date = now_utc.isoformat()
+                        logger.info(f"[Execute] ⏳ {sym} → PendingApproval (market closed)")
                     continue
 
             entry  = float(sig.get("entry_price")  or 0)
@@ -150,10 +166,10 @@ def run():
                 logger.warning(f"[Execute] Skip {sym} — missing price levels (entry={entry} tp={target} sl={stop})")
                 continue
             if stop >= entry:
-                logger.warning(f"[Execute] Skip {sym} — stop ${stop} >= entry ${entry}")
+                logger.warning(f"[Execute] Skip {sym} — invalid: stop ${stop} >= entry ${entry}")
                 continue
             if target <= entry:
-                logger.warning(f"[Execute] Skip {sym} — target ${target} <= entry ${entry}")
+                logger.warning(f"[Execute] Skip {sym} — invalid: target ${target} <= entry ${entry}")
                 continue
 
             # Position sizing
@@ -170,24 +186,20 @@ def run():
                 trade_budget = max(100, min(1500, 500 + (conf - 55) / 45 * 1000))
                 trade_budget = min(trade_budget, budget)
 
-            # Hard cap per trade: don't spend more than remaining buying power
-            # Spread remaining budget evenly across remaining slots to avoid
-            # blowing it all on the first trade
             remaining_slots = max(1, slots - executed)
             per_trade_cap = min(trade_budget, budget / remaining_slots, budget)
             per_trade_cap = max(50.0, per_trade_cap)
 
-            # Qty: fractional for crypto, integer for equities
             if crypto:
                 qty = round(per_trade_cap / entry, 6)
                 if qty < 0.0001:
-                    logger.warning(f"[Execute] Skip {sym} — qty too small ({qty}) per_trade_cap=${per_trade_cap:.0f} entry=${entry}")
+                    logger.warning(f"[Execute] Skip {sym} — qty too small ({qty})")
                     continue
             else:
                 qty = max(1, int(per_trade_cap / entry))
                 cost = qty * entry
                 if cost > budget:
-                    logger.warning(f"[Execute] Skip {sym} — {qty} shares × ${entry} = ${cost:.0f} > budget ${budget:.0f}")
+                    logger.warning(f"[Execute] Skip {sym} — cost ${cost:.0f} > budget ${budget:.0f}")
                     continue
 
             try:
@@ -198,21 +210,20 @@ def run():
                 rec = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
                 if rec:
                     rec.status = "Executed"
-                    rec.updated_date = datetime.now(timezone.utc).isoformat()
+                    rec.updated_date = now_utc.isoformat()
                 held.add(sym)
                 budget -= qty * entry
                 executed += 1
-                logger.info(f"[Execute] ✓ {sym} {'(crypto)' if crypto else '(equity)'} x{qty} @ ${entry:.4f} TP=${target:.4f} SL=${stop:.4f} | budget left=${budget:.0f}")
+                logger.info(f"[Execute] ✓ {sym} x{qty} @ ${entry:.4f} TP=${target:.4f} SL=${stop:.4f} | budget left=${budget:.0f}")
             except Exception as e:
                 rec = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
                 if rec:
                     rec.status = "Rejected"
-                    rec.updated_date = datetime.now(timezone.utc).isoformat()
+                    rec.updated_date = now_utc.isoformat()
                 logger.error(f"[Execute] ✗ {sym}: {type(e).__name__}: {e}")
 
-    # Count pending approval signals
     with get_db() as db:
         pending_count = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").count()
 
     logger.info(f"[Execute] Done — {executed} executed | {pending_count} pending approval | budget=${budget:.0f}")
-    return {"executed": executed, "pending_approval": pending_count, "regime": regime.get("label"), "budget_remaining": round(budget, 2)}
+    return {"executed": executed, "pending_approval": pending_count, "budget_remaining": round(budget, 2)}

@@ -1,9 +1,8 @@
 """
-Job: Manage Positions v6.2
-- Logs ALL positions every cycle (not just ones hitting a tier)
-- Actually submits trailing stop adjustments to Alpaca (was only logging before)
-- Cancels existing open orders for position before placing new trail
-- Fixed: removed non-existent CancelOrderRequest import
+Job: Manage Positions v6.3
+- Crypto trailing stops replaced with limit sell orders (Alpaca crypto only supports market/limit)
+- Equity positions still use native TrailingStopOrderRequest
+- Cancels existing open orders before placing new protective order
 """
 import logging, uuid
 from datetime import datetime, timezone
@@ -31,45 +30,90 @@ def _tier(plpc):
     return None
 
 
-def _set_trailing_stop(sym: str, qty: float, trail_pct: float):
-    """
-    Cancel any existing open orders for sym then place a new trailing stop.
-    Works for both crypto and equity.
-    Uses only alpaca-py methods that actually exist:
-      - client.get_orders() with GetOrdersRequest
-      - client.cancel_order_by_id(order_id)  <-- no CancelOrderRequest needed
-      - client.submit_order() with TrailingStopOrderRequest
-    """
+def _is_crypto(sym: str) -> bool:
+    return "/" in sym or sym.endswith("USD")
+
+
+def _cancel_open_orders(client, sym: str):
+    """Cancel any existing open orders for a symbol before placing new protective order."""
     try:
-        from alpaca.trading.requests import GetOrdersRequest, TrailingStopOrderRequest
-        from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
-        client = get_trading_client()
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym]))
+        for o in open_orders:
+            try:
+                client.cancel_order_by_id(o.id)
+                logger.debug(f"[Positions] Cancelled open order {o.id} for {sym}")
+            except Exception as ce:
+                logger.debug(f"[Positions] Could not cancel order {o.id}: {ce}")
+    except Exception as ce:
+        logger.debug(f"[Positions] Cancel orders check failed for {sym}: {ce}")
 
-        # Cancel any open orders for this symbol first
-        try:
-            open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym]))
-            for o in open_orders:
-                try:
-                    client.cancel_order_by_id(o.id)
-                    logger.debug(f"[Positions] Cancelled open order {o.id} for {sym}")
-                except Exception as ce:
-                    logger.debug(f"[Positions] Could not cancel order {o.id}: {ce}")
-        except Exception as ce:
-            logger.debug(f"[Positions] Cancel orders check failed for {sym}: {ce}")
 
-        # Submit trailing stop
+def _set_trailing_stop_equity(client, sym: str, qty: float, trail_pct: float) -> bool:
+    """Place a native trailing stop order for equities."""
+    try:
+        from alpaca.trading.requests import TrailingStopOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
         req = TrailingStopOrderRequest(
             symbol=sym,
-            qty=round(qty, 8) if ("/" in sym or sym.endswith("USD")) else max(1, int(qty)),
+            qty=max(1, int(qty)),
             side=OrderSide.SELL,
             time_in_force=TimeInForce.GTC,
             trail_percent=trail_pct,
         )
         order = client.submit_order(req)
-        logger.info(f"[Positions] \u2713 Trailing stop set \u2014 {sym} trail={trail_pct}% | order_id={order.id}")
+        logger.info(f"[Positions] ✓ Equity trailing stop set — {sym} trail={trail_pct}% | order_id={order.id}")
         return True
     except Exception as e:
-        logger.warning(f"[Positions] Trailing stop failed for {sym}: {e}")
+        logger.warning(f"[Positions] Equity trailing stop failed for {sym}: {e}")
+        return False
+
+
+def _set_crypto_limit_stop(client, sym: str, qty: float, current_price: float, trail_pct: float) -> bool:
+    """
+    Crypto only supports market/limit orders — no trailing stops.
+    Simulate a trailing stop floor by placing a limit sell at current_price * (1 - trail_pct/100).
+    Cancels any existing open orders first to avoid stacking.
+    """
+    try:
+        from alpaca.trading.requests import LimitOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        limit_price = round(current_price * (1.0 - trail_pct / 100.0), 6)
+        # Round qty to reasonable crypto precision
+        qty_rounded = round(qty, 8)
+
+        req = LimitOrderRequest(
+            symbol=sym,
+            qty=qty_rounded,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            limit_price=limit_price,
+        )
+        order = client.submit_order(req)
+        logger.info(
+            f"[Positions] ✓ Crypto limit-stop set — {sym} floor=${limit_price:.4f} "
+            f"(trail sim {trail_pct}% below ${current_price:.4f}) | order_id={order.id}"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[Positions] Crypto limit-stop failed for {sym}: {e}")
+        return False
+
+
+def _set_protective_order(sym: str, qty: float, trail_pct: float, current_price: float):
+    """Dispatch to correct order type based on asset class."""
+    try:
+        client = get_trading_client()
+        _cancel_open_orders(client, sym)
+
+        if _is_crypto(sym):
+            return _set_crypto_limit_stop(client, sym, qty, current_price, trail_pct)
+        else:
+            return _set_trailing_stop_equity(client, sym, qty, trail_pct)
+    except Exception as e:
+        logger.warning(f"[Positions] Protective order failed for {sym}: {e}")
         return False
 
 
@@ -96,13 +140,14 @@ def run():
         db.query(Position).delete()
 
         for pos in positions:
-            sym   = str(pos.symbol)
-            qty   = float(pos.qty or 0)
-            avg   = float(pos.avg_entry_price or 0)
-            mv    = float(pos.market_value or 0)
-            pl    = float(pos.unrealized_pl or 0)
-            plpc  = float(pos.unrealized_plpc or 0) * 100
-            side  = str(pos.side)
+            sym          = str(pos.symbol)
+            qty          = float(pos.qty or 0)
+            avg          = float(pos.avg_entry_price or 0)
+            mv           = float(pos.market_value or 0)
+            pl           = float(pos.unrealized_pl or 0)
+            plpc         = float(pos.unrealized_plpc or 0) * 100
+            side         = str(pos.side)
+            current_price = float(pos.current_price or avg or 0)
 
             logger.info(f"[Positions] {sym:12} {plpc:+6.1f}% | MV=${mv:>10,.0f} | P&L=${pl:>+8,.0f} | qty={qty}")
 
@@ -110,19 +155,19 @@ def run():
                 symbol=sym, qty=qty, avg_entry=avg,
                 market_value=mv, unrealized_pl=pl, unrealized_plpc=plpc,
                 side=side,
-                asset_class="Crypto" if ("/" in sym or sym.endswith("USD")) else "Equity",
+                asset_class="Crypto" if _is_crypto(sym) else "Equity",
                 updated_at=now_iso
             ))
 
             tier = _tier(plpc)
             if tier is None:
-                logger.info(f"[Positions] {sym:12} holding \u2014 no tier action ({plpc:+.1f}%)")
+                logger.info(f"[Positions] {sym:12} holding — no tier action ({plpc:+.1f}%)")
                 continue
 
             if tier["action"] == "close":
                 try:
                     close_position(sym)
-                    logger.info(f"[Positions] \u2713 Closed {sym} @ {plpc:+.1f}% | {tier['label']}")
+                    logger.info(f"[Positions] ✓ Closed {sym} @ {plpc:+.1f}% | {tier['label']}")
                     sig = db.query(TradingSignal).filter(
                         TradingSignal.asset_symbol.in_([sym, sym.replace("/", "")]),
                         TradingSignal.status == "Executed"
@@ -136,8 +181,11 @@ def run():
 
             else:
                 trail_pct = 5.0 if tier["action"] == "trail_tight" else 8.0
-                logger.info(f"[Positions] \u27f3 Trail {sym} @ {plpc:+.1f}% \u2014 submitting trail {trail_pct}% | {tier['label']}")
-                ok = _set_trailing_stop(sym, qty, trail_pct)
+                logger.info(
+                    f"[Positions] ⟳ Trail {sym} @ {plpc:+.1f}% — "
+                    f"{'limit-stop' if _is_crypto(sym) else 'trailing stop'} {trail_pct}% | {tier['label']}"
+                )
+                ok = _set_protective_order(sym, qty, trail_pct, current_price)
                 if ok:
                     trailing += 1
 
@@ -149,5 +197,5 @@ def run():
             snapshot_at=now_iso
         ))
 
-    logger.info(f"[Positions] Done -- {closed} closed, {trailing} trailing stops set | equity=${equity:,.2f}")
+    logger.info(f"[Positions] Done -- {closed} closed, {trailing} protective orders set | equity=${equity:,.2f}")
     return {"closed": closed, "trailing": trailing, "total": len(positions), "equity": equity}

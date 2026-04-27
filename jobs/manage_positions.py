@@ -1,8 +1,9 @@
 """
-Job: Manage Positions v6.1
+Job: Manage Positions v6.2
 - Logs ALL positions every cycle (not just ones hitting a tier)
 - Actually submits trailing stop adjustments to Alpaca (was only logging before)
 - Cancels existing open orders for position before placing new trail
+- Fixed: removed non-existent CancelOrderRequest import
 """
 import logging, uuid
 from datetime import datetime, timezone
@@ -34,34 +35,38 @@ def _set_trailing_stop(sym: str, qty: float, trail_pct: float):
     """
     Cancel any existing open orders for sym then place a new trailing stop.
     Works for both crypto and equity.
+    Uses only alpaca-py methods that actually exist:
+      - client.get_orders() with GetOrdersRequest
+      - client.cancel_order_by_id(order_id)  <-- no CancelOrderRequest needed
+      - client.submit_order() with TrailingStopOrderRequest
     """
     try:
-        from alpaca.trading.requests import GetOrdersRequest, TrailingStopOrderRequest, CancelOrderRequest
-        from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
+        from alpaca.trading.requests import GetOrdersRequest, TrailingStopOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
         client = get_trading_client()
 
-        # Cancel open orders for this symbol first
+        # Cancel any open orders for this symbol first
         try:
-            open_orders = client.get_orders(GetOrdersRequest(status=OrderStatus.OPEN, symbols=[sym]))
+            open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym]))
             for o in open_orders:
                 try:
                     client.cancel_order_by_id(o.id)
                     logger.debug(f"[Positions] Cancelled open order {o.id} for {sym}")
-                except Exception:
-                    pass
+                except Exception as ce:
+                    logger.debug(f"[Positions] Could not cancel order {o.id}: {ce}")
         except Exception as ce:
             logger.debug(f"[Positions] Cancel orders check failed for {sym}: {ce}")
 
         # Submit trailing stop
         req = TrailingStopOrderRequest(
             symbol=sym,
-            qty=round(qty, 8) if "/" in sym else max(1, int(qty)),
+            qty=round(qty, 8) if ("/" in sym or sym.endswith("USD")) else max(1, int(qty)),
             side=OrderSide.SELL,
             time_in_force=TimeInForce.GTC,
             trail_percent=trail_pct,
         )
         order = client.submit_order(req)
-        logger.info(f"[Positions] ✓ Trailing stop set — {sym} trail={trail_pct}% | order_id={order.id}")
+        logger.info(f"[Positions] \u2713 Trailing stop set \u2014 {sym} trail={trail_pct}% | order_id={order.id}")
         return True
     except Exception as e:
         logger.warning(f"[Positions] Trailing stop failed for {sym}: {e}")
@@ -99,7 +104,6 @@ def run():
             plpc  = float(pos.unrealized_plpc or 0) * 100
             side  = str(pos.side)
 
-            # Always log every position
             logger.info(f"[Positions] {sym:12} {plpc:+6.1f}% | MV=${mv:>10,.0f} | P&L=${pl:>+8,.0f} | qty={qty}")
 
             db.add(Position(
@@ -112,13 +116,13 @@ def run():
 
             tier = _tier(plpc)
             if tier is None:
-                logger.info(f"[Positions] {sym:12} holding — no tier action ({plpc:+.1f}%)")
+                logger.info(f"[Positions] {sym:12} holding \u2014 no tier action ({plpc:+.1f}%)")
                 continue
 
             if tier["action"] == "close":
                 try:
                     close_position(sym)
-                    logger.info(f"[Positions] ✓ Closed {sym} @ {plpc:+.1f}% | {tier['label']}")
+                    logger.info(f"[Positions] \u2713 Closed {sym} @ {plpc:+.1f}% | {tier['label']}")
                     sig = db.query(TradingSignal).filter(
                         TradingSignal.asset_symbol.in_([sym, sym.replace("/", "")]),
                         TradingSignal.status == "Executed"
@@ -132,7 +136,7 @@ def run():
 
             else:
                 trail_pct = 5.0 if tier["action"] == "trail_tight" else 8.0
-                logger.info(f"[Positions] ⟳ Trail {sym} @ {plpc:+.1f}% — submitting trail {trail_pct}% | {tier['label']}")
+                logger.info(f"[Positions] \u27f3 Trail {sym} @ {plpc:+.1f}% \u2014 submitting trail {trail_pct}% | {tier['label']}")
                 ok = _set_trailing_stop(sym, qty, trail_pct)
                 if ok:
                     trailing += 1

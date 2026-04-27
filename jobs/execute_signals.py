@@ -1,5 +1,5 @@
 """
-Job: Execute Signals v6.4
+Job: Execute Signals v6.5
 - generate_signals owns the PendingApproval queue (not execute)
 - execute promotes PendingApproval → Active when market opens
 - No more duplicate PendingApproval writes from execute job
@@ -85,25 +85,33 @@ def run():
             TradingSignal.confidence >= min_conf
         ).order_by(TradingSignal.confidence.desc()).limit(100).all()
 
-        # Promote PendingApproval → Active now that market is open
-        if market_open:
-            promoted = 0
-            for s in sigs:
-                if s.status == "PendingApproval":
-                    _, is_c = normalize_symbol(s.asset_symbol or "")
-                    if not is_c:  # equity only
-                        s.status = "Active"
-                        s.updated_date = now_utc.isoformat()
-                        promoted += 1
-            if promoted:
-                logger.info(f"[Execute] ↑ Promoted {promoted} PendingApproval signals → Active (market open)")
+        # Promote equity PendingApproval → Active when market opens
+        # Crypto is ALWAYS Active — should never be PendingApproval, but guard anyway
+        promoted = 0
+        for s in sigs:
+            if s.status == "PendingApproval":
+                _, is_c = normalize_symbol(s.asset_symbol or "")
+                if is_c:
+                    # Crypto somehow ended up in queue — force Active immediately
+                    s.status = "Active"
+                    s.updated_date = now_utc.isoformat()
+                    promoted += 1
+                    logger.warning(f"[Execute] Crypto {s.asset_symbol} was PendingApproval — forcing Active")
+                elif market_open:
+                    s.status = "Active"
+                    s.updated_date = now_utc.isoformat()
+                    promoted += 1
+        if promoted:
+            logger.info(f"[Execute] ↑ Promoted {promoted} signals → Active")
 
+        # Equity signals expire after 4h (stale price levels)
+        # Crypto signals expire after 24h — 24/7 market, valid overnight
         cutoff_equity = now_utc - timedelta(hours=4)
-        cutoff_crypto = now_utc - timedelta(hours=6)
+        cutoff_crypto = now_utc - timedelta(hours=24)
 
         sig_dicts = []
         for s in sigs:
-            # Resolve generated_at — fall back to created_date, then treat as fresh
+            # Resolve generated_at — fall back to created_date, then treat as ageless
             gen_str = s.generated_at or s.created_date or None
             if gen_str:
                 try:
@@ -113,7 +121,7 @@ def run():
                 except Exception:
                     gen_dt = None
             else:
-                gen_dt = None  # NULL = treat as ageless (generated offline / manually)
+                gen_dt = None  # NULL = treat as ageless
 
             sym_raw = s.asset_symbol or ""
             _, is_c = normalize_symbol(sym_raw)

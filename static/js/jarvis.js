@@ -377,7 +377,7 @@ async function loadPositions() {
       const s=p.signal;
       // Signal context row
       let sigRow='';
-      if(s){
+      if(s && !s._manual){
         const sc=s.composite_score||s.confidence||0;
         const scBadge=sc>=70?'bg-success':sc>=50?'bg-warning text-dark':'bg-danger';
         const rr=s.rr?`<span class="badge bg-dark border border-secondary ms-2">R:R ${s.rr}</span>`:'';
@@ -412,6 +412,26 @@ async function loadPositions() {
                   <div class="small text-muted mt-1">Source: ${s.signal_source||'watchlist'}</div>
                 </div>
               </div>
+            </div>
+          </td>
+        </tr>`;
+      } else if(s && s._manual){
+        // Manual / external order — show position data only
+        const dirCls = s.direction==='Long'?'text-success':'text-danger';
+        sigRow=`<tr class="signal-detail-row" style="display:none">
+          <td colspan="9" class="py-0">
+            <div class="signal-context-panel px-3 py-2">
+              <div class="d-flex align-items-center gap-3 flex-wrap">
+                <span class="badge bg-secondary"><i class="bi bi-person-fill me-1"></i>Manual Order</span>
+                <span class="badge ${s.direction==='Long'?'bg-success':'bg-primary'}">${s.direction}</span>
+                <div class="d-flex gap-3 small ms-2">
+                  <div><span class="text-muted">Avg Entry</span><br><span class="text-info fw-bold">${fmtPrice(s.entry_price)}</span></div>
+                  <div><span class="text-muted">Target</span><br><span class="text-success fw-bold">—</span></div>
+                  <div><span class="text-muted">Stop</span><br><span class="text-danger fw-bold">—</span></div>
+                </div>
+                <div class="small text-muted ms-auto">${s.reasoning||''}</div>
+              </div>
+              <div class="mt-2 small text-warning"><i class="bi bi-lightbulb-fill me-1"></i>No signal linked — use the <strong>Signals</strong> tab to run a scan and generate entry/exit levels for this position.</div>
             </div>
           </td>
         </tr>`;
@@ -1027,3 +1047,4 @@ refreshRegimeBadge();
 
 // Auto-refresh every 60s
 setInterval(refreshAll, 60000);
+

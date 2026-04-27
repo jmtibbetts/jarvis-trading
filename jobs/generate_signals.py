@@ -276,22 +276,29 @@ def run():
         logger.warning("[Signals] No signals generated — check LLM connection and logs above")
         return {"saved": 0, "skipped": 0, "regime": regime.get("label"), "error": "no_llm_output"}
 
+    # ── Market hours check (ET: Mon-Fri 09:30-16:00) ─────────────────────────
+    now_utc  = datetime.now(timezone.utc)
+    weekday  = now_utc.weekday()          # 0=Mon … 6=Sun
+    # 13:30–20:00 UTC = 09:30–16:00 ET (EDT)
+    market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
+
     # ── Save to DB (upsert logic) ─────────────────────────────────────────────
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = now_utc.isoformat()
     saved = updated = skipped = 0
 
     with get_db() as db:
-        # Expire stale Active signals (>6h old)
-        stale = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+        # Expire stale Active signals (>6h old, but never expire PendingApproval — those stay until market open)
+        stale = (now_utc - timedelta(hours=6)).isoformat()
         expired = db.query(TradingSignal).filter(
             TradingSignal.status == "Active",
+            TradingSignal.generated_at.isnot(None),
             TradingSignal.generated_at < stale
         ).all()
         for s in expired:
             s.status = "Expired"
             s.updated_date = now_iso
         if expired:
-            logger.info(f"[Signals] Expired {len(expired)} stale signals")
+            logger.info(f"[Signals] Expired {len(expired)} stale Active signals")
 
         # Build upsert map: symbol → existing record (Active OR PendingApproval)
         live_records = db.query(TradingSignal).filter(
@@ -308,8 +315,17 @@ def run():
                 sym = n.get("asset_symbol")
                 scored = score_safe(n, ta_profiles, regime, earnings_set)
 
+                # Determine target status:
+                # - Crypto: always Active (24/7 market)
+                # - Equity/ETF: Active during market hours, PendingApproval outside
+                is_crypto_sym = "/" in sym or sym.upper().endswith("USD")
+                if is_crypto_sym:
+                    target_status = "Active"
+                else:
+                    target_status = "Active" if market_open else "PendingApproval"
+
                 if sym in existing_map:
-                    # ── UPDATE existing record (preserve status / id) ─────────
+                    # ── UPDATE existing record — always overwrite with fresh data ──
                     rec = existing_map[sym]
                     rec.asset_name       = scored.get("asset_name", rec.asset_name)
                     rec.direction        = scored.get("direction", rec.direction)
@@ -325,10 +341,13 @@ def run():
                     rec.signal_source    = scored.get("signal_source", rec.signal_source)
                     rec.earnings_risk    = bool(scored.get("earnings_risk", False))
                     rec.rr_ratio         = scored.get("rr_ratio", rec.rr_ratio)
-                    rec.generated_at     = now_iso   # refresh age
+                    rec.generated_at     = now_iso
                     rec.updated_date     = now_iso
-                    # Keep status as-is (PendingApproval stays pending, Active stays active)
-                    logger.debug(f"[Signals] Upsert ↺ {sym} (status={rec.status})")
+                    # Always update status — new generate cycle refreshes the queue
+                    # (e.g. PendingApproval → Active when market opens)
+                    if rec.status not in ("Executed", "Closed", "Rejected"):
+                        rec.status = target_status
+                    logger.debug(f"[Signals] Upsert ↺ {sym} → {target_status}")
                     updated += 1
                 else:
                     # ── INSERT new record ─────────────────────────────────────
@@ -350,7 +369,7 @@ def run():
                         signal_source=scored.get("signal_source", "watchlist"),
                         earnings_risk=bool(scored.get("earnings_risk", False)),
                         rr_ratio=scored.get("rr_ratio"),
-                        status="Active",
+                        status=target_status,
                         generated_at=now_iso,
                         created_date=now_iso,
                         updated_date=now_iso,
@@ -361,6 +380,9 @@ def run():
                 logger.error(f"[Signals] Save error: {e} | raw={raw}")
                 skipped += 1
 
-    logger.info(f"[Signals] Done — {saved} new | {updated} updated/upserted | {skipped} skipped")
-    return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label")}
+    logger.info(
+        f"[Signals] Done — {saved} new | {updated} updated | {skipped} skipped | "
+        f"market={'OPEN' if market_open else 'CLOSED'} | regime={regime.get('label')}"
+    )
+    return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
 

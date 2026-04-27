@@ -174,17 +174,24 @@ def get_positions_with_signals():
         sig_map = {}
         for s in sig_dicts:
             sym = s.get("asset_symbol", "")
-            if sym and sym not in sig_map:
-                sig_map[sym] = s
-            base = sym.replace("/USD", "")
-            if base and base not in sig_map:
-                sig_map[base] = s
+            if not sym:
+                continue
+            # Index by every form: "BTC/USD", "BTC", "BTCUSD"
+            for key in [sym, sym.replace("/USD",""), sym.replace("/",""), sym.upper(), sym.lower()]:
+                if key and key not in sig_map:
+                    sig_map[key] = s
 
         result = []
         for p in positions:
             sym = str(p.symbol)
             pos_dict = _position_dict(p)
-            sig = sig_map.get(sym) or sig_map.get(sym.replace("/USD","")) or sig_map.get(sym + "/USD") or sig_map.get(sym.lower()) or sig_map.get(sym.upper())
+            # Alpaca returns crypto as "BTCUSD", DB stores as "BTC/USD" — try all forms
+            sym_slash = (sym[:-3] + "/USD") if (len(sym) > 3 and sym.endswith("USD") and "/" not in sym) else sym
+            sig = (sig_map.get(sym) or
+                   sig_map.get(sym_slash) or
+                   sig_map.get(sym.replace("/USD","")) or
+                   sig_map.get(sym.replace("/","")) or
+                   sig_map.get(sym + "/USD"))
             if sig:
                 entry  = float(sig.get("entry_price") or 0)
                 target = float(sig.get("target_price") or 0)

@@ -10,7 +10,7 @@ Job: Manage Positions v7.0
 import logging, uuid, json, math
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal, Position, PortfolioSnapshot, ThreatEvent, NewsItem
-from lib.alpaca_client import get_positions, get_account, close_position, get_trading_client, normalize_symbol
+from lib.alpaca_client import get_positions, get_account, close_position, cancel_open_orders_for_symbol, get_trading_client, normalize_symbol
 from lib.lmstudio import call_lm_studio, parse_json
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
 from lib.ohlcv_cache import fetch_with_cache
@@ -75,7 +75,8 @@ def _cancel_open_orders(client, sym: str):
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
-        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym]))
+        sym_clean = sym.upper().replace("/", "")  # Alpaca needs no-slash symbol
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym_clean]))
         for o in open_orders:
             try:
                 client.cancel_order_by_id(o.id)
@@ -341,6 +342,10 @@ def run():
 
             if action == "close":
                 try:
+                    # Cancel any open bracket legs (stop/target) before closing
+                    n_cancelled = cancel_open_orders_for_symbol(alpaca_sym)
+                    if n_cancelled:
+                        logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before close")
                     close_position(alpaca_sym)
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
                     with get_db() as db:
@@ -389,6 +394,10 @@ def run():
                 logger.info(f"[Positions] {sym} already closed by hard rule — skipping LLM EXIT")
                 continue
             try:
+                # Cancel any open bracket legs (stop/target) before closing
+                n_cancelled = cancel_open_orders_for_symbol(alpaca_sym)
+                if n_cancelled:
+                    logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before LLM close")
                 close_position(alpaca_sym)
                 logger.info(f"[Positions] ✓ [LLM] Closed {sym} @ {plpc:+.1f}% | {reason}")
                 with get_db() as db:

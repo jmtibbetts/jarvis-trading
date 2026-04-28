@@ -23,10 +23,11 @@ DIRECTION_LEVERAGE = {
 
 def _now(): return datetime.now(timezone.utc).isoformat()
 
-def _get_portfolio_cash(db) -> float:
-    """Get or initialize the paper portfolio record."""
+def _get_portfolio_cash(db):
+    """Fetch the paper portfolio record. init_db() guarantees it exists."""
     p = db.query(PaperPortfolio).first()
     if not p:
+        # Fallback: create it here if somehow missing (shouldn't happen post-init_db fix)
         from app.database import new_id
         p = PaperPortfolio(
             id=new_id(),
@@ -38,6 +39,7 @@ def _get_portfolio_cash(db) -> float:
         )
         db.add(p)
         db.flush()
+        logger.warning("[Paper] Portfolio row was missing — created with $100k starting capital")
     return p
 
 def open_paper_position(signal: dict, current_price: float = None) -> dict:
@@ -75,8 +77,10 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
 
         # Margin check — need at least the margin (notional / leverage) in cash
         margin_required = notional / leverage
+        logger.info(f"[Paper] Cash available: ${portfolio.cash:.2f} | margin required: ${margin_required:.2f}")
         if portfolio.cash < margin_required:
-            return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin_required:.0f}"}
+            logger.warning(f"[Paper] Insufficient cash — have ${portfolio.cash:.2f}, need ${margin_required:.2f}")
+            return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin_required:.0f}. Use /api/paper/reset to restore $100k."}
 
         from app.database import new_id
         pos = PaperPosition(
@@ -307,3 +311,4 @@ def get_paper_summary() -> dict:
         "positions": pos_list,
         "trades":    trade_list,
     }
+

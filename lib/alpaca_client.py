@@ -193,12 +193,25 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         }
 
 def close_position(symbol: str):
-    """Close a position by symbol. Alpaca REST requires no-slash for crypto (BTCUSD not BTC/USD)."""
+    """
+    Close a position by symbol using percentage=1 (100% closeout).
+    This avoids the "order qty must be >= minimal qty" error for dust positions
+    because Alpaca calculates the qty server-side from the actual held quantity.
+    Alpaca REST requires no-slash for crypto (BTCUSD not BTC/USD).
+    """
+    from alpaca.trading.requests import ClosePositionRequest
     client = get_trading_client()
-    # normalize_symbol returns BTC/USD for crypto — but Alpaca close_position endpoint
-    # needs the no-slash form. Strip the slash explicitly for the API call.
     s = symbol.upper().strip().replace("/", "")
-    return client.close_position(s)
+    try:
+        # percentage=1 means 100% — Alpaca computes the qty itself, no dust issues
+        return client.close_position(s, close_options=ClosePositionRequest(percentage=1))
+    except Exception as e:
+        err_str = str(e)
+        # If the position is already flat or not found, treat as success
+        if "position does not exist" in err_str.lower() or "404" in err_str:
+            logger.warning(f"[Alpaca] close_position {s}: already flat or not found — skipping")
+            return None
+        raise
 
 
 def cancel_open_orders_for_symbol(symbol: str):
@@ -219,3 +232,4 @@ def cancel_open_orders_for_symbol(symbol: str):
         return cancelled
     except Exception:
         return 0
+

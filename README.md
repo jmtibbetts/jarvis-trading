@@ -1,78 +1,195 @@
-# Jarvis Trading AI — Python Edition (v5.0)
+# Jarvis Trading AI — Python v6.3
 
-Complete rewrite of the Node.js stack in Python. Cleaner, faster, more stable on Windows.
+Fully local trading command center. FastAPI backend, Bootstrap dashboard, LM Studio LLM inference, Alpaca execution.
 
-## Stack
-- **FastAPI** — REST API + auto-generated docs at `/docs`
-- **APScheduler** — No more libuv timer crashes on Windows
-- **pandas-ta** — 130+ TA indicators (EMA, RSI, MACD, BB, ATR, VWAP, Stoch, OBV, ADX)
-- **alpaca-py** — Official Alpaca SDK
-- **SQLAlchemy + SQLite** — WAL mode, proper ORM
-- **Bootstrap 5** — Dark theme dashboard, no React/build step
+---
 
-## New Features (Python-only)
-- **Market Regime Detection** — SPY trend + ADX + RSI → risk-on/off/bear classification
-- **Kelly Criterion Sizing** — Half-Kelly position sizing based on win rate + R:R
-- **Correlation/Sector Filter** — Prevents over-concentration in one sector
-- **Portfolio Heat Monitor** — Blocks new entries when existing positions are losing
-- **Earnings Calendar Awareness** — Penalizes signals before earnings
-- **Multi-Factor Signal Scoring** — Composite score: LLM + TA confluence + R:R + volume + regime
-- **ADX Trend Strength** — Filters out choppy/weak trends
-- **Stochastic + OBV** — Additional entry confirmation indicators
-- **FastAPI /docs** — Full interactive API explorer at `/docs`
+## Requirements
 
-## Setup
+| Dependency | Version |
+|---|---|
+| Python | **3.12** |
+| TA-Lib C library | See install steps below |
+| LM Studio | Latest — https://lmstudio.ai |
+| Alpaca account | Paper or Live |
+
+---
+
+## Python 3.12 Setup (Windows)
+
+### 1. Install Python 3.12
+
+Download and install from https://www.python.org/downloads/release/python-3120/
+
+Make sure to check **"Add Python to PATH"** during install.
+
+Verify:
+```
+python --version
+# Python 3.12.x
+```
+
+### 2. Install TA-Lib (C library — required before pip install)
+
+TA-Lib must be installed as a pre-built Windows wheel. Do NOT `pip install TA-Lib` directly — it will fail.
 
 ```
-# Windows
-start.bat
+# Download the correct wheel for Python 3.12 (64-bit Windows):
+# https://github.com/cgohlke/talib-build/releases
+# File: TA_Lib-0.4.xx-cp312-cp312-win_amd64.whl
 
-# Or manually
+pip install TA_Lib-0.4.xx-cp312-cp312-win_amd64.whl
+```
+
+Replace `xx` with the latest version available on that page.
+
+### 3. Clone the repo
+
+```
+git clone https://github.com/jmtibbetts/jarvis-trading-ai-python.git
+cd jarvis-trading-ai-python
+```
+
+### 4. Create virtual environment
+
+```
 python -m venv .venv
 .venv\Scripts\activate
+```
+
+### 5. Install dependencies
+
+```
 pip install -r requirements.txt
-cp .env.example .env   # fill in your API keys
+```
+
+### 6. Configure environment
+
+```
+copy .env.example .env
+```
+
+Edit `.env` with your credentials (see Environment Variables below).
+
+### 7. Start
+
+```
+start.bat
+```
+
+Or manually:
+```
+.venv\Scripts\activate
 python main.py
 ```
 
-## API Keys (Settings tab in UI)
+Dashboard opens at: **http://localhost:3000**
 
-| Platform | Label | Fields |
-|---|---|---|
-| alpaca_paper | My Paper Account | API Key, Secret, extra_field_1="paper" |
-| alpaca_live  | Live Account | API Key, Secret, extra_field_1="live" |
-| lmstudio | Local LLM | api_url=http://localhost:1234/v1, extra_field_1=model-name |
-| telegram | Bot | api_key=BOT_TOKEN, extra_field_1=CHAT_ID |
+---
 
-## Directory Structure
+## Environment Variables (`.env`)
+
+```env
+# Alpaca — paper or live
+ALPACA_API_KEY=your_key_here
+ALPACA_API_SECRET=your_secret_here
+ALPACA_MODE=paper          # paper or live
+
+# LM Studio (local LLM inference)
+LM_STUDIO_URL=http://localhost:1234/v1
+LM_STUDIO_MODEL=local-model
+
+# Telegram (optional — for signal/threat alerts)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# App
+PORT=3000
+LOG_LEVEL=INFO
 ```
-main.py              — FastAPI app entry point
+
+> **Note:** API keys can also be added/managed from the **Settings tab** in the dashboard UI — no need to restart after changing them there.
+
+### Settings tab key formats
+
+| Platform | Label | API Key | API Secret | extra_field_1 |
+|---|---|---|---|---|
+| `alpaca_paper` | Paper Account | Key | Secret | `paper` |
+| `alpaca_live` | Live Account | Key | Secret | `live` |
+| `lmstudio` | Local LLM | — | — | Model name |
+| `telegram` | Telegram Bot | Bot token | — | Chat ID |
+
+---
+
+## LM Studio Setup
+
+1. Download LM Studio: https://lmstudio.ai
+2. Download a model (recommended: **Qwen2.5-7B-Instruct** or **Mistral-7B-Instruct**)
+3. Start the local server: **Local Server tab → Start Server**
+4. Default URL: `http://localhost:1234/v1`
+5. Set `LM_STUDIO_MODEL` in `.env` to match the loaded model name
+
+---
+
+## Architecture
+
+```
+main.py                  — FastAPI entry point (http://localhost:3000)
 app/
-  database.py        — SQLAlchemy models + session
-  routes.py          — All /api/* endpoints
-  scheduler.py       — APScheduler job runner
+  database.py            — SQLAlchemy models + SQLite (WAL mode)
+  routes.py              — All /api/* endpoints
+  scheduler.py           — APScheduler v2.0 (event-driven + guardian)
 jobs/
-  generate_signals.py  — 4-track LLM signal generation
-  execute_signals.py   — Alpaca bracket order execution
-  manage_positions.py  — Profit protection + trailing stops
-  fetch_threat_news.py — RSS + LLM threat analysis
-  fetch_market_data.py — Alpaca market data snapshots
-  telegram_bot.py      — Telegram command bot
+  generate_signals.py    — 4-track position-aware LLM signal generation (v6.3)
+  execute_signals.py     — Alpaca bracket order execution
+  manage_positions.py    — Per-position LLM evaluation with TA + news (v7.0)
+  fetch_threat_news.py   — RSS feeds + LLM threat classification
+  fetch_market_data.py   — Alpaca price snapshots + OHLCV cache warm-up
+  telegram_bot.py        — Proactive Telegram alerts + command bot
 lib/
-  alpaca_client.py   — Alpaca SDK wrapper
-  ohlcv.py           — Multi-timeframe OHLCV fetcher
-  ta_engine.py       — pandas-ta multi-timeframe analysis
-  lmstudio.py        — LM Studio LLM client
-  market_regime.py   — SPY regime detection (NEW)
-  risk_manager.py    — Kelly sizing + sector filter (NEW)
-  signal_scorer.py   — Multi-factor composite scoring (NEW)
-  earnings_calendar.py — Earnings risk awareness (NEW)
+  alpaca_client.py       — Alpaca SDK wrapper + symbol normalization
+  ohlcv_cache.py         — SQLite OHLCV cache with yfinance fallback
+  ta_engine.py           — TA-Lib multi-timeframe analysis (1H/2H/4H/1D)
+  lmstudio.py            — LLM client (LM Studio / OpenAI-compat / Anthropic)
+  market_regime.py       — SPY trend + ADX + RSI regime detection
+  risk_manager.py        — Kelly sizing + sector correlation filter
+  signal_scorer.py       — Multi-factor composite scoring
+  earnings_calendar.py   — Earnings risk awareness
 templates/
-  index.html         — Bootstrap 5 dark dashboard
+  index.html             — Bootstrap 5 dark dashboard
 static/
   css/jarvis.css
   js/jarvis.js
 data/
-  jarvis.db          — SQLite database
-  jarvis.log         — Log file
+  jarvis.db              — SQLite database (auto-created)
+  jarvis.log             — Log file
 ```
+
+---
+
+## Job Schedule
+
+| Job | Interval | Notes |
+|---|---|---|
+| Market Data | Every 15 min | Prices + OHLCV cache warm-up |
+| Threat News | Every 15 min | RSS + LLM threat classification |
+| Signal Generation | Every 30 min + event-driven | Fires within 2 min of new intel |
+| Execute Signals | Every 30 min | Bracket orders, PendingApproval queue |
+| Manage Positions | Every 5 min | Per-position TA + news + LLM evaluation |
+| Portfolio Guardian | Every 5 min | Drawdown ceiling, regime shift, concentration |
+| Telegram Bot | Every 1 min | Alerts + commands |
+
+---
+
+## Stack
+
+| Component | Library |
+|---|---|
+| API server | FastAPI + Uvicorn |
+| Scheduler | APScheduler (no libuv crashes on Windows) |
+| Technical analysis | TA-Lib (C-backed, Python 3.12 wheels) |
+| Data fallback | yfinance |
+| Broker | alpaca-py |
+| Database | SQLAlchemy + SQLite |
+| LLM | LM Studio (local) / OpenAI-compat / Anthropic |
+| Dashboard | Bootstrap 5 dark theme |

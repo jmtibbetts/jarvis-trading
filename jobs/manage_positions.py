@@ -7,7 +7,7 @@ Job: Manage Positions v7.0
 - Crypto: -4% stop, trail at +2%/+5%, take profit at +10%
 - Equity: -5% stop, trail at +5%/+10%, take profit at +15%
 """
-import logging, uuid, json
+import logging, uuid, json, math
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal, Position, PortfolioSnapshot, ThreatEvent, NewsItem
 from lib.alpaca_client import get_positions, get_account, close_position, get_trading_client, normalize_symbol
@@ -95,8 +95,11 @@ def _set_crypto_limit_stop(client, sym: str, qty: float, current_price: float, t
         from alpaca.trading.requests import LimitOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
         limit_price = round(current_price * (1.0 - trail_pct / 100.0), 6)
+        # Truncate qty using floor — never round up, Alpaca rejects if qty > available balance
+        # (their API returns e.g. 127.679999999 due to float precision, so 127.68 gets rejected)
+        qty_safe = math.floor(qty * 1_000_000) / 1_000_000
         req = LimitOrderRequest(
-            symbol=sym, qty=round(qty, 8),
+            symbol=sym, qty=qty_safe,
             side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
             limit_price=limit_price,
         )

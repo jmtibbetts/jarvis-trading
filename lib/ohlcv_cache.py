@@ -197,14 +197,16 @@ def _store_bars(symbol: str, tf: str, df: pd.DataFrame, source: str = 'alpaca'):
                 ))
                 stored += 1
         
-        # Update backfill status
+        # Update backfill status — always set latest_ts + recount total rows
         all_ts = [ts.isoformat() for ts in df.index]
-        existing_status = db.query(BackfillStatus).filter_by(symbol=symbol, timeframe=tf).first()
         now_iso = datetime.now(timezone.utc).isoformat()
+        # Real bar count: query the actual row count (not just inserts)
+        total_count = db.query(OHLCVBar).filter_by(symbol=symbol, timeframe=tf).count()
+        existing_status = db.query(BackfillStatus).filter_by(symbol=symbol, timeframe=tf).first()
         if existing_status:
             existing_status.latest_ts    = max(existing_status.latest_ts or '', max(all_ts))
             existing_status.earliest_ts  = min(existing_status.earliest_ts or min(all_ts), min(all_ts))
-            existing_status.bar_count    = (existing_status.bar_count or 0) + stored
+            existing_status.bar_count    = total_count   # authoritative count, not just new inserts
             existing_status.last_updated = now_iso
         else:
             db.add(BackfillStatus(
@@ -341,19 +343,44 @@ def get_cache_stats() -> dict:
     """Return cache statistics for the API."""
     with get_cache_db() as db:
         statuses = db.query(BackfillStatus).all()
-        total_bars = sum(int(s.bar_count or 0) for s in statuses)
+        # Use actual row count as the authoritative total (bar_count may be stale)
+        actual_total = db.query(OHLCVBar).count()
         symbols_cached = len(set(s.symbol for s in statuses))
         by_tf = {}
+        # Also track freshness: latest bar seen per TF
+        latest_by_tf = {}
+        last_updated_by_tf = {}
         for s in statuses:
             if s.timeframe not in by_tf:
                 by_tf[s.timeframe] = {'symbols': 0, 'bars': 0}
             by_tf[s.timeframe]['symbols'] += 1
             by_tf[s.timeframe]['bars'] += int(s.bar_count or 0)
+            # Track newest bar timestamp per TF
+            if s.latest_ts:
+                prev = latest_by_tf.get(s.timeframe, '')
+                if s.latest_ts > prev:
+                    latest_by_tf[s.timeframe] = s.latest_ts
+            # Track last cache-write timestamp per TF
+            if s.last_updated:
+                prev = last_updated_by_tf.get(s.timeframe, '')
+                if s.last_updated > prev:
+                    last_updated_by_tf[s.timeframe] = s.last_updated
+        # Enrich by_tf with freshness info
+        for tf in by_tf:
+            by_tf[tf]['latest_bar_ts'] = latest_by_tf.get(tf, '')
+            by_tf[tf]['last_updated']  = last_updated_by_tf.get(tf, '')
+        # Overall freshness
+        all_latest = [v for v in latest_by_tf.values() if v]
+        overall_latest_bar = max(all_latest) if all_latest else ''
+        all_updated = [v for v in last_updated_by_tf.values() if v]
+        overall_last_updated = max(all_updated) if all_updated else ''
     db_size_mb = CACHE_DB.stat().st_size / 1024 / 1024 if CACHE_DB.exists() else 0
     return {
-        'total_bars': total_bars,
+        'total_bars': actual_total,
         'symbols_cached': symbols_cached,
         'by_timeframe': by_tf,
+        'latest_bar_ts': overall_latest_bar,
+        'last_updated': overall_last_updated,
         'db_size_mb': round(db_size_mb, 2),
         'db_path': str(CACHE_DB),
     }

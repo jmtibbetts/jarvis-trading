@@ -209,4 +209,12 @@ def run():
         logger.error(f"[Market] OHLCV cache warm-up error: {e}")
         cached = 0
 
+    # Notify event bus — fresh market data means signal re-evaluation is worthwhile
+    if len(results) > 0:
+        try:
+            from app.scheduler import notify_new_intelligence
+            notify_new_intelligence()
+        except Exception as e:
+            logger.debug(f"[Market] Event notify failed: {e}")
+
     return {'prices_updated': len(results), 'ohlcv_cached': cached}

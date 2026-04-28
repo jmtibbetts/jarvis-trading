@@ -51,11 +51,24 @@ def _is_crypto(sym: str) -> bool:
 
 
 def _alpaca_sym(sym: str) -> str:
-    """Normalize symbol to Alpaca format for order submission."""
+    """Normalize symbol to Alpaca format for order submission (no slash)."""
     s = sym.upper().strip()
     if "/" in s:
         return s.replace("/", "")
     return s
+
+def _sym_variants(sym: str) -> list:
+    """Return all symbol forms for DB lookups: BTCUSD, BTC/USD, BTC, etc."""
+    s = sym.upper().strip()
+    variants = {s, s.replace("/", "")}
+    # BTCUSD → BTC/USD
+    if s.endswith("USD") and "/" not in s and len(s) > 3:
+        variants.add(s[:-3] + "/USD")
+    # BTC/USD → BTCUSD (already covered by replace above)
+    # BTC → BTC/USD
+    if "/" not in s and not s.endswith("USD") and len(s) <= 5:
+        variants.add(s + "/USD")
+    return list(variants)
 
 
 def _cancel_open_orders(client, sym: str):
@@ -332,7 +345,7 @@ def run():
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
                     with get_db() as db:
                         sig = db.query(TradingSignal).filter(
-                            TradingSignal.asset_symbol.in_([sym, alpaca_sym]),
+                            TradingSignal.asset_symbol.in_(_sym_variants(sym)),
                             TradingSignal.status == "Executed"
                         ).first()
                         if sig:
@@ -380,7 +393,7 @@ def run():
                 logger.info(f"[Positions] ✓ [LLM] Closed {sym} @ {plpc:+.1f}% | {reason}")
                 with get_db() as db:
                     sig = db.query(TradingSignal).filter(
-                        TradingSignal.asset_symbol.in_([sym, alpaca_sym]),
+                        TradingSignal.asset_symbol.in_(_sym_variants(sym)),
                         TradingSignal.status == "Executed"
                     ).first()
                     if sig:

@@ -90,10 +90,12 @@ def event_driven_signals():
 def portfolio_guardian():
     """
     Portfolio-level risk checks every 5 minutes:
-    1. Drawdown ceiling: if portfolio is down >3% on the day → go defensive (tighten all stops)
+    1. Drawdown ceiling: if portfolio is down >5% on the day → go defensive
     2. Regime shift: if market regime flips bearish → tighten all positions
-    3. Concentration: if any single position > 25% of portfolio → flag/trim
-    All decisions go through the LLM with full context before acting.
+    3. Concentration: if any single position > 35% of portfolio → flag/trim
+
+    All DB queries eagerly converted to plain dicts INSIDE their session blocks.
+    No SQLAlchemy ORM object ever leaves a with get_db() context.
     """
     try:
         from lib.alpaca_client import get_positions, get_account
@@ -101,35 +103,53 @@ def portfolio_guardian():
         from lib.lmstudio import call_lm_studio, parse_json
         from app.database import get_db, ThreatEvent, NewsItem, PortfolioSnapshot
 
+        # ── 1. Alpaca live data (SDK objects, NOT ORM — safe to use freely) ──────
         account   = get_account()
         equity    = float(account.equity)
-        positions = get_positions()
+        raw_positions = get_positions()
 
-        if not positions:
+        if not raw_positions:
+            logger.info("[Guardian] No open positions — skipping")
             return
 
-        # Portfolio metrics
-        total_mv   = sum(float(p.market_value or 0) for p in positions)
-        total_pl   = sum(float(p.unrealized_pl or 0) for p in positions)
-        total_plpc = (total_pl / (total_mv - total_pl)) * 100 if (total_mv - total_pl) > 0 else 0
-        max_single = max((float(p.market_value or 0) / total_mv * 100 for p in positions), default=0)
+        # Convert alpaca-py Position SDK objects to plain dicts immediately
+        # so there is zero ambiguity about what type they are downstream
+        positions = [
+            {
+                "symbol":          str(p.symbol),
+                "qty":             float(p.qty or 0),
+                "market_value":    float(p.market_value or 0),
+                "unrealized_pl":   float(p.unrealized_pl or 0),
+                "unrealized_plpc": float(p.unrealized_plpc or 0),
+                "avg_entry_price": float(p.avg_entry_price or 0),
+                "current_price":   float(p.current_price or 0),
+            }
+            for p in raw_positions
+        ]
 
-        # Get today's starting equity from snapshots
-        day_start_equity = equity  # fallback
+        # Portfolio metrics (all from plain dicts — no ORM)
+        total_mv   = sum(p["market_value"] for p in positions)
+        total_pl   = sum(p["unrealized_pl"] for p in positions)
+        total_plpc = (total_pl / (total_mv - total_pl)) * 100 if (total_mv - total_pl) > 0 else 0
+        max_single = max((p["market_value"] / total_mv * 100 for p in positions), default=0)
+
+        # ── 2. DB snapshot query — extract scalar immediately, no ORM outside block ─
+        day_start_equity = equity  # fallback if no snapshot
         try:
             with get_db() as db:
                 cutoff_day = (datetime.now(timezone.utc) - timedelta(hours=16)).isoformat()
                 snap = db.query(PortfolioSnapshot).filter(
                     PortfolioSnapshot.snapshot_at >= cutoff_day
                 ).order_by(PortfolioSnapshot.snapshot_at.asc()).first()
-                if snap:
+                # Extract float INSIDE the session — snap must not leave the block
+                if snap is not None:
                     day_start_equity = float(snap.equity)
-        except Exception:
-            pass
+        except Exception as snap_err:
+            logger.debug(f"[Guardian] Snapshot lookup failed: {snap_err}")
 
         day_drawdown_pct = ((equity - day_start_equity) / day_start_equity * 100) if day_start_equity else 0
 
-        # Market regime
+        # ── 3. Market regime ────────────────────────────────────────────────────
         try:
             regime = get_regime()
         except Exception:
@@ -140,18 +160,18 @@ def portfolio_guardian():
             f"Day={day_drawdown_pct:+.2f}% | MaxPos={max_single:.1f}% | Regime={regime.get('label')}"
         )
 
-        # ── Hard ceiling checks (no LLM needed) ──────────────────────────────
-        DRAWDOWN_HARD_CEILING = -5.0   # day drawdown % — go fully defensive, no new trades
-        DRAWDOWN_WARN_LEVEL   = -3.0   # warn + tighten all stops
-        CONCENTRATION_MAX     = 35.0   # single position > 35% of portfolio
+        # ── 4. Threshold checks ─────────────────────────────────────────────────
+        DRAWDOWN_HARD_CEILING = -5.0
+        DRAWDOWN_WARN_LEVEL   = -3.0
+        CONCENTRATION_MAX     = 35.0
 
-        alerts = []
+        alerts       = []
         go_defensive = False
 
         if day_drawdown_pct <= DRAWDOWN_HARD_CEILING:
             alerts.append(f"⚠️ HARD CEILING HIT: Portfolio down {day_drawdown_pct:.1f}% today")
             go_defensive = True
-            logger.warning(f"[Guardian] 🚨 Hard drawdown ceiling hit: {day_drawdown_pct:.1f}%")
+            logger.warning(f"[Guardian] 🚨 Hard drawdown ceiling: {day_drawdown_pct:.1f}%")
         elif day_drawdown_pct <= DRAWDOWN_WARN_LEVEL:
             alerts.append(f"⚠️ Drawdown warning: {day_drawdown_pct:.1f}% today")
             logger.warning(f"[Guardian] ⚠ Drawdown warning: {day_drawdown_pct:.1f}%")
@@ -160,34 +180,34 @@ def portfolio_guardian():
             alerts.append(f"🔴 High-risk regime: {regime.get('label')}")
 
         if max_single >= CONCENTRATION_MAX:
-            conc_pos = max(positions, key=lambda p: float(p.market_value or 0))
-            alerts.append(f"⚠️ Concentration risk: {conc_pos.symbol} = {max_single:.1f}% of portfolio")
+            conc = max(positions, key=lambda p: p["market_value"])
+            alerts.append(f"⚠️ Concentration risk: {conc['symbol']} = {max_single:.1f}% of portfolio")
 
         if not alerts and regime.get("risk") != "high" and day_drawdown_pct > DRAWDOWN_WARN_LEVEL:
-            logger.info(f"[Guardian] ✓ Portfolio healthy — no action needed")
+            logger.info("[Guardian] ✓ Portfolio healthy — no action needed")
             return
 
-        # ── LLM portfolio-level decision ──────────────────────────────────────
-        # Extract all data inside the session to avoid DetachedInstanceError
+        # ── 5. DB context for LLM — all converted to dicts inside session ─────
         with get_db() as db:
             cutoff_2h = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
             threats = [
-                {"severity": t.severity, "title": t.title}
+                {"severity": t.severity or "Unknown", "title": t.title or ""}
                 for t in db.query(ThreatEvent).filter(
                     ThreatEvent.status == "Active"
                 ).order_by(ThreatEvent.created_date.desc()).limit(5).all()
             ]
             news = [
-                {"sentiment": n.sentiment, "title": n.title}
+                {"sentiment": n.sentiment or "neutral", "title": n.title or ""}
                 for n in db.query(NewsItem).filter(
                     NewsItem.created_date >= cutoff_2h
                 ).order_by(NewsItem.created_date.desc()).limit(8).all()
             ]
 
+        # ── 6. Build prompt context (all plain dicts — no ORM anywhere) ────────
         threat_ctx = "\n".join(f"[{t['severity']}] {t['title']}" for t in threats) or "None"
         news_ctx   = "\n".join(f"[{n['sentiment']}] {n['title']}" for n in news) or "None"
         pos_ctx    = "\n".join(
-            f"  {p.symbol}: {float(p.unrealized_plpc or 0)*100:+.1f}% | MV=${float(p.market_value or 0):,.0f}"
+            f"  {p['symbol']}: {p['unrealized_plpc'] * 100:+.1f}% | MV=${p['market_value']:,.0f}"
             for p in positions
         )
 
@@ -244,11 +264,11 @@ Respond ONLY with valid JSON:
             from lib.alpaca_client import close_position
             for pos in positions:
                 try:
-                    sym = pos.symbol.upper().replace("/", "")
+                    sym = pos["symbol"].upper().replace("/", "")
                     close_position(sym)
                     logger.info(f"[Guardian] ✓ Closed {sym} (defensive)")
                 except Exception as e:
-                    logger.error(f"[Guardian] Close {pos.symbol} failed: {e}")
+                    logger.error(f"[Guardian] Close {pos['symbol']} failed: {e}")
 
         elif action == "EXIT_WEAKEST" and to_exit:
             from lib.alpaca_client import close_position
@@ -263,9 +283,9 @@ Respond ONLY with valid JSON:
             # Tighten stops on all open positions
             from jobs.manage_positions import _set_protective_order, _is_crypto
             for pos in positions:
-                sym           = str(pos.symbol)
-                qty           = float(pos.qty or 0)
-                current_price = float(pos.current_price or pos.avg_entry_price or 0)
+                sym           = pos["symbol"]
+                qty           = pos["qty"]
+                current_price = pos["current_price"] or pos["avg_entry_price"]
                 try:
                     _set_protective_order(sym.replace("/", ""), qty, float(tighten), current_price)
                     logger.info(f"[Guardian] ⟳ Tightened stop {sym} @ {tighten}%")

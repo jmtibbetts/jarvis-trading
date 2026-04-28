@@ -118,6 +118,12 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     if cfg['api_key']:
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
 
+    # Sanitize messages — strip non-BMP Unicode (emoji, rare CJK, etc.) that
+    # some LM Studio builds reject with a 400 even on large-context models.
+    def _sanitize(s: str) -> str:
+        return s.encode('utf-8', errors='replace').decode('utf-8') if s else s
+    messages = [{"role": m["role"], "content": _sanitize(m["content"])} for m in messages]
+
     payload = {
         "model":       cfg['model'],
         "messages":    messages,
@@ -135,6 +141,8 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.post(url, json=payload, headers=headers)
+        if r.status_code == 400:
+            logger.error(f"[LLM] 400 Bad Request body: {r.text[:500]}")
         r.raise_for_status()
         data    = r.json()
         content = data['choices'][0]['message']['content']
@@ -213,4 +221,5 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+
 

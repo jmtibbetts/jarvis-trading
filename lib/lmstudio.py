@@ -4,7 +4,7 @@ v6.2: Global threading lock — only one LLM call at a time (local model can't p
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
       Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
 """
-import os, json, re, logging, threading, signal
+import os, json, re, logging, threading
 import httpx
 from app.database import get_db, PlatformConfig
 
@@ -17,16 +17,10 @@ TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to 
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
 
-def _handle_signal(signum, frame):
-    """Set the shutdown flag so in-flight LLM calls can detect it and abort."""
-    _shutdown_event.set()
+# _shutdown_event is set externally by main.py lifespan on shutdown
 
-# Register graceful shutdown handlers (safe to call multiple times)
-try:
-    signal.signal(signal.SIGINT,  _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-except (OSError, ValueError):
-    pass  # Non-main thread — uvicorn handles this for us
+# NOTE: Do NOT register signal handlers here — uvicorn owns SIGINT/SIGTERM.
+# The _shutdown_event is set by main.py's lifespan shutdown hook instead.
 
 # ── Global serialization lock — local LLMs can't handle concurrent requests ───
 # Using a RLock so the same thread can re-acquire (avoids deadlocks on re-entrant calls)
@@ -219,3 +213,4 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+

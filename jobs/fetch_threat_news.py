@@ -222,4 +222,13 @@ def run():
         db.query(NewsItem).filter(NewsItem.created_date < prune_cutoff).delete()
     
     logger.info(f"[News] Saved {threat_count} threats, {news_count} news items")
+
+    # Notify event bus if new intelligence arrived — triggers immediate signal re-generation
+    if threat_count > 0 or news_count > 0:
+        try:
+            from app.scheduler import notify_new_intelligence
+            notify_new_intelligence()
+        except Exception as e:
+            logger.debug(f"[News] Event notify failed: {e}")
+
     return {'threats': threat_count, 'news': news_count}

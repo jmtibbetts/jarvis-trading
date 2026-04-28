@@ -168,17 +168,24 @@ def portfolio_guardian():
             return
 
         # ── LLM portfolio-level decision ──────────────────────────────────────
+        # Extract all data inside the session to avoid DetachedInstanceError
         with get_db() as db:
-            threats = db.query(ThreatEvent).filter(
-                ThreatEvent.status == "Active"
-            ).order_by(ThreatEvent.created_date.desc()).limit(5).all()
             cutoff_2h = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-            news = db.query(NewsItem).filter(
-                NewsItem.created_date >= cutoff_2h
-            ).order_by(NewsItem.created_date.desc()).limit(8).all()
+            threats = [
+                {"severity": t.severity, "title": t.title}
+                for t in db.query(ThreatEvent).filter(
+                    ThreatEvent.status == "Active"
+                ).order_by(ThreatEvent.created_date.desc()).limit(5).all()
+            ]
+            news = [
+                {"sentiment": n.sentiment, "title": n.title}
+                for n in db.query(NewsItem).filter(
+                    NewsItem.created_date >= cutoff_2h
+                ).order_by(NewsItem.created_date.desc()).limit(8).all()
+            ]
 
-        threat_ctx = "\n".join(f"[{t.severity}] {t.title}" for t in threats) or "None"
-        news_ctx   = "\n".join(f"[{n.sentiment}] {n.title}" for n in news) or "None"
+        threat_ctx = "\n".join(f"[{t['severity']}] {t['title']}" for t in threats) or "None"
+        news_ctx   = "\n".join(f"[{n['sentiment']}] {n['title']}" for n in news) or "None"
         pos_ctx    = "\n".join(
             f"  {p.symbol}: {float(p.unrealized_plpc or 0)*100:+.1f}% | MV=${float(p.market_value or 0):,.0f}"
             for p in positions

@@ -100,23 +100,26 @@ def alert_critical_threats(token, chat_id):
         return
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
     with get_db() as db:
-        threats = db.query(ThreatEvent).filter(
-            ThreatEvent.status == "Active",
-            ThreatEvent.severity.in_(["Critical", "High"]),
-            ThreatEvent.published_at >= cutoff
-        ).order_by(ThreatEvent.published_at.desc()).limit(5).all()
+        threats = [
+            {"id": t.id, "severity": t.severity, "country": t.country or "", "title": t.title or "", "source_url": t.source_url or ""}
+            for t in db.query(ThreatEvent).filter(
+                ThreatEvent.status == "Active",
+                ThreatEvent.severity.in_(["Critical", "High"]),
+                ThreatEvent.published_at >= cutoff
+            ).order_by(ThreatEvent.published_at.desc()).limit(5).all()
+        ]
 
-    to_alert = [t for t in threats if t.id not in _alerted_threats]
+    to_alert = [t for t in threats if t["id"] not in _alerted_threats]
     if not to_alert:
         return
 
     lines = [f"⚠️ <b>Threat Alert ({len(to_alert)})</b>"]
     for t in to_alert:
-        em = "🔴" if t.severity == "Critical" else "🟠"
-        lines.append(f"{em} [{t.severity}] {t.country}: {t.title[:100]}")
-        if t.source_url:
-            lines.append(f"   🔗 {t.source_url[:80]}")
-        _alerted_threats.add(t.id)
+        em = "🔴" if t["severity"] == "Critical" else "🟠"
+        lines.append(f"{em} [{t['severity']}] {t['country']}: {t['title'][:100]}")
+        if t["source_url"]:
+            lines.append(f"   🔗 {t['source_url'][:80]}")
+        _alerted_threats.add(t["id"])
 
     if len(_alerted_threats) > 500:
         _alerted_threats = set(list(_alerted_threats)[-300:])
@@ -130,14 +133,17 @@ def alert_position_updates(token, chat_id):
         return
     try:
         with get_db() as db:
-            positions = db.query(Position).all()
+            positions = [
+                {"symbol": p.symbol, "unrealized_plpc": p.unrealized_plpc or 0, "unrealized_pl": p.unrealized_pl or 0}
+                for p in db.query(Position).all()
+            ]
         notable = []
         for p in positions:
-            plpc = p.unrealized_plpc or 0
+            plpc = p["unrealized_plpc"]
             if plpc >= 10:
-                notable.append(f"🚀 <b>{p.symbol}</b> +{plpc:.1f}% (${p.unrealized_pl:.2f}) — consider taking profit")
+                notable.append(f"🚀 <b>{p['symbol']}</b> +{plpc:.1f}% (${p['unrealized_pl']:.2f}) — consider taking profit")
             elif plpc <= -7:
-                notable.append(f"🛑 <b>{p.symbol}</b> {plpc:.1f}% (${p.unrealized_pl:.2f}) — approaching stop-loss")
+                notable.append(f"🛑 <b>{p['symbol']}</b> {plpc:.1f}% (${p['unrealized_pl']:.2f}) — approaching stop-loss")
         if notable:
             send(token, chat_id, "📊 <b>Position Alert</b>\n" + "\n".join(notable))
     except Exception as e:
@@ -150,42 +156,54 @@ def handle(cmd, chat_id, token):
 
     if base in ("/signals", "/signal"):
         with get_db() as db:
-            sigs = db.query(TradingSignal).filter(TradingSignal.status == "Active").order_by(
-                TradingSignal.confidence.desc()
-            ).limit(10).all()
+            sigs = [
+                {"asset_symbol": s.asset_symbol, "direction": s.direction,
+                 "confidence": s.confidence or 0, "composite_score": s.composite_score,
+                 "entry_price": s.entry_price or 0, "target_price": s.target_price or 0, "stop_loss": s.stop_loss or 0}
+                for s in db.query(TradingSignal).filter(TradingSignal.status == "Active").order_by(
+                    TradingSignal.confidence.desc()
+                ).limit(10).all()
+            ]
         if not sigs:
             send(token, chat_id, "No active signals."); return
         lines = [f"<b>🎯 Signals ({len(sigs)})</b>"]
         for s in sigs:
-            sc = s.composite_score or s.confidence or 0
-            em = "🟢" if s.direction == "Long" else "🔵"
-            lines.append(f"{em} <b>{s.asset_symbol}</b> {s.direction} | Score:{sc:.0f}%\n   ${s.entry_price:.2f}→${s.target_price:.2f} SL${s.stop_loss:.2f}")
+            sc = s["composite_score"] or s["confidence"]
+            em = "🟢" if s["direction"] == "Long" else "🔵"
+            lines.append(f"{em} <b>{s['asset_symbol']}</b> {s['direction']} | Score:{sc:.0f}%\n   ${s['entry_price']:.2f}→${s['target_price']:.2f} SL${s['stop_loss']:.2f}")
         send(token, chat_id, "\n".join(lines))
 
     elif base in ("/positions", "/pos"):
         with get_db() as db:
-            pos = db.query(Position).all()
+            pos = [
+                {"symbol": p.symbol, "qty": p.qty or 0, "market_value": p.market_value or 0,
+                 "unrealized_pl": p.unrealized_pl or 0, "unrealized_plpc": p.unrealized_plpc or 0}
+                for p in db.query(Position).all()
+            ]
         if not pos:
             send(token, chat_id, "No open positions."); return
-        tpl = sum(p.unrealized_pl or 0 for p in pos)
-        tmv = sum(p.market_value or 0 for p in pos)
+        tpl = sum(p["unrealized_pl"] for p in pos)
+        tmv = sum(p["market_value"] for p in pos)
         lines = [f"<b>📊 Positions ({len(pos)}) MV:${tmv:.0f} P&L:${tpl:+.2f}</b>"]
         for p in pos:
-            em = "🟢" if (p.unrealized_pl or 0) >= 0 else "🔴"
-            lines.append(f"{em} <b>{p.symbol}</b> x{p.qty:.4g} ${p.market_value:.0f} P&L:${p.unrealized_pl:.2f}({p.unrealized_plpc:.1f}%)")
+            em = "🟢" if p["unrealized_pl"] >= 0 else "🔴"
+            lines.append(f"{em} <b>{p['symbol']}</b> x{p['qty']:.4g} ${p['market_value']:.0f} P&L:${p['unrealized_pl']:.2f}({p['unrealized_plpc']:.1f}%)")
         send(token, chat_id, "\n".join(lines))
 
     elif base in ("/threats", "/threat"):
         with get_db() as db:
-            threats = db.query(ThreatEvent).filter(ThreatEvent.status == "Active").order_by(
-                ThreatEvent.published_at.desc()
-            ).limit(8).all()
+            threats = [
+                {"severity": t.severity, "country": t.country or "", "title": t.title or ""}
+                for t in db.query(ThreatEvent).filter(ThreatEvent.status == "Active").order_by(
+                    ThreatEvent.published_at.desc()
+                ).limit(8).all()
+            ]
         if not threats:
             send(token, chat_id, "No active threats."); return
         lines = [f"<b>⚠️ Threats ({len(threats)})</b>"]
         for t in threats:
-            em = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}.get(t.severity, "⚪")
-            lines.append(f"{em} [{t.severity}] {t.country}: {t.title[:80]}")
+            em = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}.get(t["severity"], "⚪")
+            lines.append(f"{em} [{t['severity']}] {t['country']}: {t['title'][:80]}")
         send(token, chat_id, "\n".join(lines))
 
     elif base in ("/regime", "/market"):
@@ -231,15 +249,19 @@ def handle(cmd, chat_id, token):
     elif base == "/perf":
         try:
             with get_db() as db:
-                closed = db.query(TradingSignal).filter(
-                    TradingSignal.status.in_(["Closed", "Executed"])
-                ).order_by(TradingSignal.updated_date.desc()).limit(20).all()
+                closed = [
+                    {"entry_price": s.entry_price, "target_price": s.target_price, "stop_loss": s.stop_loss}
+                    for s in db.query(TradingSignal).filter(
+                        TradingSignal.status.in_(["Closed", "Executed"])
+                    ).order_by(TradingSignal.updated_date.desc()).limit(20).all()
+                ]
             if not closed:
                 send(token, chat_id, "No closed trades yet."); return
             wins = losses = total_rr = 0
             for s in closed:
-                if s.entry_price and s.target_price and s.stop_loss and s.entry_price > s.stop_loss:
-                    rr = (s.target_price - s.entry_price) / (s.entry_price - s.stop_loss)
+                ep = s["entry_price"]; tp = s["target_price"]; sl = s["stop_loss"]
+                if ep and tp and sl and ep > sl:
+                    rr = (tp - ep) / (ep - sl)
                     total_rr += rr
                     wins += 1 if rr >= 1 else 0
                     losses += 1 if rr < 1 else 0

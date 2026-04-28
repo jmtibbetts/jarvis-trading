@@ -3,7 +3,7 @@ Jarvis Trading AI — Python Edition v6.0
 FastAPI + APScheduler + SQLAlchemy + TA-Lib
 Run: python main.py
 """
-import os, logging, sys, threading, time
+import os, logging, sys, threading, time, signal
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -36,7 +36,7 @@ scheduler = None
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    """Startup / shutdown — jobs fire immediately via next_run_time=now in scheduler."""
+    """Startup / shutdown."""
     global scheduler
 
     # ── Startup ────────────────────────────────────────────────────────────────
@@ -50,25 +50,16 @@ async def lifespan(app_: FastAPI):
     # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("[Server] Shutdown initiated...")
 
-    # Signal all in-flight LLM calls to abort (so they don't block thread join)
+    # Signal any in-flight LLM calls to abort
     try:
         from lib.lmstudio import _shutdown_event
         _shutdown_event.set()
     except Exception:
         pass
 
+    # Shut down scheduler without waiting for running jobs
     if scheduler:
-        # wait=False: don't block on running jobs — they'll see the shutdown flag
         scheduler.shutdown(wait=False)
-
-    # Force-exit after 3s if threads are still hanging (e.g. blocked LLM call)
-    def _force_exit():
-        time.sleep(3)
-        logger.warning("[Server] Force-exiting — threads did not stop cleanly")
-        os._exit(0)
-
-    t = threading.Thread(target=_force_exit, daemon=True)
-    t.start()
 
     logger.info("[Server] Shutdown complete")
 

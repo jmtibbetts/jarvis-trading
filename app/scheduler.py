@@ -344,8 +344,9 @@ def create_scheduler() -> BackgroundScheduler:
                   'interval', minutes=5, id='positions',
                   next_run_time=now + timedelta(seconds=30))
 
-    scheduler.add_job(make_job_runner('paper', paper_run),
+    sched.add_job(make_job_runner('paper', paper_run),
                   'interval', minutes=15, id='paper_trading',
+                  next_run_time=now + timedelta(minutes=5),
                   replace_existing=True, max_instances=1, misfire_grace_time=180)
 
     # Portfolio guardian every 5 min (offset from positions by 2.5 min)
@@ -359,3 +360,4 @@ def create_scheduler() -> BackgroundScheduler:
 
     logger.info("[Scheduler] v2.0 — all jobs registered (event-driven + guardian active)")
     return sched
+

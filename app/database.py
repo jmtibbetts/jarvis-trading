@@ -160,6 +160,8 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     # Run migrations for any missing columns
     _migrate_columns()
+    # Seed paper portfolio if missing
+    _seed_paper_portfolio()
     print("[DB] Schema initialized")
 
 def _migrate_columns():
@@ -187,6 +189,29 @@ def _migrate_columns():
                         print(f"[DB] Migrated: added {table}.{col_name}")
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
+
+
+def _seed_paper_portfolio():
+    """Ensure a PaperPortfolio row exists with starting capital.
+    Safe to call on every startup — only inserts if the table is empty."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT cash FROM paper_portfolio LIMIT 1")).fetchone()
+            if row is None:
+                conn.execute(text(
+                    "INSERT INTO paper_portfolio (id, cash, total_trades, winning_trades, realized_pnl, updated_at) "
+                    "VALUES (:id, :cash, 0, 0, 0.0, :ts)"
+                ), {"id": str(uuid.uuid4()), "cash": 100000.0, "ts": datetime.now(timezone.utc).isoformat()})
+                conn.commit()
+                print("[DB] Paper portfolio seeded with $100,000 starting capital")
+            elif float(row[0]) == 0.0:
+                # Corrupted zero-cash row — reset it
+                conn.execute(text("UPDATE paper_portfolio SET cash=100000.0, updated_at=:ts"),
+                             {"ts": datetime.now(timezone.utc).isoformat()})
+                conn.commit()
+                print("[DB] Paper portfolio cash was $0 — reset to $100,000")
+    except Exception as e:
+        print(f"[DB] Paper portfolio seed warning: {e}")
 
 
 # ── Paper Trading Models ──────────────────────────────────────────────────────
@@ -246,3 +271,4 @@ class PaperPortfolio(Base):
     winning_trades = Column(Float, default=0)
     realized_pnl   = Column(Float, default=0.0)
     updated_at     = Column(String, default=now_iso)
+

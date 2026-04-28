@@ -193,6 +193,29 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         }
 
 def close_position(symbol: str):
-    sym, _ = normalize_symbol(symbol)
+    """Close a position by symbol. Alpaca REST requires no-slash for crypto (BTCUSD not BTC/USD)."""
     client = get_trading_client()
-    return client.close_position(sym)
+    # normalize_symbol returns BTC/USD for crypto — but Alpaca close_position endpoint
+    # needs the no-slash form. Strip the slash explicitly for the API call.
+    s = symbol.upper().strip().replace("/", "")
+    return client.close_position(s)
+
+
+def cancel_open_orders_for_symbol(symbol: str):
+    """Cancel all open orders for a symbol — needed before closing a position that has bracket legs."""
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        client = get_trading_client()
+        s = symbol.upper().strip().replace("/", "")
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[s]))
+        cancelled = 0
+        for o in open_orders:
+            try:
+                client.cancel_order_by_id(o.id)
+                cancelled += 1
+            except Exception:
+                pass
+        return cancelled
+    except Exception:
+        return 0

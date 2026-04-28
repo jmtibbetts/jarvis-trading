@@ -31,19 +31,40 @@ if not exist .venv (
 )
 call .venv\Scripts\activate.bat
 
-:: ── Upgrade pip ───────────────────────────────────────────────
-python -m pip install --upgrade pip --quiet
-
-:: ── Install base requirements ─────────────────────────────────
+:: ── Smart dependency check ────────────────────────────────────
+:: Only run pip install if requirements.txt changed since last install,
+:: or if the sentinel file doesn't exist yet.
 echo.
-echo  Installing base dependencies...
-pip install -r requirements.txt --quiet
-if %errorlevel% neq 0 (
-    echo  ERROR: Base dependency install failed. Run with verbose:
-    echo    pip install -r requirements.txt
-    pause & exit /b 1
+set SENTINEL=.venv\.deps_installed
+set NEEDS_INSTALL=0
+
+if not exist "%SENTINEL%" (
+    set NEEDS_INSTALL=1
+    echo  First run — installing dependencies...
+) else (
+    :: Compare requirements.txt modified date to sentinel date
+    for /f %%a in ('forfiles /p "%~dp0" /m requirements.txt /c "cmd /c echo @fdate @ftime" 2^>nul') do set REQ_DATE=%%a
+    for /f %%a in ('forfiles /p "%~dp0\.venv" /m .deps_installed /c "cmd /c echo @fdate @ftime" 2^>nul') do set SENT_DATE=%%a
+    if "!REQ_DATE!" neq "!SENT_DATE!" (
+        set NEEDS_INSTALL=1
+        echo  requirements.txt changed — updating dependencies...
+    ) else (
+        echo  Dependencies up to date ^(delete .venv\.deps_installed to force reinstall^).
+    )
 )
-echo  Base dependencies OK.
+
+if !NEEDS_INSTALL! equ 1 (
+    python -m pip install --upgrade pip --quiet
+    pip install -r requirements.txt --quiet
+    if %errorlevel% neq 0 (
+        echo  ERROR: Dependency install failed. Run with verbose:
+        echo    pip install -r requirements.txt
+        pause & exit /b 1
+    )
+    :: Write sentinel with same timestamp logic (just touch the file)
+    echo installed > "%SENTINEL%"
+    echo  Dependencies installed OK.
+)
 
 :: ── TA-Lib (pre-built wheel for Python 3.12 / Win x64) ───────
 echo.
@@ -67,6 +88,7 @@ if %errorlevel% neq 0 (
         pip install ta==0.11.0 --quiet
     ) else (
         echo  TA-Lib 0.6.8 installed successfully!
+        echo installed > "%SENTINEL%"
     )
 ) else (
     echo  TA-Lib already installed.

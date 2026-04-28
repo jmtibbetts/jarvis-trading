@@ -1,7 +1,8 @@
 """
 Job: Execute Signals v6.5
-- generate_signals owns the PendingApproval queue (not execute)
-- execute promotes PendingApproval → Active when market opens
+- generate_signals sets status=Active when market is open, PendingApproval when closed
+- execute promotes PendingApproval → Active at run-time if market has since opened
+- Once status=Active, execute fires immediately — no manual approval needed
 - No more duplicate PendingApproval writes from execute job
 """
 import logging
@@ -171,12 +172,15 @@ def run():
                 logger.info(f"[Execute] Skip {sym} — already held")
                 continue
 
-            # Skip equities when market is closed — generate_signals owns the queue
+            # Market-hours gate is enforced by generate_signals (status=PendingApproval when closed).
+            # By the time a signal reaches here with status=Active, it is safe to execute.
+            # Extra guard: if somehow an equity Active signal exists but market is NOW closed, skip it.
             if not crypto:
-                weekday    = now_utc.weekday()
-                market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
-                if not market_open:
-                    logger.debug(f"[Execute] Skip {sym} — equity, market closed")
+                now_check = datetime.now(timezone.utc)
+                wd = now_check.weekday()
+                mkt_now = wd < 5 and (now_check.hour > 13 or (now_check.hour == 13 and now_check.minute >= 30)) and now_check.hour < 20
+                if not mkt_now:
+                    logger.debug(f"[Execute] Skip {sym} — equity, market just closed")
                     continue
 
             entry  = float(sig.get("entry_price")  or 0)

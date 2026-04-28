@@ -10,6 +10,27 @@ import logging, threading
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
+import concurrent.futures as _cf
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """APScheduler executor that uses daemon threads — exits cleanly on Ctrl+C."""
+    def _create_executor(self, max_workers):
+        # Override to force daemon=True on all worker threads so Python's
+        # atexit/threading._shutdown doesn't hang waiting for them on exit.
+        executor = _cf.ThreadPoolExecutor(max_workers=max_workers,
+                                          thread_name_prefix='apscheduler')
+        # Patch existing threads created before our override takes effect
+        for t in executor._threads:
+            t.daemon = True
+        # Patch the initializer to make future threads daemon
+        _orig_init = executor._initializer
+        def _daemon_init(*args, **kwargs):
+            import threading
+            threading.current_thread().daemon = True
+            if _orig_init:
+                _orig_init(*args, **kwargs)
+        executor._initializer = _daemon_init
+        return executor
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +324,7 @@ Respond ONLY with valid JSON:
 
 
 def create_scheduler() -> BackgroundScheduler:
-    executors = {'default': ThreadPoolExecutor(max_workers=6)}
+    executors = {'default': _DaemonThreadPoolExecutor(max_workers=6)}
     sched = BackgroundScheduler(executors=executors, timezone='UTC')
 
     from jobs.fetch_market_data import run as market_run
@@ -360,4 +381,5 @@ def create_scheduler() -> BackgroundScheduler:
 
     logger.info("[Scheduler] v2.0 — all jobs registered (event-driven + guardian active)")
     return sched
+
 

@@ -1,8 +1,9 @@
 """
-Job: Manage Positions v6.3
-- Crypto trailing stops replaced with limit sell orders (Alpaca crypto only supports market/limit)
-- Equity positions still use native TrailingStopOrderRequest
-- Cancels existing open orders before placing new protective order
+Job: Manage Positions v6.4
+- Separate tier tables for crypto vs equity
+- Crypto: stop at -4%, trail at +2%/+5%, take profit at +10%
+- Equity: stop at -5%, trail at +5%/+10%, take profit at +15%
+- Crypto trails use tighter 3%/5% vs equity 5%/8%
 """
 import logging, uuid
 from datetime import datetime, timezone
@@ -11,15 +12,32 @@ from lib.alpaca_client import get_positions, get_account, close_position, get_tr
 
 logger = logging.getLogger(__name__)
 
-TIERS = [
-    {"min_gain": 15.0, "max_gain": None,  "action": "close",         "label": ">=15% -- close"},
-    {"min_gain": 10.0, "max_gain": 15.0,  "action": "trail_tight",   "label": "10-15% -- trail 5%"},
-    {"min_gain":  5.0, "max_gain": 10.0,  "action": "trail_moderate", "label": "5-10% -- trail 8%"},
-    {"min_gain": None, "max_gain": -8.0,  "action": "close",         "label": "<=-8% -- cut loss"},
+# ── Tier thresholds ────────────────────────────────────────────────────────────
+# Separate tiers for crypto (24/7, volatile) vs equity (session-based, calmer)
+# Crypto: tighter stops, smaller profit targets (moves fast, can reverse fast)
+# Equity: wider stops to survive intraday noise, bigger targets for trend plays
+
+TIERS_CRYPTO = [
+    {"min_gain": 10.0, "max_gain": None,  "action": "close",          "label": ">=10% -- take profit"},
+    {"min_gain":  5.0, "max_gain": 10.0,  "action": "trail_tight",    "label": "5-10% -- trail 3%"},
+    {"min_gain":  2.0, "max_gain":  5.0,  "action": "trail_moderate",  "label": "2-5% -- trail 5%"},
+    {"min_gain": None, "max_gain": -4.0,  "action": "close",          "label": "<=-4% -- cut loss"},
 ]
 
-def _tier(plpc):
-    for t in TIERS:
+TIERS_EQUITY = [
+    {"min_gain": 15.0, "max_gain": None,  "action": "close",          "label": ">=15% -- take profit"},
+    {"min_gain": 10.0, "max_gain": 15.0,  "action": "trail_tight",    "label": "10-15% -- trail 5%"},
+    {"min_gain":  5.0, "max_gain": 10.0,  "action": "trail_moderate",  "label": "5-10% -- trail 8%"},
+    {"min_gain": None, "max_gain": -5.0,  "action": "close",          "label": "<=-5% -- cut loss"},
+]
+
+# Legacy alias — not used directly anymore but keep for any external references
+TIERS = TIERS_EQUITY
+
+def _tier(plpc: float, is_crypto: bool = False):
+    """Return the matching tier dict, or None if in the hold zone."""
+    tiers = TIERS_CRYPTO if is_crypto else TIERS_EQUITY
+    for t in tiers:
         mg, xg = t["min_gain"], t["max_gain"]
         if mg is not None and xg is not None:
             if mg <= plpc < xg: return t
@@ -159,7 +177,7 @@ def run():
                 updated_at=now_iso
             ))
 
-            tier = _tier(plpc)
+            tier = _tier(plpc, is_crypto=_is_crypto(sym))
             if tier is None:
                 logger.info(f"[Positions] {sym:12} holding — no tier action ({plpc:+.1f}%)")
                 continue
@@ -180,7 +198,11 @@ def run():
                     logger.error(f"[Positions] Close {sym} failed: {e}")
 
             else:
-                trail_pct = 5.0 if tier["action"] == "trail_tight" else 8.0
+                # Crypto uses tighter trails; equity uses wider ones
+                if _is_crypto(sym):
+                    trail_pct = 3.0 if tier["action"] == "trail_tight" else 5.0
+                else:
+                    trail_pct = 5.0 if tier["action"] == "trail_tight" else 8.0
                 logger.info(
                     f"[Positions] ⟳ Trail {sym} @ {plpc:+.1f}% — "
                     f"{'limit-stop' if _is_crypto(sym) else 'trailing stop'} {trail_pct}% | {tier['label']}"

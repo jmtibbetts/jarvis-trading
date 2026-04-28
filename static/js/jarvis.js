@@ -1093,3 +1093,181 @@ refreshRegimeBadge();
 // Auto-refresh every 60s
 setInterval(refreshAll, 60000);
 
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAPER TRADING
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadPaperTab() {
+  try {
+    const data = await apiGet('/paper/summary');
+    const p    = data.portfolio;
+
+    // KPIs
+    const retPct = p.total_return_pct;
+    document.getElementById('paperEquity').textContent     = '$' + p.equity.toLocaleString('en-US', {maximumFractionDigits:0});
+    const retEl = document.getElementById('paperReturn');
+    retEl.textContent = (retPct >= 0 ? '+' : '') + retPct.toFixed(2) + '%';
+    retEl.className   = 'fs-5 fw-bold ' + (retPct >= 0 ? 'text-success' : 'text-danger');
+
+    const realEl = document.getElementById('paperRealizedPnl');
+    realEl.textContent = (p.realized_pnl >= 0 ? '+$' : '-$') + Math.abs(p.realized_pnl).toLocaleString('en-US', {maximumFractionDigits:2});
+    realEl.className   = 'fs-5 fw-bold ' + (p.realized_pnl >= 0 ? 'text-success' : 'text-danger');
+
+    document.getElementById('paperWinRate').textContent    = p.win_rate + '%';
+    const opEl = document.getElementById('paperOpenPnl');
+    opEl.textContent = (p.open_pnl >= 0 ? '+$' : '-$') + Math.abs(p.open_pnl).toLocaleString('en-US', {maximumFractionDigits:2});
+    opEl.className   = 'fs-5 fw-bold ' + (p.open_pnl >= 0 ? 'text-success' : 'text-danger');
+    document.getElementById('paperCash').textContent       = '$' + p.cash.toLocaleString('en-US', {maximumFractionDigits:0});
+    document.getElementById('paperMargin').textContent     = '$' + p.margin_in_use.toLocaleString('en-US', {maximumFractionDigits:0});
+    document.getElementById('paperTrades').textContent     = p.total_trades + ' (' + p.winning_trades + ' W)';
+
+    // Open positions
+    const posBody = document.getElementById('paperPositionsTbody');
+    if (!data.positions || data.positions.length === 0) {
+      posBody.innerHTML = '<tr><td colspan="14" class="text-muted text-center">No open paper positions</td></tr>';
+    } else {
+      posBody.innerHTML = data.positions.map(pos => {
+        const pnlCls = pos.unrealized_pnl >= 0 ? 'text-success' : 'text-danger';
+        const dirBadge = paperDirBadge(pos.direction);
+        const sideBadge = pos.side === 'long'
+          ? '<span class="badge bg-success">LONG</span>'
+          : '<span class="badge bg-danger">SHORT</span>';
+        return `<tr>
+          <td class="fw-semibold text-warning">${pos.symbol}</td>
+          <td>${dirBadge}</td>
+          <td>${sideBadge}</td>
+          <td>${pos.leverage}×</td>
+          <td>${pos.qty.toFixed(4)}</td>
+          <td>$${pos.entry_price.toFixed(4)}</td>
+          <td>$${pos.current_price.toFixed(4)}</td>
+          <td class="text-success">$${pos.target_price.toFixed(4)}</td>
+          <td class="text-danger">$${pos.stop_loss.toFixed(4)}</td>
+          <td>$${pos.notional.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+          <td class="${pnlCls}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(2)}</td>
+          <td class="${pnlCls}">${pos.unrealized_pct >= 0 ? '+' : ''}${pos.unrealized_pct.toFixed(2)}%</td>
+          <td class="text-muted">${relTime(pos.opened_at)}</td>
+          <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Trade history
+    const trBody = document.getElementById('paperTradesTbody');
+    if (!data.trades || data.trades.length === 0) {
+      trBody.innerHTML = '<tr><td colspan="10" class="text-muted text-center">No completed trades</td></tr>';
+    } else {
+      trBody.innerHTML = data.trades.map(t => {
+        const pnlCls = t.realized_pnl >= 0 ? 'text-success' : 'text-danger';
+        const reasonBadge = paperReasonBadge(t.close_reason);
+        return `<tr>
+          <td class="fw-semibold text-warning">${t.symbol}</td>
+          <td>${paperDirBadge(t.direction)}</td>
+          <td>${t.leverage}×</td>
+          <td>$${t.entry_price.toFixed(4)}</td>
+          <td>$${t.exit_price.toFixed(4)}</td>
+          <td class="${pnlCls} fw-semibold">${t.realized_pnl >= 0 ? '+' : ''}$${t.realized_pnl.toFixed(2)}</td>
+          <td class="${pnlCls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+          <td>${reasonBadge}</td>
+          <td class="text-muted small">${relTime(t.opened_at)}</td>
+          <td class="text-muted small">${relTime(t.closed_at)}</td>
+        </tr>`;
+      }).join('');
+    }
+  } catch (e) {
+    console.error('[Paper] loadPaperTab error:', e);
+  }
+}
+
+function paperDirBadge(dir) {
+  const map = {
+    'Long':             '<span class="badge bg-success">📈 Long 1×</span>',
+    'Long_Leveraged':   '<span class="badge bg-primary">🚀 Long 2×</span>',
+    'Short':            '<span class="badge bg-danger">📉 Short 1×</span>',
+    'Short_Leveraged':  '<span class="badge" style="background:#ff6600">🔻 Short 2×</span>',
+  };
+  return map[dir] || `<span class="badge bg-secondary">${dir}</span>`;
+}
+
+function paperReasonBadge(r) {
+  const map = {
+    'stop_loss':   '<span class="badge bg-danger">Stop Loss</span>',
+    'take_profit': '<span class="badge bg-success">Take Profit</span>',
+    'manual':      '<span class="badge bg-secondary">Manual</span>',
+    'margin_call': '<span class="badge bg-warning text-dark">Margin Call</span>',
+  };
+  return map[r] || `<span class="badge bg-secondary">${r||'—'}</span>`;
+}
+
+async function paperOpenPosition() {
+  const sym   = document.getElementById('paperSym').value.trim().toUpperCase();
+  const dir   = document.getElementById('paperDir').value;
+  const entry = parseFloat(document.getElementById('paperEntry').value) || null;
+  const tgt   = parseFloat(document.getElementById('paperTarget').value) || null;
+  const stp   = parseFloat(document.getElementById('paperStop').value) || null;
+  if (!sym) { alert('Enter a symbol'); return; }
+  try {
+    const res = await apiPost('/paper/open', {
+      symbol: sym, paper_direction: dir, asset_class: sym.includes('/') ? 'Crypto' : 'Equity',
+      entry_price: entry, target_price: tgt, stop_loss: stp
+    });
+    if (res.ok) {
+      showToast(`✅ Paper ${dir} opened on ${sym}`);
+      loadPaperTab();
+      document.getElementById('paperSym').value = '';
+    } else {
+      alert('Error: ' + (res.error || JSON.stringify(res)));
+    }
+  } catch(e) { alert('Error: ' + e); }
+}
+
+async function paperClose(posId) {
+  if (!confirm('Close this paper position at market price?')) return;
+  try {
+    const res = await apiPost(`/paper/close/${posId}`);
+    if (res.ok) {
+      const sign = res.pnl >= 0 ? '+' : '';
+      showToast(`✅ Closed ${res.symbol} | P&L ${sign}$${res.pnl.toFixed(2)} (${sign}${res.pnl_pct.toFixed(2)}%)`);
+      loadPaperTab();
+    } else {
+      alert('Error: ' + (res.error || JSON.stringify(res)));
+    }
+  } catch(e) { alert('Error: ' + e); }
+}
+
+async function paperRunMTM() {
+  try {
+    const res = await apiPost('/paper/run-mtm');
+    const closed = res.closed || [];
+    let msg = `✅ MTM updated ${res.updated || 0} positions`;
+    if (closed.length) msg += ` | Auto-closed: ${closed.map(c => c.symbol + ' (' + c.reason + ')').join(', ')}`;
+    showToast(msg);
+    loadPaperTab();
+  } catch(e) { alert('Error: ' + e); }
+}
+
+async function paperReset() {
+  if (!confirm('⚠️ RESET paper account to $100,000? All positions and trade history will be erased.')) return;
+  try {
+    const res = await apiPost('/paper/reset');
+    showToast('✅ Paper account reset to $100,000');
+    loadPaperTab();
+  } catch(e) { alert('Error: ' + e); }
+}
+
+// Expose paper-execute on signal cards
+async function paperExecuteSignal(signalId, symbol) {
+  const dir = prompt(`Paper trade direction for ${symbol}?\nOptions: Long, Long_Leveraged, Short, Short_Leveraged`, 'Short');
+  if (!dir) return;
+  try {
+    const res = await apiPost(`/signals/${signalId}/paper-execute?direction=${encodeURIComponent(dir)}`);
+    if (res.ok) {
+      showToast(`✅ Paper ${dir} opened for ${symbol}`);
+      loadPaperTab();
+    } else {
+      alert('Error: ' + (res.error || JSON.stringify(res)));
+    }
+  } catch(e) { alert('Error: ' + e); }
+}

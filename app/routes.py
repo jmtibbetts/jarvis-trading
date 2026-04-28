@@ -652,3 +652,177 @@ def _config_dict(c):
             "created_date":c.created_date,"updated_date":c.updated_date}
 
 
+
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Paper Trading Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+class PaperOpenRequest(BaseModel):
+    symbol:          str
+    asset_class:     Optional[str] = "Equity"
+    paper_direction: Optional[str] = "Long"   # Long | Long_Leveraged | Short | Short_Leveraged
+    entry_price:     Optional[float] = None
+    target_price:    Optional[float] = None
+    stop_loss:       Optional[float] = None
+    signal_id:       Optional[str]   = None
+
+@router.get("/paper/summary")
+def get_paper_summary_route():
+    """Full paper portfolio summary — positions, trades, equity curve."""
+    try:
+        from lib.paper_engine import get_paper_summary
+        return get_paper_summary()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.post("/paper/open")
+def paper_open(body: PaperOpenRequest):
+    """Manually open a paper position."""
+    try:
+        from lib.paper_engine import open_paper_position
+        from app.database import MarketAsset
+        price = body.entry_price
+        if not price:
+            with get_db() as db:
+                a = db.query(MarketAsset).filter(MarketAsset.symbol == body.symbol).first()
+                if a: price = float(a.price)
+        if not price:
+            raise HTTPException(400, f"No price available for {body.symbol}")
+        signal = {
+            "id": body.signal_id, "asset_symbol": body.symbol, "asset_class": body.asset_class,
+            "paper_direction": body.paper_direction, "direction": body.paper_direction,
+            "entry_price": price, "target_price": body.target_price, "stop_loss": body.stop_loss,
+        }
+        result = open_paper_position(signal, current_price=price)
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        return result
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.post("/paper/close/{pos_id}")
+def paper_close(pos_id: str, price: Optional[float] = None):
+    """Close a paper position at current market price."""
+    try:
+        from lib.paper_engine import close_paper_position
+        from app.database import PaperPosition, MarketAsset
+        close_price = price
+        if not close_price:
+            with get_db() as db:
+                pos = db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()
+                if pos:
+                    sym = pos.symbol
+                    a = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
+                    if a: close_price = float(a.price or pos.current_price or pos.entry_price)
+        if not close_price:
+            raise HTTPException(400, "No close price available")
+        return close_paper_position(pos_id, close_price, reason="manual")
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.post("/paper/reset")
+def paper_reset():
+    """Reset paper portfolio to starting capital ($100k). Wipes all positions and trades."""
+    try:
+        from app.database import PaperPosition, PaperTrade, PaperPortfolio, new_id, now_iso
+        with get_db() as db:
+            db.query(PaperTrade).delete()
+            db.query(PaperPosition).delete()
+            db.query(PaperPortfolio).delete()
+            db.add(PaperPortfolio(id=new_id(), cash=100000.0, total_trades=0,
+                                  winning_trades=0, realized_pnl=0.0, updated_at=now_iso()))
+        return {"ok": True, "message": "Paper account reset to $100,000"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.post("/paper/run-mtm")
+def paper_run_mtm():
+    """Manually trigger mark-to-market cycle."""
+    try:
+        from lib.paper_engine import mark_to_market
+        with get_db() as db:
+            assets = db.query(MarketAsset).all()
+            prices = {a.symbol: float(a.price) for a in assets if a.price}
+        result = mark_to_market(prices)
+        return {"ok": True, **result}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.get("/paper/positions")
+def get_paper_positions(status: str = "Open"):
+    """List paper positions filtered by status."""
+    try:
+        from app.database import PaperPosition
+        with get_db() as db:
+            q = db.query(PaperPosition)
+            if status != "all": q = q.filter(PaperPosition.status == status)
+            positions = q.order_by(PaperPosition.opened_at.desc()).limit(100).all()
+            return [
+                {
+                    "id": p.id, "symbol": p.symbol, "asset_class": p.asset_class,
+                    "direction": p.direction, "side": p.side, "leverage": p.leverage,
+                    "qty": float(p.qty), "entry_price": float(p.entry_price),
+                    "current_price": float(p.current_price or p.entry_price),
+                    "target_price": float(p.target_price or 0),
+                    "stop_loss": float(p.stop_loss or 0),
+                    "notional": float(p.notional or 0),
+                    "unrealized_pnl": float(p.unrealized_pnl or 0),
+                    "unrealized_pct": float(p.unrealized_pct or 0),
+                    "status": p.status, "opened_at": p.opened_at,
+                }
+                for p in positions
+            ]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.get("/paper/trades")
+def get_paper_trades(limit: int = 100):
+    """List completed paper trades."""
+    try:
+        from app.database import PaperTrade
+        with get_db() as db:
+            trades = db.query(PaperTrade).order_by(PaperTrade.closed_at.desc()).limit(limit).all()
+            return [
+                {
+                    "id": t.id, "symbol": t.symbol, "direction": t.direction,
+                    "leverage": t.leverage, "entry_price": float(t.entry_price),
+                    "exit_price": float(t.exit_price),
+                    "realized_pnl": round(float(t.realized_pnl), 2),
+                    "pnl_pct": round(float(t.pnl_pct), 2),
+                    "close_reason": t.close_reason, "opened_at": t.opened_at, "closed_at": t.closed_at,
+                    "asset_class": t.asset_class,
+                }
+                for t in trades
+            ]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@router.post("/signals/{signal_id}/paper-execute")
+def paper_execute_signal(signal_id: str, direction: str = "Long"):
+    """Send an existing signal to the paper engine with specified direction."""
+    try:
+        from lib.paper_engine import open_paper_position
+        from app.database import MarketAsset
+        with get_db() as db:
+            sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+            if not sig: raise HTTPException(404, "Signal not found")
+            sym = sig.asset_symbol
+            a = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
+            price = float(a.price) if a and a.price else float(sig.entry_price or 0)
+            sig_data = {
+                "id": sig.id, "asset_symbol": sym, "asset_class": sig.asset_class,
+                "paper_direction": direction, "entry_price": price,
+                "target_price": sig.target_price, "stop_loss": sig.stop_loss,
+            }
+
+        result = open_paper_position(sig_data, current_price=price)
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        return result
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(500, str(e))

@@ -1,8 +1,13 @@
 """
-Job: Generate Trading Signals v6.2
+Job: Generate Trading Signals v6.4
 Architecture fix: read TA from cache only (no live OHLCV fetch during signal gen).
 The fetch_market_data job already runs every 15 min and populates ohlcv_cache.
 Signal gen just reads that cache → builds prompts → calls LLM. Fast and lock-friendly.
+
+v6.4 changes:
+- Paper signals (Short, Short_Leveraged, Long_Leveraged) now generated via a dedicated Track E
+- normalize_signal accepts an is_paper flag to skip the Long/Bounce enforcement
+- Paper signals are saved with paper_mode=True and paper_direction set
 """
 import logging, re, uuid
 from datetime import datetime, timezone, timedelta
@@ -15,11 +20,18 @@ logger = logging.getLogger(__name__)
 TRACK_A = ["RTX","LMT","NOC","GD","BA","XOM","CVX","COP","FANG","CEG","GLD","SLV","TLT","SPY","IWM","USO","UNG","GDX","GDXJ"]
 TRACK_B = ["NVDA","AMD","MSFT","GOOGL","AAPL","META","AMZN","AVGO","TSM","ANET","INTC","QCOM","SMCI","VRT","SOXX","QQQ","CRWV","NBIS","PLTR","TSLA","COIN","MSTR","ARM","HOOD"]
 TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD","SUI/USD","RENDER/USD","INJ/USD","NEAR/USD","OP/USD","ARB/USD"]
+# Track E: paper-only universe — best candidates for leveraged/short plays
+TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
 ALL_SYMBOLS = list(dict.fromkeys(TRACK_A + TRACK_B + TRACK_C))
 
 COMMON_TICKERS = {"AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AMD","INTC","QCOM","AVGO","TSM","ARM","SMCI","PLTR","COIN","MSTR","HOOD","RBLX","SNAP","UBER","ABNB","SQ","PYPL","SHOP","NET","CRWD","PANW","ZS","DDOG","SNOW","MDB","AI","SOUN","IONQ","RXRX","ACHR","JOBY","RKLB","ASTS","XOM","CVX","COP","OXY","SLB","HAL","RTX","LMT","NOC","GD","BA","GLD","SLV","GDX","GDXJ","USO","UNG","SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","TLT","IEF","HYG","JPM","BAC","GS","BTC","ETH","SOL","XRP","BNB","AVAX","LINK","DOGE","ADA","AAVE","DOT","ATOM","SUI","RENDER","INJ","NEAR","OP","ARB","MATIC","UNI"}
 CRYPTO_BASES = {"SOL","XRP","BNB","AVAX","LINK","DOGE","ADA","AAVE","DOT","ATOM","SUI","RENDER","INJ","NEAR","OP","ARB","MATIC","UNI","PEPE","LTC"}
 SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Long","confidence":78,"timeframe":"4H","entry_price":875.00,"target_price":920.00,"stop_loss":850.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bullish"}]"""
+
+# Paper signal schema — direction can be Short, Short_Leveraged, Long_Leveraged
+PAPER_SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Short_Leveraged","confidence":72,"timeframe":"4H","entry_price":875.00,"target_price":820.00,"stop_loss":900.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bearish"}]"""
+
+PAPER_DIRECTIONS = {"Short", "Short_Leveraged", "Long_Leveraged", "Long", "Bounce"}
 
 
 def _read_ta_from_cache(symbols: list, timeframes=None) -> dict:
@@ -45,7 +57,6 @@ def _read_ta_from_cache(symbols: list, timeframes=None) -> dict:
         return result
     except Exception as e:
         logger.error(f"[Signals] Cache read failed: {e} — falling back to live fetch")
-        # Last resort: live fetch for a small subset
         try:
             from lib.ohlcv import fetch_batch
             return fetch_batch(symbols[:10], timeframes)
@@ -68,10 +79,10 @@ def extract_opportunistic(threats, news, fixed_symbols):
     return [
         {"symbol": f"{t}/USD" if t in CRYPTO_BASES else t, "is_crypto": t in CRYPTO_BASES}
         for t, cnt in sorted(found.items(), key=lambda x: -x[1]) if cnt >= 1
-    ][:10]  # reduced from 15 to keep prompts manageable
+    ][:10]
 
 
-def normalize_signal(s, ta_profiles, asset_map):
+def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     sym = (s.get("asset_symbol") or s.get("symbol") or s.get("ticker") or "").upper().strip()
     if not sym:
         return None
@@ -82,8 +93,31 @@ def normalize_signal(s, ta_profiles, asset_map):
         s["asset_class"] = "Crypto"
     s["asset_symbol"] = sym
     s["asset_name"] = s.get("asset_name") or sym
-    direction = (s.get("direction") or "Long").capitalize()
-    s["direction"] = "Long" if direction not in ("Bounce", "Long") else direction
+
+    direction = (s.get("direction") or "Long").replace(" ", "_").replace("-", "_")
+
+    if is_paper:
+        # Paper mode: allow all direction types — just normalize the key
+        # Map common variants
+        dir_map = {
+            "Long":            "Long",
+            "Bounce":          "Bounce",
+            "Short":           "Short",
+            "Short_Leveraged": "Short_Leveraged",
+            "Shortleveraged":  "Short_Leveraged",
+            "Long_Leveraged":  "Long_Leveraged",
+            "Longleveraged":   "Long_Leveraged",
+        }
+        direction = dir_map.get(direction.capitalize(), direction)
+        if direction not in PAPER_DIRECTIONS:
+            direction = "Long"
+        s["direction"] = direction
+        s["paper_mode"] = True
+        s["paper_direction"] = direction
+    else:
+        # Live mode: only Long or Bounce
+        d_cap = direction.capitalize()
+        s["direction"] = "Long" if d_cap not in ("Bounce", "Long") else d_cap
 
     ta = ta_profiles.get(sym, {})
     last_price = (
@@ -100,15 +134,27 @@ def normalize_signal(s, ta_profiles, asset_map):
     s["entry_price"] = entry
 
     atr_pct = (((ta.get("4H") or {}).get("atr") or {}).get("pct")) or 2.0
-    stop = float(s.get("stop_loss") or 0)
-    if not stop or stop >= entry:
-        stop = round(entry * (1 - max(atr_pct, 1.5) / 100 * 1.5), 4 if entry < 1 else 2)
-    s["stop_loss"] = stop
 
-    target = float(s.get("target_price") or 0)
-    if not target or target <= entry:
-        target = round(entry * (1 + atr_pct / 100 * 2.5), 4 if entry < 1 else 2)
-    s["target_price"] = target
+    if is_paper and s["direction"] in ("Short", "Short_Leveraged"):
+        # Short: stop ABOVE entry, target BELOW entry
+        stop = float(s.get("stop_loss") or 0)
+        if not stop or stop <= entry:
+            stop = round(entry * (1 + max(atr_pct, 1.5) / 100 * 1.5), 4 if entry < 1 else 2)
+        s["stop_loss"] = stop
+        target = float(s.get("target_price") or 0)
+        if not target or target >= entry:
+            target = round(entry * (1 - atr_pct / 100 * 2.5), 4 if entry < 1 else 2)
+        s["target_price"] = target
+    else:
+        # Long / Long_Leveraged / Bounce: stop BELOW entry, target ABOVE entry
+        stop = float(s.get("stop_loss") or 0)
+        if not stop or stop >= entry:
+            stop = round(entry * (1 - max(atr_pct, 1.5) / 100 * 1.5), 4 if entry < 1 else 2)
+        s["stop_loss"] = stop
+        target = float(s.get("target_price") or 0)
+        if not target or target <= entry:
+            target = round(entry * (1 + atr_pct / 100 * 2.5), 4 if entry < 1 else 2)
+        s["target_price"] = target
 
     s["confidence"] = max(1, min(100, int(s.get("confidence") or 65)))
     s["timeframe"] = s.get("timeframe") or "4H"
@@ -131,16 +177,14 @@ def score_safe(signal, ta_profiles, regime, earnings_set):
 
 
 def run():
-    logger.info("[Signals] Starting signal generation v6.3 (position-aware, event-driven)...")
+    logger.info("[Signals] Starting signal generation v6.4 (paper-enabled, position-aware)...")
 
-    # ── Log which LLM we're hitting ───────────────────────────────────────────
     try:
         cfg = get_llm_config()
         logger.info(f"[Signals] LLM → platform={cfg.get('platform')} url={cfg.get('url')} model={cfg.get('model')}")
     except Exception as e:
         logger.error(f"[Signals] LLM config error: {e}")
 
-    # ── Load context from DB ──────────────────────────────────────────────────
     with get_db() as db:
         threats = [
             {"title": t.title, "description": t.description, "severity": t.severity, "country": t.country}
@@ -156,7 +200,6 @@ def run():
         asset_map = {a.symbol: {"name": a.name, "price": a.price}
                      for a in db.query(MarketAsset).all()}
 
-    # ── Current portfolio positions (so LLM knows what we already hold) ──────
     held_positions = []
     held_symbols   = set()
     try:
@@ -167,7 +210,7 @@ def run():
             plpc = float(p.unrealized_plpc or 0) * 100
             mv   = float(p.market_value or 0)
             held_symbols.add(sym)
-            held_symbols.add(sym.replace("USD", "/USD"))  # also add slash form
+            held_symbols.add(sym.replace("USD", "/USD"))
             held_positions.append({
                 "symbol": sym,
                 "pnl_pct": round(plpc, 2),
@@ -178,22 +221,20 @@ def run():
     except Exception as e:
         logger.warning(f"[Signals] Could not fetch positions for context: {e}")
 
-    logger.info(f"[Signals] Context: {len(threats)} threats, {len(news)} news, {len(asset_map)} assets | holding {len(held_positions)} positions: {[p['symbol'] for p in held_positions]}")
+    logger.info(f"[Signals] Context: {len(threats)} threats, {len(news)} news, {len(asset_map)} assets | holding {len(held_positions)} positions")
 
-    # ── Opportunistic tickers from news ──────────────────────────────────────
     opp = extract_opportunistic(threats, news, ALL_SYMBOLS)
     opp_syms = [o["symbol"] for o in opp if o["symbol"] not in ALL_SYMBOLS]
-    all_syms = ALL_SYMBOLS + opp_syms
+    all_syms = ALL_SYMBOLS + opp_syms + TRACK_E_PAPER
+    all_syms_dedup = list(dict.fromkeys(all_syms))
     logger.info(f"[Signals] {len(opp_syms)} opportunistic tickers: {opp_syms}")
 
-    # ── Read TA from cache (NO live API calls here) ───────────────────────────
-    logger.info(f"[Signals] Reading TA from cache for {len(all_syms)} symbols...")
-    bars = _read_ta_from_cache(all_syms)
+    logger.info(f"[Signals] Reading TA from cache for {len(all_syms_dedup)} symbols...")
+    bars = _read_ta_from_cache(all_syms_dedup)
     ta_profiles = {sym: analyze_symbol(sym_bars) for sym, sym_bars in bars.items()}
     has_ta = sum(1 for v in ta_profiles.values() if any(tf_data for tf_data in v.values() if tf_data is not None))
-    logger.info(f"[Signals] TA profiles: {has_ta}/{len(all_syms)} have data")
+    logger.info(f"[Signals] TA profiles: {has_ta}/{len(all_syms_dedup)} have data")
 
-    # ── Regime ────────────────────────────────────────────────────────────────
     regime = {"label": "Unknown", "risk": "medium"}
     try:
         from lib.market_regime import get_regime
@@ -202,7 +243,6 @@ def run():
     except Exception as e:
         logger.warning(f"[Signals] Regime check failed: {e}")
 
-    # ── Earnings risk ─────────────────────────────────────────────────────────
     earnings_set = set()
     try:
         from lib.earnings_calendar import get_earnings_this_week
@@ -210,7 +250,6 @@ def run():
     except:
         pass
 
-    # ── Build prompts ─────────────────────────────────────────────────────────
     threat_ctx = "\n".join([
         f"[{t.get('severity','?')}] {t.get('country','?')}: {t.get('title','')}"
         for t in threats[:10]
@@ -223,6 +262,9 @@ def run():
 
     sys_p = "You are an expert quantitative trader. Output only valid JSON arrays, no commentary, no markdown."
     bounce_rule = "\nRULES: direction must be 'Long' or 'Bounce' only. stop_loss BELOW entry. target ABOVE entry. R:R >= 2.\n"
+    paper_rule  = ("\nRULES: direction must be 'Short', 'Short_Leveraged', or 'Long_Leveraged' ONLY. "
+                   "For Short/Short_Leveraged: stop_loss ABOVE entry, target_price BELOW entry. "
+                   "For Long_Leveraged: stop_loss BELOW entry, target ABOVE entry. R:R >= 2.\n")
 
     def ta_block(syms):
         blocks = [
@@ -231,7 +273,6 @@ def run():
         ]
         return "\n".join(blocks) or "No TA data available."
 
-    # Build held position context string for LLM
     held_ctx = ""
     if held_positions:
         held_lines = [
@@ -240,14 +281,16 @@ def run():
         ]
         held_ctx = "=== CURRENT OPEN POSITIONS (DO NOT generate signals for these unless adding to a winner >+5%) ===\n" + "\n".join(held_lines) + "\n\n"
 
-    def make_prompt(label, syms, task):
+    def make_prompt(label, syms, task, rule=None):
+        r = rule if rule is not None else bounce_rule
+        schema = PAPER_SIGNAL_SCHEMA if rule == paper_rule else SIGNAL_SCHEMA
         prompt = (
             f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
             f"=== MARKET NEWS ===\n{news_ctx}\n\n"
             f"{held_ctx}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
-            f"=== TASK ===\n{task}{bounce_rule}"
-            f"Output format (return ONLY this JSON array):\n{SIGNAL_SCHEMA}"
+            f"=== TASK ===\n{task}{r}"
+            f"Output format (return ONLY this JSON array):\n{schema}"
         )
         return prompt
 
@@ -256,33 +299,36 @@ def run():
          make_prompt("MACRO/GEO/COMMODITIES", TRACK_A,
                      "Analyze defense (RTX/LMT/NOC/GD/BA), energy (XOM/CVX/COP), "
                      "commodities (GLD/SLV/GDX), rates (TLT), broad market (SPY/IWM). "
-                     "Generate 4-6 high-conviction LONG or BOUNCE signals with TA references.")),
+                     "Generate 4-6 high-conviction LONG or BOUNCE signals with TA references."), False),
         ("B_tech", TRACK_B,
          make_prompt("TECH/AI/GROWTH", TRACK_B,
                      "Analyze AI/semis (NVDA/AMD/AVGO/TSM/ARM/SMCI), "
                      "software (MSFT/GOOGL/META/AMZN), high-beta (PLTR/COIN/MSTR/TSLA). "
-                     "Generate 4-7 high-conviction LONG or BOUNCE signals.")),
+                     "Generate 4-7 high-conviction LONG or BOUNCE signals."), False),
         ("C_crypto", TRACK_C,
          make_prompt("CRYPTO", TRACK_C,
                      "Analyze BTC/ETH macro, L1s (SOL/XRP/BNB/AVAX), DeFi (LINK/AAVE). "
                      "24/7 market. Wider stops (8-12% ATR ok). "
-                     "Generate 3-5 LONG or BOUNCE signals.")),
+                     "Generate 3-5 LONG or BOUNCE signals."), False),
+        ("E_paper", TRACK_E_PAPER,
+         make_prompt("PAPER TRADING — LEVERAGED/SHORT", TRACK_E_PAPER,
+                     "Identify the BEST candidates for SHORT, SHORT_LEVERAGED, or LONG_LEVERAGED paper trades. "
+                     "Use macro/news to find overextended longs (short candidates) or confirmed breakouts for leveraged longs. "
+                     "Generate 3-5 paper trading signals only.", rule=paper_rule), True),
     ]
     if opp_syms:
         tracks.append((
             "D_opp", opp_syms,
             make_prompt("OPPORTUNISTIC", opp_syms,
                         f"These tickers appeared in threat/news: {opp_syms[:8]}. "
-                        "Generate 2-4 signals for the strongest setups only.")
+                        "Generate 2-4 signals for the strongest setups only."), False
         ))
 
-    # Log estimated token sizes
-    for name, syms, prompt in tracks:
+    for name, syms, prompt, _ in tracks:
         logger.info(f"[Signals] Track {name}: {len(syms)} syms | ~{len(prompt)//4} tokens")
 
-    # ── Call LLM — one track at a time (lock serializes anyway) ──────────────
-    all_raw = []
-    for name, syms, prompt in tracks:
+    all_raw        = []  # (signal_dict, is_paper)
+    for name, syms, prompt, is_paper in tracks:
         try:
             logger.info(f"[Signals] Calling LLM for track {name}...")
             r = call_lm_studio(prompt, system=sys_p, max_tokens=2500, temperature=0.15)
@@ -290,12 +336,12 @@ def run():
             sigs = parse_json(r)
             if isinstance(sigs, list):
                 logger.info(f"[Signals] Track {name} → parsed {len(sigs)} signals")
-                all_raw.extend(sigs)
+                all_raw.extend((s, is_paper) for s in sigs)
             elif isinstance(sigs, dict):
                 for k in ["signals", "trades", "setups", "results"]:
                     if sigs.get(k):
                         logger.info(f"[Signals] Track {name} → {len(sigs[k])} signals from key '{k}'")
-                        all_raw.extend(sigs[k])
+                        all_raw.extend((s, is_paper) for s in sigs[k])
                         break
             else:
                 logger.warning(f"[Signals] Track {name} → unexpected response type {type(sigs)}: {r[:200]}")
@@ -308,18 +354,14 @@ def run():
         logger.warning("[Signals] No signals generated — check LLM connection and logs above")
         return {"saved": 0, "skipped": 0, "regime": regime.get("label"), "error": "no_llm_output"}
 
-    # ── Market hours check (ET: Mon-Fri 09:30-16:00) ─────────────────────────
     now_utc  = datetime.now(timezone.utc)
-    weekday  = now_utc.weekday()          # 0=Mon … 6=Sun
-    # 13:30–20:00 UTC = 09:30–16:00 ET (EDT)
+    weekday  = now_utc.weekday()
     market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
 
-    # ── Save to DB (upsert logic) ─────────────────────────────────────────────
     now_iso = now_utc.isoformat()
     saved = updated = skipped = 0
 
     with get_db() as db:
-        # Expire stale Active signals (>6h old, but never expire PendingApproval — those stay until market open)
         stale = (now_utc - timedelta(hours=6)).isoformat()
         expired = db.query(TradingSignal).filter(
             TradingSignal.status == "Active",
@@ -332,33 +374,37 @@ def run():
         if expired:
             logger.info(f"[Signals] Expired {len(expired)} stale Active signals")
 
-        # Build upsert map: symbol → existing record (Active OR PendingApproval)
         live_records = db.query(TradingSignal).filter(
-            TradingSignal.status.in_(["Active", "PendingApproval"])
+            TradingSignal.status.in_(["Active", "PendingApproval", "PaperExecuted"])
         ).all()
-        existing_map = {rec.asset_symbol: rec for rec in live_records}
+        # Key: (symbol, is_paper) to prevent collisions between live and paper signals
+        existing_map = {}
+        for rec in live_records:
+            k = (rec.asset_symbol, bool(getattr(rec, 'paper_mode', False)))
+            existing_map[k] = rec
 
-        for raw in all_raw:
+        for raw, is_paper in all_raw:
             try:
-                n = normalize_signal(raw, ta_profiles, asset_map)
+                n = normalize_signal(raw, ta_profiles, asset_map, is_paper=is_paper)
                 if not n:
                     skipped += 1
                     continue
                 sym = n.get("asset_symbol")
                 scored = score_safe(n, ta_profiles, regime, earnings_set)
 
-                # Determine target status:
-                # - Crypto: always Active (24/7 market)
-                # - Equity/ETF: Active during market hours, PendingApproval outside
                 is_crypto_sym = "/" in sym or sym.upper().endswith("USD")
                 if is_crypto_sym:
                     target_status = "Active"
                 else:
                     target_status = "Active" if market_open else "PendingApproval"
 
-                if sym in existing_map:
-                    # ── UPDATE existing record — always overwrite with fresh data ──
-                    rec = existing_map[sym]
+                # Paper signals are always "Active" — they don't go to Alpaca
+                if is_paper:
+                    target_status = "Active"
+
+                rec_key = (sym, is_paper)
+                if rec_key in existing_map:
+                    rec = existing_map[rec_key]
                     rec.asset_name       = scored.get("asset_name", rec.asset_name)
                     rec.direction        = scored.get("direction", rec.direction)
                     rec.confidence       = scored.get("confidence", rec.confidence)
@@ -375,14 +421,14 @@ def run():
                     rec.rr_ratio         = scored.get("rr_ratio", rec.rr_ratio)
                     rec.generated_at     = now_iso
                     rec.updated_date     = now_iso
-                    # Always update status — new generate cycle refreshes the queue
-                    # (e.g. PendingApproval → Active when market opens)
-                    if rec.status not in ("Executed", "Closed", "Rejected"):
+                    if is_paper:
+                        rec.paper_mode      = True
+                        rec.paper_direction = scored.get("paper_direction") or scored.get("direction")
+                    if rec.status not in ("Executed", "Closed", "Rejected", "PaperExecuted"):
                         rec.status = target_status
-                    logger.debug(f"[Signals] Upsert ↺ {sym} → {target_status}")
+                    logger.debug(f"[Signals] Upsert ↺ {sym} (paper={is_paper}) → {target_status}")
                     updated += 1
                 else:
-                    # ── INSERT new record ─────────────────────────────────────
                     db.add(TradingSignal(
                         id=str(uuid.uuid4()),
                         asset_symbol=scored.get("asset_symbol"),
@@ -402,12 +448,15 @@ def run():
                         earnings_risk=bool(scored.get("earnings_risk", False)),
                         rr_ratio=scored.get("rr_ratio"),
                         status=target_status,
+                        paper_mode=True if is_paper else False,
+                        paper_direction=scored.get("paper_direction") if is_paper else None,
                         generated_at=now_iso,
                         created_date=now_iso,
                         updated_date=now_iso,
                     ))
-                    existing_map[sym] = True  # prevent double-insert in same run
+                    existing_map[rec_key] = True
                     saved += 1
+                    logger.debug(f"[Signals] New {'PAPER' if is_paper else 'LIVE'} signal: {sym} {scored.get('direction')} → {target_status}")
             except Exception as e:
                 logger.error(f"[Signals] Save error: {e} | raw={raw}")
                 skipped += 1
@@ -417,4 +466,3 @@ def run():
         f"market={'OPEN' if market_open else 'CLOSED'} | regime={regime.get('label')}"
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
-

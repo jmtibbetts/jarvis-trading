@@ -1,9 +1,10 @@
 """
 lib/lmstudio.py — Unified LLM client.
-v6.1: Global threading lock — only one LLM call at a time (local model can't parallelize).
+v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
+      Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
 """
-import os, json, re, logging, threading
+import os, json, re, logging, threading, signal
 import httpx
 from app.database import get_db, PlatformConfig
 
@@ -11,10 +12,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
-TIMEOUT       = 300.0  # 5 min — local models can be slow on big prompts
+TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to prevent shutdown hangs
+
+# ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
+_shutdown_event = threading.Event()
+
+def _handle_signal(signum, frame):
+    """Set the shutdown flag so in-flight LLM calls can detect it and abort."""
+    _shutdown_event.set()
+
+# Register graceful shutdown handlers (safe to call multiple times)
+try:
+    signal.signal(signal.SIGINT,  _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+except (OSError, ValueError):
+    pass  # Non-main thread — uvicorn handles this for us
 
 # ── Global serialization lock — local LLMs can't handle concurrent requests ───
-_llm_lock = threading.Lock()
+# Using a RLock so the same thread can re-acquire (avoids deadlocks on re-entrant calls)
+_llm_lock = threading.RLock()
 
 # ── Provider detection ─────────────────────────────────────────────────────────
 OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', 'other'}
@@ -79,11 +95,17 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                    temperature: float = 0.15) -> str:
     """
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
+    Aborts immediately if shutdown has been signalled.
     """
+    if _shutdown_event.is_set():
+        raise RuntimeError("LLM call aborted — shutdown in progress")
+
     cfg = get_llm_config()
     effective_max = max_tokens or cfg['max_tokens']
 
     with _llm_lock:
+        if _shutdown_event.is_set():
+            raise RuntimeError("LLM call aborted — shutdown in progress")
         logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max}")
         if cfg['provider'] == 'anthropic':
             return _call_anthropic(prompt, system, effective_max, temperature, cfg)
@@ -112,8 +134,13 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     url = f"{cfg['url']}/chat/completions"
     logger.info(f"[LLM] → POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt")
 
+    # Use a streaming-capable client with a shorter connect timeout
+    # so we don't block forever if LM Studio is gone
+    timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)
+
     try:
-        r = httpx.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        with httpx.Client(timeout=timeout) as client:
+            r = client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data    = r.json()
         content = data['choices'][0]['message']['content']
@@ -143,8 +170,10 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
         payload["system"] = system
 
     url = "https://api.anthropic.com/v1/messages"
+    timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)
     try:
-        r = httpx.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        with httpx.Client(timeout=timeout) as client:
+            r = client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
         return data['content'][0]['text']

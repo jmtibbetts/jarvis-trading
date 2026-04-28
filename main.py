@@ -48,8 +48,28 @@ async def lifespan(app_: FastAPI):
     yield  # ← App runs here
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
+    logger.info("[Server] Shutdown initiated...")
+
+    # Signal all in-flight LLM calls to abort (so they don't block thread join)
+    try:
+        from lib.lmstudio import _shutdown_event
+        _shutdown_event.set()
+    except Exception:
+        pass
+
     if scheduler:
+        # wait=False: don't block on running jobs — they'll see the shutdown flag
         scheduler.shutdown(wait=False)
+
+    # Force-exit after 3s if threads are still hanging (e.g. blocked LLM call)
+    def _force_exit():
+        time.sleep(3)
+        logger.warning("[Server] Force-exiting — threads did not stop cleanly")
+        os._exit(0)
+
+    t = threading.Thread(target=_force_exit, daemon=True)
+    t.start()
+
     logger.info("[Server] Shutdown complete")
 
 

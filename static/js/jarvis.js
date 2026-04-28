@@ -212,7 +212,7 @@ async function submitTradeModal() {
 }
 
 
-/* ── Monday Approval Queue ─────────────────────────────────────────────────── */
+/* ── Pending Equity Trades (off-hours queue) ────────────────────────────────── */
 async function loadQueue() {
   try {
     const data = await api('/signals/pending');
@@ -221,40 +221,67 @@ async function loadQueue() {
     const grid  = document.getElementById('queue-grid');
     const summary = document.getElementById('queue-summary');
     if (badge) { badge.textContent = sigs.length; badge.style.display = sigs.length ? '' : 'none'; }
+
+    // Market hours check (client-side, ET = UTC-4 in EDT)
+    const nowUTC = new Date();
+    const etOffset = -4; // EDT; use -5 for EST
+    const etHour = ((nowUTC.getUTCHours() + etOffset) + 24) % 24;
+    const etMin  = nowUTC.getUTCMinutes();
+    const etDay  = new Date(nowUTC.getTime() + etOffset * 3600000).getUTCDay(); // 0=Sun,6=Sat
+    const mktOpen = etDay >= 1 && etDay <= 5 &&
+      (etHour > 9 || (etHour === 9 && etMin >= 30)) && etHour < 16;
+    const mktStatus = mktOpen
+      ? '<span class="badge bg-success ms-2">🟢 Market Open — signals auto-execute</span>'
+      : '<span class="badge bg-warning text-dark ms-2">🔴 Market Closed — signals queue until open</span>';
+
     if (!sigs.length) {
-      grid.innerHTML = '<div class="col-12 text-center text-muted py-5"><i class="bi bi-calendar-check display-6 d-block mb-2 opacity-25"></i>No signals pending approval</div>';
+      grid.innerHTML = `<div class="col-12 text-center text-muted py-5">
+        <i class="bi bi-check-circle display-6 d-block mb-2 text-success opacity-50"></i>
+        <div class="fw-bold">No pending signals</div>
+        <div class="small mt-1">${mktOpen ? 'Market is open — signals execute automatically.' : 'Signals generated during market hours execute automatically.'}</div>
+      </div>`;
       if (summary) summary.style.display = 'none';
       return;
     }
+
     // Summary bar
     if (summary) {
-      const totalRisk = sigs.reduce((a,s) => a + (s.entry_price||0), 0);
-      summary.innerHTML = `<i class="bi bi-info-circle"></i> <strong>${sigs.length}</strong> signals queued · ` +
-        `Avg confidence: <strong>${Math.round(sigs.reduce((a,s)=>a+(s.confidence||0),0)/sigs.length)}%</strong> · ` +
-        `Review each signal before approving. Market opens Monday 9:30 AM ET.`;
+      const avgConf = Math.round(sigs.reduce((a,s)=>a+(s.confidence||0),0)/sigs.length);
+      const sortedByTime = [...sigs].sort((a,b) => new Date(b.generated_at||0)-new Date(a.generated_at||0));
+      summary.innerHTML = `<i class="bi bi-info-circle"></i> ${mktStatus} &nbsp;·&nbsp;
+        <strong>${sigs.length}</strong> signals queued off-hours &nbsp;·&nbsp;
+        Avg confidence: <strong>${avgConf}%</strong> &nbsp;·&nbsp;
+        <span class="text-warning">These will auto-execute when the market opens at 9:30 AM ET.</span>
+        You can reject any you don't want.`;
       summary.style.display = '';
     }
-    grid.innerHTML = sigs.map(s => {
+
+    // Sort by generated_at desc (newest first) — user can override with buttons in header
+    const sorted = [...sigs].sort((a,b) => new Date(b.generated_at||0) - new Date(a.generated_at||0));
+
+    grid.innerHTML = sorted.map(s => {
       const rr = s.entry_price && s.target_price && s.stop_loss && s.entry_price > s.stop_loss
         ? ((s.target_price - s.entry_price)/(s.entry_price - s.stop_loss)).toFixed(1) : 'N/A';
       const rrCls = rr !== 'N/A' && parseFloat(rr) >= 2 ? 'text-success' : rr !== 'N/A' && parseFloat(rr) >= 1 ? 'text-warning' : 'text-danger';
       const score = s.composite_score || s.confidence || 0;
+      const genAt = s.generated_at ? new Date(s.generated_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + ' · ' + new Date(s.generated_at).toLocaleDateString([], {month:'short',day:'numeric'}) : '—';
       return `<div class="col-xl-3 col-lg-4 col-md-6">
         <div class="card h-100 border-warning">
           <div class="card-header d-flex justify-content-between align-items-center py-2">
             <div>
               <span class="fw-bold">${s.asset_symbol}</span>
               <span class="badge bg-success ms-1">${s.direction||'Long'}</span>
-              <span class="badge bg-warning text-dark ms-1">⏳ Pending</span>
+              <span class="badge bg-warning text-dark ms-1">⏳ Queued</span>
             </div>
-            <small class="text-muted">${timeAgo(s.generated_at)}</small>
+            <small class="text-muted" title="${s.generated_at||''}">${timeAgo(s.generated_at)}</small>
           </div>
           <div class="card-body py-2 px-3">
             <div class="d-flex justify-content-between mb-1">
               <small class="text-muted">Score</small>
               <span class="badge ${score>=70?'bg-success':score>=50?'bg-warning text-dark':'bg-danger'}">${Math.round(score)}%</span>
             </div>
-            <div class="small text-muted mb-2">${s.asset_name||s.asset_symbol} · ${s.asset_class||''} · ${s.timeframe||''} · <span class="text-warning">LLM:${s.confidence}%</span></div>
+            <div class="small text-muted mb-1">${s.asset_name||s.asset_symbol} · ${s.asset_class||''} · ${s.timeframe||''}</div>
+            <div class="small text-muted mb-2" style="font-size:.7rem">Generated: ${genAt}</div>
             <div class="row g-1 mb-2">
               <div class="col-4 text-center p-1 rounded" style="background:rgba(13,202,240,.08)">
                 <div class="text-muted" style="font-size:.65rem">ENTRY</div>
@@ -276,10 +303,10 @@ async function loadQueue() {
             <p class="small text-muted mb-0" style="font-size:.72rem;line-height:1.4;max-height:55px;overflow:hidden">${(s.reasoning||'').slice(0,160)}</p>
           </div>
           <div class="card-footer py-1 d-flex gap-1">
-            <button class="btn btn-warning btn-sm flex-fill py-0 text-dark" style="font-size:.75rem" onclick="approveSignal('${s.id}')">
-              <i class="bi bi-check-circle-fill"></i> Approve
+            <button class="btn btn-outline-info btn-sm flex-fill py-0" style="font-size:.75rem" onclick="forceApproveSignal('${s.id}')" title="Execute now (bypass market hours)">
+              <i class="bi bi-lightning-fill"></i> Force Now
             </button>
-            <button class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size:.75rem" onclick="rejectSignal('${s.id}')">
+            <button class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size:.75rem" onclick="rejectSignal('${s.id}')" title="Remove from queue">
               <i class="bi bi-x-lg"></i>
             </button>
           </div>
@@ -289,8 +316,8 @@ async function loadQueue() {
   } catch(e) { console.error('Queue load error:', e); }
 }
 
-async function approveSignal(id) {
-  if (!confirm('Submit this order to Alpaca now?')) return;
+async function forceApproveSignal(id) {
+  if (!confirm('Force-execute this signal now, even if market is closed?\nThis will attempt a market order via Alpaca immediately.')) return;
   try {
     const r = await api('/signals/'+id+'/approve', {method:'POST'});
     toast(r.ok ? `✅ Order submitted: ${r.symbol} x${r.qty}` : '❌ Approve failed', r.ok ? 'success' : 'danger');
@@ -309,7 +336,7 @@ async function rejectSignal(id) {
 async function approveAllPending() {
   const sigs = document.querySelectorAll('#queue-grid .col-xl-3');
   if (!sigs.length) { toast('No pending signals', 'secondary'); return; }
-  if (!confirm(`Approve and submit ALL ${sigs.length} pending signals to Alpaca?`)) return;
+  if (!confirm(`Force-execute ALL ${sigs.length} queued signals now?\nNormally these auto-execute at market open. Proceed only if you want them submitted immediately.`)) return;
   try {
     const r = await api('/signals/approve-all', {method:'POST'});
     toast(`✅ Approved: ${r.approved} | Rejected: ${r.rejected} | BP remaining: $${r.buying_power_remaining?.toFixed(0)}`, 'success');

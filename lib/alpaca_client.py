@@ -204,7 +204,7 @@ def close_position(symbol: str):
     s = symbol.upper().strip().replace("/", "")
     try:
         # percentage=1 means 100% — Alpaca computes the qty itself, no dust issues
-        return client.close_position(s, close_options=ClosePositionRequest(percentage=1))
+        return client.close_position(s, close_options=ClosePositionRequest(percentage="1"))
     except Exception as e:
         err_str = str(e)
         # If the position is already flat or not found, treat as success
@@ -232,4 +232,5 @@ def cancel_open_orders_for_symbol(symbol: str):
         return cancelled
     except Exception:
         return 0
+
 

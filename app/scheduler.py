@@ -21,6 +21,7 @@ job_status = {
     'positions': {'status': 'idle', 'last': None, 'error': None},
     'telegram':  {'status': 'idle', 'last': None, 'error': None},
     'guardian':  {'status': 'idle', 'last': None, 'error': None},
+    'paper':     {'status': 'idle', 'last': None, 'error': None},
 }
 
 # ── Event bus: news/threat jobs signal here when new items arrive ──────────────
@@ -311,6 +312,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.execute_signals   import run as execute_run
     from jobs.manage_positions  import run as positions_run
     from jobs.telegram_bot      import run as telegram_run
+    from jobs.paper_trading     import run as paper_run
 
     now = datetime.now(timezone.utc)
 
@@ -341,6 +343,10 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('positions', positions_run),
                   'interval', minutes=5, id='positions',
                   next_run_time=now + timedelta(seconds=30))
+
+    scheduler.add_job(make_job_runner('paper', paper_run),
+                  'interval', minutes=15, id='paper_trading',
+                  replace_existing=True, max_instances=1, misfire_grace_time=180)
 
     # Portfolio guardian every 5 min (offset from positions by 2.5 min)
     sched.add_job(make_job_runner('guardian', portfolio_guardian),

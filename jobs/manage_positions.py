@@ -179,13 +179,13 @@ def _get_context(db) -> tuple[str, str]:
     ).order_by(NewsItem.created_date.desc()).limit(10).all()
 
     threat_ctx = "\n".join(
-        f"[{t.severity}] {t.title}: {(t.description or '')[:120]}"
-        for t in threats
+        f"[{t.severity}] {t.title}: {(t.description or '')[:80]}"
+        for t in threats[:4]
     ) or "No active threats"
 
     news_ctx = "\n".join(
-        f"[{n.sentiment or 'neutral'}] {n.title}: {(n.summary or '')[:120]}"
-        for n in news
+        f"[{n.sentiment or 'neutral'}] {n.title}: {(n.summary or '')[:80]}"
+        for n in news[:6]
     ) or "No recent news"
 
     return threat_ctx, news_ctx
@@ -202,7 +202,9 @@ def _llm_evaluate_position(sym: str, plpc: float, avg: float, current_price: flo
     is_c = _is_crypto(sym)
     asset_type = "Crypto (24/7)" if is_c else "Equity"
 
-    ta_block = build_ta_prompt_block(sym, ta_data) if ta_data else "TA data unavailable"
+    # Limit to 1H + 1D for position management — 4-TF block is too large for most local models
+    ta_block_data = {k: ta_data[k] for k in ("1H", "1D") if ta_data and k in ta_data}
+    ta_block = build_ta_prompt_block(sym, ta_block_data) if ta_block_data else "TA data unavailable"
 
     orig_entry  = original_signal.get("entry_price", avg)
     orig_target = original_signal.get("target_price", "N/A")
@@ -239,6 +241,13 @@ DECISION RULES:
 
 Respond ONLY with valid JSON:
 {{"action": "HOLD" | "TIGHTEN_STOP" | "EXIT", "reason": "1-2 sentence explanation", "new_stop_pct": <float or null>}}"""
+
+    # Guard: truncate prompt if too long — LM Studio returns 400 when
+    # prompt + max_tokens exceeds the model's context window
+    MAX_PROMPT_CHARS = 6000  # ~1500 tokens — safe for 4096-ctx models with 200 completion tokens
+    if len(prompt) > MAX_PROMPT_CHARS:
+        prompt = prompt[:MAX_PROMPT_CHARS] + "\n...[truncated]"
+        logger.debug(f"[Positions] Prompt truncated to {MAX_PROMPT_CHARS} chars for {sym}")
 
     try:
         raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=200)
@@ -432,3 +441,4 @@ def run():
 
     logger.info(f"[Positions] Done — {closed} closed, {trailing} protective orders | equity=${equity:,.2f}")
     return {"closed": closed, "trailing": trailing, "total": len(positions), "equity": equity}
+

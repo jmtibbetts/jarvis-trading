@@ -784,10 +784,28 @@ async function loadJobs() {
     const cacheBars    = cache.total_bars || 0;
     const cacheSize    = cache.db_size_mb != null ? cache.db_size_mb.toFixed(1) + ' MB' : '';
     const byTf         = cache.by_timeframe || {};
-    const tfSummary    = Object.entries(byTf).map(([tf,v])=>`${tf}: ${v.bars?.toLocaleString()||0} bars`).join(' · ');
-    const cacheRows    = cacheSymbols
-      ? `<div class="small text-muted">${cacheSymbols} symbols · ${cacheBars.toLocaleString()} bars${cacheSize?' · '+cacheSize:''}</div>`+
-        (tfSummary ? `<div class="small text-muted">${tfSummary}</div>` : '')
+    // Per-TF rows with freshness
+    const tfRows = Object.entries(byTf).map(([tf,v]) => {
+      const latestBar = v.latest_bar_ts ? new Date(v.latest_bar_ts).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+      const lastUpd   = v.last_updated  ? timeAgo(v.last_updated) : '—';
+      const stale = v.last_updated && (Date.now() - new Date(v.last_updated)) > 30*60*1000; // >30min
+      return `<div class="d-flex justify-content-between small text-muted">
+        <span>${tf}: ${(v.bars||0).toLocaleString()} bars</span>
+        <span class="${stale?'text-warning':'text-success'}" title="Last updated: ${lastUpd}">⏱ ${latestBar}</span>
+      </div>`;
+    }).join('');
+    // Overall freshness badge
+    const lastUpd = cache.last_updated;
+    const minsAgo = lastUpd ? Math.round((Date.now()-new Date(lastUpd))/60000) : null;
+    const freshBadge = minsAgo === null ? '' :
+      minsAgo < 20 ? `<span class="badge bg-success ms-1">Fresh (${minsAgo}m ago)</span>` :
+      minsAgo < 60 ? `<span class="badge bg-warning text-dark ms-1">⚠ ${minsAgo}m ago</span>` :
+                     `<span class="badge bg-danger ms-1">⛔ Stale ${minsAgo}m ago</span>`;
+    const cacheRows = cacheSymbols
+      ? `<div class="d-flex justify-content-between align-items-center mb-1">
+           <span class="small text-muted">${cacheSymbols} symbols · ${cacheBars.toLocaleString()} bars${cacheSize?' · '+cacheSize:''}</span>
+           ${freshBadge}
+         </div>${tfRows}`
       : '<div class="small text-muted text-warning">No cache data yet — market job will populate on next run</div>';
     grid.innerHTML+=`
       <div class="col-lg-4 col-md-6">

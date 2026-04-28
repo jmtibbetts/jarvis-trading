@@ -62,6 +62,8 @@ class TradingSignal(Base):
     signal_source    = Column(String, default="watchlist")
     earnings_risk    = Column(Boolean, default=False)
     rr_ratio         = Column(Float)
+    paper_mode       = Column(Boolean, default=False)    # Route to paper engine
+    paper_direction  = Column(String)                    # Long_Leveraged | Short | Short_Leveraged
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
 
@@ -164,12 +166,14 @@ def _migrate_columns():
     """Add any missing columns to existing tables without data loss."""
     migrations = {
         "trading_signals": [
-            ("composite_score", "REAL"),
-            ("signal_source",   "TEXT DEFAULT 'watchlist'"),
-            ("earnings_risk",   "INTEGER DEFAULT 0"),
-            ("rr_ratio",        "REAL"),
-            ("momentum",        "TEXT"),
-            ("key_risks",       "TEXT"),
+            ("composite_score",  "REAL"),
+            ("signal_source",    "TEXT DEFAULT 'watchlist'"),
+            ("earnings_risk",    "INTEGER DEFAULT 0"),
+            ("rr_ratio",         "REAL"),
+            ("momentum",         "TEXT"),
+            ("key_risks",        "TEXT"),
+            ("paper_mode",       "INTEGER DEFAULT 0"),
+            ("paper_direction",  "TEXT"),
         ]
     }
     try:
@@ -183,3 +187,62 @@ def _migrate_columns():
                         print(f"[DB] Migrated: added {table}.{col_name}")
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
+
+
+# ── Paper Trading Models ──────────────────────────────────────────────────────
+
+class PaperPosition(Base):
+    """Open or closed virtual positions for the paper trading engine."""
+    __tablename__ = "paper_positions"
+    id            = Column(String, primary_key=True, default=new_id)
+    symbol        = Column(String, nullable=False)
+    asset_class   = Column(String)          # Equity | Crypto
+    direction     = Column(String)          # Long | Long_Leveraged | Short | Short_Leveraged
+    side          = Column(String)          # long | short
+    leverage      = Column(Float, default=1.0)
+    qty           = Column(Float)
+    entry_price   = Column(Float)
+    current_price = Column(Float)
+    target_price  = Column(Float)
+    stop_loss     = Column(Float)
+    notional      = Column(Float)           # total exposure = qty * entry_price * leverage
+    margin_used   = Column(Float)           # cash reserved = notional / leverage
+    unrealized_pnl= Column(Float, default=0.0)
+    unrealized_pct= Column(Float, default=0.0)
+    signal_id     = Column(String)          # FK to trading_signals.id (optional)
+    status        = Column(String, default="Open")  # Open | Closed
+    opened_at     = Column(String, default=now_iso)
+    updated_at    = Column(String, default=now_iso)
+
+
+class PaperTrade(Base):
+    """Completed paper trades — the historical ledger."""
+    __tablename__ = "paper_trades"
+    id            = Column(String, primary_key=True, default=new_id)
+    position_id   = Column(String)          # FK to paper_positions.id
+    symbol        = Column(String)
+    asset_class   = Column(String)
+    direction     = Column(String)
+    side          = Column(String)
+    leverage      = Column(Float, default=1.0)
+    qty           = Column(Float)
+    entry_price   = Column(Float)
+    exit_price    = Column(Float)
+    notional      = Column(Float)
+    realized_pnl  = Column(Float)
+    pnl_pct       = Column(Float)
+    close_reason  = Column(String)          # stop_loss | take_profit | manual | margin_call
+    signal_id     = Column(String)
+    opened_at     = Column(String)
+    closed_at     = Column(String, default=now_iso)
+
+
+class PaperPortfolio(Base):
+    """Single-row virtual account state."""
+    __tablename__ = "paper_portfolio"
+    id             = Column(String, primary_key=True, default=new_id)
+    cash           = Column(Float, default=100000.0)
+    total_trades   = Column(Float, default=0)
+    winning_trades = Column(Float, default=0)
+    realized_pnl   = Column(Float, default=0.0)
+    updated_at     = Column(String, default=now_iso)

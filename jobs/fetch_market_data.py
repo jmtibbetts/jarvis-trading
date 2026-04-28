@@ -36,18 +36,17 @@ CRYPTO_YF_MAP = {
     'NEAR/USD': 'NEAR-USD', 'OP/USD': 'OP-USD', 'ARB/USD': 'ARB11841-USD',
 }
 
-ALPACA_CONNECT_TIMEOUT = 10   # seconds -- bail fast if Alpaca is unreachable
-ALPACA_READ_TIMEOUT    = 20   # seconds -- bail if response is slow
+ALPACA_CONNECT_TIMEOUT = 10   # seconds -- unused (TCP probe replaced by SDK timeout)
+ALPACA_READ_TIMEOUT    = 12   # seconds -- bail if SDK call is slow; yfinance fallback handles the rest
 
 
 def _check_alpaca_reachable(host='data.alpaca.markets', port=443, timeout=5) -> bool:
-    """Quick TCP probe to avoid hanging the full SDK call."""
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.close()
-        return True
-    except (socket.timeout, OSError):
-        return False
+    """
+    Deprecated: TCP probe was unreliable — port 443 being open doesn't mean the
+    API endpoint itself is healthy. Always return True and let the SDK call
+    handle failures with its own timeout guard.
+    """
+    return True
 
 
 def _fetch_crypto_via_yfinance(symbols: list) -> dict:
@@ -218,3 +217,4 @@ def run():
             logger.debug(f"[Market] Event notify failed: {e}")
 
     return {'prices_updated': len(results), 'ohlcv_cached': cached}
+

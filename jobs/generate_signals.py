@@ -131,7 +131,7 @@ def score_safe(signal, ta_profiles, regime, earnings_set):
 
 
 def run():
-    logger.info("[Signals] Starting signal generation v6.2 (cache-first)...")
+    logger.info("[Signals] Starting signal generation v6.3 (position-aware, event-driven)...")
 
     # ── Log which LLM we're hitting ───────────────────────────────────────────
     try:
@@ -156,7 +156,29 @@ def run():
         asset_map = {a.symbol: {"name": a.name, "price": a.price}
                      for a in db.query(MarketAsset).all()}
 
-    logger.info(f"[Signals] Context: {len(threats)} threats, {len(news)} news, {len(asset_map)} assets")
+    # ── Current portfolio positions (so LLM knows what we already hold) ──────
+    held_positions = []
+    held_symbols   = set()
+    try:
+        from lib.alpaca_client import get_positions
+        raw_positions = get_positions()
+        for p in raw_positions:
+            sym  = str(p.symbol).upper()
+            plpc = float(p.unrealized_plpc or 0) * 100
+            mv   = float(p.market_value or 0)
+            held_symbols.add(sym)
+            held_symbols.add(sym.replace("USD", "/USD"))  # also add slash form
+            held_positions.append({
+                "symbol": sym,
+                "pnl_pct": round(plpc, 2),
+                "market_value": round(mv, 2),
+                "avg_entry": float(p.avg_entry_price or 0),
+                "current_price": float(p.current_price or 0),
+            })
+    except Exception as e:
+        logger.warning(f"[Signals] Could not fetch positions for context: {e}")
+
+    logger.info(f"[Signals] Context: {len(threats)} threats, {len(news)} news, {len(asset_map)} assets | holding {len(held_positions)} positions: {[p['symbol'] for p in held_positions]}")
 
     # ── Opportunistic tickers from news ──────────────────────────────────────
     opp = extract_opportunistic(threats, news, ALL_SYMBOLS)
@@ -209,10 +231,20 @@ def run():
         ]
         return "\n".join(blocks) or "No TA data available."
 
+    # Build held position context string for LLM
+    held_ctx = ""
+    if held_positions:
+        held_lines = [
+            f"  {p['symbol']}: {p['pnl_pct']:+.1f}% | entry=${p['avg_entry']:.4f} | current=${p['current_price']:.4f} | MV=${p['market_value']:,.0f}"
+            for p in held_positions
+        ]
+        held_ctx = "=== CURRENT OPEN POSITIONS (DO NOT generate signals for these unless adding to a winner >+5%) ===\n" + "\n".join(held_lines) + "\n\n"
+
     def make_prompt(label, syms, task):
         prompt = (
             f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
             f"=== MARKET NEWS ===\n{news_ctx}\n\n"
+            f"{held_ctx}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
             f"=== TASK ===\n{task}{bounce_rule}"
             f"Output format (return ONLY this JSON array):\n{SIGNAL_SCHEMA}"

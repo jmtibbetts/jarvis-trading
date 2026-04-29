@@ -11,6 +11,7 @@ v6.4 changes:
 """
 import logging, re, uuid
 from datetime import datetime, timezone, timedelta
+from app.routes import log_decision
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
 from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
@@ -352,6 +353,7 @@ def run():
 
     if not all_raw:
         logger.warning("[Signals] No signals generated — check LLM connection and logs above")
+        log_decision("signals", "NO_OUTPUT", "No signals generated — check LLM connection", score=0)
         return {"saved": 0, "skipped": 0, "regime": regime.get("label"), "error": "no_llm_output"}
 
     now_utc  = datetime.now(timezone.utc)
@@ -465,5 +467,10 @@ def run():
     logger.info(
         f"[Signals] Done — {saved} new | {updated} updated | {skipped} skipped | "
         f"market={'OPEN' if market_open else 'CLOSED'} | regime={regime.get('label')}"
+    )
+    log_decision(
+        "signals", "GENERATED",
+        f"{saved} new signals | {updated} updated | regime={regime.get('label')} | market={'OPEN' if market_open else 'CLOSED'}",
+        score=float(saved)
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}

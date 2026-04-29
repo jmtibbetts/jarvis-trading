@@ -15,6 +15,7 @@ from app.routes import log_decision
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
 from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
+from lib.learning_engine import get_accuracy_context
 
 logger = logging.getLogger(__name__)
 
@@ -268,10 +269,12 @@ def run():
                    "For Long_Leveraged: stop_loss BELOW entry, target ABOVE entry. R:R >= 2.\n")
 
     def ta_block(syms):
-        blocks = [
-            build_ta_prompt_block(s, ta_profiles.get(s, {}), asset_map.get(s, {}).get("name", s))
-            for s in syms if ta_profiles.get(s)
-        ]
+        blocks = []
+        for s in syms:
+            if ta_profiles.get(s):
+                ta_txt = build_ta_prompt_block(s, ta_profiles.get(s, {}), asset_map.get(s, {}).get("name", s))
+                acc_txt = get_accuracy_context(s, lookback_days=30)
+                blocks.append(ta_txt + acc_txt)
         return "\n".join(blocks) or "No TA data available."
 
     held_ctx = ""

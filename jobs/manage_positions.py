@@ -12,6 +12,7 @@ import logging, uuid, json, math
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal, Position, PortfolioSnapshot, ThreatEvent, NewsItem
 from lib.alpaca_client import get_positions, get_account, close_position, cancel_open_orders_for_symbol, get_trading_client, normalize_symbol
+from lib.learning_engine import record_trade_outcome
 from lib.lmstudio import call_lm_studio, parse_json
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
 from lib.ohlcv_cache import fetch_with_cache
@@ -371,6 +372,18 @@ def run():
                     if n_cancelled:
                         logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before close")
                     close_position(alpaca_sym)
+                    try:
+                        record_trade_outcome(
+                            symbol=sym, asset_class=pos.asset_class or "equity",
+                            direction=pos.side or "long",
+                            entry_price=float(pos.avg_entry or 0),
+                            exit_price=current_price,
+                            qty=float(pos.qty or 0),
+                            exit_reason="HARD_STOP" if plpc < 0 else "TAKE_PROFIT",
+                            timeframe="1D",
+                            signal_confidence=None, signal_score=None,
+                        )
+                    except Exception as _le: logger.warning(f"[Learning] record failed: {_le}")
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
                     log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price)
                     with get_db() as db:
@@ -426,6 +439,18 @@ def run():
                 if n_cancelled:
                     logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before LLM close")
                 close_position(alpaca_sym)
+                try:
+                    record_trade_outcome(
+                        symbol=sym, asset_class=pos.asset_class or "equity",
+                        direction=pos.side or "long",
+                        entry_price=float(pos.avg_entry or 0),
+                        exit_price=current_price,
+                        qty=float(pos.qty or 0),
+                        exit_reason="LLM_EXIT",
+                        timeframe="1D",
+                        signal_confidence=None, signal_score=None,
+                    )
+                except Exception as _le: logger.warning(f"[Learning] record failed: {_le}")
                 logger.info(f"[Positions] ✓ [LLM] Closed {sym} @ {plpc:+.1f}% | {reason}")
                 with get_db() as db:
                     sig = db.query(TradingSignal).filter(

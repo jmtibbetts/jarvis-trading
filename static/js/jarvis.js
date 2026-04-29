@@ -10,6 +10,26 @@ const api  = (p, opts={}) => {
   return POST(p, opts.body ? JSON.parse(opts.body) : {});
 };
 
+
+/* ── Toast Notifications ────────────────────────────────────────────────────── */
+function showToast(msg, type = 'success') {
+  // type: 'success' | 'danger' | 'warning' | 'info'
+  const colorMap = { success: '#198754', danger: '#dc3545', warning: '#ffc107', info: '#0dcaf0' };
+  const bg = colorMap[type] || colorMap.success;
+  const container = document.getElementById('toast-container') || (() => {
+    const div = document.createElement('div');
+    div.id = 'toast-container';
+    div.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;';
+    document.body.appendChild(div);
+    return div;
+  })();
+  const toast = document.createElement('div');
+  toast.style.cssText = `background:${bg};color:#fff;padding:0.75rem 1.25rem;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.4);font-size:.9rem;max-width:360px;word-break:break-word;animation:fadeInUp .2s ease;`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .4s'; setTimeout(() => toast.remove(), 400); }, 3500);
+}
+
 let allSignals=[], allThreats=[], allNews=[], equityChart=null;
 
 /* ── Formatters ─────────────────────────────────────────────────────────── */

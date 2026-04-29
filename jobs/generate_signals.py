@@ -99,10 +99,15 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     sym = (s.get("asset_symbol") or s.get("symbol") or s.get("ticker") or "").upper().strip()
     if not sym:
         return None
-    if sym in CRYPTO_BASES:
+    # Futures universe check must come BEFORE crypto detection
+    # (some forex symbols contain '=' which would confuse crypto logic)
+    if sym in FUTURES_UNIVERSE:
+        fu_meta = FUTURES_UNIVERSE[sym]
+        s["asset_class"] = "Forex" if fu_meta.get("category") == "Forex" else "Futures"
+    elif sym in CRYPTO_BASES:
         sym = f"{sym}/USD"
         s["asset_class"] = "Crypto"
-    if "/" in sym:
+    elif "/" in sym and not sym.endswith("=X") and not sym.endswith("=F"):
         s["asset_class"] = "Crypto"
     s["asset_symbol"] = sym
     s["asset_name"] = s.get("asset_name") or sym
@@ -113,15 +118,30 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
         # Paper mode: allow all direction types — just normalize the key
         # Map common variants
         dir_map = {
-            "Long":            "Long",
-            "Bounce":          "Bounce",
-            "Short":           "Short",
-            "Short_Leveraged": "Short_Leveraged",
-            "Shortleveraged":  "Short_Leveraged",
-            "Long_Leveraged":  "Long_Leveraged",
-            "Longleveraged":   "Long_Leveraged",
+            "Long":             "Long",
+            "Bounce":           "Bounce",
+            "Short":            "Short",
+            "Short_Leveraged":  "Short_Leveraged",
+            "Shortleveraged":   "Short_Leveraged",
+            "Long_Leveraged":   "Long_Leveraged",
+            "Longleveraged":    "Long_Leveraged",
+            "Long_2X":          "Long_Leveraged",
+            "Long_5X":          "Long_5x",
+            "Long_10X":         "Long_10x",
+            "Long_20X":         "Long_20x",
+            "Long5X":           "Long_5x",
+            "Long10X":          "Long_10x",
+            "Long20X":          "Long_20x",
+            "Short_2X":         "Short_Leveraged",
+            "Short_5X":         "Short_5x",
+            "Short_10X":        "Short_10x",
+            "Short_20X":        "Short_20x",
+            "Short5X":          "Short_5x",
+            "Short10X":         "Short_10x",
+            "Short20X":         "Short_20x",
         }
-        direction = dir_map.get(direction.capitalize(), direction)
+        # Try exact match first, then capitalized variant
+        direction = dir_map.get(direction, dir_map.get(direction.capitalize(), direction))
         if direction not in PAPER_DIRECTIONS:
             direction = "Long"
         s["direction"] = direction
@@ -357,9 +377,9 @@ def run():
         logger.info(f"[Signals] Fetching futures TA for {len(futures_syms_to_analyze)} symbols...")
         for fsym in futures_syms_to_analyze:
             bars = fetch_futures_multi_tf(fsym, ["1H", "4H", "1D"])
-            if any(v is not None for v in bars.values()):
-                futures_ta_profiles[fsym] = {tf: analyze_symbol({tf: df})[tf] if df is not None else None
-                                             for tf, df in bars.items()}
+            valid_bars = {tf: df for tf, df in bars.items() if df is not None and len(df) >= 10}
+            if valid_bars:
+                futures_ta_profiles[fsym] = analyze_symbol(valid_bars)
         logger.info(f"[Signals] Futures TA ready: {len(futures_ta_profiles)} symbols")
     except Exception as _fe:
         logger.warning(f"[Signals] Futures TA fetch failed: {_fe}")

@@ -496,15 +496,58 @@
         <div class="row g-2 align-items-end">
           <div class="col-md-2">
             <label class="form-label small mb-1 text-muted">Symbol</label>
-            <input type="text" class="form-control form-control-sm bg-dark text-white border-secondary" id="paperSym" placeholder="NVDA, BTC/USD…">
+            <input type="text" class="form-control form-control-sm bg-dark text-white border-secondary" id="paperSym" placeholder="NVDA, GC=F, EURUSD=X…">
           </div>
           <div class="col-md-2">
-            <label class="form-label small mb-1 text-muted">Direction</label>
+            <label class="form-label small mb-1 text-muted">Quick: Futures</label>
+            <select class="form-select form-select-sm bg-dark text-white border-secondary" id="paperFuturesPick" onchange="document.getElementById('paperSym').value=this.value;this.value='';">
+              <option value="">— Pick a futures —</option>
+              <optgroup label="🛢️ Energy">
+                <option value="CL=F">CL=F — Crude Oil (WTI)</option>
+                <option value="BZ=F">BZ=F — Brent Crude</option>
+                <option value="NG=F">NG=F — Natural Gas</option>
+              </optgroup>
+              <optgroup label="🥇 Metals">
+                <option value="GC=F">GC=F — Gold</option>
+                <option value="SI=F">SI=F — Silver</option>
+                <option value="PL=F">PL=F — Platinum</option>
+                <option value="HG=F">HG=F — Copper</option>
+              </optgroup>
+              <optgroup label="🌾 Grains">
+                <option value="ZC=F">ZC=F — Corn</option>
+                <option value="ZW=F">ZW=F — Wheat</option>
+              </optgroup>
+              <optgroup label="💱 Forex">
+                <option value="EURUSD=X">EURUSD=X — EUR/USD</option>
+                <option value="GBPUSD=X">GBPUSD=X — GBP/USD</option>
+                <option value="JPY=X">JPY=X — USD/JPY</option>
+                <option value="AUDUSD=X">AUDUSD=X — AUD/USD</option>
+                <option value="CHF=X">CHF=X — USD/CHF</option>
+                <option value="DX-Y.NYB">DX-Y.NYB — Dollar Index</option>
+              </optgroup>
+              <optgroup label="📊 Index Futures">
+                <option value="ES=F">ES=F — S&P 500 Futures</option>
+                <option value="NQ=F">NQ=F — Nasdaq Futures</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small mb-1 text-muted">Direction / Leverage</label>
             <select class="form-select form-select-sm bg-dark text-white border-secondary" id="paperDir">
-              <option value="Long">📈 Long (1×)</option>
-              <option value="Long_Leveraged">🚀 Long 2× Leveraged</option>
-              <option value="Short">📉 Short (1×)</option>
-              <option value="Short_Leveraged">🔻 Short 2× Leveraged</option>
+              <optgroup label="── Long ──">
+                <option value="Long">📈 Long (1×)</option>
+                <option value="Long_Leveraged">🚀 Long (2×)</option>
+                <option value="Long_5x">🚀 Long (5×)</option>
+                <option value="Long_10x">⚡ Long (10×)</option>
+                <option value="Long_20x">💥 Long (20×)</option>
+              </optgroup>
+              <optgroup label="── Short ──">
+                <option value="Short">📉 Short (1×)</option>
+                <option value="Short_Leveraged">🔻 Short (2×)</option>
+                <option value="Short_5x">🔻 Short (5×)</option>
+                <option value="Short_10x">🔥 Short (10×)</option>
+                <option value="Short_20x">💣 Short (20×)</option>
+              </optgroup>
             </select>
           </div>
           <div class="col-md-2">
@@ -558,6 +601,50 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Futures Prices Panel -->
+    <div class="mt-4">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h6 class="text-uppercase text-muted fw-semibold mb-0" style="font-size:.7rem;letter-spacing:.08em">
+          <i class="bi bi-globe2 me-1 text-warning"></i>Futures & Forex Market Prices
+        </h6>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.7rem" onclick="loadFuturesPrices()">
+          <i class="bi bi-arrow-clockwise"></i> Refresh
+        </button>
+      </div>
+
+      <!-- Category filter tabs -->
+      <div class="d-flex gap-1 flex-wrap mb-2" id="futures-cat-tabs">
+        <button class="btn btn-xs btn-secondary py-0 px-2 active" style="font-size:.72rem" onclick="filterFuturesCat('all',this)">All</button>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="filterFuturesCat('Energy',this)">🛢️ Energy</button>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="filterFuturesCat('Metals',this)">🥇 Metals</button>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="filterFuturesCat('Forex',this)">💱 Forex</button>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="filterFuturesCat('Grains',this)">🌾 Grains</button>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="filterFuturesCat('Index',this)">📊 Index Futures</button>
+      </div>
+
+      <div class="row g-2" id="futures-price-grid">
+        <div class="col-12 text-center text-muted py-3" style="font-size:.8rem">
+          <i class="bi bi-arrow-clockwise me-1"></i>Click Refresh to load futures prices…
+        </div>
+      </div>
+    </div>
+
+    <!-- Futures News Panel -->
+    <div class="mt-4">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h6 class="text-uppercase text-muted fw-semibold mb-0" style="font-size:.7rem;letter-spacing:.08em">
+          <i class="bi bi-newspaper me-1 text-info"></i>Futures & Commodity News
+        </h6>
+        <button class="btn btn-xs btn-outline-secondary py-0 px-2" style="font-size:.7rem" onclick="loadFuturesNews()">
+          <i class="bi bi-arrow-clockwise"></i> Refresh
+        </button>
+      </div>
+      <div id="futures-news-list" class="d-flex flex-column gap-1">
+        <div class="text-muted small text-center py-2">Click Refresh to load futures/commodity news…</div>
+      </div>
+    </div>
+
   </div>
   <!-- ══ END PAPER TRADING TAB ══════════════════════════════════════════════ -->
 

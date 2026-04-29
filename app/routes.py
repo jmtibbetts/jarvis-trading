@@ -756,6 +756,56 @@ def paper_run_mtm():
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@router.get("/paper/debug")
+def paper_debug():
+    """Debug endpoint — returns raw DB counts and first few records for diagnosis."""
+    try:
+        from app.database import PaperPosition, PaperTrade, PaperPortfolio
+        with get_db() as db:
+            portfolio = db.query(PaperPortfolio).first()
+            all_positions = db.query(PaperPosition).all()
+            open_positions = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
+            all_trades = db.query(PaperTrade).all()
+            
+            return {
+                "portfolio": {
+                    "cash": float(portfolio.cash) if portfolio else None,
+                    "total_trades": portfolio.total_trades if portfolio else None,
+                    "winning_trades": portfolio.winning_trades if portfolio else None,
+                    "realized_pnl": float(portfolio.realized_pnl) if portfolio else None,
+                } if portfolio else None,
+                "position_counts": {
+                    "total": len(all_positions),
+                    "open": len(open_positions),
+                    "by_status": {s: sum(1 for p in all_positions if p.status == s) 
+                                  for s in set(p.status for p in all_positions)},
+                },
+                "trade_count": len(all_trades),
+                "sample_open_positions": [
+                    {
+                        "id": p.id, "symbol": p.symbol, "status": p.status,
+                        "direction": p.direction, "side": p.side,
+                        "entry_price": float(p.entry_price) if p.entry_price else None,
+                        "qty": float(p.qty) if p.qty else None,
+                        "margin_used": float(p.margin_used) if p.margin_used else None,
+                        "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl is not None else None,
+                        "opened_at": p.opened_at,
+                    }
+                    for p in open_positions[:5]
+                ],
+                "sample_trades": [
+                    {
+                        "id": t.id, "symbol": t.symbol, "direction": t.direction,
+                        "realized_pnl": float(t.realized_pnl) if t.realized_pnl else None,
+                        "close_reason": t.close_reason, "closed_at": t.closed_at,
+                    }
+                    for t in all_trades[:5]
+                ],
+            }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @router.get("/paper/positions")
 def get_paper_positions(status: str = "Open"):
     """List paper positions filtered by status."""

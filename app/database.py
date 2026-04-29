@@ -176,7 +176,27 @@ def _migrate_columns():
             ("key_risks",        "TEXT"),
             ("paper_mode",       "INTEGER DEFAULT 0"),
             ("paper_direction",  "TEXT"),
-        ]
+        ],
+        "paper_positions": [
+            ("asset_class",     "TEXT"),
+            ("direction",       "TEXT"),
+            ("side",            "TEXT"),
+            ("leverage",        "REAL DEFAULT 1.0"),
+            ("notional",        "REAL"),
+            ("margin_used",     "REAL"),
+            ("unrealized_pnl",  "REAL DEFAULT 0.0"),
+            ("unrealized_pct",  "REAL DEFAULT 0.0"),
+            ("signal_id",       "TEXT"),
+        ],
+        "paper_trades": [
+            ("asset_class",     "TEXT"),
+            ("direction",       "TEXT"),
+            ("side",            "TEXT"),
+            ("leverage",        "REAL DEFAULT 1.0"),
+            ("notional",        "REAL"),
+            ("signal_id",       "TEXT"),
+            ("position_id",     "TEXT"),
+        ],
     }
     try:
         with engine.connect() as conn:
@@ -196,6 +216,10 @@ def _seed_paper_portfolio():
     Safe to call on every startup — only inserts if the table is empty."""
     try:
         with engine.connect() as conn:
+            tables = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+            if "paper_portfolio" not in tables:
+                print("[DB] paper_portfolio table not yet created — skipping seed")
+                return
             row = conn.execute(text("SELECT cash FROM paper_portfolio LIMIT 1")).fetchone()
             if row is None:
                 conn.execute(text(

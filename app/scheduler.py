@@ -283,20 +283,36 @@ Respond ONLY with valid JSON:
 
         if action in ("EXIT_ALL",) or go_defensive:
             # Hard ceiling hit — close everything
-            from lib.alpaca_client import close_position
+            from lib.alpaca_client import close_position, cancel_open_orders_for_symbol
             for pos in positions:
                 try:
-                    sym = pos["symbol"].upper().replace("/", "")
+                    raw_sym  = pos["symbol"]
+                    sym      = raw_sym.upper().replace("/", "")
+                    mv       = abs(float(pos.get("market_value") or 0))
+                    # Skip dust positions — notional < $1 will always error
+                    if mv < 1.0:
+                        logger.warning(f"[Guardian] Skipping {sym} — dust position (MV=${mv:.4f})")
+                        continue
+                    cancel_open_orders_for_symbol(sym)
                     close_position(sym)
                     logger.info(f"[Guardian] ✓ Closed {sym} (defensive)")
                 except Exception as e:
                     logger.error(f"[Guardian] Close {pos['symbol']} failed: {e}")
 
         elif action == "EXIT_WEAKEST" and to_exit:
-            from lib.alpaca_client import close_position
+            from lib.alpaca_client import close_position, cancel_open_orders_for_symbol
+            # Build a lookup for market value by symbol
+            mv_lookup = {p["symbol"].upper().replace("/", ""): abs(float(p.get("market_value") or 0))
+                         for p in positions}
             for sym in to_exit:
                 try:
-                    close_position(sym.upper().replace("/", ""))
+                    clean_sym = sym.upper().replace("/", "")
+                    mv = mv_lookup.get(clean_sym, 999)
+                    if mv < 1.0:
+                        logger.warning(f"[Guardian] Skipping {clean_sym} — dust position (MV=${mv:.4f})")
+                        continue
+                    cancel_open_orders_for_symbol(clean_sym)
+                    close_position(clean_sym)
                     logger.info(f"[Guardian] ✓ Closed {sym} (LLM: EXIT_WEAKEST)")
                 except Exception as e:
                     logger.error(f"[Guardian] Close {sym} failed: {e}")
@@ -385,5 +401,6 @@ def create_scheduler() -> BackgroundScheduler:
 
     logger.info("[Scheduler] v2.0 — all jobs registered (event-driven + guardian active)")
     return sched
+
 
 

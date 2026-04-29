@@ -460,7 +460,9 @@ def get_paper_summary() -> dict:
 
     open_pnl  = sum(p["unrealized_pnl"] for p in pos_list)
     margin_in = sum(p["margin_used"] for p in pos_list)
-    equity    = p_data["cash"] + open_pnl
+    # Equity = cash on hand + margin deployed + any unrealized gains/losses
+    # (margin is still your capital — just locked in positions, not lost)
+    equity    = p_data["cash"] + margin_in + open_pnl
     total     = p_data["total_trades"]
     wins      = p_data["winning_trades"]
     win_rate  = round(wins / total * 100, 1) if total > 0 else 0.0

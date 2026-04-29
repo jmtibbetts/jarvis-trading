@@ -38,6 +38,7 @@
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-jobs"><i class="bi bi-cpu"></i> Jobs</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-performance"><i class="bi bi-bar-chart-line-fill"></i> Performance</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-paper" onclick="loadPaperTab()"><i class="bi bi-journal-richtext"></i> Paper</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-decisions" onclick="loadDecisions()"><i class="bi bi-robot"></i> AI Log</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-settings"><i class="bi bi-gear-fill"></i> Settings</a></li>
 </ul>
 
@@ -559,6 +560,37 @@
   </div>
   <!-- ══ END PAPER TRADING TAB ══════════════════════════════════════════════ -->
 
+
+  <!-- AI Decision Log Tab -->
+  <div class="tab-pane fade" id="tab-decisions">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h5 class="mb-0 text-white"><i class="bi bi-robot me-2 text-info"></i>AI Decision Log</h5>
+      <div class="d-flex gap-2">
+        <select id="decision-filter" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:160px" onchange="filterDecisions()">
+          <option value="">All Sources</option>
+          <option value="guardian">Guardian</option>
+          <option value="positions">Positions</option>
+          <option value="paper">Paper</option>
+          <option value="signals">Signals</option>
+        </select>
+        <select id="decision-action-filter" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:160px" onchange="filterDecisions()">
+          <option value="">All Actions</option>
+          <option value="EXIT">EXIT</option>
+          <option value="HOLD">HOLD</option>
+          <option value="TIGHTEN_STOP">TIGHTEN_STOP</option>
+          <option value="EXIT_WEAKEST">EXIT_WEAKEST</option>
+          <option value="EXIT_ALL">EXIT_ALL</option>
+          <option value="APPROVED">APPROVED</option>
+          <option value="REJECTED">REJECTED</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadDecisions()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="clearDecisions()"><i class="bi bi-trash"></i> Clear</button>
+      </div>
+    </div>
+    <div id="decision-stats" class="d-flex gap-3 mb-3 flex-wrap"></div>
+    <div id="decision-list" class="d-flex flex-column gap-2"></div>
+  </div>
+
   <div class="tab-pane fade" id="tab-settings">
     <div class="row g-3">
       <div class="col-lg-5">
@@ -627,7 +659,105 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="/static/js/jarvis.js"></script>
+<script src="/static/js/jarvis.js">
+// ── AI Decision Log ──────────────────────────────────────────────────────────
+let allDecisions = [];
+
+function loadDecisions() {
+  API('/api/decisions?limit=300').then(data => {
+    allDecisions = data || [];
+    filterDecisions();
+    renderDecisionStats(allDecisions);
+  }).catch(e => console.error('decisions load failed', e));
+}
+
+function renderDecisionStats(decisions) {
+  const counts = {};
+  decisions.forEach(d => { counts[d.action] = (counts[d.action]||0)+1; });
+  const colors = {
+    EXIT:'danger', EXIT_WEAKEST:'danger', EXIT_ALL:'danger',
+    HOLD:'success', TIGHTEN_STOP:'warning',
+    APPROVED:'info', REJECTED:'secondary', TIGHTEN_ALL:'warning'
+  };
+  const html = Object.entries(counts).map(([k,v]) =>
+    `<span class="badge bg-${colors[k]||'secondary'} fs-6 px-3 py-2">${k}: ${v}</span>`
+  ).join('');
+  document.getElementById('decision-stats').innerHTML = html;
+}
+
+function filterDecisions() {
+  const src = document.getElementById('decision-filter').value;
+  const act = document.getElementById('decision-action-filter').value;
+  let filtered = allDecisions;
+  if (src) filtered = filtered.filter(d => d.source === src);
+  if (act) filtered = filtered.filter(d => d.action === act);
+  renderDecisions(filtered);
+}
+
+function renderDecisions(decisions) {
+  const el = document.getElementById('decision-list');
+  if (!decisions.length) {
+    el.innerHTML = '<div class="text-muted text-center py-5">No decisions logged yet.</div>';
+    return;
+  }
+
+  const actionColors = {
+    EXIT:'danger', EXIT_WEAKEST:'danger', EXIT_ALL:'danger',
+    HOLD:'success', TIGHTEN_STOP:'warning', TIGHTEN_ALL:'warning',
+    APPROVED:'info', REJECTED:'secondary'
+  };
+  const actionIcons = {
+    EXIT:'🔴', EXIT_WEAKEST:'🔴', EXIT_ALL:'🔴🔴',
+    HOLD:'🟢', TIGHTEN_STOP:'🟡', TIGHTEN_ALL:'🟡',
+    APPROVED:'✅', REJECTED:'❌'
+  };
+  const sourceIcons = {
+    guardian:'🛡️', positions:'📊', paper:'📋', signals:'⚡'
+  };
+
+  el.innerHTML = decisions.map(d => {
+    const color = actionColors[d.action] || 'secondary';
+    const icon = actionIcons[d.action] || '•';
+    const srcIcon = sourceIcons[d.source] || '•';
+    const ts = d.created_at ? d.created_at.replace('T',' ').substring(0,19) : '';
+    const sym = d.symbol ? `<span class="badge bg-dark border border-secondary me-1">${d.symbol}</span>` : '';
+    const pnl = d.pnl_pct != null ? `<span class="text-${d.pnl_pct>=0?'success':'danger'} ms-2 small">${d.pnl_pct>=0?'+':''}${(+d.pnl_pct).toFixed(2)}%</span>` : '';
+    const price = d.price ? `<span class="text-muted ms-2 small">@ $${(+d.price).toFixed(4)}</span>` : '';
+    const score = d.score != null ? `<span class="text-info ms-2 small">score=${(+d.score).toFixed(0)}</span>` : '';
+    const id = 'dec-' + d.id;
+
+    return `<div class="card bg-dark border-${color} border-opacity-50">
+      <div class="card-header py-2 px-3 d-flex align-items-center justify-content-between" style="cursor:pointer" onclick="toggleDecision('${id}')">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="badge bg-${color}">${icon} ${d.action}</span>
+          <span class="text-muted small">${srcIcon} ${d.source}</span>
+          ${sym}${pnl}${price}${score}
+        </div>
+        <span class="text-muted small">${ts} <i class="bi bi-chevron-down ms-1"></i></span>
+      </div>
+      <div id="${id}" class="collapse">
+        <div class="card-body py-2 px-3">
+          <p class="mb-0 text-white-50">${d.reasoning || '<em class="text-muted">No reasoning provided</em>'}</p>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleDecision(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('show');
+}
+
+function clearDecisions() {
+  if (!confirm('Clear all AI decision log entries?')) return;
+  fetch('/api/decisions/clear', {method:'DELETE'})
+    .then(r => r.json())
+    .then(d => { allDecisions = []; filterDecisions(); renderDecisionStats([]); alert(`Cleared ${d.deleted} entries`); })
+    .catch(e => alert('Clear failed: ' + e));
+}
+
+</script>
 
   
 

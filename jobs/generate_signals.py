@@ -15,7 +15,7 @@ from app.routes import log_decision
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
 from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
-from lib.learning_engine import get_accuracy_context
+from lib.learning_engine import get_accuracy_context, get_pattern_context, get_regime_context, get_lessons_context, get_confidence_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -272,9 +272,11 @@ def run():
         blocks = []
         for s in syms:
             if ta_profiles.get(s):
-                ta_txt = build_ta_prompt_block(s, ta_profiles.get(s, {}), asset_map.get(s, {}).get("name", s))
+                ta_txt  = build_ta_prompt_block(s, ta_profiles.get(s, {}), asset_map.get(s, {}).get("name", s))
                 acc_txt = get_accuracy_context(s, lookback_days=30)
-                blocks.append(ta_txt + acc_txt)
+                pat_txt = get_pattern_context(ta_profiles.get(s, {}), "long")
+                les_txt = get_lessons_context(symbol=s, limit=3)
+                blocks.append(ta_txt + acc_txt + pat_txt + les_txt)
         return "\n".join(blocks) or "No TA data available."
 
     held_ctx = ""
@@ -288,9 +290,11 @@ def run():
     def make_prompt(label, syms, task, rule=None):
         r = rule if rule is not None else bounce_rule
         schema = PAPER_SIGNAL_SCHEMA if rule == paper_rule else SIGNAL_SCHEMA
+        regime_ctx = get_regime_context(regime.get("label", ""))
         prompt = (
             f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
             f"=== MARKET NEWS ===\n{news_ctx}\n\n"
+            f"=== MARKET REGIME ===\nCurrent: {regime.get('label','Unknown')} | Risk: {regime.get('risk','medium')}\n{regime_ctx}\n"
             f"{held_ctx}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
             f"=== TASK ===\n{task}{r}"

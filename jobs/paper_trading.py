@@ -1,4 +1,5 @@
 from app.routes import log_decision
+from lib.futures_data import FUTURES_UNIVERSE, get_cached_futures_price, fetch_futures_multi_tf
 """
 Job: Paper Trading v5.0
 Changes from v4.0:
@@ -50,6 +51,7 @@ def _tier(plpc: float, is_crypto: bool):
 
 
 def _get_all_prices() -> dict:
+    # Layer 1: Alpaca / MarketAsset DB (equities + crypto)
     with get_db() as db:
         assets = db.query(MarketAsset).all()
         prices = {}
@@ -60,22 +62,48 @@ def _get_all_prices() -> dict:
                     prices[a.symbol.replace("/", "")] = float(a.price)
                 elif a.symbol.endswith("USD") and len(a.symbol) > 3:
                     prices[a.symbol[:-3] + "/USD"] = float(a.price)
-        return prices
+
+    # Layer 2: Futures / Forex via yfinance (cached, 5-min TTL)
+    try:
+        for sym in FUTURES_UNIVERSE:
+            if sym not in prices:
+                fd = get_cached_futures_price(sym)
+                if fd and fd.get("price"):
+                    prices[sym] = float(fd["price"])
+        logger.debug(f"[PaperTrading] Price map: {len(prices)} symbols (Alpaca+Futures)")
+    except Exception as _fe:
+        logger.debug(f"[PaperTrading] Futures price layer error: {_fe}")
+
+    return prices
 
 
 def _get_current_price(symbol: str, prices: dict = None) -> float:
+    # Check in-memory price map first (covers Alpaca + futures already loaded)
     if prices:
-        for v in [symbol, symbol.replace("/",""), symbol.replace("/USD",""), symbol+"/USD"]:
+        for v in [symbol, symbol.replace("/",""), symbol.replace("/USD",""),
+                  symbol+"/USD", symbol.upper()]:
             if v in prices:
-                return prices[v]
-    variants = [symbol, symbol.replace("/",""), symbol.replace("/USD",""), symbol+"/USD" if "/" not in symbol else symbol]
+                return float(prices[v])
+
+    # DB lookup (Alpaca MarketAsset)
+    variants = [symbol, symbol.replace("/",""), symbol.replace("/USD",""),
+                symbol+"/USD" if "/" not in symbol else symbol]
     with get_db() as db:
         for v in variants:
             asset = db.query(MarketAsset).filter(MarketAsset.symbol == v).first()
             if asset and asset.price and float(asset.price) > 0:
                 return float(asset.price)
-    return 0.0
 
+    # Futures / Forex fallback via yfinance (for symbols like GC=F, EURUSD=X)
+    try:
+        if symbol in FUTURES_UNIVERSE:
+            fd = get_cached_futures_price(symbol)
+            if fd and fd.get("price"):
+                return float(fd["price"])
+    except Exception:
+        pass
+
+    return 0.0
 
 def _get_open_paper_symbols() -> set:
     with get_db() as db:
@@ -123,12 +151,24 @@ def _get_context() -> tuple:
 
 def _fetch_ta(sym: str) -> dict:
     try:
-        from lib.ta_engine import analyze_symbol, build_ta_prompt_block
+        from lib.ta_engine import analyze_symbol
+        bars_by_tf = {}
+
+        # ── Futures / Forex path (yfinance) ──────────────────────────────────
+        if sym in FUTURES_UNIVERSE:
+            raw = fetch_futures_multi_tf(sym, ["1H", "4H", "1D"])
+            for tf, df in raw.items():
+                if df is not None and len(df) >= 20:
+                    bars_by_tf[tf] = df
+            if bars_by_tf:
+                logger.debug(f"[PaperTrading] Futures TA ({len(bars_by_tf)} TFs) for {sym}")
+                return analyze_symbol(bars_by_tf)
+
+        # ── Equity / Crypto path (Alpaca OHLCV cache) ─────────────────────────
         from lib.ohlcv_cache import fetch_with_cache
         cache_sym = sym
         if _is_crypto(sym) and "/" not in sym:
             cache_sym = sym[:-3] + "/USD" if sym.upper().endswith("USD") else sym + "/USD"
-        bars_by_tf = {}
         for tf in ["1H", "4H", "1D"]:
             try:
                 df = fetch_with_cache(cache_sym, tf, lookback_bars=100)
@@ -293,30 +333,48 @@ Respond ONLY with valid JSON (no markdown):
 # ────────────────────────────────────────────────────────────────────────────
 
 def _get_pending_signals(db) -> list:
+    """
+    Return signals eligible for paper execution:
+      - paper_mode=True signals (Track E: leveraged/short equities/crypto)
+      - Any signal whose symbol is in the futures universe (Track F)
+    Live equity/crypto signals (paper_mode=False, not in futures universe)
+    are handled exclusively by execute_signals.py — never touched here.
+    """
     eligible_statuses = ["Active", "Executed", "PendingApproval"]
     signals = db.query(TradingSignal).filter(
         TradingSignal.status.in_(eligible_statuses),
-    ).order_by(TradingSignal.generated_at.desc()).limit(100).all()
+    ).order_by(TradingSignal.generated_at.desc()).limit(200).all()
     seen = set()
     result = []
     for s in signals:
         sym = (s.asset_symbol or "").upper().strip()
         if not sym or sym in seen:
             continue
+
+        is_futures = sym in FUTURES_UNIVERSE
+        is_paper   = bool(getattr(s, 'paper_mode', False))
+
+        # Only pick up signals that belong in the paper engine
+        if not is_paper and not is_futures:
+            continue
+
         seen.add(sym)
+        # Use paper_direction when set; fall back to direction
+        paper_dir = (getattr(s, 'paper_direction', None) or s.direction or "Long")
         result.append({
-            "id":            s.id,
-            "asset_symbol":  sym,
-            "asset_name":    s.asset_name or sym,
-            "asset_class":   s.asset_class or "Equity",
-            "direction":     s.direction or "Long",
-            "paper_direction": s.direction or "Long",
-            "entry_price":   float(s.entry_price) if s.entry_price else 0.0,
-            "target_price":  float(s.target_price) if s.target_price else 0.0,
-            "stop_loss":     float(s.stop_loss) if s.stop_loss else 0.0,
-            "confidence":    float(s.confidence) if s.confidence else 50.0,
-            "reasoning":     s.reasoning or "",
-            "signal_status": s.status,
+            "id":             s.id,
+            "asset_symbol":   sym,
+            "asset_name":     s.asset_name or sym,
+            "asset_class":    s.asset_class or ("Futures" if is_futures else "Equity"),
+            "direction":      s.direction or "Long",
+            "paper_direction": paper_dir,
+            "paper_mode":     True,
+            "entry_price":    float(s.entry_price) if s.entry_price else 0.0,
+            "target_price":   float(s.target_price) if s.target_price else 0.0,
+            "stop_loss":      float(s.stop_loss) if s.stop_loss else 0.0,
+            "confidence":     float(s.confidence) if s.confidence else 50.0,
+            "reasoning":      s.reasoning or "",
+            "signal_status":  s.status,
         })
     return result
 

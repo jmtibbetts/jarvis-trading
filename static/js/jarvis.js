@@ -1703,3 +1703,98 @@ function renderLessons(rows) {
     </div>`;
   }).join('');
 }
+
+// ── Futures Market Panel ─────────────────────────────────────────────────────
+
+let _allFuturesPrices = [];
+
+async function loadFuturesPrices() {
+  const grid = document.getElementById('futures-price-grid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="col-12 text-center text-muted py-3"><span class="spinner-border spinner-border-sm me-2"></span>Fetching futures prices via yfinance…</div>';
+  try {
+    const data = await API('/futures/prices?paper_only=false');
+    _allFuturesPrices = Object.values(data || {});
+    renderFuturesGrid(_allFuturesPrices);
+  } catch(e) {
+    grid.innerHTML = '<div class="col-12 text-center text-danger py-2">Failed to load futures prices</div>';
+    console.error('loadFuturesPrices failed', e);
+  }
+}
+
+function filterFuturesCat(cat, btn) {
+  // Toggle button active state
+  document.querySelectorAll('#futures-cat-tabs button').forEach(b => {
+    b.className = b.className.replace('btn-secondary','btn-outline-secondary');
+  });
+  if (btn) {
+    btn.className = btn.className.replace('btn-outline-secondary','btn-secondary');
+  }
+  const rows = cat === 'all' ? _allFuturesPrices : _allFuturesPrices.filter(r => r.category === cat);
+  renderFuturesGrid(rows);
+}
+
+function renderFuturesGrid(rows) {
+  const grid = document.getElementById('futures-price-grid');
+  if (!rows || rows.length === 0) {
+    grid.innerHTML = '<div class="col-12 text-center text-muted py-3" style="font-size:.8rem">No data — click Refresh first</div>';
+    return;
+  }
+
+  const catIcons = { Energy:'🛢️', Metals:'🥇', Grains:'🌾', Forex:'💱', Index:'📊', Volatility:'⚡', Softs:'☕', Bonds:'📈' };
+
+  grid.innerHTML = rows.map(r => {
+    const chg = r.change_pct || 0;
+    const chgColor = chg > 0 ? 'text-success' : chg < 0 ? 'text-danger' : 'text-muted';
+    const chgIcon  = chg > 0 ? '▲' : chg < 0 ? '▼' : '—';
+    const icon     = catIcons[r.category] || '📊';
+    const priceStr = r.price > 1000 ? r.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})
+                   : r.price > 1    ? r.price.toFixed(4)
+                   : r.price.toFixed(6);
+    const paperBadge = r.paper_eligible
+      ? '<span class="badge bg-warning text-dark ms-1" style="font-size:.6rem">PAPER</span>' : '';
+    const tradeBtn = r.paper_eligible
+      ? `<button class="btn btn-xs btn-outline-warning py-0 px-1 mt-1" style="font-size:.65rem"
+           onclick="document.getElementById('paperSym').value='${r.symbol}';document.querySelector('[href=\\'#tab-paper\\']').click()">
+           Trade</button>` : '';
+    return `<div class="col-6 col-md-4 col-xl-3">
+      <div class="card bg-dark border-secondary p-2 h-100">
+        <div class="d-flex justify-content-between align-items-start mb-1">
+          <span class="text-muted" style="font-size:.68rem">${icon} ${r.category}</span>
+          ${paperBadge}
+        </div>
+        <div class="fw-bold text-white" style="font-size:.8rem">${r.symbol}</div>
+        <div class="text-muted" style="font-size:.68rem;line-height:1.1">${r.name || ''}</div>
+        <div class="fs-6 fw-bold text-white mt-1">$${priceStr}</div>
+        <div class="${chgColor}" style="font-size:.75rem">${chgIcon} ${chg >= 0 ? '+' : ''}${chg.toFixed(3)}%</div>
+        ${tradeBtn}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadFuturesNews() {
+  const el = document.getElementById('futures-news-list');
+  if (!el) return;
+  el.innerHTML = '<div class="text-muted small text-center py-2"><span class="spinner-border spinner-border-sm me-2"></span>Loading futures & commodity news…</div>';
+  try {
+    const articles = await API('/futures/news?limit=25');
+    if (!articles || articles.length === 0) {
+      el.innerHTML = '<div class="text-muted small text-center py-2">No futures news available</div>';
+      return;
+    }
+    const catIcons = { Energy:'🛢️', Metals:'🥇', Grains:'🌾', Forex:'💱', Index:'📊', General:'📰' };
+    el.innerHTML = articles.map(a => {
+      const icon = catIcons[a.category] || '📰';
+      const url  = a.url ? `href="${a.url}" target="_blank"` : '';
+      return `<div class="border-bottom border-secondary pb-1 mb-1" style="font-size:.78rem">
+        <span class="text-muted me-1">${icon} <span class="badge bg-secondary" style="font-size:.6rem">${a.category||'News'}</span></span>
+        <a ${url} class="text-light text-decoration-none">${a.title}</a>
+        <span class="text-muted ms-1" style="font-size:.65rem">(${a.source||''})</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="text-danger small text-center py-2">Failed to load futures news</div>';
+    console.error('loadFuturesNews failed', e);
+  }
+}

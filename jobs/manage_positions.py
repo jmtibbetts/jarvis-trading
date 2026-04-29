@@ -372,7 +372,7 @@ def run():
                         logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before close")
                     close_position(alpaca_sym)
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
-                log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price)
+                    log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price)
                     with get_db() as db:
                         sig = db.query(TradingSignal).filter(
                             TradingSignal.asset_symbol.in_(_sym_variants(sym)),

@@ -287,6 +287,14 @@ def run():
     now_iso  = datetime.now(timezone.utc).isoformat()
     closed   = 0
     trailing = 0
+
+    # Fetch current regime for learning engine
+    current_regime = "Unknown"
+    try:
+        from lib.market_regime import get_regime as _get_regime
+        current_regime = _get_regime().get("label", "Unknown")
+    except Exception as _re:
+        logger.warning(f"[Positions] Regime fetch failed: {_re}")
     total_mv = sum(float(p.market_value or 0) for p in positions)
     total_pl = sum(float(p.unrealized_pl or 0) for p in positions)
 
@@ -305,6 +313,7 @@ def run():
             "target_price": s.target_price,
             "stop_loss":    s.stop_loss,
             "confidence":   s.confidence,
+            "timeframe":    s.timeframe or "1D",
             "reasoning":    s.reasoning or "",
         } for s in exec_sigs}
 
@@ -373,6 +382,7 @@ def run():
                         logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before close")
                     close_position(alpaca_sym)
                     try:
+                        _sig_data = sig_map.get(sym.upper().replace("/", ""), {})
                         record_trade_outcome(
                             symbol=sym, asset_class=pos.asset_class or "equity",
                             direction=pos.side or "long",
@@ -380,8 +390,11 @@ def run():
                             exit_price=current_price,
                             qty=float(pos.qty or 0),
                             exit_reason="HARD_STOP" if plpc < 0 else "TAKE_PROFIT",
-                            timeframe="1D",
-                            signal_confidence=None, signal_score=None,
+                            timeframe=_sig_data.get("timeframe", "1D"),
+                            signal_confidence=_sig_data.get("confidence"),
+                            signal_reasoning=_sig_data.get("reasoning"),
+                            ta_profile=_fetch_ta(sym),
+                            market_regime=current_regime,
                         )
                     except Exception as _le: logger.warning(f"[Learning] record failed: {_le}")
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
@@ -440,6 +453,7 @@ def run():
                     logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before LLM close")
                 close_position(alpaca_sym)
                 try:
+                    _sig_data2 = sig_map.get(sym.upper().replace("/", ""), {})
                     record_trade_outcome(
                         symbol=sym, asset_class=pos.asset_class or "equity",
                         direction=pos.side or "long",
@@ -447,8 +461,11 @@ def run():
                         exit_price=current_price,
                         qty=float(pos.qty or 0),
                         exit_reason="LLM_EXIT",
-                        timeframe="1D",
-                        signal_confidence=None, signal_score=None,
+                        timeframe=_sig_data2.get("timeframe", "1D"),
+                        signal_confidence=_sig_data2.get("confidence"),
+                        signal_reasoning=_sig_data2.get("reasoning"),
+                        ta_profile=ta_data,
+                        market_regime=current_regime,
                     )
                 except Exception as _le: logger.warning(f"[Learning] record failed: {_le}")
                 logger.info(f"[Positions] ✓ [LLM] Closed {sym} @ {plpc:+.1f}% | {reason}")

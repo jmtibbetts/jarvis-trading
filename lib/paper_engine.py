@@ -309,8 +309,11 @@ def get_paper_summary() -> dict:
         ]
 
     open_pnl  = sum(p["unrealized_pnl"] for p in pos_list)
+    # margin_in is the cash already deducted from portfolio.cash when positions were opened.
+    # equity = cash (which includes locked margin) + unrealized P&L on those positions.
+    # Do NOT add margin_in again — it would double-count.
     margin_in = sum(p["notional"] / (p["leverage"] or 1.0) for p in pos_list if p["notional"])
-    equity    = p_data["cash"] + margin_in + open_pnl
+    equity    = p_data["cash"] + open_pnl
     win_rate  = round(p_data["winning_trades"] / p_data["total_trades"] * 100, 1) if p_data["total_trades"] > 0 else 0
 
     return {
@@ -329,21 +332,25 @@ def get_paper_summary() -> dict:
 
 
 def reset_paper_portfolio() -> dict:
-    """Reset the paper portfolio back to $100k starting capital."""
+    """Reset the paper portfolio back to $100k starting capital.
+    Hard-deletes all positions and trades, then recreates a clean portfolio row.
+    This guarantees cash is always exactly $100k — no stale deductions.
+    """
+    from app.database import new_id
     with get_db() as db:
-        # Close all open positions
-        positions = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
-        for p in positions:
-            p.status = "Closed"
-            p.updated_at = _now()
+        from app.database import PaperTrade, PaperPosition, PaperPortfolio
+        db.query(PaperTrade).delete()
+        db.query(PaperPosition).delete()
+        db.query(PaperPortfolio).delete()
+        db.flush()
+        db.add(PaperPortfolio(
+            id=new_id(),
+            cash=PAPER_STARTING_CAPITAL,
+            total_trades=0,
+            winning_trades=0,
+            realized_pnl=0.0,
+            updated_at=_now()
+        ))
 
-        # Reset portfolio
-        portfolio = _get_portfolio_cash(db)
-        portfolio.cash           = PAPER_STARTING_CAPITAL
-        portfolio.realized_pnl   = 0.0
-        portfolio.total_trades   = 0
-        portfolio.winning_trades = 0
-        portfolio.updated_at     = _now()
-
-    logger.info("[Paper] Portfolio reset to $100k")
+    logger.info("[Paper] Portfolio hard-reset to $100k — all positions/trades cleared")
     return {"ok": True, "message": "Paper portfolio reset to $100k", "cash": PAPER_STARTING_CAPITAL}

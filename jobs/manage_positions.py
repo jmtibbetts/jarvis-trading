@@ -1,3 +1,4 @@
+from app.routes import log_decision
 """
 Job: Manage Positions v7.0
 - Every position evaluated against fresh TA + recent news/threats every cycle
@@ -371,6 +372,7 @@ def run():
                         logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before close")
                     close_position(alpaca_sym)
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
+                log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price)
                     with get_db() as db:
                         sig = db.query(TradingSignal).filter(
                             TradingSignal.asset_symbol.in_(_sym_variants(sym)),
@@ -386,6 +388,7 @@ def run():
 
             else:
                 logger.info(f"[Positions] ⟳ [RULE] Trail {sym} @ {plpc:+.1f}% — {trail_pct}% | {label}")
+                log_decision("positions", "TIGHTEN_STOP", f"Hard rule trail: {label} @ {trail_pct}%", symbol=sym, pnl_pct=plpc, price=current_price)
                 ok = _set_protective_order(alpaca_sym, qty, trail_pct, current_price)
                 if ok:
                     trailing += 1
@@ -410,6 +413,7 @@ def run():
         new_stop_pct = decision.get("new_stop_pct")
 
         logger.info(f"[Positions] 🤖 {sym} → {action} | {reason}")
+        log_decision("positions", action, reason, symbol=sym, pnl_pct=plpc, price=current_price)
 
         if action == "EXIT":
             # Don't double-close if hard rule already fired

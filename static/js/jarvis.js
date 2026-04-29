@@ -1159,29 +1159,36 @@ async function loadPaperTab() {
     if (!data.positions || data.positions.length === 0) {
       posBody.innerHTML = '<tr><td colspan="14" class="text-muted text-center">No open paper positions</td></tr>';
     } else {
-      posBody.innerHTML = data.positions.map(pos => {
-        const pnlCls = pos.unrealized_pnl >= 0 ? 'text-success' : 'text-danger';
-        const dirBadge = paperDirBadge(pos.direction);
-        const sideBadge = pos.side === 'long'
-          ? '<span class="badge bg-success">LONG</span>'
-          : '<span class="badge bg-danger">SHORT</span>';
-        return `<tr>
-          <td class="fw-semibold text-warning">${pos.symbol}</td>
-          <td>${dirBadge}</td>
-          <td>${sideBadge}</td>
-          <td>${(pos.leverage||1).toFixed(1)}×</td>
-          <td>${pos.qty.toFixed(4)}</td>
-          <td>$${pos.entry_price.toFixed(4)}</td>
-          <td>$${pos.current_price.toFixed(4)}</td>
-          <td class="text-success">$${pos.target_price.toFixed(4)}</td>
-          <td class="text-danger">$${pos.stop_loss.toFixed(4)}</td>
-          <td>$${pos.notional.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
-          <td class="${pnlCls}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(2)}</td>
-          <td class="${pnlCls}">${pos.unrealized_pct >= 0 ? '+' : ''}${pos.unrealized_pct.toFixed(2)}%</td>
-          <td class="text-muted">${relTime(pos.opened_at)}</td>
-          <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
-        </tr>`;
-      }).join('');
+      const posRows = [];
+      for (const pos of data.positions) {
+        try {
+          const pnlCls   = (pos.unrealized_pnl||0) >= 0 ? 'text-success' : 'text-danger';
+          const dirBadge = paperDirBadge(pos.direction);
+          const sideBadge = (pos.side||'long') === 'long'
+            ? '<span class="badge bg-success">LONG</span>'
+            : '<span class="badge bg-danger">SHORT</span>';
+          const fmt = (v,d=4) => (v!=null && !isNaN(v)) ? Number(v).toFixed(d) : '—';
+          posRows.push(`<tr>
+            <td class="fw-semibold text-warning">${pos.symbol||'?'}</td>
+            <td>${dirBadge}</td>
+            <td>${sideBadge}</td>
+            <td>${(pos.leverage||1).toFixed(1)}×</td>
+            <td>${fmt(pos.qty)}</td>
+            <td>$${fmt(pos.entry_price)}</td>
+            <td>$${fmt(pos.current_price)}</td>
+            <td class="text-success">$${fmt(pos.target_price)}</td>
+            <td class="text-danger">$${fmt(pos.stop_loss)}</td>
+            <td>$${(pos.notional||0).toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+            <td class="${pnlCls}">${(pos.unrealized_pnl||0) >= 0 ? '+' : ''}$${fmt(pos.unrealized_pnl,2)}</td>
+            <td class="${pnlCls}">${(pos.unrealized_pct||0) >= 0 ? '+' : ''}${fmt(pos.unrealized_pct,2)}%</td>
+            <td class="text-muted">${relTime(pos.opened_at)}</td>
+            <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
+          </tr>`);
+        } catch(rowErr) {
+          console.warn('[Paper] Skipped bad position row:', pos.symbol, rowErr);
+        }
+      }
+      posBody.innerHTML = posRows.length ? posRows.join('') : '<tr><td colspan="14" class="text-muted text-center">No open paper positions</td></tr>';
     }
 
     // Trade history
@@ -1189,22 +1196,29 @@ async function loadPaperTab() {
     if (!data.trades || data.trades.length === 0) {
       trBody.innerHTML = '<tr><td colspan="10" class="text-muted text-center">No completed trades</td></tr>';
     } else {
-      trBody.innerHTML = data.trades.map(t => {
-        const pnlCls = t.realized_pnl >= 0 ? 'text-success' : 'text-danger';
-        const reasonBadge = paperReasonBadge(t.close_reason);
-        return `<tr>
-          <td class="fw-semibold text-warning">${t.symbol}</td>
-          <td>${paperDirBadge(t.direction)}</td>
-          <td>${(t.leverage||1).toFixed(1)}×</td>
-          <td>$${(t.entry_price||0).toFixed(4)}</td>
-          <td>$${(t.exit_price||0).toFixed(4)}</td>
-          <td class="${pnlCls} fw-semibold">${(t.realized_pnl||0) >= 0 ? '+' : ''}$${Math.abs(t.realized_pnl||0).toFixed(2)}</td>
-          <td class="${pnlCls}">${(t.pnl_pct||0) >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}%</td>
-          <td>${reasonBadge}</td>
-          <td class="text-muted small">${relTime(t.opened_at)}</td>
-          <td class="text-muted small">${relTime(t.closed_at)}</td>
-        </tr>`;
-      }).join('');
+      const trRows = [];
+      for (const t of data.trades) {
+        try {
+          const pnlCls = (t.realized_pnl||0) >= 0 ? 'text-success' : 'text-danger';
+          const reasonBadge = paperReasonBadge(t.close_reason);
+          const fmt = (v,d=4) => (v!=null && !isNaN(v)) ? Number(v).toFixed(d) : '—';
+          trRows.push(`<tr>
+            <td class="fw-semibold text-warning">${t.symbol||'?'}</td>
+            <td>${paperDirBadge(t.direction)}</td>
+            <td>${(t.leverage||1).toFixed(1)}×</td>
+            <td>$${fmt(t.entry_price)}</td>
+            <td>$${fmt(t.exit_price)}</td>
+            <td class="${pnlCls} fw-semibold">${(t.realized_pnl||0) >= 0 ? '+' : ''}$${fmt(Math.abs(t.realized_pnl||0),2)}</td>
+            <td class="${pnlCls}">${(t.pnl_pct||0) >= 0 ? '+' : ''}${fmt(t.pnl_pct,2)}%</td>
+            <td>${reasonBadge}</td>
+            <td class="text-muted small">${relTime(t.opened_at)}</td>
+            <td class="text-muted small">${relTime(t.closed_at)}</td>
+          </tr>`);
+        } catch(rowErr) {
+          console.warn('[Paper] Skipped bad trade row:', t.symbol, rowErr);
+        }
+      }
+      trBody.innerHTML = trRows.length ? trRows.join('') : '<tr><td colspan="10" class="text-muted text-center">No completed trades</td></tr>';
     }
   } catch (e) {
     console.error('[Paper] loadPaperTab error:', e);
@@ -1214,11 +1228,12 @@ async function loadPaperTab() {
 function paperDirBadge(dir) {
   const map = {
     'Long':             '<span class="badge bg-success">📈 Long 1×</span>',
+    'Bounce':           '<span class="badge bg-success">📈 Bounce 1×</span>',
     'Long_Leveraged':   '<span class="badge bg-primary">🚀 Long 2×</span>',
     'Short':            '<span class="badge bg-danger">📉 Short 1×</span>',
     'Short_Leveraged':  '<span class="badge" style="background:#ff6600">🔻 Short 2×</span>',
   };
-  return map[dir] || `<span class="badge bg-secondary">${dir}</span>`;
+  return map[dir] || `<span class="badge bg-secondary">${dir||'Long'}</span>`;
 }
 
 function paperReasonBadge(r) {

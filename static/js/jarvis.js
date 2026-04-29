@@ -1181,7 +1181,7 @@ async function loadPaperTab() {
             <td>$${(pos.notional||0).toLocaleString('en-US',{maximumFractionDigits:0})}</td>
             <td class="${pnlCls}">${(pos.unrealized_pnl||0) >= 0 ? '+' : ''}$${fmt(pos.unrealized_pnl,2)}</td>
             <td class="${pnlCls}">${(pos.unrealized_pct||0) >= 0 ? '+' : ''}${fmt(pos.unrealized_pct,2)}%</td>
-            <td class="text-muted">${relTime(pos.opened_at)}</td>
+            <td class="text-muted">${timeAgo(pos.opened_at)}</td>
             <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
           </tr>`);
         } catch(rowErr) {
@@ -1211,8 +1211,8 @@ async function loadPaperTab() {
             <td class="${pnlCls} fw-semibold">${(t.realized_pnl||0) >= 0 ? '+' : ''}$${fmt(Math.abs(t.realized_pnl||0),2)}</td>
             <td class="${pnlCls}">${(t.pnl_pct||0) >= 0 ? '+' : ''}${fmt(t.pnl_pct,2)}%</td>
             <td>${reasonBadge}</td>
-            <td class="text-muted small">${relTime(t.opened_at)}</td>
-            <td class="text-muted small">${relTime(t.closed_at)}</td>
+            <td class="text-muted small">${timeAgo(t.opened_at)}</td>
+            <td class="text-muted small">${timeAgo(t.closed_at)}</td>
           </tr>`);
         } catch(rowErr) {
           console.warn('[Paper] Skipped bad trade row:', t.symbol, rowErr);

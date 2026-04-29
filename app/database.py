@@ -5,7 +5,7 @@ v6.1: Added earnings_risk column to TradingSignal. Better migration coverage.
 import os, uuid, json
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, event, text)
+from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, Integer, event, text)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from contextlib import contextmanager
 

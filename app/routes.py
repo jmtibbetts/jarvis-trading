@@ -934,17 +934,44 @@ def paper_execute_signal(signal_id: str, direction: str = "Long"):
 def log_decision(source: str, action: str, reasoning: str,
                  symbol: str = None, price: float = None,
                  pnl_pct: float = None, score: float = None):
-    """Persist an AI decision to the ai_decisions table. Call from any job."""
+    """Persist an AI decision to the ai_decisions table using raw SQL for reliability."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
     try:
-        with get_db() as db:
-            db.add(AiDecision(
-                source=source, symbol=symbol, action=action,
-                reasoning=reasoning, price=price,
-                pnl_pct=pnl_pct, score=score
-            ))
+        from app.database import engine
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            # Self-heal: ensure table exists before every write
+            conn.execute(_text("""
+                CREATE TABLE IF NOT EXISTS ai_decisions (
+                    id         TEXT PRIMARY KEY,
+                    source     TEXT,
+                    symbol     TEXT,
+                    action     TEXT,
+                    reasoning  TEXT,
+                    price      REAL,
+                    pnl_pct    REAL,
+                    score      REAL,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(_text("""
+                INSERT INTO ai_decisions (id, source, symbol, action, reasoning, price, pnl_pct, score, created_at)
+                VALUES (:id, :source, :symbol, :action, :reasoning, :price, :pnl_pct, :score, :created_at)
+            """), {
+                "id":         str(__import__("uuid").uuid4()),
+                "source":     source,
+                "symbol":     symbol,
+                "action":     action,
+                "reasoning":  (reasoning or "")[:2000],
+                "price":      price,
+                "pnl_pct":    pnl_pct,
+                "score":      score,
+                "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            })
+        _logger.debug(f"[log_decision] Saved: {source} | {action} | {symbol}")
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"[log_decision] Failed to save: {e}")
+        _logger.warning(f"[log_decision] Failed to save: {e}", exc_info=True)
 
 
 @router.get("/decisions")

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.database import get_db, AiDecision, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot
-from lib.learning_engine import get_all_outcomes, get_all_accuracy
+from lib.learning_engine import get_all_outcomes, get_all_accuracy, get_all_patterns, get_all_regime_stats, get_all_lessons
 from app.scheduler import job_status
 
 logger = logging.getLogger(__name__)
@@ -1052,3 +1052,18 @@ def get_learning_summary():
         "best_trade": rows[5], "worst_trade": rows[6],
         "total_pnl_usd": round(rows[7] or 0, 2),
     }
+
+@router.get("/learning/patterns")
+def get_patterns():
+    """Return Tier 3 pattern memory — TA setup win/loss history."""
+    return get_all_patterns()
+
+@router.get("/learning/regimes")
+def get_regimes():
+    """Return Tier 4 regime performance — win rates per market regime."""
+    return get_all_regime_stats()
+
+@router.get("/learning/lessons")
+def get_lessons(limit: int = 50):
+    """Return Tier 5 LLM reasoning audit lessons."""
+    return get_all_lessons(limit=limit)

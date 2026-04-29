@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.database import get_db, AiDecision, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot
+from lib.learning_engine import get_all_outcomes, get_all_accuracy
 from app.scheduler import job_status
 
 logger = logging.getLogger(__name__)
@@ -1008,3 +1009,46 @@ def clear_decisions():
         conn.execute(_text("DELETE FROM ai_decisions"))
     return {"ok": True, "deleted": count}
 
+# ── Learning Engine — Tier 1 & 2 ─────────────────────────────────────────────
+
+@router.get("/learning/outcomes")
+def get_outcomes(limit: int = 200, paper: bool = False):
+    """Return closed trade outcomes for the performance log."""
+    return get_all_outcomes(limit=limit, paper_mode=paper)
+
+@router.get("/learning/accuracy")
+def get_accuracy():
+    """Return per-symbol signal accuracy stats."""
+    return get_all_accuracy()
+
+@router.get("/learning/summary")
+def get_learning_summary():
+    """Return a portfolio-level learning summary."""
+    from app.database import engine
+    from sqlalchemy import text as _text
+    with engine.connect() as conn:
+        rows = conn.execute(_text("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses,
+                ROUND(AVG(pnl_pct),3) as avg_pnl,
+                ROUND(AVG(hold_duration_m),1) as avg_hold_min,
+                ROUND(MAX(pnl_pct),3) as best_trade,
+                ROUND(MIN(pnl_pct),3) as worst_trade,
+                SUM(pnl_usd) as total_pnl_usd
+            FROM trade_outcomes WHERE paper_mode = 0
+        """)).fetchone()
+    if not rows or rows[0] == 0:
+        return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                "avg_pnl": 0, "avg_hold_min": 0, "best_trade": 0,
+                "worst_trade": 0, "total_pnl_usd": 0}
+    total = rows[0] or 0
+    wins  = rows[1] or 0
+    return {
+        "total": total, "wins": wins, "losses": rows[2] or 0,
+        "win_rate": round(wins / total, 4) if total else 0,
+        "avg_pnl": rows[3], "avg_hold_min": rows[4],
+        "best_trade": rows[5], "worst_trade": rows[6],
+        "total_pnl_usd": round(rows[7] or 0, 2),
+    }

@@ -91,10 +91,12 @@ def _set_trailing_stop_equity(client, sym: str, qty: float, trail_pct: float) ->
     try:
         from alpaca.trading.requests import TrailingStopOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
+        # Alpaca requires trail_percent >= 0.1 — clamp any LLM-supplied value
+        trail_pct_safe = max(0.1, float(trail_pct))
         req = TrailingStopOrderRequest(
             symbol=sym, qty=max(1, int(qty)),
             side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-            trail_percent=trail_pct,
+            trail_percent=trail_pct_safe,
         )
         order = client.submit_order(req)
         logger.info(f"[Positions] ✓ Equity trailing stop — {sym} trail={trail_pct}% | {order.id}")
@@ -112,11 +114,24 @@ def _set_crypto_limit_stop(client, sym: str, qty: float, current_price: float, t
         # Truncate qty using floor — never round up, Alpaca rejects if qty > available balance
         # (their API returns e.g. 127.679999999 due to float precision, so 127.68 gets rejected)
         qty_safe = math.floor(qty * 1_000_000) / 1_000_000
-        req = LimitOrderRequest(
-            symbol=sym, qty=qty_safe,
-            side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-            limit_price=limit_price,
-        )
+        if qty_safe <= 0:
+            # qty floored to zero (dust position) — use notional instead
+            notional_safe = round(qty * current_price, 2)
+            if notional_safe < 1.0:
+                logger.warning(f"[Positions] Crypto limit-stop skipped {sym} — dust position (qty={qty}, notional=${notional_safe:.4f})")
+                return False
+            req = LimitOrderRequest(
+                symbol=sym, notional=notional_safe,
+                side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                limit_price=limit_price,
+            )
+            logger.info(f"[Positions] Crypto limit-stop using notional=${notional_safe:.2f} for {sym} (qty floored to 0)")
+        else:
+            req = LimitOrderRequest(
+                symbol=sym, qty=qty_safe,
+                side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                limit_price=limit_price,
+            )
         order = client.submit_order(req)
         logger.info(f"[Positions] ✓ Crypto limit-stop — {sym} floor=${limit_price:.4f} ({trail_pct}% below ${current_price:.4f}) | {order.id}")
         return True

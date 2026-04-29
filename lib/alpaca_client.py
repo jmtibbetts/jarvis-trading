@@ -237,17 +237,17 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
 
 def close_position(symbol: str):
     """
-    Close a position by symbol using percentage=1 (100% closeout).
-    This avoids the "order qty must be >= minimal qty" error for dust positions
-    because Alpaca calculates the qty server-side from the actual held quantity.
+    Close 100% of a position by symbol.
+    Calling client.close_position(symbol) with NO ClosePositionRequest options is
+    Alpaca's fully-reliable 100% liquidation path — no fractional math, no dust errors.
+    NOTE: percentage="1" was a bug — Alpaca treats that as 1%, not 100%.
     Alpaca REST requires no-slash for crypto (BTCUSD not BTC/USD).
     """
-    from alpaca.trading.requests import ClosePositionRequest
     client = get_trading_client()
     s = symbol.upper().strip().replace("/", "")
     try:
-        # percentage=1 means 100% — Alpaca computes the qty itself, no dust issues
-        return client.close_position(s, close_options=ClosePositionRequest(percentage="1"))
+        # No ClosePositionRequest = Alpaca default = close 100% of position
+        return client.close_position(s)
     except Exception as e:
         err_str = str(e)
         # If the position is already flat or not found, treat as success
@@ -275,3 +275,4 @@ def cancel_open_orders_for_symbol(symbol: str):
         return cancelled
     except Exception:
         return 0
+

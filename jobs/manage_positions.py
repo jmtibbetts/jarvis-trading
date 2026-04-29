@@ -344,6 +344,14 @@ def run():
         is_c          = _is_crypto(sym)
         alpaca_sym    = _alpaca_sym(sym)
 
+        # ── DUST GUARD: skip positions with negligible market value ────────────
+        # These are residual fractional positions from previous closes.
+        # They can't be meaningfully managed and waste LLM tokens + API calls.
+        DUST_THRESHOLD_USD = 1.0
+        if abs(mv) < DUST_THRESHOLD_USD:
+            logger.warning(f"[Positions] Skipping {sym} — dust position (MV=${mv:.6f}, qty={qty:.8g})")
+            continue
+
         logger.info(f"[Positions] {sym:12} {plpc:+6.1f}% | MV=${mv:>10,.0f} | P&L=${pl:>+8,.0f} | qty={qty}")
 
         # ── STEP 1: Hard deterministic rules — no LLM, instant ────────────────

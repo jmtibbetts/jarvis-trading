@@ -1,3 +1,4 @@
+from app.routes import log_decision
 """
 Job: Paper Trading v5.0
 Changes from v4.0:
@@ -188,6 +189,7 @@ def _manage_open_positions(prices: dict) -> dict:
         tier = _tier(plpc, is_c)
         if tier and tier["action"] == "close":
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
+            log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=tier["label"])
             closed += 1
             continue
@@ -260,6 +262,7 @@ Respond ONLY with valid JSON (no markdown):
 
         if action == "EXIT":
             logger.info(f"[PaperTrading] 🤖 LLM EXIT {sym} {plpc:+.2f}% | {reasoning}")
+            log_decision("paper", "EXIT", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=f"AI EXIT: {reasoning[:80]}")
             closed += 1
         elif action == "TIGHTEN_STOP" and new_stop_pct:
@@ -271,7 +274,7 @@ Respond ONLY with valid JSON (no markdown):
                         p = db.query(PaperPosition).filter(PaperPosition.id == pos["id"]).first()
                         if p:
                             p.stop_loss = new_stop
-                    logger.info(f"[PaperTrading] 🤖 TIGHTEN {sym} stop → ${new_stop:.4f} ({new_stop_pct}% below ${current_price:.4f}) | {reasoning}")
+                    logger.info(f"[PaperTrading] 🤖 TIGHTEN_STOP {sym} stop → ${new_stop:.4f} ({new_stop_pct}% below ${current_price:.4f}) | {reasoning}")
                 else:
                     logger.debug(f"[PaperTrading] TIGHTEN_STOP for {sym} ignored — new stop ${new_stop:.4f} not above current ${pos['stop_loss']:.4f}")
             except Exception as e:
@@ -279,6 +282,7 @@ Respond ONLY with valid JSON (no markdown):
             held += 1
         else:
             logger.info(f"[PaperTrading] 🤖 HOLD {sym} {plpc:+.2f}% | {reasoning}")
+            log_decision("paper", "HOLD", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
             held += 1
 
     return {"evaluated": evaluated, "closed": closed, "held": held}
@@ -436,6 +440,7 @@ def run():
         if not eval_result["approved"]:
             logger.info(
                 f"[PaperTrading] ❌ AI rejected entry {sym} — "
+                log_decision('paper', 'REJECTED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
                 f"score={eval_result['score']:.0f} | {eval_result['reasoning']}"
             )
             skipped_ai += 1
@@ -443,6 +448,7 @@ def run():
 
         logger.info(
             f"[PaperTrading] ✅ AI approved entry {sym} {sig['paper_direction']} — "
+            log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
             f"score={eval_result['score']:.0f} @ ${price:.4f} | {eval_result['reasoning']}"
         )
         result = open_paper_position(sig, current_price=price)
@@ -472,3 +478,5 @@ def run():
         "summary": port,
     }
 
+
+log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])

@@ -976,27 +976,35 @@ def log_decision(source: str, action: str, reasoning: str,
 
 @router.get("/decisions")
 def get_decisions(limit: int = 200):
-    """Return recent AI decisions newest-first."""
-    with get_db() as db:
-        rows = db.query(AiDecision).order_by(AiDecision.created_at.desc()).limit(limit).all()
-        return [{
-            "id":         r.id,
-            "source":     r.source,
-            "symbol":     r.symbol,
-            "action":     r.action,
-            "reasoning":  r.reasoning,
-            "price":      r.price,
-            "pnl_pct":    r.pnl_pct,
-            "score":      r.score,
-            "created_at": r.created_at,
-        } for r in rows]
+    """Return recent AI decisions newest-first — raw SQL so it works even if table is brand new."""
+    from app.database import engine
+    from sqlalchemy import text as _text
+    with engine.begin() as conn:
+        conn.execute(_text("""
+            CREATE TABLE IF NOT EXISTS ai_decisions (
+                id TEXT PRIMARY KEY, source TEXT, symbol TEXT, action TEXT,
+                reasoning TEXT, price REAL, pnl_pct REAL, score REAL, created_at TEXT
+            )
+        """))
+        rows = conn.execute(_text(
+            "SELECT id, source, symbol, action, reasoning, price, pnl_pct, score, created_at "
+            "FROM ai_decisions ORDER BY created_at DESC LIMIT :lim"
+        ), {"lim": limit}).fetchall()
+    return [
+        {"id": r[0], "source": r[1], "symbol": r[2], "action": r[3],
+         "reasoning": r[4], "price": r[5], "pnl_pct": r[6], "score": r[7], "created_at": r[8]}
+        for r in rows
+    ]
 
 
 @router.delete("/decisions/clear")
 def clear_decisions():
     """Clear all AI decision log entries."""
-    with get_db() as db:
-        count = db.query(AiDecision).count()
-        db.query(AiDecision).delete()
+    from app.database import engine
+    from sqlalchemy import text as _text
+    with engine.begin() as conn:
+        conn.execute(_text("CREATE TABLE IF NOT EXISTS ai_decisions (id TEXT PRIMARY KEY, source TEXT, symbol TEXT, action TEXT, reasoning TEXT, price REAL, pnl_pct REAL, score REAL, created_at TEXT)"))
+        count = conn.execute(_text("SELECT COUNT(*) FROM ai_decisions")).scalar()
+        conn.execute(_text("DELETE FROM ai_decisions"))
     return {"ok": True, "deleted": count}
 

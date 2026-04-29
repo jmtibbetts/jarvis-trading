@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot
+from app.database import get_db, AiDecision, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot
 from app.scheduler import job_status
 
 logger = logging.getLogger(__name__)
@@ -928,3 +928,48 @@ def paper_execute_signal(signal_id: str, direction: str = "Long"):
     except HTTPException: raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+# ── AI Decision Log ────────────────────────────────────────────────────────────
+
+def log_decision(source: str, action: str, reasoning: str,
+                 symbol: str = None, price: float = None,
+                 pnl_pct: float = None, score: float = None):
+    """Persist an AI decision to the ai_decisions table. Call from any job."""
+    try:
+        with get_db() as db:
+            db.add(AiDecision(
+                source=source, symbol=symbol, action=action,
+                reasoning=reasoning, price=price,
+                pnl_pct=pnl_pct, score=score
+            ))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[log_decision] Failed to save: {e}")
+
+
+@router.get("/decisions")
+def get_decisions(limit: int = 200):
+    """Return recent AI decisions newest-first."""
+    with get_db() as db:
+        rows = db.query(AiDecision).order_by(AiDecision.created_at.desc()).limit(limit).all()
+        return [{
+            "id":         r.id,
+            "source":     r.source,
+            "symbol":     r.symbol,
+            "action":     r.action,
+            "reasoning":  r.reasoning,
+            "price":      r.price,
+            "pnl_pct":    r.pnl_pct,
+            "score":      r.score,
+            "created_at": r.created_at,
+        } for r in rows]
+
+
+@router.delete("/decisions/clear")
+def clear_decisions():
+    """Clear all AI decision log entries."""
+    with get_db() as db:
+        count = db.query(AiDecision).count()
+        db.query(AiDecision).delete()
+    return {"ok": True, "deleted": count}
+

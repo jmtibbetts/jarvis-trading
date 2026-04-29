@@ -524,7 +524,6 @@ def get_lessons_context(symbol: str = None, limit: int = 5) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def record_trade_outcome(
-    _lazy_ensure()
     *,
     symbol: str,
     asset_class: str,
@@ -544,6 +543,7 @@ def record_trade_outcome(
     entered_at: str = None,
     paper_mode: bool = False,
 ):
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
 

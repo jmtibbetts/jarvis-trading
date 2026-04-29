@@ -95,7 +95,7 @@ def _get_open_paper_positions() -> list:
             "margin":       float(p.margin_used or 0),
             "leverage":     float(p.leverage or 1),
             "stop_loss":    float(p.stop_loss or 0),
-            "take_profit":  float(p.take_profit or 0),
+            "target_price": float(p.target_price or 0),
             "opened_at":    str(p.opened_at or ""),
         } for p in rows]
 
@@ -216,7 +216,7 @@ POSITION: {sym} ({'Crypto 24/7' if is_c else 'Equity'})
   Entry:          ${entry:.4f}
   Current Price:  ${current_price:.4f}
   Stop Loss:      ${pos['stop_loss']:.4f}
-  Take Profit:    ${pos['take_profit']:.4f}
+  Take Profit:    ${pos['target_price']:.4f}
   Leverage:       {pos['leverage']}x
   Deterministic tier: {tier_label}
 
@@ -471,3 +471,4 @@ def run():
         "skipped_no_price": skipped_no_price,
         "summary": port,
     }
+

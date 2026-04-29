@@ -296,3 +296,15 @@ class PaperPortfolio(Base):
     realized_pnl   = Column(Float, default=0.0)
     updated_at     = Column(String, default=now_iso)
 
+class AiDecision(Base):
+    """Log of every AI decision made by Guardian, position manager, and paper trading."""
+    __tablename__ = "ai_decisions"
+    id          = Column(String, primary_key=True, default=new_id)
+    source      = Column(String)   # guardian | positions | paper | signals
+    symbol      = Column(String)   # affected symbol (None for portfolio-level decisions)
+    action      = Column(String)   # HOLD | EXIT | TIGHTEN_STOP | EXIT_WEAKEST | EXIT_ALL | TIGHTEN_ALL | APPROVED | REJECTED
+    reasoning   = Column(String)   # LLM reasoning text
+    price       = Column(Float)    # current price at decision time (optional)
+    pnl_pct     = Column(Float)    # P&L% of position at decision time (optional)
+    score       = Column(Float)    # confidence/score if entry eval (optional)
+    created_at  = Column(String, default=now_iso)

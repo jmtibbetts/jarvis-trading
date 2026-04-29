@@ -399,6 +399,7 @@ def get_paper_summary() -> dict:
                     "unrealized_pct":float(p.unrealized_pct or 0),
                     "opened_at":     p.opened_at.isoformat() if hasattr(p.opened_at, "isoformat") else (p.opened_at or ""),
                     "asset_class":   p.asset_class or "Equity",
+                    "signal_id":     p.signal_id or "",
                 })
             except Exception as e:
                 logger.warning(f"[Paper] Skipping bad position row {p.id}: {e}")
@@ -424,6 +425,38 @@ def get_paper_summary() -> dict:
                 })
             except Exception as e:
                 logger.warning(f"[Paper] Skipping bad trade row {t.id}: {e}")
+
+    # Join signal data for paper positions (for TA/reasoning/news display)
+    signal_ids = [p["signal_id"] for p in pos_list if p.get("signal_id")]
+    signal_map = {}
+    if signal_ids:
+        try:
+            from app.database import TradingSignal
+            sigs = db.query(TradingSignal).filter(TradingSignal.id.in_(signal_ids)).all()
+            for s in sigs:
+                signal_map[s.id] = {
+                    "id":             s.id,
+                    "direction":      s.direction or "Long",
+                    "confidence":     float(s.confidence or 0),
+                    "composite_score":float(getattr(s, "composite_score", None) or s.confidence or 0),
+                    "timeframe":      s.timeframe or "",
+                    "reasoning":      s.reasoning or "",
+                    "key_risks":      getattr(s, "key_risks", None) or "",
+                    "momentum":       getattr(s, "momentum", None) or "",
+                    "signal_source":  getattr(s, "signal_source", None) or "watchlist",
+                    "generated_at":   s.generated_at.isoformat() if hasattr(s.generated_at, "isoformat") else (s.generated_at or ""),
+                    "entry_price":    float(s.entry_price or 0),
+                    "target_price":   float(s.target_price or 0),
+                    "stop_loss":      float(s.stop_loss or 0),
+                    "status":         s.status or "",
+                    "trigger_event":  getattr(s, "trigger_event", None) or "",
+                }
+        except Exception as e:
+            logger.warning(f"[Paper] Could not join signals: {e}")
+
+    # Attach signal context to each position
+    for p in pos_list:
+        p["signal"] = signal_map.get(p.get("signal_id"), None)
 
     open_pnl  = sum(p["unrealized_pnl"] for p in pos_list)
     margin_in = sum(p["margin_used"] for p in pos_list)

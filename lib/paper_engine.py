@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 PAPER_STARTING_CAPITAL = 100_000.0   # $100k virtual account
 MAX_LEVERAGE           = 3.0          # Max leverage multiplier
-MARGIN_CALL_THRESHOLD  = 0.20         # Liquidate if equity < 20% of notional
+MARGIN_CALL_THRESHOLD  = 0.15         # Liquidate if equity < 15% of margin (lost 85% of capital)
 DEFAULT_POSITION_SIZE  = 3_000.0      # $3k margin per trade (3% of $100k)
 
 DIRECTION_LEVERAGE = {
@@ -343,9 +343,9 @@ def mark_to_market(prices: dict) -> dict:
             if stop  > 0 and price >= stop:    reason = "stop_loss"
             elif target > 0 and price <= target: reason = "take_profit"
 
-        # Margin call: equity in position < 20% of notional exposure
+        # Margin call: equity in position (margin + pnl) < 15% of original margin (lost 85%)
         equity_in_pos = margin + pnl
-        if pos["notional"] > 0 and equity_in_pos < pos["notional"] * MARGIN_CALL_THRESHOLD:
+        if margin > 0 and equity_in_pos < margin * MARGIN_CALL_THRESHOLD:
             reason = "margin_call"
 
         if reason:

@@ -393,16 +393,24 @@ def mark_to_market(prices: dict) -> dict:
             prices.get(sym.replace("/", "") + "USD") or
             prices.get(sym.replace("/", ""))
         )
-        # Also try futures data source for futures/forex symbols
+        # Futures/Forex fallback — covers GC=F, EURUSD=X, CL=F, etc.
         if not price:
             try:
                 from lib.futures_data import get_cached_futures_price, FUTURES_UNIVERSE
                 if sym in FUTURES_UNIVERSE:
                     fd = get_cached_futures_price(sym)
-                    if fd:
-                        price = float(fd.get("price") or 0)
+                    if fd and fd.get("price"):
+                        price = float(fd["price"])
             except Exception:
                 pass
+
+        # Also check with and without = suffix (yfinance oddities)
+        if not price:
+            for alt in [sym.upper(), sym.replace("=X",""), sym.replace("=F","")]:
+                if alt in prices and prices[alt]:
+                    price = float(prices[alt])
+                    break
+
         if not price:
             logger.debug(f"[Paper] No price in MTM for {sym}")
             continue

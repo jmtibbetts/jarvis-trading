@@ -1,5 +1,5 @@
 """
-FastAPI routes v6.0 — all /api/* endpoints.
+FastAPI routes v6.6 — all /api/* endpoints.
 Added: /regime, /portfolio/equity, /market/full, /positions/close, /signals/clear/expired
 """
 import logging, uuid

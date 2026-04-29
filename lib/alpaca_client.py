@@ -159,10 +159,25 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         entry_order = client.submit_order(market_req)
         logger.info(f"[Alpaca] Crypto market entry submitted — {sym} x{qty} | order_id={entry_order.id}")
 
+        # ── Wait briefly for fill + get actual filled qty ────────────────────
+        # Market orders settle with minor fee/rounding differences.
+        # Always use filled_qty * 0.999 (floor to 8dp) for protective orders
+        # to avoid "insufficient balance" 40310000 errors.
+        import time as _time
+        _time.sleep(1.0)
+        try:
+            filled_order = client.get_order_by_id(entry_order.id)
+            filled_qty = float(filled_order.filled_qty or qty)
+        except Exception:
+            filled_qty = float(qty)
+        # Apply a 0.1% haircut and floor to 8 decimal places to stay under settled balance
+        protective_qty = round(filled_qty * 0.999, 8)
+        logger.info(f"[Alpaca] Crypto filled qty={filled_qty} → protective qty={protective_qty} (0.1% haircut)")
+
         result = {
             'id': str(entry_order.id),
             'symbol': sym,
-            'qty': qty,
+            'qty': filled_qty,
             'status': str(entry_order.status),
             'type': 'market',
             'side': str(entry_order.side),
@@ -178,7 +193,7 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
             try:
                 sl_req = LimitOrderRequest(
                     symbol=sym,
-                    qty=round(qty, 8),
+                    qty=protective_qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
                     limit_price=round(stop_loss, 8),
@@ -186,7 +201,7 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                 sl_order = client.submit_order(sl_req)
                 result['sl_order_id'] = str(sl_order.id)
                 logger.info(
-                    f"[Alpaca] Crypto SL order placed — {sym} limit-sell @ ${stop_loss:.6g} | order_id={sl_order.id}"
+                    f"[Alpaca] Crypto SL order placed — {sym} limit-sell x{protective_qty} @ ${stop_loss:.6g} | order_id={sl_order.id}"
                 )
             except Exception as e:
                 logger.warning(f"[Alpaca] Crypto SL order failed for {sym}: {e} — entry still filled, no SL protection")
@@ -196,7 +211,7 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
             try:
                 tp_req = LimitOrderRequest(
                     symbol=sym,
-                    qty=round(qty, 8),
+                    qty=protective_qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
                     limit_price=round(take_profit, 8),
@@ -204,7 +219,7 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                 tp_order = client.submit_order(tp_req)
                 result['tp_order_id'] = str(tp_order.id)
                 logger.info(
-                    f"[Alpaca] Crypto TP order placed — {sym} limit-sell @ ${take_profit:.6g} | order_id={tp_order.id}"
+                    f"[Alpaca] Crypto TP order placed — {sym} limit-sell x{protective_qty} @ ${take_profit:.6g} | order_id={tp_order.id}"
                 )
             except Exception as e:
                 logger.warning(f"[Alpaca] Crypto TP order failed for {sym}: {e} — entry still filled, no TP protection")

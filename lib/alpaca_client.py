@@ -129,6 +129,26 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
     order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
 
     if crypto:
+        # ── Step 0: cancel any existing open sell orders for this symbol ────
+        # Alpaca rejects new sell orders as "wash trade" if a prior sell
+        # order (orphaned SL/TP from a previous entry) is still open.
+        try:
+            from alpaca.trading.requests import GetOrdersRequest as _GOR
+            from alpaca.trading.enums import QueryOrderStatus as _QOS
+            sym_clean = sym.replace("/", "")
+            existing_sells = client.get_orders(_GOR(status=_QOS.OPEN, symbols=[sym_clean]))
+            cancelled = 0
+            for o in existing_sells:
+                try:
+                    client.cancel_order_by_id(o.id)
+                    cancelled += 1
+                except Exception:
+                    pass
+            if cancelled:
+                logger.info(f"[Alpaca] Cleared {cancelled} orphan order(s) for {sym} before new entry")
+        except Exception as ce:
+            logger.debug(f"[Alpaca] Pre-entry cancel check failed for {sym}: {ce}")
+
         # ── Step 1: market entry ────────────────────────────────────────────
         market_req = MarketOrderRequest(
             symbol=sym,

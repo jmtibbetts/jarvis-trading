@@ -440,17 +440,17 @@ def run():
         if not eval_result["approved"]:
             logger.info(
                 f"[PaperTrading] ❌ AI rejected entry {sym} — "
-                log_decision('paper', 'REJECTED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
                 f"score={eval_result['score']:.0f} | {eval_result['reasoning']}"
             )
+            log_decision('paper', 'REJECTED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
             skipped_ai += 1
             continue
 
         logger.info(
             f"[PaperTrading] ✅ AI approved entry {sym} {sig['paper_direction']} — "
-            log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
             f"score={eval_result['score']:.0f} @ ${price:.4f} | {eval_result['reasoning']}"
         )
+        log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
         result = open_paper_position(sig, current_price=price)
         if result.get("ok"):
             executed += 1
@@ -479,4 +479,3 @@ def run():
     }
 
 
-log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])

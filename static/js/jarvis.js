@@ -1101,6 +1101,16 @@ setInterval(refreshAll, 60000);
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function loadPaperTab() {
+  // Start a 30-second auto-refresh when on the paper tab
+  if (window._paperRefreshTimer) clearInterval(window._paperRefreshTimer);
+  window._paperRefreshTimer = setInterval(() => {
+    if (document.getElementById('tab-paper')?.classList.contains('active')) {
+      loadPaperTab();
+    } else {
+      clearInterval(window._paperRefreshTimer);
+      window._paperRefreshTimer = null;
+    }
+  }, 30000);
   try {
     const data = await API('/paper/summary');
     const p    = data.portfolio;
@@ -1139,7 +1149,7 @@ async function loadPaperTab() {
           <td class="fw-semibold text-warning">${pos.symbol}</td>
           <td>${dirBadge}</td>
           <td>${sideBadge}</td>
-          <td>${pos.leverage}×</td>
+          <td>${(pos.leverage||1).toFixed(1)}×</td>
           <td>${pos.qty.toFixed(4)}</td>
           <td>$${pos.entry_price.toFixed(4)}</td>
           <td>$${pos.current_price.toFixed(4)}</td>
@@ -1165,11 +1175,11 @@ async function loadPaperTab() {
         return `<tr>
           <td class="fw-semibold text-warning">${t.symbol}</td>
           <td>${paperDirBadge(t.direction)}</td>
-          <td>${t.leverage}×</td>
-          <td>$${t.entry_price.toFixed(4)}</td>
-          <td>$${t.exit_price.toFixed(4)}</td>
-          <td class="${pnlCls} fw-semibold">${t.realized_pnl >= 0 ? '+' : ''}$${t.realized_pnl.toFixed(2)}</td>
-          <td class="${pnlCls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+          <td>${(t.leverage||1).toFixed(1)}×</td>
+          <td>$${(t.entry_price||0).toFixed(4)}</td>
+          <td>$${(t.exit_price||0).toFixed(4)}</td>
+          <td class="${pnlCls} fw-semibold">${(t.realized_pnl||0) >= 0 ? '+' : ''}$${Math.abs(t.realized_pnl||0).toFixed(2)}</td>
+          <td class="${pnlCls}">${(t.pnl_pct||0) >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}%</td>
           <td>${reasonBadge}</td>
           <td class="text-muted small">${relTime(t.opened_at)}</td>
           <td class="text-muted small">${relTime(t.closed_at)}</td>

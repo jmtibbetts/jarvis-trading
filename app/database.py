@@ -272,9 +272,11 @@ def _migrate_columns():
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
 
-    # ── Learning engine tables ───────────────────────────────────────────────
+    # ── Learning engine tables (Tiers 1-5) ─────────────────────────────────
+    # Safe to run on every startup — CREATE TABLE IF NOT EXISTS is idempotent
     try:
         with engine.begin() as conn:
+            # Tier 1+2 — trade history & accuracy tracking
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS trade_outcomes (
                     id TEXT PRIMARY KEY, signal_id TEXT, symbol TEXT, asset_class TEXT,
@@ -295,7 +297,55 @@ def _migrate_columns():
                     last_updated TEXT
                 )
             """))
-            print("[DB] Learning engine tables ready")
+            # Tier 3 — Pattern Memory (TA setup fingerprints → win/loss history)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS pattern_memory (
+                    id TEXT PRIMARY KEY,
+                    fingerprint TEXT UNIQUE,
+                    pattern_desc TEXT,
+                    asset_class TEXT,
+                    timeframe TEXT,
+                    total INTEGER DEFAULT 0,
+                    wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0,
+                    win_rate REAL DEFAULT 0.0,
+                    avg_pnl_pct REAL DEFAULT 0.0,
+                    last_seen TEXT,
+                    last_updated TEXT
+                )
+            """))
+            # Tier 4 — Regime Performance (strategy perf by market regime)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS regime_performance (
+                    id TEXT PRIMARY KEY,
+                    regime TEXT UNIQUE,
+                    total INTEGER DEFAULT 0,
+                    wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0,
+                    win_rate REAL DEFAULT 0.0,
+                    avg_pnl_pct REAL DEFAULT 0.0,
+                    avg_confidence REAL DEFAULT 0.0,
+                    last_updated TEXT
+                )
+            """))
+            # Tier 5 — LLM Reasoning Audit / Lessons
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS llm_lessons (
+                    id TEXT PRIMARY KEY,
+                    outcome_id TEXT,
+                    symbol TEXT,
+                    asset_class TEXT,
+                    outcome TEXT,
+                    pnl_pct REAL,
+                    original_reasoning TEXT,
+                    lesson TEXT,
+                    lesson_category TEXT,
+                    market_regime TEXT,
+                    paper_mode INTEGER DEFAULT 0,
+                    created_at TEXT
+                )
+            """))
+            print("[DB] Learning engine tables (Tiers 1-5) ready")
     except Exception as e:
         print(f"[DB] Learning table migration warning: {e}")
 

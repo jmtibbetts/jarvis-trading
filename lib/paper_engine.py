@@ -212,15 +212,17 @@ def mark_to_market(prices: dict) -> dict:
         positions = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
         pos_list = [
             {
-                "id": p.id, "symbol": p.symbol, "entry_price": float(p.entry_price),
-                "qty": float(p.qty), "side": p.side, "leverage": float(p.leverage),
+                "id": p.id, "symbol": p.symbol, "entry_price": float(p.entry_price or 0),
+                "qty": float(p.qty or 0), "side": p.side or "long",
+                "leverage": float(p.leverage or 1.0),
                 "target_price": float(p.target_price or 0),
                 "stop_loss": float(p.stop_loss or 0),
                 "notional": float(p.notional or 0),
                 "margin_used": float(p.margin_used or 0),
-                "direction": p.direction,
+                "direction": p.direction or "Long",
             }
             for p in positions
+            if p.entry_price and p.qty
         ]
 
     for pos in pos_list:
@@ -280,15 +282,18 @@ def get_paper_summary() -> dict:
         positions = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
         pos_list = [
             {
-                "id": p.id, "symbol": p.symbol, "direction": p.direction,
-                "side": p.side, "leverage": p.leverage, "qty": float(p.qty),
-                "entry_price": float(p.entry_price), "current_price": float(p.current_price or p.entry_price),
+                "id": p.id, "symbol": p.symbol, "direction": p.direction or "Long",
+                "side": p.side or "long", "leverage": float(p.leverage or 1.0),
+                "qty": float(p.qty or 0),
+                "entry_price": float(p.entry_price or 0),
+                "current_price": float(p.current_price or p.entry_price or 0),
                 "target_price": float(p.target_price or 0), "stop_loss": float(p.stop_loss or 0),
                 "notional": float(p.notional or 0), "unrealized_pnl": float(p.unrealized_pnl or 0),
                 "unrealized_pct": float(p.unrealized_pct or 0),
-                "opened_at": p.opened_at, "asset_class": p.asset_class,
+                "opened_at": p.opened_at, "asset_class": p.asset_class or "Equity",
             }
             for p in positions
+            if p.entry_price
         ]
 
         trades = db.query(PaperTrade).order_by(PaperTrade.closed_at.desc()).limit(50).all()
@@ -304,7 +309,7 @@ def get_paper_summary() -> dict:
         ]
 
     open_pnl  = sum(p["unrealized_pnl"] for p in pos_list)
-    margin_in = sum(p["notional"] / p["leverage"] for p in pos_list)
+    margin_in = sum(p["notional"] / (p["leverage"] or 1.0) for p in pos_list if p["notional"])
     equity    = p_data["cash"] + margin_in + open_pnl
     win_rate  = round(p_data["winning_trades"] / p_data["total_trades"] * 100, 1) if p_data["total_trades"] > 0 else 0
 

@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
+def _lazy_ensure():
+    """Call once per process to guarantee all learning tables exist.
+    Safe to call from any public function — no-ops after first call."""
+    global _tables_ensured
+    if _tables_ensured:
+        return
+    try:
+        from app.database import engine
+        with engine.begin() as conn:
+            _ensure_tables(conn)
+        _tables_ensured = True
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).debug(f"[Learning] lazy_ensure skipped: {_e}")
+
+
 def _new_id():
     return str(uuid.uuid4())
 
@@ -30,6 +46,8 @@ def _new_id():
 # ─────────────────────────────────────────────────────────────────────────────
 # DB BOOTSTRAP — ensure all learning tables exist (idempotent)
 # ─────────────────────────────────────────────────────────────────────────────
+
+_tables_ensured = False  # module-level flag — only run once per process
 
 def _ensure_tables(conn):
     from sqlalchemy import text
@@ -212,6 +230,7 @@ def get_pattern_context(ta_profile: dict, direction: str) -> str:
     """
     Returns a text block for LLM injection: pattern win-rate history.
     """
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
     try:
@@ -284,6 +303,7 @@ def get_regime_context(current_regime: str) -> str:
     Returns a text block for LLM injection: how the bot has performed historically
     in this exact market regime.
     """
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
     try:
@@ -323,6 +343,7 @@ def get_confidence_adjustment(current_regime: str, base_confidence: float) -> fl
     Adjust signal confidence based on historical win rate in this regime.
     Returns adjusted confidence (capped 10-99).
     """
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
     try:
@@ -446,6 +467,7 @@ def get_lessons_context(symbol: str = None, limit: int = 5) -> str:
     Returns the most recent/relevant lessons for LLM prompt injection.
     Increments applied_count so we can track usage.
     """
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
     try:
@@ -502,6 +524,7 @@ def get_lessons_context(symbol: str = None, limit: int = 5) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def record_trade_outcome(
+    _lazy_ensure()
     *,
     symbol: str,
     asset_class: str,
@@ -680,6 +703,7 @@ def _refresh_signal_accuracy(symbol: str, asset_class: str, timeframe: str):
 
 
 def get_accuracy_context(symbol: str, timeframe: str = None, lookback_days: int = 30) -> str:
+    _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
     try:

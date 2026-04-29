@@ -666,6 +666,29 @@ def _position_dict(p):
         "current_price":   float(p.current_price or 0),
     }
 
+@router.get("/debug/positions")
+def debug_positions_raw():
+    """Debug: return raw Alpaca position data to diagnose filtering/class issues."""
+    try:
+        from lib.alpaca_client import get_positions
+        positions = get_positions()
+        out = []
+        for p in positions:
+            raw_class = str(getattr(p, "asset_class", "") or "")
+            qty_raw   = str(getattr(p, "qty", ""))
+            out.append({
+                "symbol":          str(p.symbol),
+                "qty_raw":         qty_raw,
+                "qty_float":       float(p.qty or 0),
+                "raw_asset_class": raw_class,
+                "resolved_class":  _position_dict(p)["asset_class"],
+                "market_value":    float(p.market_value or 0),
+                "side":            str(p.side),
+            })
+        return {"count": len(out), "positions": out}
+    except Exception as e:
+        return {"error": str(e)}
+
 def _config_dict(c):
     return {"id":c.id,"key":c.key,"label":c.label,"platform":c.platform,"config_type":c.config_type,
             "api_key":c.api_key,"api_secret":c.api_secret,"api_url":c.api_url,

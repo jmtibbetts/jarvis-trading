@@ -1067,3 +1067,39 @@ def get_regimes():
 def get_lessons(limit: int = 50):
     """Return Tier 5 LLM reasoning audit lessons."""
     return get_all_lessons(limit=limit)
+
+# ─── Futures Data ─────────────────────────────────────────────────────────────
+
+@router.get("/futures/prices")
+def get_futures_prices(paper_only: bool = False):
+    """Return latest futures/forex/commodity prices."""
+    try:
+        from lib.futures_data import fetch_all_futures_prices, PAPER_FUTURES, FUTURES_UNIVERSE
+        syms = PAPER_FUTURES if paper_only else list(FUTURES_UNIVERSE.keys())
+        return fetch_all_futures_prices(syms)
+    except Exception as e:
+        logger.error(f"[API] /futures/prices: {e}")
+        return {}
+
+@router.get("/futures/news")
+def get_futures_news(limit: int = 30):
+    """Return recent futures/commodity/forex news articles."""
+    try:
+        from lib.futures_data import fetch_futures_news
+        return fetch_futures_news(max_total=limit)
+    except Exception as e:
+        logger.error(f"[API] /futures/news: {e}")
+        return []
+
+@router.get("/futures/universe")
+def get_futures_universe():
+    """Return the full futures symbol registry."""
+    try:
+        from lib.futures_data import FUTURES_UNIVERSE, CATEGORY_ICONS
+        return [
+            {"symbol": sym, **meta, "icon": CATEGORY_ICONS.get(meta.get("category",""), "📊")}
+            for sym, meta in FUTURES_UNIVERSE.items()
+        ]
+    except Exception as e:
+        logger.error(f"[API] /futures/universe: {e}")
+        return []

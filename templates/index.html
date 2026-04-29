@@ -722,6 +722,72 @@
       </div>
     </div>
 
+    <!-- Row 2: Patterns + Regime + Lessons -->
+    <div class="row g-3 mt-1">
+
+      <!-- Tier 3: Pattern Memory -->
+      <div class="col-12 col-xl-4">
+        <div class="card bg-dark border-secondary h-100">
+          <div class="card-header border-secondary py-2">
+            <span class="text-white fw-semibold"><i class="bi bi-fingerprint me-1 text-warning"></i>Pattern Memory <span class="badge bg-secondary ms-1 small">Tier 3</span></span>
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-dark table-hover table-sm align-middle mb-0">
+                <thead class="table-secondary">
+                  <tr>
+                    <th>Pattern</th>
+                    <th>Count</th>
+                    <th>Win%</th>
+                    <th>Avg P&L</th>
+                  </tr>
+                </thead>
+                <tbody id="patterns-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tier 4: Regime Performance -->
+      <div class="col-12 col-xl-4">
+        <div class="card bg-dark border-secondary h-100">
+          <div class="card-header border-secondary py-2">
+            <span class="text-white fw-semibold"><i class="bi bi-bar-chart-steps me-1 text-info"></i>Regime Performance <span class="badge bg-secondary ms-1 small">Tier 4</span></span>
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-dark table-hover table-sm align-middle mb-0">
+                <thead class="table-secondary">
+                  <tr>
+                    <th>Regime</th>
+                    <th>Trades</th>
+                    <th>Win%</th>
+                    <th>Avg P&L</th>
+                    <th>Avg Conf</th>
+                  </tr>
+                </thead>
+                <tbody id="regime-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tier 5: LLM Lessons -->
+      <div class="col-12 col-xl-4">
+        <div class="card bg-dark border-secondary h-100">
+          <div class="card-header border-secondary py-2">
+            <span class="text-white fw-semibold"><i class="bi bi-lightbulb-fill me-1 text-success"></i>AI Lessons <span class="badge bg-secondary ms-1 small">Tier 5</span></span>
+          </div>
+          <div class="card-body p-2" style="max-height:320px;overflow-y:auto">
+            <div id="lessons-list"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
     <!-- Empty state -->
     <div id="learning-empty" class="text-center text-muted py-5" style="display:none">
       <i class="bi bi-mortarboard fs-1 d-block mb-2 opacity-50"></i>

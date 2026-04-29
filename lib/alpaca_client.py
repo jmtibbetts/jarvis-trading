@@ -7,7 +7,7 @@ from functools import lru_cache
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, GetOrdersRequest,
-    TrailingStopOrderRequest
+    StopOrderRequest
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
@@ -116,9 +116,13 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
     Submit an order with take-profit and stop-loss protection.
 
     Equities: standard bracket order (limit entry + TP limit + SL stop).
-    Crypto:   market entry first, then a separate trailing-stop order as
-              protective exit.  Alpaca does NOT support bracket orders on
-              crypto — submitting one raises an API error.
+    Crypto:   market entry first, then two separate protective limit orders:
+              - A stop-loss static limit-sell at stop_loss price
+              - A take-profit limit-sell at take_profit price
+              Alpaca does NOT support bracket orders or trailing stops on
+              crypto — submitting either raises a 40010001 API error.
+              These are NOT linked (no OCO), so the position manager is
+              responsible for cancelling the orphan order after a leg fills.
     """
     sym, crypto = normalize_symbol(symbol)
     client = get_trading_client()
@@ -135,29 +139,7 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         entry_order = client.submit_order(market_req)
         logger.info(f"[Alpaca] Crypto market entry submitted — {sym} x{qty} | order_id={entry_order.id}")
 
-        # ── Step 2: trailing stop as protective exit ────────────────────────
-        # Calculate trail % from the stop_loss relative to entry_price
-        # e.g. entry=100, stop=92 → trail=8%
-        if entry_price and stop_loss and entry_price > 0:
-            trail_pct = round(abs(entry_price - stop_loss) / entry_price * 100, 2)
-            trail_pct = max(1.0, min(trail_pct, 15.0))  # clamp 1-15%
-        else:
-            trail_pct = 5.0  # sensible default
-
-        try:
-            trail_req = TrailingStopOrderRequest(
-                symbol=sym,
-                qty=round(qty, 8),
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                trail_percent=trail_pct,
-            )
-            trail_order = client.submit_order(trail_req)
-            logger.info(f"[Alpaca] Crypto trailing stop attached — {sym} trail={trail_pct}% | order_id={trail_order.id}")
-        except Exception as te:
-            logger.warning(f"[Alpaca] Trailing stop failed for {sym}: {te} — entry still filled")
-
-        return {
+        result = {
             'id': str(entry_order.id),
             'symbol': sym,
             'qty': qty,
@@ -165,8 +147,49 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
             'type': 'market',
             'side': str(entry_order.side),
             'crypto': True,
-            'trail_pct': trail_pct,
+            'sl_order_id': None,
+            'tp_order_id': None,
         }
+
+        # ── Step 2a: static stop-loss limit-sell ────────────────────────────
+        # Alpaca crypto does NOT support trailing stops or bracket orders.
+        # We use a plain limit-sell at the stop_loss price instead.
+        if stop_loss and stop_loss > 0:
+            try:
+                sl_req = LimitOrderRequest(
+                    symbol=sym,
+                    qty=round(qty, 8),
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=round(stop_loss, 8),
+                )
+                sl_order = client.submit_order(sl_req)
+                result['sl_order_id'] = str(sl_order.id)
+                logger.info(
+                    f"[Alpaca] Crypto SL order placed — {sym} limit-sell @ ${stop_loss:.6g} | order_id={sl_order.id}"
+                )
+            except Exception as e:
+                logger.warning(f"[Alpaca] Crypto SL order failed for {sym}: {e} — entry still filled, no SL protection")
+
+        # ── Step 2b: take-profit limit-sell ─────────────────────────────────
+        if take_profit and take_profit > 0:
+            try:
+                tp_req = LimitOrderRequest(
+                    symbol=sym,
+                    qty=round(qty, 8),
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=round(take_profit, 8),
+                )
+                tp_order = client.submit_order(tp_req)
+                result['tp_order_id'] = str(tp_order.id)
+                logger.info(
+                    f"[Alpaca] Crypto TP order placed — {sym} limit-sell @ ${take_profit:.6g} | order_id={tp_order.id}"
+                )
+            except Exception as e:
+                logger.warning(f"[Alpaca] Crypto TP order failed for {sym}: {e} — entry still filled, no TP protection")
+
+        return result
 
     else:
         # ── Equity: standard bracket (limit entry) ──────────────────────────
@@ -232,5 +255,3 @@ def cancel_open_orders_for_symbol(symbol: str):
         return cancelled
     except Exception:
         return 0
-
-

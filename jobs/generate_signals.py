@@ -374,8 +374,9 @@ def run():
         if expired:
             logger.info(f"[Signals] Expired {len(expired)} stale Active signals")
 
+        # Exclude PaperExecuted so each signal cycle can generate fresh paper entries
         live_records = db.query(TradingSignal).filter(
-            TradingSignal.status.in_(["Active", "PendingApproval", "PaperExecuted"])
+            TradingSignal.status.in_(["Active", "PendingApproval"])
         ).all()
         # Key: (symbol, is_paper) to prevent collisions between live and paper signals
         existing_map = {}

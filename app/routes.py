@@ -181,6 +181,8 @@ def get_positions_with_signals():
                 if key and key not in sig_map:
                     sig_map[key] = s
 
+        # Filter out zero-qty stale positions
+        positions = [p for p in positions if abs(float(p.qty or 0)) > 0]
         result = []
         for p in positions:
             sym = str(p.symbol)
@@ -248,6 +250,8 @@ def get_positions_live():
         positions = get_positions(); account = get_account()
         equity = float(account.equity); mv = sum(float(p.market_value or 0) for p in positions)
         pl     = sum(float(p.unrealized_pl or 0) for p in positions)
+        # Filter out zero-qty stale positions (Alpaca sometimes keeps closed positions)
+        positions = [p for p in positions if abs(float(p.qty or 0)) > 0]
         return {"positions":[_position_dict(p) for p in positions],
                 "account":{"equity":equity,"cash":float(account.cash),
                             "buying_power":float(account.buying_power),"market_value":mv,
@@ -632,6 +636,24 @@ def _position_dict(p):
     plpc_raw = float(p.unrealized_plpc or 0)
     # Convert to percentage: if abs value > 1, it's already in pct; otherwise multiply
     plpc = plpc_raw * 100 if abs(plpc_raw) <= 1 else plpc_raw
+    # Detect asset class: prefer Alpaca's own asset_class attribute, fall back to heuristics
+    # Alpaca returns crypto symbols as e.g. "BTCUSD" (no slash) with asset_class="crypto"
+    raw_class = str(getattr(p, "asset_class", "") or "").lower()
+    if raw_class in ("crypto", "cryptocurrency"):
+        asset_class = "Crypto"
+    elif "/" in sym:
+        asset_class = "Crypto"
+    elif sym.endswith("USD") and len(sym) > 5:
+        # Heuristic: symbols like BTCUSD, ETHUSD, SOLUSD, AAVEUSD, ARBUSD, AVAXUSD, LINKUSD, XRPUSD
+        # known equity symbols that end in D won't be >5 chars ending USD typically,
+        # but we also check: if it looks like a crypto ticker (>5 chars, ends USD, no digits)
+        base = sym[:-3]  # strip "USD"
+        if len(base) >= 2 and base.isalpha():
+            asset_class = "Crypto"
+        else:
+            asset_class = "Equity"
+    else:
+        asset_class = "Equity"
     return {
         "symbol":          sym,
         "qty":             float(p.qty or 0),
@@ -640,7 +662,7 @@ def _position_dict(p):
         "unrealized_pl":   float(p.unrealized_pl or 0),
         "unrealized_plpc": round(plpc, 4),
         "side":            str(p.side),
-        "asset_class":     "Crypto" if "/" in sym else "Equity",
+        "asset_class":     asset_class,
         "current_price":   float(p.current_price or 0),
     }
 

@@ -665,7 +665,7 @@
 let allDecisions = [];
 
 function loadDecisions() {
-  API('/api/decisions?limit=300').then(data => {
+  API('/decisions?limit=300').then(data => {
     allDecisions = data || [];
     filterDecisions();
     renderDecisionStats(allDecisions);

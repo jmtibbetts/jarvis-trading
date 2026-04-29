@@ -1177,8 +1177,71 @@ async function loadPaperTab() {
             ? '<span class="badge bg-success">LONG</span>'
             : '<span class="badge bg-danger">SHORT</span>';
           const fmt = (v,d=4) => (v!=null && !isNaN(v)) ? Number(v).toFixed(d) : '—';
-          posRows.push(`<tr>
-            <td class="fw-semibold text-warning">${pos.symbol||'?'}</td>
+
+          // Build signal detail panel (same as real positions tab)
+          const s = pos.signal;
+          let detailRow = '';
+          if (s) {
+            const sc      = s.composite_score || s.confidence || 0;
+            const scBadge = sc>=70 ? 'bg-success' : sc>=50 ? 'bg-warning text-dark' : 'bg-danger';
+            const rr      = pos.entry_price && pos.target_price && pos.stop_loss && pos.entry_price > pos.stop_loss
+                            ? ((pos.target_price - pos.entry_price) / (pos.entry_price - pos.stop_loss)).toFixed(1)
+                            : null;
+            const rrBadge = rr ? `<span class="badge bg-dark border border-secondary ms-2">R:R ${rr}:1</span>` : '';
+            const progPct = pos.entry_price && pos.target_price && pos.current_price
+                            ? Math.round((pos.current_price - pos.entry_price) / (pos.target_price - pos.entry_price) * 100)
+                            : null;
+            const progBar = progPct != null ? `
+              <div class="mt-2">
+                <div class="small text-muted d-flex justify-content-between"><span>Trade Progress</span><span>${progPct}% to target</span></div>
+                <div class="progress mt-1" style="height:4px"><div class="progress-bar ${progPct>=100?'bg-success':progPct>=0?'bg-info':'bg-danger'}" style="width:${Math.max(0,Math.min(100,progPct))}%"></div></div>
+              </div>` : '';
+            detailRow = `<tr class="signal-detail-row" style="display:none">
+              <td colspan="14" class="py-0">
+                <div class="signal-context-panel px-3 py-2">
+                  <div class="row g-2 align-items-start">
+                    <div class="col-lg-4">
+                      <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+                        <span class="badge ${s.direction==='Long'||s.direction==='Bounce'?'bg-success':'bg-primary'}">${s.direction}</span>
+                        <span class="badge ${scBadge}">Score ${sc.toFixed(0)}%</span>
+                        <span class="badge bg-secondary">${s.timeframe||''}</span>
+                        ${rrBadge}
+                        <span class="text-muted small ms-auto">${timeAgo(s.generated_at)}</span>
+                      </div>
+                      <div class="d-flex gap-3 small">
+                        <div><span class="text-muted">Entry</span><br><span class="text-info fw-bold">${fmtPrice(s.entry_price)}</span></div>
+                        <div><span class="text-muted">Target</span><br><span class="text-success fw-bold">${fmtPrice(s.target_price)}</span></div>
+                        <div><span class="text-muted">Stop</span><br><span class="text-danger fw-bold">${fmtPrice(s.stop_loss)}</span></div>
+                      </div>
+                      ${progBar}
+                    </div>
+                    <div class="col-lg-5">
+                      <div class="small text-muted mb-1"><i class="bi bi-chat-text-fill text-info me-1"></i>LLM Reasoning</div>
+                      <div class="small" style="line-height:1.4;color:#ccc">${(s.reasoning||'No reasoning recorded').slice(0,350)}${(s.reasoning||'').length>350?'…':''}</div>
+                    </div>
+                    <div class="col-lg-3">
+                      ${s.key_risks ? `<div class="small text-muted mb-1"><i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>Key Risks</div><div class="small text-warning" style="line-height:1.4">${s.key_risks.slice(0,200)}</div>` : ''}
+                      ${s.momentum ? `<div class="small text-muted mt-2">Momentum: <span class="text-info">${s.momentum}</span></div>` : ''}
+                      ${s.trigger_event ? `<div class="small text-muted mt-1">Trigger: <span class="text-light">${s.trigger_event.slice(0,80)}</span></div>` : ''}
+                      <div class="small text-muted mt-1">Source: <span class="text-light">${s.signal_source||'watchlist'}</span></div>
+                      <div class="small text-muted mt-1">Signal: <span class="badge bg-dark border border-secondary">${s.status||''}</span></div>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>`;
+          } else {
+            detailRow = `<tr class="signal-detail-row" style="display:none">
+              <td colspan="14" class="py-1">
+                <div class="signal-context-panel px-3 py-2">
+                  <span class="text-muted small"><i class="bi bi-info-circle me-1"></i>No signal linked — position opened manually or signal expired.</span>
+                </div>
+              </td>
+            </tr>`;
+          }
+
+          posRows.push(`<tr class="position-row" style="cursor:pointer" onclick="toggleSignalRow(this)">
+            <td class="fw-semibold text-warning">${pos.symbol||'?'} <i class="bi bi-chevron-down text-muted" style="font-size:.65rem"></i></td>
             <td>${dirBadge}</td>
             <td>${sideBadge}</td>
             <td>${(pos.leverage||1).toFixed(1)}×</td>
@@ -1191,8 +1254,8 @@ async function loadPaperTab() {
             <td class="${pnlCls}">${(pos.unrealized_pnl||0) >= 0 ? '+' : ''}$${fmt(pos.unrealized_pnl,2)}</td>
             <td class="${pnlCls}">${(pos.unrealized_pct||0) >= 0 ? '+' : ''}${fmt(pos.unrealized_pct,2)}%</td>
             <td class="text-muted">${timeAgo(pos.opened_at)}</td>
-            <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
-          </tr>`);
+            <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="event.stopPropagation();paperClose('${pos.id}')"><i class="bi bi-x-lg"></i></button></td>
+          </tr>${detailRow}`);
         } catch(rowErr) {
           console.warn('[Paper] Skipped bad position row:', pos.symbol, rowErr);
         }

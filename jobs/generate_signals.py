@@ -16,6 +16,7 @@ from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAss
 from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
 from lib.learning_engine import get_accuracy_context, get_pattern_context, get_regime_context, get_lessons_context, get_confidence_adjustment
+from lib.futures_data import PAPER_FUTURES, get_futures_news_context, fetch_futures_multi_tf, FUTURES_UNIVERSE
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,15 @@ TRACK_B = ["NVDA","AMD","MSFT","GOOGL","AAPL","META","AMZN","AVGO","TSM","ANET",
 TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD","SUI/USD","RENDER/USD","INJ/USD","NEAR/USD","OP/USD","ARB/USD"]
 # Track E: paper-only universe — best candidates for leveraged/short plays
 TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
+
+# Track F: paper-only futures / forex / commodities
+# Symbols from lib/futures_data.py — fetched via yfinance
+TRACK_F_FUTURES = [sym for sym in PAPER_FUTURES
+                   if sym not in ["^VIX","^TNX","^TYX"]]  # exclude pure reference indices
+
+FUTURES_PAPER_DIRECTIONS = {"Long", "Short", "Long_Leveraged", "Short_Leveraged",
+                             "Long_5x", "Short_5x", "Long_10x", "Short_10x",
+                             "Long_20x", "Short_20x"}
 ALL_SYMBOLS = list(dict.fromkeys(TRACK_A + TRACK_B + TRACK_C))
 
 COMMON_TICKERS = {"AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AMD","INTC","QCOM","AVGO","TSM","ARM","SMCI","PLTR","COIN","MSTR","HOOD","RBLX","SNAP","UBER","ABNB","SQ","PYPL","SHOP","NET","CRWD","PANW","ZS","DDOG","SNOW","MDB","AI","SOUN","IONQ","RXRX","ACHR","JOBY","RKLB","ASTS","XOM","CVX","COP","OXY","SLB","HAL","RTX","LMT","NOC","GD","BA","GLD","SLV","GDX","GDXJ","USO","UNG","SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","TLT","IEF","HYG","JPM","BAC","GS","BTC","ETH","SOL","XRP","BNB","AVAX","LINK","DOGE","ADA","AAVE","DOT","ATOM","SUI","RENDER","INJ","NEAR","OP","ARB","MATIC","UNI"}
@@ -32,8 +42,9 @@ SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"
 
 # Paper signal schema — direction can be Short, Short_Leveraged, Long_Leveraged
 PAPER_SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Short_Leveraged","confidence":72,"timeframe":"4H","entry_price":875.00,"target_price":820.00,"stop_loss":900.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bearish"}]"""
+FUTURES_PAPER_SCHEMA = """[{"asset_symbol":"GC=F","asset_name":"Gold Futures","asset_class":"Futures","direction":"Long_5x","confidence":75,"timeframe":"4H","entry_price":2310.50,"target_price":2380.00,"stop_loss":2265.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bullish"}]"""
 
-PAPER_DIRECTIONS = {"Short", "Short_Leveraged", "Long_Leveraged", "Long", "Bounce"}
+PAPER_DIRECTIONS = {"Short", "Short_Leveraged", "Long_Leveraged", "Long", "Bounce", "Long_5x", "Short_5x", "Long_10x", "Short_10x", "Long_20x", "Short_20x"}
 
 
 def _read_ta_from_cache(symbols: list, timeframes=None) -> dict:
@@ -245,6 +256,15 @@ def run():
     except Exception as e:
         logger.warning(f"[Signals] Regime check failed: {e}")
 
+    # Pull futures/commodity/forex news (Track F context)
+    futures_news_ctx = ""
+    try:
+        futures_news_ctx = get_futures_news_context(max_items=12)
+        if futures_news_ctx:
+            logger.info("[Signals] Futures news context loaded")
+    except Exception as _fn:
+        logger.debug(f"[Signals] Futures news unavailable: {_fn}")
+
     earnings_set = set()
     try:
         from lib.earnings_calendar import get_earnings_this_week
@@ -268,13 +288,19 @@ def run():
                    "For Short/Short_Leveraged: stop_loss ABOVE entry, target_price BELOW entry. "
                    "For Long_Leveraged: stop_loss BELOW entry, target ABOVE entry. R:R >= 2.\n")
 
-    def ta_block(syms):
+    def ta_block(syms, futures_profiles=None):
         blocks = []
         for s in syms:
-            if ta_profiles.get(s):
-                ta_txt  = build_ta_prompt_block(s, ta_profiles.get(s, {}), asset_map.get(s, {}).get("name", s))
+            # Check regular TA profiles first
+            profile = ta_profiles.get(s)
+            if not profile and futures_profiles:
+                profile = futures_profiles.get(s)
+            if profile:
+                fu_meta = FUTURES_UNIVERSE.get(s, {})
+                name = asset_map.get(s, {}).get("name") or fu_meta.get("name") or s
+                ta_txt  = build_ta_prompt_block(s, profile, name)
                 acc_txt = get_accuracy_context(s, lookback_days=30)
-                pat_txt = get_pattern_context(ta_profiles.get(s, {}), "long")
+                pat_txt = get_pattern_context(profile, "long")
                 les_txt = get_lessons_context(symbol=s, limit=3)
                 blocks.append(ta_txt + acc_txt + pat_txt + les_txt)
         return "\n".join(blocks) or "No TA data available."
@@ -324,6 +350,53 @@ def run():
                      "Use macro/news to find overextended longs (short candidates) or confirmed breakouts for leveraged longs. "
                      "Generate 3-5 paper trading signals only.", rule=paper_rule), True),
     ]
+    # Build futures TA profiles for Track F
+    futures_ta_profiles = {}
+    try:
+        futures_syms_to_analyze = TRACK_F_FUTURES[:10]  # Limit to avoid long fetch time
+        logger.info(f"[Signals] Fetching futures TA for {len(futures_syms_to_analyze)} symbols...")
+        for fsym in futures_syms_to_analyze:
+            bars = fetch_futures_multi_tf(fsym, ["1H", "4H", "1D"])
+            if any(v is not None for v in bars.values()):
+                futures_ta_profiles[fsym] = {tf: analyze_symbol({tf: df})[tf] if df is not None else None
+                                             for tf, df in bars.items()}
+        logger.info(f"[Signals] Futures TA ready: {len(futures_ta_profiles)} symbols")
+    except Exception as _fe:
+        logger.warning(f"[Signals] Futures TA fetch failed: {_fe}")
+
+    _fut_asset_ref = "\n".join(
+        f"  {s}: {FUTURES_UNIVERSE.get(s,{}).get('name',s)} [{FUTURES_UNIVERSE.get(s,{}).get('category','?')}]"
+        for s in TRACK_F_FUTURES[:14]
+    )
+    _fut_ta_block = ta_block(TRACK_F_FUTURES[:10], futures_profiles=futures_ta_profiles)
+    _fut_regime_ctx = get_regime_context(regime.get("label", ""))
+    _fut_regime_label = regime.get("label", "Unknown")
+    _fut_regime_risk  = regime.get("risk", "medium")
+    _fut_rules = (
+        "\nRULES: direction must be one of: Long, Long_5x, Long_10x, Long_20x, "
+        "Short, Short_5x, Short_10x, Short_20x.\n"
+        "asset_class must be 'Futures' or 'Forex'.\n"
+        "Use leverage appropriate to conviction: 5x moderate, 10x high, 20x very high with tight stops.\n"
+        "Generate 4-6 signals."
+    )
+    futures_prompt = (
+        f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
+        f"=== FUTURES / COMMODITY / FOREX NEWS ===\n{futures_news_ctx}\n\n"
+        f"=== MARKET REGIME ===\nCurrent: {_fut_regime_label} | Risk: {_fut_regime_risk}\n"
+        f"{_fut_regime_ctx}\n"
+        f"=== TECHNICAL ANALYSIS — FUTURES / FOREX / COMMODITIES ===\n"
+        f"{_fut_ta_block}\n\n"
+        f"=== ASSET REFERENCE ===\n{_fut_asset_ref}\n\n"
+        f"=== TASK ===\nYou are analyzing FUTURES, COMMODITIES, and FOREX pairs for paper trading. "
+        f"Identify macro trends: energy supply/demand, precious metals momentum, forex strength/weakness. "
+        f"Use 5x for moderate conviction, 10x for high, 20x for very high (with tight stops). "
+        f"Short overextended uptrends. Long breakout/oversold bounces. Generate 4-6 paper signals."
+        f"{_fut_rules}\n"
+        f"Output format (return ONLY this JSON array):\n{FUTURES_PAPER_SCHEMA}"
+    )
+
+    tracks.append(("F_futures", TRACK_F_FUTURES[:14], futures_prompt, True))
+
     if opp_syms:
         tracks.append((
             "D_opp", opp_syms,

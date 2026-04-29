@@ -92,7 +92,7 @@ def _get_open_paper_positions() -> list:
             "direction":    p.direction,
             "entry_price":  float(p.entry_price or 0),
             "qty":          float(p.qty or 0),
-            "margin":       float(p.margin or 0),
+            "margin":       float(p.margin_used or 0),
             "leverage":     float(p.leverage or 1),
             "stop_loss":    float(p.stop_loss or 0),
             "take_profit":  float(p.take_profit or 0),

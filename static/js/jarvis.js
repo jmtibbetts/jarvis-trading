@@ -1587,3 +1587,119 @@ function renderOutcomes(rows) {
     </tr>`;
   }).join('');
 }
+
+// ── Learning Engine — Tier 3 / 4 / 5 extensions ─────────────────────────────
+
+// Override loadLearning to also fetch patterns, regimes, lessons
+const _loadLearningBase = loadLearning;
+async function loadLearning() {
+  try {
+    const [summary, outcomes, accuracy, patterns, regimes, lessons] = await Promise.all([
+      API('/learning/summary'),
+      API('/learning/outcomes?limit=500'),
+      API('/learning/accuracy'),
+      API('/learning/patterns'),
+      API('/learning/regimes'),
+      API('/learning/lessons?limit=30'),
+    ]);
+
+    allOutcomes = outcomes || [];
+    allAccuracy = accuracy || [];
+
+    // Populate symbol filter
+    const symSel = document.getElementById('learning-filter');
+    const syms = [...new Set(allOutcomes.map(o => o.symbol))].sort();
+    symSel.innerHTML = '<option value="">All Symbols</option>' +
+      syms.map(s => `<option value="${s}">${s}</option>`).join('');
+
+    renderLearningSummary(summary);
+    renderAccuracy(allAccuracy);
+    filterOutcomes();
+    renderPatterns(patterns || []);
+    renderRegimes(regimes || []);
+    renderLessons(lessons || []);
+
+  } catch(e) {
+    console.error('loadLearning failed', e);
+  }
+}
+
+function renderPatterns(rows) {
+  const tbody = document.getElementById('patterns-tbody');
+  if (!tbody) return;
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3" style="font-size:0.8rem">Patterns build after trades close (need ≥3 matches)</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const wr = ((r.win_rate || 0) * 100).toFixed(0);
+    const wrColor = r.win_rate >= 0.6 ? 'text-success' : r.win_rate >= 0.4 ? 'text-warning' : 'text-danger';
+    const pnlColor = (r.avg_pnl_pct || 0) >= 0 ? 'text-success' : 'text-danger';
+    const desc = (r.pattern_desc || '').split(' | ').join('\n');
+    return `<tr title="${desc.replace(/"/g,'&quot;')}">
+      <td style="font-size:0.72rem;max-width:200px;word-break:break-word" class="text-muted">${r.pattern_desc || '—'}</td>
+      <td class="text-white">${r.total}</td>
+      <td class="${wrColor} fw-bold">${wr}%</td>
+      <td class="${pnlColor}">${(r.avg_pnl_pct||0) >= 0 ? '+' : ''}${(r.avg_pnl_pct||0).toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderRegimes(rows) {
+  const tbody = document.getElementById('regime-tbody');
+  if (!tbody) return;
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3" style="font-size:0.8rem">Regime data builds after trades close</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const wr = ((r.win_rate || 0) * 100).toFixed(0);
+    const wrColor = r.win_rate >= 0.6 ? 'text-success' : r.win_rate >= 0.4 ? 'text-warning' : 'text-danger';
+    const pnlColor = (r.avg_pnl_pct || 0) >= 0 ? 'text-success' : 'text-danger';
+    const regimeBadgeClass = {
+      'Risk-On Bull': 'bg-success',
+      'Range-Bound':  'bg-warning text-dark',
+      'Bear / Risk-Off': 'bg-danger',
+      'Overbought Bull': 'bg-warning text-dark',
+      'Neutral': 'bg-secondary',
+    }[r.regime] || 'bg-secondary';
+    return `<tr>
+      <td><span class="badge ${regimeBadgeClass}" style="font-size:0.72rem">${r.regime}</span></td>
+      <td class="text-white">${r.total}</td>
+      <td class="${wrColor} fw-bold">${wr}%</td>
+      <td class="${pnlColor}">${(r.avg_pnl_pct||0) >= 0 ? '+' : ''}${(r.avg_pnl_pct||0).toFixed(2)}%</td>
+      <td class="text-muted">${(r.avg_confidence||0).toFixed(0)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderLessons(rows) {
+  const el = document.getElementById('lessons-list');
+  if (!el) return;
+  if (!rows || rows.length === 0) {
+    el.innerHTML = '<div class="text-muted text-center py-3" style="font-size:0.8rem">Lessons appear after losing trades — the AI reviews its reasoning and stores what it missed.</div>';
+    return;
+  }
+  const categoryColors = {
+    'TA_MISS':     'text-warning',
+    'REGIME_MISS': 'text-info',
+    'NEWS_MISS':   'text-primary',
+    'TIMING':      'text-secondary',
+    'CORRECT_CALL':'text-success',
+    'OTHER':       'text-muted',
+  };
+  el.innerHTML = rows.map(r => {
+    const icon   = r.outcome === 'LOSS' ? '❌' : '✅';
+    const catColor = categoryColors[r.lesson_category] || 'text-muted';
+    const ts     = r.created_at ? new Date(r.created_at).toLocaleDateString() : '';
+    return `<div class="border border-secondary rounded p-2 mb-2" style="font-size:0.78rem">
+      <div class="d-flex justify-content-between mb-1">
+        <span>${icon} <span class="fw-semibold text-white">${r.symbol}</span>
+          <span class="${catColor} ms-1">[${r.lesson_category || 'OTHER'}]</span></span>
+        <span class="text-muted">${ts}</span>
+      </div>
+      <div class="text-light">${r.lesson}</div>
+      <div class="text-muted mt-1" style="font-size:0.7rem">Applied ${r.applied_count||0}× to future prompts</div>
+    </div>`;
+  }).join('');
+}

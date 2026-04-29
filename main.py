@@ -1,5 +1,5 @@
 """
-Jarvis Trading AI — Python Edition v6.0
+Jarvis Trading AI — Python Edition v6.6
 FastAPI + APScheduler + SQLAlchemy + TA-Lib
 Run: python main.py
 """
@@ -64,7 +64,7 @@ async def lifespan(app_: FastAPI):
     logger.info("[Server] Shutdown complete")
 
 
-app = FastAPI(title="Jarvis Trading AI", version="6.0.0", lifespan=lifespan)
+app = FastAPI(title="Jarvis Trading AI", version="6.6.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Database init ──────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ def spa_fallback(full_path: str = ""):
 def print_banner():
     port = int(os.getenv('PORT', 3000))
     print("\n" + "═"*65)
-    print("  🤖  JARVIS TRADING AI  v6.0  (Python Edition)")
+    print("  🤖  JARVIS TRADING AI  v6.6  (Python Edition)")
     print("═"*65)
     print(f"  Dashboard:  http://localhost:{port}")
     print(f"  API docs:   http://localhost:{port}/docs")

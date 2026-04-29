@@ -397,7 +397,7 @@ def get_paper_summary() -> dict:
                     "margin_used":   float(p.margin_used or DEFAULT_POSITION_SIZE),
                     "unrealized_pnl":float(p.unrealized_pnl or 0),
                     "unrealized_pct":float(p.unrealized_pct or 0),
-                    "opened_at":     p.opened_at,
+                    "opened_at":     p.opened_at.isoformat() if hasattr(p.opened_at, "isoformat") else (p.opened_at or ""),
                     "asset_class":   p.asset_class or "Equity",
                 })
             except Exception as e:
@@ -418,8 +418,8 @@ def get_paper_summary() -> dict:
                     "realized_pnl": round(float(t.realized_pnl or 0), 2),
                     "pnl_pct":      round(float(t.pnl_pct or 0), 2),
                     "close_reason": t.close_reason or "manual",
-                    "opened_at":    t.opened_at,
-                    "closed_at":    t.closed_at,
+                    "opened_at":    t.opened_at.isoformat() if hasattr(t.opened_at, "isoformat") else (t.opened_at or ""),
+                    "closed_at":    t.closed_at.isoformat() if hasattr(t.closed_at, "isoformat") else (t.closed_at or ""),
                     "asset_class":  t.asset_class or "Equity",
                 })
             except Exception as e:

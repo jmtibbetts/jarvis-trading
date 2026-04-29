@@ -156,6 +156,50 @@ class PortfolioSnapshot(Base):
     position_count = Column(Float)
     snapshot_at    = Column(String, default=now_iso)
 
+
+class TradeOutcome(Base):
+    """Records the final outcome of every closed trade for learning/backreview."""
+    __tablename__ = "trade_outcomes"
+    id               = Column(String, primary_key=True, default=new_id)
+    signal_id        = Column(String)          # FK → trading_signals.id
+    symbol           = Column(String)
+    asset_class      = Column(String)          # equity | crypto
+    direction        = Column(String)          # BUY | SELL
+    timeframe        = Column(String)
+    entry_price      = Column(Float)
+    exit_price       = Column(Float)
+    qty              = Column(Float)
+    pnl_usd          = Column(Float)           # realized P&L in dollars
+    pnl_pct          = Column(Float)           # realized P&L in percent
+    outcome          = Column(String)          # WIN | LOSS | BREAKEVEN
+    exit_reason      = Column(String)          # HARD_STOP | TAKE_PROFIT | LLM_EXIT | MANUAL | TIMEOUT
+    hold_duration_m  = Column(Float)           # minutes held
+    signal_confidence= Column(Float)           # original signal confidence
+    signal_score     = Column(Float)           # original composite score
+    signal_reasoning = Column(Text)            # original LLM reasoning
+    ta_summary       = Column(Text)            # TA snapshot at entry
+    market_regime    = Column(String)          # trending | ranging | volatile at entry
+    paper_mode       = Column(Boolean, default=False)
+    entered_at       = Column(String)
+    exited_at        = Column(String, default=now_iso)
+
+class SignalAccuracy(Base):
+    """Aggregated win-rate stats per symbol+timeframe for LLM prompt injection."""
+    __tablename__ = "signal_accuracy"
+    id               = Column(String, primary_key=True, default=new_id)
+    symbol           = Column(String)
+    asset_class      = Column(String)
+    timeframe        = Column(String)
+    total_trades     = Column(Integer, default=0)
+    wins             = Column(Integer, default=0)
+    losses           = Column(Integer, default=0)
+    win_rate         = Column(Float, default=0.0)   # 0.0–1.0
+    avg_pnl_pct      = Column(Float, default=0.0)
+    avg_hold_min     = Column(Float, default=0.0)
+    best_pnl_pct     = Column(Float, default=0.0)
+    worst_pnl_pct    = Column(Float, default=0.0)
+    last_updated     = Column(String, default=now_iso)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     # Run migrations for any missing columns
@@ -227,6 +271,33 @@ def _migrate_columns():
                 print("[DB] Migrated: created ai_decisions table")
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
+
+    # ── Learning engine tables ───────────────────────────────────────────────
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS trade_outcomes (
+                    id TEXT PRIMARY KEY, signal_id TEXT, symbol TEXT, asset_class TEXT,
+                    direction TEXT, timeframe TEXT, entry_price REAL, exit_price REAL,
+                    qty REAL, pnl_usd REAL, pnl_pct REAL, outcome TEXT, exit_reason TEXT,
+                    hold_duration_m REAL, signal_confidence REAL, signal_score REAL,
+                    signal_reasoning TEXT, ta_summary TEXT, market_regime TEXT,
+                    paper_mode INTEGER DEFAULT 0, entered_at TEXT, exited_at TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS signal_accuracy (
+                    id TEXT PRIMARY KEY, symbol TEXT, asset_class TEXT, timeframe TEXT,
+                    total_trades INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0, win_rate REAL DEFAULT 0.0,
+                    avg_pnl_pct REAL DEFAULT 0.0, avg_hold_min REAL DEFAULT 0.0,
+                    best_pnl_pct REAL DEFAULT 0.0, worst_pnl_pct REAL DEFAULT 0.0,
+                    last_updated TEXT
+                )
+            """))
+            print("[DB] Learning engine tables ready")
+    except Exception as e:
+        print(f"[DB] Learning table migration warning: {e}")
 
 
 def _seed_paper_portfolio():

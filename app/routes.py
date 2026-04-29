@@ -730,12 +730,16 @@ def paper_reset():
     try:
         from app.database import PaperPosition, PaperTrade, PaperPortfolio, new_id, now_iso
         with get_db() as db:
+            # Hard delete ALL trades and positions, then recreate a clean portfolio row
             db.query(PaperTrade).delete()
             db.query(PaperPosition).delete()
             db.query(PaperPortfolio).delete()
-            db.add(PaperPortfolio(id=new_id(), cash=100000.0, total_trades=0,
-                                  winning_trades=0, realized_pnl=0.0, updated_at=now_iso()))
-        return {"ok": True, "message": "Paper account reset to $100,000"}
+            db.flush()
+            db.add(PaperPortfolio(
+                id=new_id(), cash=100_000.0, total_trades=0,
+                winning_trades=0, realized_pnl=0.0, updated_at=now_iso()
+            ))
+        return {"ok": True, "message": "Paper account reset to $100,000", "cash": 100000.0}
     except Exception as e:
         raise HTTPException(500, str(e))
 

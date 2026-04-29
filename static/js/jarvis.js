@@ -1136,23 +1136,32 @@ async function loadPaperTab() {
     const p    = data.portfolio;
 
     // KPIs
-    const retPct = p.total_return_pct;
-    document.getElementById('paperEquity').textContent     = '$' + p.equity.toLocaleString('en-US', {maximumFractionDigits:0});
+    const retPct    = p.total_return_pct ?? 0;
+    const equity    = p.equity ?? p.cash ?? 0;
+    const openPnl   = p.open_pnl ?? 0;
+    const realPnl   = p.realized_pnl ?? 0;
+    const marginUse = p.margin_in_use ?? 0;
+    const cash      = p.cash ?? 0;
+    const winRate   = p.win_rate ?? 0;
+    const totalTr   = p.total_trades ?? 0;
+    const winTr     = p.winning_trades ?? 0;
+
+    document.getElementById('paperEquity').textContent     = '$' + equity.toLocaleString('en-US', {maximumFractionDigits:0});
     const retEl = document.getElementById('paperReturn');
     retEl.textContent = (retPct >= 0 ? '+' : '') + retPct.toFixed(2) + '%';
     retEl.className   = 'fs-5 fw-bold ' + (retPct >= 0 ? 'text-success' : 'text-danger');
 
     const realEl = document.getElementById('paperRealizedPnl');
-    realEl.textContent = (p.realized_pnl >= 0 ? '+$' : '-$') + Math.abs(p.realized_pnl).toLocaleString('en-US', {maximumFractionDigits:2});
-    realEl.className   = 'fs-5 fw-bold ' + (p.realized_pnl >= 0 ? 'text-success' : 'text-danger');
+    realEl.textContent = (realPnl >= 0 ? '+$' : '-$') + Math.abs(realPnl).toLocaleString('en-US', {maximumFractionDigits:2});
+    realEl.className   = 'fs-5 fw-bold ' + (realPnl >= 0 ? 'text-success' : 'text-danger');
 
-    document.getElementById('paperWinRate').textContent    = p.win_rate + '%';
+    document.getElementById('paperWinRate').textContent    = winRate + '%';
     const opEl = document.getElementById('paperOpenPnl');
-    opEl.textContent = (p.open_pnl >= 0 ? '+$' : '-$') + Math.abs(p.open_pnl).toLocaleString('en-US', {maximumFractionDigits:2});
-    opEl.className   = 'fs-5 fw-bold ' + (p.open_pnl >= 0 ? 'text-success' : 'text-danger');
-    document.getElementById('paperCash').textContent       = '$' + p.cash.toLocaleString('en-US', {maximumFractionDigits:0});
-    document.getElementById('paperMargin').textContent     = '$' + p.margin_in_use.toLocaleString('en-US', {maximumFractionDigits:0});
-    document.getElementById('paperTrades').textContent     = p.total_trades + ' (' + p.winning_trades + ' W)';
+    opEl.textContent = (openPnl >= 0 ? '+$' : '-$') + Math.abs(openPnl).toLocaleString('en-US', {maximumFractionDigits:2});
+    opEl.className   = 'fs-5 fw-bold ' + (openPnl >= 0 ? 'text-success' : 'text-danger');
+    document.getElementById('paperCash').textContent       = '$' + cash.toLocaleString('en-US', {maximumFractionDigits:0});
+    document.getElementById('paperMargin').textContent     = '$' + marginUse.toLocaleString('en-US', {maximumFractionDigits:0});
+    document.getElementById('paperTrades').textContent     = totalTr + ' (' + winTr + ' W)';
 
     // Open positions
     const posBody = document.getElementById('paperPositionsTbody');

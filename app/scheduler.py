@@ -133,6 +133,7 @@ def portfolio_guardian():
 
         if not raw_positions:
             logger.info("[Guardian] No open positions — skipping")
+            log_decision("guardian", "IDLE", "No open positions — guardian standing by")
             return
 
         # Convert alpaca-py Position SDK objects to plain dicts immediately

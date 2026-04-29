@@ -124,7 +124,7 @@ def portfolio_guardian():
         from lib.market_regime import get_regime
         from lib.lmstudio import call_lm_studio, parse_json
         from app.routes import log_decision
-from app.database import get_db, ThreatEvent, NewsItem, PortfolioSnapshot
+        from app.database import get_db, ThreatEvent, NewsItem, PortfolioSnapshot
 
         # ── 1. Alpaca live data (SDK objects, NOT ORM — safe to use freely) ──────
         account   = get_account()

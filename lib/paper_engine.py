@@ -19,16 +19,30 @@ from app.database import get_db, PaperPosition, PaperTrade, PaperPortfolio
 logger = logging.getLogger(__name__)
 
 PAPER_STARTING_CAPITAL = 100_000.0   # $100k virtual account
-MAX_LEVERAGE           = 3.0          # Max leverage multiplier
+MAX_LEVERAGE           = 20.0         # Max leverage multiplier (5x/10x/20x supported)
 MARGIN_CALL_THRESHOLD  = 0.15         # Liquidate if equity < 15% of margin (lost 85% of capital)
 DEFAULT_POSITION_SIZE  = 3_000.0      # $3k margin per trade (3% of $100k)
 
+# Leverage by asset class — futures get tighter margin than equity
+ASSET_CLASS_MARGIN = {
+    "futures":  1_500.0,   # Futures use smaller margin (higher leverage)
+    "forex":    1_000.0,   # Forex pip-based — smaller notional per pip
+    "crypto":   2_000.0,
+    "equity":   3_000.0,
+}
+
 DIRECTION_LEVERAGE = {
-    "Long":             (1,  1.0),
-    "Bounce":           (1,  1.0),
-    "Long_Leveraged":   (1,  2.0),
-    "Short":            (-1, 1.0),
-    "Short_Leveraged":  (-1, 2.0),
+    "Long":               (1,   1.0),
+    "Bounce":             (1,   1.0),
+    "Long_Leveraged":     (1,   2.0),
+    "Long_5x":            (1,   5.0),
+    "Long_10x":           (1,  10.0),
+    "Long_20x":           (1,  20.0),
+    "Short":              (-1,  1.0),
+    "Short_Leveraged":    (-1,  2.0),
+    "Short_5x":           (-1,  5.0),
+    "Short_10x":          (-1, 10.0),
+    "Short_20x":          (-1, 20.0),
 }
 
 # Exhaustive mapping for LLM output normalization
@@ -41,6 +55,17 @@ _DIR_ALIASES = {
     "long-leveraged":    "Long_Leveraged",
     "leveraged long":    "Long_Leveraged",
     "leveraged_long":    "Long_Leveraged",
+    "long_2x":           "Long_Leveraged",
+    "long_5x":           "Long_5x",
+    "long5x":            "Long_5x",
+    "long 5x":           "Long_5x",
+    "long-5x":           "Long_5x",
+    "long_10x":          "Long_10x",
+    "long10x":           "Long_10x",
+    "long 10x":          "Long_10x",
+    "long_20x":          "Long_20x",
+    "long20x":           "Long_20x",
+    "long 20x":          "Long_20x",
     "short":             "Short",
     "short_leveraged":   "Short_Leveraged",
     "shortleveraged":    "Short_Leveraged",
@@ -48,6 +73,17 @@ _DIR_ALIASES = {
     "short-leveraged":   "Short_Leveraged",
     "leveraged short":   "Short_Leveraged",
     "leveraged_short":   "Short_Leveraged",
+    "short_2x":          "Short_Leveraged",
+    "short_5x":          "Short_5x",
+    "short5x":           "Short_5x",
+    "short 5x":          "Short_5x",
+    "short-5x":          "Short_5x",
+    "short_10x":         "Short_10x",
+    "short10x":          "Short_10x",
+    "short 10x":         "Short_10x",
+    "short_20x":         "Short_20x",
+    "short20x":          "Short_20x",
+    "short 20x":         "Short_20x",
 }
 
 
@@ -121,11 +157,38 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
 
     side, leverage = DIRECTION_LEVERAGE[dir_key]
     entry = float(current_price or signal.get("entry_price") or 0)
+    # Try futures price source if still no price
+    if (not entry or entry <= 0):
+        try:
+            from lib.futures_data import get_cached_futures_price, FUTURES_UNIVERSE
+            if sym in FUTURES_UNIVERSE:
+                fd = get_cached_futures_price(sym)
+                if fd:
+                    entry = float(fd.get("price") or 0)
+        except Exception:
+            pass
     if not entry or entry <= 0:
         return {"error": f"No valid entry price for {sym} (got: {current_price}, signal entry: {signal.get('entry_price')})"}
 
-    # Auto-detect asset class
-    asset_class = signal.get("asset_class") or ("Crypto" if "/" in sym or sym.endswith("USD") else "Equity")
+    # Auto-detect asset class (Equity | Crypto | Futures | Forex)
+    asset_class_raw = (signal.get("asset_class") or "").lower()
+    if "futures" in asset_class_raw or "commodity" in asset_class_raw:
+        asset_class = "Futures"
+    elif "forex" in asset_class_raw or "currency" in asset_class_raw:
+        asset_class = "Forex"
+    elif "/" in sym or sym.upper().endswith("USD"):
+        asset_class = "Crypto"
+    else:
+        # Check the futures universe
+        try:
+            from lib.futures_data import FUTURES_UNIVERSE
+            if sym in FUTURES_UNIVERSE:
+                cat = FUTURES_UNIVERSE[sym]["category"]
+                asset_class = "Forex" if cat == "Forex" else "Futures"
+            else:
+                asset_class = "Equity"
+        except Exception:
+            asset_class = "Equity"
 
     target = float(signal.get("target_price") or 0)
     stop   = float(signal.get("stop_loss") or 0)
@@ -142,9 +205,22 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
         if not stop or stop <= entry:
             stop = round(entry * 1.03, 4 if entry < 1 else 2)
 
-    margin   = DEFAULT_POSITION_SIZE
+    # Margin from signal override or per-asset-class defaults
+    override_margin = float(signal.get("margin_override") or 0)
+    ac_lower = asset_class.lower()
+    base_margin = (override_margin if override_margin > 0
+                   else ASSET_CLASS_MARGIN.get(ac_lower, DEFAULT_POSITION_SIZE))
+    margin   = base_margin
     notional = margin * leverage
-    qty      = round(notional / entry, 6)
+
+    # For low-price instruments (forex pairs typically near 1.0-1.5), scale qty
+    # to represent a reasonable notional exposure
+    if entry < 2.0 and ac_lower == "forex":
+        # Standard lot approach: each 'qty' unit = 1 mini lot ($10k notional)
+        qty = round(notional / (entry * 1000), 2) if entry > 0 else 0.0
+        qty = max(qty, 0.01)
+    else:
+        qty = round(notional / entry, 6)
 
     with get_db() as db:
         existing = db.query(PaperPosition).filter(
@@ -317,6 +393,16 @@ def mark_to_market(prices: dict) -> dict:
             prices.get(sym.replace("/", "") + "USD") or
             prices.get(sym.replace("/", ""))
         )
+        # Also try futures data source for futures/forex symbols
+        if not price:
+            try:
+                from lib.futures_data import get_cached_futures_price, FUTURES_UNIVERSE
+                if sym in FUTURES_UNIVERSE:
+                    fd = get_cached_futures_price(sym)
+                    if fd:
+                        price = float(fd.get("price") or 0)
+            except Exception:
+                pass
         if not price:
             logger.debug(f"[Paper] No price in MTM for {sym}")
             continue

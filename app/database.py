@@ -207,6 +207,24 @@ def _migrate_columns():
                         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"))
                         conn.commit()
                         print(f"[DB] Migrated: added {table}.{col_name}")
+            # Ensure ai_decisions table exists (may be missing on older DBs)
+            tables = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+            if "ai_decisions" not in tables:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ai_decisions (
+                        id         TEXT PRIMARY KEY,
+                        source     TEXT,
+                        symbol     TEXT,
+                        action     TEXT,
+                        reasoning  TEXT,
+                        price      REAL,
+                        pnl_pct    REAL,
+                        score      REAL,
+                        created_at TEXT
+                    )
+                """))
+                conn.commit()
+                print("[DB] Migrated: created ai_decisions table")
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
 

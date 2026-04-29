@@ -181,8 +181,8 @@ def get_positions_with_signals():
                 if key and key not in sig_map:
                     sig_map[key] = s
 
-        # Filter out zero-qty stale positions
-        positions = [p for p in positions if abs(float(p.qty or 0)) > 0]
+        # Filter out zero-qty and dust positions (Alpaca retains sub-cent crypto leftovers)
+        positions = [p for p in positions if abs(float(p.qty or 0)) >= 0.0001 and abs(float(p.market_value or 0)) >= 1.0]
         result = []
         for p in positions:
             sym = str(p.symbol)
@@ -250,8 +250,8 @@ def get_positions_live():
         positions = get_positions(); account = get_account()
         equity = float(account.equity); mv = sum(float(p.market_value or 0) for p in positions)
         pl     = sum(float(p.unrealized_pl or 0) for p in positions)
-        # Filter out zero-qty stale positions (Alpaca sometimes keeps closed positions)
-        positions = [p for p in positions if abs(float(p.qty or 0)) > 0]
+        # Filter out zero-qty and dust positions (Alpaca retains sub-cent crypto leftovers)
+        positions = [p for p in positions if abs(float(p.qty or 0)) >= 0.0001 and abs(float(p.market_value or 0)) >= 1.0]
         return {"positions":[_position_dict(p) for p in positions],
                 "account":{"equity":equity,"cash":float(account.cash),
                             "buying_power":float(account.buying_power),"market_value":mv,
@@ -638,15 +638,18 @@ def _position_dict(p):
     plpc = plpc_raw * 100 if abs(plpc_raw) <= 1 else plpc_raw
     # Detect asset class: prefer Alpaca's own asset_class attribute, fall back to heuristics
     # Alpaca returns crypto symbols as e.g. "BTCUSD" (no slash) with asset_class="crypto"
-    raw_class = str(getattr(p, "asset_class", "") or "").lower()
-    if raw_class in ("crypto", "cryptocurrency"):
+    # Detect crypto: check Alpaca's asset_class attr (may be enum like AssetClass.CRYPTO
+    # or string "crypto" / "cryptocurrency"), then symbol heuristics
+    try:
+        raw_class = str(getattr(p, "asset_class", "") or "").lower()
+    except Exception:
+        raw_class = ""
+    # Alpaca SDK enum stringifies as e.g. "AssetClass.CRYPTO" or just "crypto"
+    if "crypto" in raw_class:
         asset_class = "Crypto"
     elif "/" in sym:
         asset_class = "Crypto"
     elif sym.endswith("USD") and len(sym) > 5:
-        # Heuristic: symbols like BTCUSD, ETHUSD, SOLUSD, AAVEUSD, ARBUSD, AVAXUSD, LINKUSD, XRPUSD
-        # known equity symbols that end in D won't be >5 chars ending USD typically,
-        # but we also check: if it looks like a crypto ticker (>5 chars, ends USD, no digits)
         base = sym[:-3]  # strip "USD"
         if len(base) >= 2 and base.isalpha():
             asset_class = "Crypto"

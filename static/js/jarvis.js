@@ -1102,7 +1102,7 @@ setInterval(refreshAll, 60000);
 
 async function loadPaperTab() {
   try {
-    const data = await apiGet('/paper/summary');
+    const data = await API('/paper/summary');
     const p    = data.portfolio;
 
     // KPIs
@@ -1209,7 +1209,7 @@ async function paperOpenPosition() {
   const stp   = parseFloat(document.getElementById('paperStop').value) || null;
   if (!sym) { alert('Enter a symbol'); return; }
   try {
-    const res = await apiPost('/paper/open', {
+    const res = await POST('/paper/open', {
       symbol: sym, paper_direction: dir, asset_class: sym.includes('/') ? 'Crypto' : 'Equity',
       entry_price: entry, target_price: tgt, stop_loss: stp
     });
@@ -1226,7 +1226,7 @@ async function paperOpenPosition() {
 async function paperClose(posId) {
   if (!confirm('Close this paper position at market price?')) return;
   try {
-    const res = await apiPost(`/paper/close/${posId}`);
+    const res = await POST(`/paper/close/${posId}`);
     if (res.ok) {
       const sign = res.pnl >= 0 ? '+' : '';
       showToast(`✅ Closed ${res.symbol} | P&L ${sign}$${res.pnl.toFixed(2)} (${sign}${res.pnl_pct.toFixed(2)}%)`);
@@ -1239,7 +1239,7 @@ async function paperClose(posId) {
 
 async function paperRunMTM() {
   try {
-    const res = await apiPost('/paper/run-mtm');
+    const res = await POST('/paper/run-mtm');
     const closed = res.closed || [];
     let msg = `✅ MTM updated ${res.updated || 0} positions`;
     if (closed.length) msg += ` | Auto-closed: ${closed.map(c => c.symbol + ' (' + c.reason + ')').join(', ')}`;
@@ -1251,7 +1251,7 @@ async function paperRunMTM() {
 async function paperReset() {
   if (!confirm('⚠️ RESET paper account to $100,000? All positions and trade history will be erased.')) return;
   try {
-    const res = await apiPost('/paper/reset');
+    const res = await POST('/paper/reset');
     showToast('✅ Paper account reset to $100,000');
     loadPaperTab();
   } catch(e) { alert('Error: ' + e); }
@@ -1262,7 +1262,7 @@ async function paperExecuteSignal(signalId, symbol) {
   const dir = prompt(`Paper trade direction for ${symbol}?\nOptions: Long, Long_Leveraged, Short, Short_Leveraged`, 'Short');
   if (!dir) return;
   try {
-    const res = await apiPost(`/signals/${signalId}/paper-execute?direction=${encodeURIComponent(dir)}`);
+    const res = await POST(`/signals/${signalId}/paper-execute?direction=${encodeURIComponent(dir)}`);
     if (res.ok) {
       showToast(`✅ Paper ${dir} opened for ${symbol}`);
       loadPaperTab();

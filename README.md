@@ -1,7 +1,7 @@
-# 🤖 Jarvis Trading AI v6.4
+# 🤖 Jarvis Trading AI v6.5
 
 > **Python Edition** — FastAPI + APScheduler + TA-Lib + Alpaca  
-> Autonomous trading across equities, crypto, and commodities with geopolitical threat intelligence, multi-factor signal scoring, AI position management, and a parallel paper trading engine for shorts and leverage.
+> Autonomous trading across equities, crypto, and commodities with geopolitical threat intelligence, multi-factor signal scoring, AI position management, a parallel paper trading engine for shorts and leverage, and a live Real vs Paper performance comparison dashboard.
 
 ---
 
@@ -217,11 +217,27 @@ Supports long, short, and leveraged virtual positions independent of broker supp
 | Short | Short | 1× |
 | Short_Leveraged | Short | 2× |
 
-- $100k virtual starting capital
-- Max 3× leverage
-- Margin call liquidation at < 20% equity
+- **$100k virtual starting capital**
+- Max 3× leverage, $3k margin per position
+- Margin call liquidation at < 15% equity loss on margin
 - Automatic mark-to-market every job cycle
+- Signal context (TA, LLM reasoning, key risks, trigger events) linked to every position
 - Performance tracked separately from live Alpaca positions
+
+### Paper Tab UI Features
+
+- **KPI Dashboard** — Virtual Equity, Total Return, Realized P&L, Win Rate, Open P&L, Cash, Margin In Use, Total Trades
+- **Real vs Paper Comparison Card** — side-by-side Alpaca vs virtual account with dual progress bars showing return vs $100k baseline
+- **Expandable Position Rows** — click any paper position to reveal:
+  - LLM composite score, direction, timeframe, R:R ratio
+  - Entry / Target / Stop levels from the originating signal
+  - Trade progress bar (% of way to target)
+  - Full LLM reasoning text
+  - Key risks identified by the LLM
+  - Trigger event (news/threat that spawned the signal)
+  - Signal source (watchlist vs opportunistic) and status
+- **Trade History** — closed paper trades with P&L, close reason, and timing
+- **Manual Open** — open any paper position manually with custom entry/target/stop
 
 ---
 
@@ -265,9 +281,26 @@ Supports long, short, and leveraged virtual positions independent of broker supp
 **Alpaca 429 rate limit on OHLCV fetch**
 - Rate limiter uses 0.8s delay + exponential backoff with max 2 concurrent workers
 
+**Paper tab shows 0% return with positions open**
+- Fixed in v6.5 — equity now correctly calculated as `cash + margin_deployed + open_pnl`
+- Margin is deployed capital, not lost capital
+
+**Paper positions show no data**
+- Fixed in v6.5 — null-safe KPI rendering prevents early crash before positions render
+- `opened_at` datetime serialized via `.isoformat()` to ensure clean JSON
+
 ---
 
 ## 📦 Changelog
+
+### v6.5
+- New: **Real vs Paper comparison card** — side-by-side Alpaca vs virtual account on Paper tab with dual return progress bars and delta label
+- New: **Paper position detail panels** — click any paper position row to expand full LLM context (reasoning, key risks, TA score, R:R, progress bar, trigger event, signal source)
+- New: **Signal join in paper summary** — `/api/paper/summary` now returns linked signal data for each open position
+- Fix: **Paper equity formula** — equity = cash + margin_deployed + open_pnl (was incorrectly showing −15% when $15k margin was deployed)
+- Fix: **Null-safe KPI rendering** — paper tab no longer crashes before positions render when fields are null
+- Fix: **datetime serialization** — `opened_at`/`closed_at` now serialized via `.isoformat()` for consistent JSON output
+- Fix: **Close button propagation** — paper position close button no longer triggers row expand toggle
 
 ### v6.4
 - New: **Paper trading engine** — virtual Long/Short/Leveraged positions with full P&L tracking

@@ -123,7 +123,8 @@ def portfolio_guardian():
         from lib.alpaca_client import get_positions, get_account
         from lib.market_regime import get_regime
         from lib.lmstudio import call_lm_studio, parse_json
-        from app.database import get_db, ThreatEvent, NewsItem, PortfolioSnapshot
+        from app.routes import log_decision
+from app.database import get_db, ThreatEvent, NewsItem, PortfolioSnapshot
 
         # ── 1. Alpaca live data (SDK objects, NOT ORM — safe to use freely) ──────
         account   = get_account()
@@ -194,6 +195,7 @@ def portfolio_guardian():
             alerts.append(f"⚠️ HARD CEILING HIT: Portfolio down {day_drawdown_pct:.1f}% today")
             go_defensive = True
             logger.warning(f"[Guardian] 🚨 Hard drawdown ceiling: {day_drawdown_pct:.1f}%")
+            log_decision("guardian", "EXIT_ALL", f"Hard drawdown ceiling hit: {day_drawdown_pct:.1f}% day loss")
         elif day_drawdown_pct <= DRAWDOWN_WARN_LEVEL:
             alerts.append(f"⚠️ Drawdown warning: {day_drawdown_pct:.1f}% today")
             logger.warning(f"[Guardian] ⚠ Drawdown warning: {day_drawdown_pct:.1f}%")
@@ -207,6 +209,7 @@ def portfolio_guardian():
 
         if not alerts and regime.get("risk") != "high" and day_drawdown_pct > DRAWDOWN_WARN_LEVEL:
             logger.info("[Guardian] ✓ Portfolio healthy — no action needed")
+            log_decision("guardian", "HOLD", "Portfolio healthy — no action needed")
             return
 
         # ── 5. DB context for LLM — all converted to dicts inside session ─────
@@ -280,6 +283,7 @@ Respond ONLY with valid JSON:
         tighten = decision.get("stop_tighten_pct")
 
         logger.info(f"[Guardian] 🤖 Decision: {action} | {reason}")
+        log_decision("guardian", action, reason)
 
         if action in ("EXIT_ALL",) or go_defensive:
             # Hard ceiling hit — close everything
@@ -296,6 +300,7 @@ Respond ONLY with valid JSON:
                     cancel_open_orders_for_symbol(sym)
                     close_position(sym)
                     logger.info(f"[Guardian] ✓ Closed {sym} (defensive)")
+                    log_decision("guardian", "EXIT", f"Defensive close: {reason}", symbol=sym)
                 except Exception as e:
                     logger.error(f"[Guardian] Close {pos['symbol']} failed: {e}")
 
@@ -314,6 +319,7 @@ Respond ONLY with valid JSON:
                     cancel_open_orders_for_symbol(clean_sym)
                     close_position(clean_sym)
                     logger.info(f"[Guardian] ✓ Closed {sym} (LLM: EXIT_WEAKEST)")
+                    log_decision("guardian", "EXIT_WEAKEST", reason, symbol=sym)
                 except Exception as e:
                     logger.error(f"[Guardian] Close {sym} failed: {e}")
 
@@ -331,6 +337,7 @@ Respond ONLY with valid JSON:
                 try:
                     _set_protective_order(sym.replace("/", ""), qty, tighten_pct, current_price)
                     logger.info(f"[Guardian] ⟳ Tightened stop {sym} @ {tighten_pct}%")
+                    log_decision("guardian", "TIGHTEN_STOP", f"{reason} — tightened to {tighten_pct}%", symbol=sym)
                 except Exception as e:
                     logger.error(f"[Guardian] Tighten {sym} failed: {e}")
 

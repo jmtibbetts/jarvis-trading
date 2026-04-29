@@ -264,7 +264,7 @@ Respond ONLY with valid JSON:
   "action": "HOLD" | "TIGHTEN_ALL" | "EXIT_WEAKEST" | "EXIT_ALL",
   "reason": "2-3 sentence explanation",
   "symbols_to_exit": ["SYM1", "SYM2"],
-  "stop_tighten_pct": <float — trail % to apply to all remaining positions, or null>
+  "stop_tighten_pct": <float between 0.5 and 5.0 — trail % to apply to all remaining positions, or null>
 }}"""
 
         try:
@@ -302,6 +302,10 @@ Respond ONLY with valid JSON:
                     logger.error(f"[Guardian] Close {sym} failed: {e}")
 
         elif action == "TIGHTEN_ALL" and tighten:
+            # Clamp stop_tighten_pct: equity trailing stops need >= 0.1%, sane range 0.5-15%
+            tighten_pct = max(0.5, min(float(tighten), 15.0))
+            if tighten_pct != float(tighten):
+                logger.info(f"[Guardian] stop_tighten_pct clamped {tighten} → {tighten_pct}%")
             # Tighten stops on all open positions
             from jobs.manage_positions import _set_protective_order, _is_crypto
             for pos in positions:
@@ -309,8 +313,8 @@ Respond ONLY with valid JSON:
                 qty           = pos["qty"]
                 current_price = pos["current_price"] or pos["avg_entry_price"]
                 try:
-                    _set_protective_order(sym.replace("/", ""), qty, float(tighten), current_price)
-                    logger.info(f"[Guardian] ⟳ Tightened stop {sym} @ {tighten}%")
+                    _set_protective_order(sym.replace("/", ""), qty, tighten_pct, current_price)
+                    logger.info(f"[Guardian] ⟳ Tightened stop {sym} @ {tighten_pct}%")
                 except Exception as e:
                     logger.error(f"[Guardian] Tighten {sym} failed: {e}")
 

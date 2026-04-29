@@ -1229,6 +1229,8 @@ async function loadPaperTab() {
       }
       trBody.innerHTML = trRows.length ? trRows.join('') : '<tr><td colspan="10" class="text-muted text-center">No completed trades</td></tr>';
     }
+    // Populate compare card
+    loadCompareCard();
   } catch (e) {
     console.error('[Paper] loadPaperTab error:', e);
   }
@@ -1253,6 +1255,69 @@ function paperReasonBadge(r) {
     'margin_call': '<span class="badge bg-warning text-dark">Margin Call</span>',
   };
   return map[r] || `<span class="badge bg-secondary">${r||'—'}</span>`;
+}
+
+
+async function loadCompareCard() {
+  try {
+    const [paperData, realData] = await Promise.all([
+      API('/paper/summary'),
+      API('/positions/with-signals').catch(() => null),
+    ]);
+
+    const p     = paperData.portfolio || {};
+    const acct  = (realData && realData.account) || {};
+    const pos   = (realData && realData.positions) || [];
+
+    // Paper values
+    const pEq   = p.equity ?? p.cash ?? 0;
+    const pOpen = p.open_pnl ?? 0;
+    const pPos  = (paperData.positions || []).length;
+    const pWin  = p.win_rate ?? 0;
+    const pRet  = p.total_return_pct ?? 0;
+
+    // Real values
+    const rEq   = parseFloat(acct.equity || 0);
+    const rOpen = parseFloat(acct.unrealized_pl || 0);
+    const rPos  = pos.length;
+    const rDay  = parseFloat(acct.equity_previous_close ? rEq - parseFloat(acct.equity_previous_close) : 0);
+    const rStart = 100000; // same baseline for fair comparison
+    const rRet  = rStart > 0 ? ((rEq - rStart) / rStart * 100) : 0;
+
+    const fmt$ = v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits:2});
+    const cls  = v => v >= 0 ? 'text-success' : 'text-danger';
+
+    document.getElementById('cmpRealEquity').textContent    = '$' + rEq.toLocaleString('en-US',{maximumFractionDigits:0});
+    document.getElementById('cmpRealOpenPnl').textContent   = fmt$(rOpen);
+    document.getElementById('cmpRealOpenPnl').className     = 'fw-bold ' + cls(rOpen);
+    document.getElementById('cmpRealPositions').textContent = rPos + ' open';
+    document.getElementById('cmpRealDayPnl').textContent    = fmt$(rDay);
+    document.getElementById('cmpRealDayPnl').className      = 'fw-bold ' + cls(rDay);
+
+    document.getElementById('cmpPaperEquity').textContent   = '$' + pEq.toLocaleString('en-US',{maximumFractionDigits:0});
+    document.getElementById('cmpPaperOpenPnl').textContent  = fmt$(pOpen);
+    document.getElementById('cmpPaperOpenPnl').className    = 'fw-bold ' + cls(pOpen);
+    document.getElementById('cmpPaperPositions').textContent= pPos + ' open';
+    document.getElementById('cmpPaperWinRate').textContent  = pWin + '%';
+
+    // Progress bars — clamp to 0–20% return range for visual scale
+    const scale = 20;
+    const pPct  = Math.min(Math.max(pRet, -scale), scale);
+    const rPct  = Math.min(Math.max(rRet, -scale), scale);
+    const toWidth = v => Math.abs(v) / scale * 50 + 50; // center at 50%
+
+    document.getElementById('cmpPaperBar').style.width = Math.min(100, Math.max(0, toWidth(pPct))) + '%';
+    document.getElementById('cmpRealBar').style.width  = Math.min(100, Math.max(0, toWidth(rPct))) + '%';
+    document.getElementById('cmpPaperBar').style.background = pRet >= 0 ? '#ffc107' : '#dc3545';
+    document.getElementById('cmpRealBar').style.background  = rRet  >= 0 ? '#198754' : '#dc3545';
+
+    const delta = pRet - rRet;
+    const deltaEl = document.getElementById('cmpDeltaLabel');
+    deltaEl.textContent  = `Paper ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}% vs Real`;
+    deltaEl.className    = 'small fw-bold ' + cls(delta);
+  } catch(e) {
+    console.warn('[Compare] Card load error:', e);
+  }
 }
 
 async function paperOpenPosition() {

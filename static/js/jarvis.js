@@ -1453,3 +1453,137 @@ async function paperExecuteSignal(signalId, symbol) {
     }
   } catch(e) { alert('Error: ' + e); }
 }
+
+// ── Learning Engine Tab ──────────────────────────────────────────────────────
+let allOutcomes = [];
+let allAccuracy = [];
+
+async function loadLearning() {
+  try {
+    const [summary, outcomes, accuracy] = await Promise.all([
+      API('/learning/summary'),
+      API('/learning/outcomes?limit=500'),
+      API('/learning/accuracy'),
+    ]);
+
+    allOutcomes = outcomes || [];
+    allAccuracy = accuracy || [];
+
+    // Populate symbol filter
+    const symSel = document.getElementById('learning-filter');
+    const syms = [...new Set(allOutcomes.map(o => o.symbol))].sort();
+    symSel.innerHTML = '<option value="">All Symbols</option>' +
+      syms.map(s => `<option value="${s}">${s}</option>`).join('');
+
+    // KPIs
+    renderLearningSummary(summary);
+    renderAccuracy(allAccuracy);
+    filterOutcomes();
+
+  } catch(e) {
+    console.error('loadLearning failed', e);
+  }
+}
+
+function renderLearningSummary(s) {
+  if (!s || s.total === 0) {
+    document.getElementById('learning-empty').style.display = '';
+    document.getElementById('learning-kpis').style.display = 'none';
+    return;
+  }
+  document.getElementById('learning-empty').style.display = 'none';
+  document.getElementById('learning-kpis').style.display = '';
+
+  const wr = ((s.win_rate || 0) * 100).toFixed(1);
+  const wrColor = s.win_rate >= 0.6 ? 'text-success' : s.win_rate >= 0.4 ? 'text-warning' : 'text-danger';
+
+  document.getElementById('kpi-total').textContent  = s.total || 0;
+  const wrEl = document.getElementById('kpi-winrate');
+  wrEl.textContent  = wr + '%';
+  wrEl.className    = `fs-3 fw-bold ${wrColor}`;
+  const avgEl = document.getElementById('kpi-avgpnl');
+  avgEl.textContent = (s.avg_pnl >= 0 ? '+' : '') + (s.avg_pnl || 0).toFixed(2) + '%';
+  avgEl.className   = `fs-3 fw-bold ${s.avg_pnl >= 0 ? 'text-success' : 'text-danger'}`;
+  const totEl = document.getElementById('kpi-totalpnl');
+  totEl.textContent = '$' + (s.total_pnl_usd >= 0 ? '+' : '') + (s.total_pnl_usd || 0).toFixed(2);
+  totEl.className   = `fs-3 fw-bold ${s.total_pnl_usd >= 0 ? 'text-success' : 'text-danger'}`;
+  document.getElementById('kpi-best').textContent   = '+' + (s.best_trade || 0).toFixed(2) + '%';
+  document.getElementById('kpi-worst').textContent  = (s.worst_trade || 0).toFixed(2) + '%';
+  const holdMin = s.avg_hold_min || 0;
+  document.getElementById('kpi-hold').textContent   = holdMin >= 60
+    ? (holdMin/60).toFixed(1) + 'h' : Math.round(holdMin) + 'm';
+  document.getElementById('kpi-wl').textContent     = `${s.wins} / ${s.losses}`;
+}
+
+function renderAccuracy(rows) {
+  const tbody = document.getElementById('accuracy-tbody');
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No data yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const wr = ((r.win_rate || 0) * 100).toFixed(0);
+    const wrColor = r.win_rate >= 0.6 ? 'text-success' : r.win_rate >= 0.4 ? 'text-warning' : 'text-danger';
+    const pnlColor = r.avg_pnl_pct >= 0 ? 'text-success' : 'text-danger';
+    const holdMin = r.avg_hold_min || 0;
+    const holdStr = holdMin >= 60 ? (holdMin/60).toFixed(1)+'h' : Math.round(holdMin)+'m';
+    return `<tr>
+      <td><span class="fw-semibold text-white">${r.symbol}</span><br>
+          <span class="text-muted" style="font-size:0.7rem">${r.asset_class||''} ${r.timeframe||''}</span></td>
+      <td>${r.total_trades}</td>
+      <td class="${wrColor} fw-bold">${wr}%</td>
+      <td class="${pnlColor}">${r.avg_pnl_pct >= 0 ? '+' : ''}${(r.avg_pnl_pct||0).toFixed(2)}%</td>
+      <td class="text-muted">${holdStr}</td>
+      <td class="text-success">+${(r.best_pnl_pct||0).toFixed(2)}%</td>
+      <td class="text-danger">${(r.worst_pnl_pct||0).toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterOutcomes() {
+  const sym = document.getElementById('learning-filter')?.value || '';
+  const outcomeFilter = document.getElementById('learning-outcome-filter')?.value || '';
+  let rows = allOutcomes;
+  if (sym) rows = rows.filter(o => o.symbol === sym);
+  if (outcomeFilter) rows = rows.filter(o => o.outcome === outcomeFilter);
+  renderOutcomes(rows);
+}
+
+function renderOutcomes(rows) {
+  const tbody = document.getElementById('outcomes-tbody');
+  const empty = document.getElementById('learning-empty');
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No trades match filter</td></tr>';
+    if (allOutcomes.length === 0) empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  tbody.innerHTML = rows.map(r => {
+    const outcomeIcon = r.outcome === 'WIN' ? '✅' : r.outcome === 'LOSS' ? '❌' : '➖';
+    const pnlColor = (r.pnl_pct || 0) >= 0 ? 'text-success' : 'text-danger';
+    const pnlUsdColor = (r.pnl_usd || 0) >= 0 ? 'text-success' : 'text-danger';
+    const holdMin = r.hold_duration_m || 0;
+    const holdStr = holdMin >= 60 ? (holdMin/60).toFixed(1)+'h' : Math.round(holdMin)+'m';
+    const exitedAt = r.exited_at ? new Date(r.exited_at).toLocaleString() : '—';
+    const exitBadge = {
+      'TAKE_PROFIT': 'badge bg-success',
+      'HARD_STOP':   'badge bg-danger',
+      'LLM_EXIT':    'badge bg-warning text-dark',
+      'MANUAL':      'badge bg-secondary',
+      'TIMEOUT':     'badge bg-secondary',
+    }[r.exit_reason] || 'badge bg-secondary';
+    return `<tr>
+      <td class="fw-semibold text-white">${r.symbol}</td>
+      <td><span class="badge ${r.direction==='BUY'||r.direction==='long'?'bg-success':'bg-danger'}">${r.direction||'—'}</span></td>
+      <td>${outcomeIcon} ${r.outcome}</td>
+      <td class="${pnlColor} fw-bold">${(r.pnl_pct||0) >= 0 ? '+' : ''}${(r.pnl_pct||0).toFixed(2)}%</td>
+      <td class="${pnlUsdColor}">${(r.pnl_usd||0) >= 0 ? '+$' : '-$'}${Math.abs(r.pnl_usd||0).toFixed(2)}</td>
+      <td class="text-muted">${holdStr}</td>
+      <td><span class="${exitBadge}">${r.exit_reason||'—'}</span></td>
+      <td class="text-muted" style="font-size:0.75rem">${r.market_regime||'—'}</td>
+      <td class="text-muted" style="font-size:0.75rem">${exitedAt}</td>
+    </tr>`;
+  }).join('');
+}

@@ -2,9 +2,13 @@
 Job: Fetch market data — prices + OHLCV cache warm-up.
 v6.3: Added connect timeout + yfinance fallback for crypto price fetch.
       Crypto timeout no longer stalls the entire job.
+v6.8.4: Equity price fetch now wrapped in ThreadPoolExecutor timeout guard
+        (same as crypto) to prevent indefinite hang when data.alpaca.markets
+        is unreachable. Added yfinance equity fallback for timeout/error cases.
 """
 import logging, uuid, time, socket
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from app.database import get_db, MarketAsset
 from lib.alpaca_client import get_alpaca_creds, normalize_symbol, is_crypto
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
@@ -36,8 +40,8 @@ CRYPTO_YF_MAP = {
     'NEAR/USD': 'NEAR-USD', 'OP/USD': 'OP-USD', 'ARB/USD': 'ARB11841-USD',
 }
 
-ALPACA_CONNECT_TIMEOUT = 10   # seconds -- unused (TCP probe replaced by SDK timeout)
-ALPACA_READ_TIMEOUT    = 12   # seconds -- bail if SDK call is slow; yfinance fallback handles the rest
+ALPACA_CONNECT_TIMEOUT = 10   # seconds
+ALPACA_READ_TIMEOUT    = 12   # seconds — bail if SDK call is slow; fallback handles rest
 
 
 def _check_alpaca_reachable(host='data.alpaca.markets', port=443, timeout=5) -> bool:
@@ -73,6 +77,33 @@ def _fetch_crypto_via_yfinance(symbols: list) -> dict:
         logger.info(f"[Market] yfinance crypto fallback: {len(results)}/{len(symbols)} prices")
     except Exception as e:
         logger.warning(f"[Market] yfinance fallback failed entirely: {e}")
+    return results
+
+
+def _fetch_equity_via_yfinance(symbols: list) -> dict:
+    """Fallback: pull latest equity prices from yfinance when Alpaca is unreachable."""
+    results = {}
+    try:
+        import yfinance as yf
+        # yfinance uses the same tickers for equities
+        tickers = yf.Tickers(' '.join(symbols))
+        for sym in symbols:
+            try:
+                info = tickers.tickers[sym].fast_info
+                price = getattr(info, 'last_price', None) or getattr(info, 'regularMarketPrice', None)
+                vol   = getattr(info, 'three_month_average_volume', 0) or 0
+                if price:
+                    results[sym] = {
+                        'price': float(price),
+                        'volume': float(vol),
+                        'asset_class': 'Equity',
+                        'name': sym,
+                    }
+            except Exception as ie:
+                logger.debug(f"[Market] yfinance equity {sym}: {ie}")
+        logger.info(f"[Market] yfinance equity fallback: {len(results)}/{len(symbols)} prices")
+    except Exception as e:
+        logger.warning(f"[Market] yfinance equity fallback failed entirely: {e}")
     return results
 
 
@@ -141,22 +172,38 @@ def run():
 
     # -- 1. Latest price snapshot -----------------------------------------------
 
-    # Equity prices
-    try:
+    # Equity prices — wrapped in timeout guard to prevent indefinite hang
+    def _do_equity_fetch():
         req = StockLatestBarRequest(symbol_or_symbols=EQUITY_WATCHLIST)
-        bars = stock_client.get_stock_latest_bar(req)
-        for sym, bar in bars.items():
-            results[sym] = {'price': float(bar.close), 'volume': float(bar.volume or 0), 'asset_class': 'Equity', 'name': sym}
-        logger.info(f"[Market] Got {len(bars)} equity prices")
-    except Exception as e:
-        logger.error(f"[Market] Equity price error: {e}")
+        return stock_client.get_stock_latest_bar(req)
 
-    # Crypto prices -- TCP probe first, then SDK call with timeout guard
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_do_equity_fetch)
+            try:
+                bars = future.result(timeout=ALPACA_READ_TIMEOUT)
+                for sym, bar in bars.items():
+                    results[sym] = {
+                        'price': float(bar.close),
+                        'volume': float(bar.volume or 0),
+                        'asset_class': 'Equity',
+                        'name': sym,
+                    }
+                logger.info(f"[Market] Got {len(bars)} equity prices (Alpaca)")
+            except FuturesTimeout:
+                logger.warning(f"[Market] Alpaca equity fetch timed out ({ALPACA_READ_TIMEOUT}s) — falling back to yfinance")
+                results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+            except Exception as te:
+                logger.warning(f"[Market] Alpaca equity fetch error: {te} — falling back to yfinance")
+                results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+    except Exception as e:
+        logger.error(f"[Market] Equity price error: {e} — trying yfinance")
+        results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+
+    # Crypto prices — TCP probe first, then SDK call with timeout guard
     alpaca_reachable = _check_alpaca_reachable(timeout=ALPACA_CONNECT_TIMEOUT)
     if alpaca_reachable:
         try:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-
             def _do_crypto_fetch():
                 req = CryptoLatestBarRequest(symbol_or_symbols=CRYPTO_WATCHLIST)
                 return crypto_client.get_crypto_latest_bar(req)
@@ -217,4 +264,3 @@ def run():
             logger.debug(f"[Market] Event notify failed: {e}")
 
     return {'prices_updated': len(results), 'ohlcv_cached': cached}
-

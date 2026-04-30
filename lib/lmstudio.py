@@ -127,10 +127,12 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
+                # Give the retry more token budget — model skips thinking so needs room for actual output
+                retry_max = max(effective_max, 3072)
                 if cfg['provider'] == 'anthropic':
-                    return _call_anthropic(prompt, fallback_system, effective_max, temperature, cfg)
+                    return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
                 else:
-                    return _call_openai_compat(prompt, fallback_system, effective_max, temperature, cfg)
+                    return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg)
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
 
@@ -257,6 +259,7 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+
 
 
 

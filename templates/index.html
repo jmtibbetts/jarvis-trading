@@ -14,7 +14,7 @@
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-secondary">
   <div class="container-fluid">
     <span class="navbar-brand fw-bold">
-      <i class="bi bi-robot text-success"></i> Jarvis Trading AI <span class="badge bg-success ms-1" style="font-size:.6rem">v6.8 Python Edition</span>
+      <i class="bi bi-robot text-success"></i> Jarvis Trading AI <span class="badge bg-success ms-1" style="font-size:.6rem">v6.8.2 Python Edition</span>
     </span>
     <div class="d-flex align-items-center gap-3 ms-auto">
       <div id="regime-badge" class="small"></div>
@@ -1023,6 +1023,10 @@ function renderDecisions(decisions) {
     const pnl = d.pnl_pct != null ? `<span class="text-${d.pnl_pct>=0?'success':'danger'} ms-2 small">${d.pnl_pct>=0?'+':''}${(+d.pnl_pct).toFixed(2)}%</span>` : '';
     const price = d.price ? `<span class="text-muted ms-2 small">@ $${(+d.price).toFixed(4)}</span>` : '';
     const score = d.score != null ? `<span class="text-info ms-2 small">score=${(+d.score).toFixed(0)}</span>` : '';
+    // thinking badge: 🧠 for full CoT, ⚡ for fast/deterministic path
+    const thinkBadge = (d.thinking === 0 || d.thinking === false)
+      ? `<span class="badge bg-secondary border border-warning border-opacity-50 ms-1" title="Fast path — no chain-of-thought">⚡ fast</span>`
+      : `<span class="badge bg-secondary border border-info border-opacity-25 ms-1" title="Full chain-of-thought reasoning">🧠</span>`;
     const id = 'dec-' + d.id;
 
     return `<div class="card bg-dark border-${color} border-opacity-50">
@@ -1030,7 +1034,7 @@ function renderDecisions(decisions) {
         <div class="d-flex align-items-center gap-2 flex-wrap">
           <span class="badge bg-${color}">${icon} ${d.action}</span>
           <span class="text-muted small">${srcIcon} ${d.source}</span>
-          ${sym}${pnl}${price}${score}
+          ${sym}${pnl}${price}${score}${thinkBadge}
         </div>
         <span class="text-muted small">${ts} <i class="bi bi-chevron-down ms-1"></i></span>
       </div>

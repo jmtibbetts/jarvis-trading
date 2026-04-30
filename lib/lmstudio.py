@@ -1,6 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
-v6.8: thinking param — prepends /no_think to system prompt for fast calls.
+v6.9: 4-slot parallel semaphore (LLM_MAX_PARALLEL=4), 120k context / 32768 output tokens default.
 v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
       Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
@@ -28,9 +28,11 @@ class _EmptyThinkingResponse(RuntimeError):
     """Raised when LM Studio returns 0 chars because the model only produced <think> tokens."""
     pass
 
-# ── Global serialization lock — local LLMs can't handle concurrent requests ───
-# Using a RLock so the same thread can re-acquire (avoids deadlocks on re-entrant calls)
-_llm_lock = threading.RLock()
+# ── Concurrency limiter — LM Studio supports N parallel inference slots ─────
+# BoundedSemaphore(4) allows 4 concurrent LLM calls, matching LM Studio's 4-slot config.
+# Increase LLM_MAX_PARALLEL env var to match your LM Studio "Parallel Requests" setting.
+_LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "4"))
+_llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
 # ── Provider detection ─────────────────────────────────────────────────────────
 OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', 'other'}
@@ -53,7 +55,7 @@ def get_llm_config() -> dict:
                     'url':        (cfg.api_url or DEFAULT_URL).rstrip('/'),
                     'model':      cfg.extra_field_1 or DEFAULT_MODEL,
                     'api_key':    cfg.api_key or '',
-                    'max_tokens': int(cfg.extra_field_2 or 4096),
+                    'max_tokens': int(cfg.extra_field_2 or 32768),
                     'platform':   platform,
                     'provider':   'anthropic' if platform == 'anthropic' else 'openai_compat',
                 }
@@ -65,7 +67,7 @@ def get_llm_config() -> dict:
         'url':        os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
         'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':    os.getenv('OPENAI_API_KEY', ''),
-        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 4096)),
+        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 32768)),
         'platform':   'lmstudio',
         'provider':   'openai_compat',
     }
@@ -128,7 +130,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
                 # Give the retry more token budget — model skips thinking so needs room for actual output
-                retry_max = max(effective_max, 3072)
+                retry_max = max(effective_max, 32768)
                 if cfg['provider'] == 'anthropic':
                     return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
                 else:

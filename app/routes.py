@@ -934,8 +934,11 @@ def paper_execute_signal(signal_id: str, direction: str = "Long"):
 
 def log_decision(source: str, action: str, reasoning: str,
                  symbol: str = None, price: float = None,
-                 pnl_pct: float = None, score: float = None):
-    """Persist an AI decision to the ai_decisions table using raw SQL for reliability."""
+                 pnl_pct: float = None, score: float = None,
+                 thinking: bool = True):
+    """Persist an AI decision to the ai_decisions table using raw SQL for reliability.
+    thinking=True → full chain-of-thought was used. thinking=False → /no_think fast path.
+    """
     import logging as _log
     _logger = _log.getLogger(__name__)
     try:
@@ -953,12 +956,21 @@ def log_decision(source: str, action: str, reasoning: str,
                     price      REAL,
                     pnl_pct    REAL,
                     score      REAL,
+                    thinking   INTEGER DEFAULT 1,
                     created_at TEXT
-                )
+                );
+                -- self-heal: add thinking column to existing DBs
+                CREATE TABLE IF NOT EXISTS _dummy_thinking_migration (id TEXT);
             """))
+            # Self-heal: add thinking column if missing (existing DBs)
+            try:
+                conn.execute(_text("ALTER TABLE ai_decisions ADD COLUMN thinking INTEGER DEFAULT 1"))
+            except Exception:
+                pass  # Column already exists
+
             conn.execute(_text("""
-                INSERT INTO ai_decisions (id, source, symbol, action, reasoning, price, pnl_pct, score, created_at)
-                VALUES (:id, :source, :symbol, :action, :reasoning, :price, :pnl_pct, :score, :created_at)
+                INSERT INTO ai_decisions (id, source, symbol, action, reasoning, price, pnl_pct, score, thinking, created_at)
+                VALUES (:id, :source, :symbol, :action, :reasoning, :price, :pnl_pct, :score, :thinking, :created_at)
             """), {
                 "id":         str(__import__("uuid").uuid4()),
                 "source":     source,
@@ -968,6 +980,7 @@ def log_decision(source: str, action: str, reasoning: str,
                 "price":      price,
                 "pnl_pct":    pnl_pct,
                 "score":      score,
+                "thinking":   1 if thinking else 0,
                 "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
             })
         _logger.debug(f"[log_decision] Saved: {source} | {action} | {symbol}")
@@ -984,16 +997,22 @@ def get_decisions(limit: int = 200):
         conn.execute(_text("""
             CREATE TABLE IF NOT EXISTS ai_decisions (
                 id TEXT PRIMARY KEY, source TEXT, symbol TEXT, action TEXT,
-                reasoning TEXT, price REAL, pnl_pct REAL, score REAL, created_at TEXT
+                reasoning TEXT, price REAL, pnl_pct REAL, score REAL,
+                thinking INTEGER DEFAULT 1, created_at TEXT
             )
         """))
+        try:
+            conn.execute(_text("ALTER TABLE ai_decisions ADD COLUMN thinking INTEGER DEFAULT 1"))
+        except Exception:
+            pass
         rows = conn.execute(_text(
-            "SELECT id, source, symbol, action, reasoning, price, pnl_pct, score, created_at "
+            "SELECT id, source, symbol, action, reasoning, price, pnl_pct, score, thinking, created_at "
             "FROM ai_decisions ORDER BY created_at DESC LIMIT :lim"
         ), {"lim": limit}).fetchall()
     return [
         {"id": r[0], "source": r[1], "symbol": r[2], "action": r[3],
-         "reasoning": r[4], "price": r[5], "pnl_pct": r[6], "score": r[7], "created_at": r[8]}
+         "reasoning": r[4], "price": r[5], "pnl_pct": r[6], "score": r[7],
+         "thinking": r[8] if r[8] is not None else 1, "created_at": r[9]}
         for r in rows
     ]
 

@@ -1461,6 +1461,22 @@ let allAccuracy = [];
 // learningMode: 'live' | 'paper' | 'all'
 let learningMode = 'all';
 
+
+async function triggerBackfill() {
+  const btn = document.getElementById('backfill-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Running...'; }
+  try {
+    const res = await POST('/learning/backfill-paper', {});
+    const msg = `Backfill complete: ${res.inserted} inserted, ${res.skipped} skipped, ${res.errors} errors`;
+    alert(msg);
+    loadLearning(learningMode);
+  } catch(e) {
+    alert('Backfill failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-database-fill-up"></i> Backfill Paper'; }
+  }
+}
+
 async function loadLearning(mode) {
   if (mode !== undefined) learningMode = mode;
 
@@ -1889,4 +1905,5 @@ async function loadFuturesNews() {
     console.error('loadFuturesNews failed', e);
   }
 }
+
 

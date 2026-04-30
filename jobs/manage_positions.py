@@ -1,6 +1,6 @@
 from app.routes import log_decision
 """
-Job: Manage Positions v7.0
+Job: Manage Positions v6.8
 - Every position evaluated against fresh TA + recent news/threats every cycle
 - LLM reviews each position and returns: HOLD | TIGHTEN_STOP | EXIT
 - Hard deterministic rules still fire first (no LLM latency on urgent closes)
@@ -258,7 +258,7 @@ Respond ONLY with valid JSON:
 {{"action": "HOLD" | "TIGHTEN_STOP" | "EXIT", "reason": "1-2 sentence explanation", "new_stop_pct": <float or null>}}"""
 
     try:
-        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=200)
+        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=200, thinking=True)
         result = parse_json(raw)
         if isinstance(result, dict) and result.get("action") in ("HOLD", "TIGHTEN_STOP", "EXIT"):
             return result

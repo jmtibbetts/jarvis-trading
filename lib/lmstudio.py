@@ -23,6 +23,11 @@ _shutdown_event = threading.Event()
 # NOTE: Do NOT register signal handlers here — uvicorn owns SIGINT/SIGTERM.
 # The _shutdown_event is set by main.py's lifespan shutdown hook instead.
 
+# ── Typed sentinel for thinking-only empty responses ──────────────────────────
+class _EmptyThinkingResponse(RuntimeError):
+    """Raised when LM Studio returns 0 chars because the model only produced <think> tokens."""
+    pass
+
 # ── Global serialization lock — local LLMs can't handle concurrent requests ───
 # Using a RLock so the same thread can re-acquire (avoids deadlocks on re-entrant calls)
 _llm_lock = threading.RLock()
@@ -117,17 +122,18 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
             else:
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
-        except RuntimeError as e:
-            # Auto-retry without thinking if model returned empty content
-            # This handles Qwen3 producing only <think> tokens with no final answer
-            if "empty content" in str(e).lower() and thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-                logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output")
-                fallback_system = '/no_think\n\n' + (system or '')
+        except _EmptyThinkingResponse:
+            # Qwen3 produced only <think> tokens — retry immediately with /no_think
+            if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+                logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
+                fallback_system = '/no_think
+
+' + (system or '')
                 if cfg['provider'] == 'anthropic':
                     return _call_anthropic(prompt, fallback_system, effective_max, temperature, cfg)
                 else:
                     return _call_openai_compat(prompt, fallback_system, effective_max, temperature, cfg)
-            raise
+            raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
@@ -172,14 +178,15 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
         logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars")
 
-        # Guard: LM Studio with thinking models sometimes returns empty content
-        # when the model only produced <think> tokens with no final answer.
-        # Detect and raise so callers can handle gracefully.
+        # Guard: Qwen3 thinking mode sometimes emits only <think> tokens internally
+        # and returns empty content field. Raise typed exception so retry logic can catch it.
         if not content or not content.strip():
-            logger.warning(f"[LLM] Empty content returned ({tokens} tokens were thinking-only). Retrying without thinking...")
-            raise RuntimeError(f"LLM returned empty content after {tokens} completion tokens — model may have only produced thinking tokens with no final answer")
+            logger.warning(f"[LLM] Empty content ({tokens} thinking-only tokens) — will retry with /no_think")
+            raise _EmptyThinkingResponse(f"Empty content after {tokens} tokens")
 
         return content
+    except _EmptyThinkingResponse:
+        raise  # pass through to retry handler — do NOT wrap
     except httpx.TimeoutException:
         raise RuntimeError(f"LLM timeout after {TIMEOUT}s — is {cfg['platform']} running at {cfg['url']}?")
     except Exception as e:

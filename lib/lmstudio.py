@@ -1,5 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v6.9.1: Auto-resolve model ID from /v1/models when configured name is placeholder.
 v6.9: 4-slot parallel semaphore (LLM_MAX_PARALLEL=4), 120k context / 32768 output tokens default.
 v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
@@ -34,9 +35,54 @@ class _EmptyThinkingResponse(RuntimeError):
 _LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "4"))
 _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
+# ── Model auto-resolution cache ───────────────────────────────────────────────
+# When the DB/env model is the generic placeholder, we query /v1/models and cache
+# the first real loaded model ID so we don't hit LM Studio on every call.
+_resolved_model_cache: dict = {}   # keyed by base_url → resolved model id
+_model_cache_lock = threading.Lock()
+
 # ── Provider detection ─────────────────────────────────────────────────────────
 OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', 'other'}
 ANTHROPIC_PLATFORMS     = {'anthropic'}
+
+PLACEHOLDER_MODELS = {'local-model', 'default', '', None}
+
+
+def _resolve_model(cfg: dict) -> str:
+    """
+    If the configured model name is a generic placeholder, query the server's
+    /v1/models endpoint and return the first loaded model ID.
+    Result is cached per base URL so subsequent calls are free.
+    Falls back gracefully to the placeholder if the server is unreachable.
+    """
+    model = cfg.get('model', '')
+    if model not in PLACEHOLDER_MODELS:
+        return model  # Already a real name — nothing to do
+
+    base_url = cfg.get('url', DEFAULT_URL)
+    with _model_cache_lock:
+        if base_url in _resolved_model_cache:
+            return _resolved_model_cache[base_url]
+
+    try:
+        headers = {}
+        if cfg.get('api_key'):
+            headers['Authorization'] = f"Bearer {cfg['api_key']}"
+        r = httpx.get(f"{base_url}/models", headers=headers, timeout=5.0)
+        if r.status_code == 200:
+            models = r.json().get('data', [])
+            if models:
+                real_model = models[0].get('id', model)
+                logger.info(f"[LLM] Auto-resolved model '{model}' → '{real_model}' from {base_url}/models")
+                with _model_cache_lock:
+                    _resolved_model_cache[base_url] = real_model
+                return real_model
+    except Exception as e:
+        logger.warning(f"[LLM] Could not auto-resolve model from {base_url}/models: {e}")
+
+    # Can't reach server — return placeholder as-is and let the call fail with a clear error
+    return model
+
 
 def get_llm_config() -> dict:
     """Read active LLM config from DB. Falls back to env vars / defaults."""
@@ -76,13 +122,17 @@ def get_llm_config() -> dict:
 def check_health() -> dict:
     """Ping the LLM server and return status."""
     cfg = get_llm_config()
+    # Invalidate cache so health check always probes live
+    with _model_cache_lock:
+        _resolved_model_cache.pop(cfg.get('url', DEFAULT_URL), None)
+    resolved = _resolve_model(cfg)
     try:
         if cfg['provider'] == 'openai_compat':
             r = httpx.get(f"{cfg['url']}/models", timeout=5,
                           headers=({'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {}))
             if r.status_code == 200:
                 models = r.json().get('data', [])
-                return {'ok': True, 'platform': cfg['platform'], 'model': cfg['model'],
+                return {'ok': True, 'platform': cfg['platform'], 'model': resolved,
                         'url': cfg['url'], 'models': [m.get('id') for m in models[:5]]}
             return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
                     'status_code': r.status_code}
@@ -106,6 +156,8 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         raise RuntimeError("LLM call aborted — shutdown in progress")
 
     cfg = get_llm_config()
+    # Auto-resolve placeholder model names (e.g. "local-model") to the real loaded model ID
+    cfg['model'] = _resolve_model(cfg)
     effective_max = max_tokens or cfg['max_tokens']
 
     # Qwen3 thinking toggle — only applies to local models (lmstudio / ollama)
@@ -273,8 +325,3 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
-
-
-
-
-

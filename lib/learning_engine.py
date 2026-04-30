@@ -620,8 +620,8 @@ def record_trade_outcome(
                 except Exception as e:
                     logger.warning(f"[Learning-T3] pattern update failed: {e}")
 
-            # Tier 4 — Regime performance
-            if market_regime and not paper_mode:
+            # Tier 4 — Regime performance (paper trades count too)
+            if market_regime:
                 try:
                     _update_regime_performance(market_regime, outcome, pnl_pct, signal_confidence or 0, conn)
                 except Exception as e:
@@ -629,12 +629,11 @@ def record_trade_outcome(
 
         logger.info(f"[Learning] Recorded: {symbol} {outcome} {pnl_pct:+.2f}% via {exit_reason}")
 
-        # Tier 2 — signal accuracy (separate transaction)
-        if not paper_mode:
-            _refresh_signal_accuracy(symbol, asset_class, timeframe)
+        # Tier 2 — signal accuracy (separate transaction; paper trades included)
+        _refresh_signal_accuracy(symbol, asset_class, timeframe)
 
         # Tier 5 — LLM reasoning audit (async-ish: only for losses or big wins)
-        if not paper_mode and signal_reasoning and outcome in ("LOSS",):
+        if signal_reasoning and outcome in ("LOSS",):
             outcome_row = {
                 "id": row_id, "symbol": symbol, "direction": direction,
                 "entry_price": entry_price, "exit_price": exit_price,
@@ -667,7 +666,7 @@ def _refresh_signal_accuracy(symbol: str, asset_class: str, timeframe: str):
         with engine.begin() as conn:
             rows = conn.execute(text("""
                 SELECT outcome, pnl_pct, hold_duration_m FROM trade_outcomes
-                WHERE symbol=:sym AND paper_mode=0
+                WHERE symbol=:sym
             """), {"sym": symbol}).fetchall()
 
             if not rows:
@@ -728,7 +727,7 @@ def get_accuracy_context(symbol: str, timeframe: str = None, lookback_days: int 
             rows = conn.execute(text("""
                 SELECT outcome, pnl_pct, exit_reason, hold_duration_m
                 FROM trade_outcomes
-                WHERE symbol=:sym AND paper_mode=0 AND exited_at>=:cutoff
+                WHERE symbol=:sym AND exited_at>=:cutoff
                 ORDER BY exited_at DESC LIMIT 20
             """), {"sym": symbol, "cutoff": cutoff}).fetchall()
 
@@ -875,3 +874,144 @@ def get_all_lessons(limit: int = 50) -> list:
         logger.error(f"[Learning] get_all_lessons error: {e}")
         return []
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKFILL — import historical paper trades → trade_outcomes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def backfill_paper_trades() -> dict:
+    """
+    One-time utility: scan PaperTrade table for closed trades that have NOT yet
+    been recorded in trade_outcomes, and insert them.  Safe to call multiple
+    times — uses signal_id + symbol + exited_at uniqueness to skip duplicates.
+    Returns {"inserted": N, "skipped": M, "errors": K}
+    """
+    _lazy_ensure()
+    from app.database import engine, get_db, PaperTrade, PaperPosition, TradingSignal
+    from sqlalchemy import text
+
+    inserted = 0
+    skipped  = 0
+    errors   = 0
+
+    try:
+        # Fetch all closed paper trades
+        with get_db() as db:
+            trades = db.query(PaperTrade).all()
+            trade_rows = []
+            for t in trades:
+                # Resolve signal metadata
+                tf, conf, reasoning = "4H", None, None
+                if t.signal_id:
+                    try:
+                        sig = db.query(TradingSignal).filter(TradingSignal.id == t.signal_id).first()
+                        if sig:
+                            tf       = sig.timeframe or "4H"
+                            conf     = float(sig.confidence) if sig.confidence else None
+                            reasoning = sig.reasoning or None
+                    except Exception:
+                        pass
+                trade_rows.append({
+                    "id":          str(t.id),
+                    "signal_id":   str(t.signal_id) if t.signal_id else None,
+                    "symbol":      t.symbol,
+                    "asset_class": t.asset_class or "equity",
+                    "direction":   t.direction or "BUY",
+                    "side":        t.side or "long",
+                    "timeframe":   tf,
+                    "entry_price": float(t.entry_price or 0),
+                    "exit_price":  float(t.exit_price or 0),
+                    "qty":         float(t.qty or 0),
+                    "pnl_usd":     float(t.realized_pnl or 0),
+                    "pnl_pct":     float(t.pnl_pct or 0),
+                    "exit_reason": t.close_reason or "MANUAL",
+                    "confidence":  conf,
+                    "reasoning":   reasoning,
+                    "opened_at":   t.opened_at.isoformat() if t.opened_at else None,
+                    "closed_at":   t.closed_at.isoformat() if t.closed_at else None,
+                })
+
+        with engine.begin() as conn:
+            _ensure_tables(conn)
+            for t in trade_rows:
+                try:
+                    # Skip if already recorded (match on symbol + exit time)
+                    exists = conn.execute(text(
+                        "SELECT 1 FROM trade_outcomes WHERE symbol=:sym AND exited_at=:ea AND paper_mode=1 LIMIT 1"
+                    ), {"sym": t["symbol"], "ea": t["closed_at"]}).fetchone()
+                    if exists:
+                        skipped += 1
+                        continue
+
+                    pnl_pct  = t["pnl_pct"]
+                    pnl_usd  = t["pnl_usd"]
+                    if pnl_pct > 0.1:   outcome = "WIN"
+                    elif pnl_pct < -0.1: outcome = "LOSS"
+                    else:                outcome = "BREAKEVEN"
+
+                    hold_min = None
+                    if t["opened_at"] and t["closed_at"]:
+                        try:
+                            a = datetime.fromisoformat(t["opened_at"].replace("Z","+00:00"))
+                            b = datetime.fromisoformat(t["closed_at"].replace("Z","+00:00"))
+                            hold_min = round((b - a).total_seconds() / 60, 1)
+                        except Exception:
+                            pass
+
+                    conn.execute(text("""
+                        INSERT INTO trade_outcomes
+                        (id, signal_id, symbol, asset_class, direction, timeframe,
+                         entry_price, exit_price, qty, pnl_usd, pnl_pct, outcome, exit_reason,
+                         hold_duration_m, signal_confidence, signal_reasoning,
+                         market_regime, paper_mode, entered_at, exited_at)
+                        VALUES
+                        (:id, :signal_id, :symbol, :asset_class, :direction, :timeframe,
+                         :entry_price, :exit_price, :qty, :pnl_usd, :pnl_pct, :outcome, :exit_reason,
+                         :hold_min, :confidence, :reasoning,
+                         NULL, 1, :entered_at, :exited_at)
+                    """), {
+                        "id":          _new_id(),
+                        "signal_id":   t["signal_id"],
+                        "symbol":      t["symbol"],
+                        "asset_class": t["asset_class"],
+                        "direction":   t["direction"],
+                        "timeframe":   t["timeframe"],
+                        "entry_price": t["entry_price"],
+                        "exit_price":  t["exit_price"],
+                        "qty":         t["qty"],
+                        "pnl_usd":     round(pnl_usd, 4),
+                        "pnl_pct":     round(pnl_pct, 4),
+                        "outcome":     outcome,
+                        "exit_reason": t["exit_reason"],
+                        "hold_min":    hold_min,
+                        "confidence":  t["confidence"],
+                        "reasoning":   t["reasoning"],
+                        "entered_at":  t["opened_at"],
+                        "exited_at":   t["closed_at"],
+                    })
+                    inserted += 1
+
+                    # Refresh Tier 2 accuracy per symbol (deferred — done after loop)
+                except Exception as e:
+                    logger.warning(f"[Backfill] Error on {t.get('symbol')}: {e}")
+                    errors += 1
+
+        # Refresh Tier 2 accuracy for all backfilled symbols
+        done_syms = set()
+        for t in trade_rows:
+            sym = t["symbol"]
+            if sym not in done_syms:
+                try:
+                    _refresh_signal_accuracy(sym, t["asset_class"], t["timeframe"])
+                    done_syms.add(sym)
+                except Exception:
+                    pass
+
+        logger.info(f"[Backfill] Complete — inserted={inserted} skipped={skipped} errors={errors}")
+
+    except Exception as e:
+        logger.error(f"[Backfill] Fatal: {e}")
+        errors += 1
+
+    return {"inserted": inserted, "skipped": skipped, "errors": errors}

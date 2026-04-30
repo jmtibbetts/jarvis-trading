@@ -1147,6 +1147,14 @@ def seed_test_outcome():
 
 # ─── Futures Data ─────────────────────────────────────────────────────────────
 
+
+@router.post("/learning/backfill-paper")
+def backfill_paper_outcomes():
+    """One-time backfill: copy all closed PaperTrades into trade_outcomes so learning engine can process them."""
+    from lib.learning_engine import backfill_paper_trades
+    result = backfill_paper_trades()
+    return result
+
 @router.get("/futures/prices")
 def get_futures_prices(paper_only: bool = False):
     """Return latest futures/forex/commodity prices."""
@@ -1180,4 +1188,5 @@ def get_futures_universe():
     except Exception as e:
         logger.error(f"[API] /futures/universe: {e}")
         return []
+
 

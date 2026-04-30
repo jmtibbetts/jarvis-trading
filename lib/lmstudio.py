@@ -129,12 +129,18 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
-                # Give the retry more token budget — model skips thinking so needs room for actual output
                 retry_max = max(effective_max, 32768)
-                if cfg['provider'] == 'anthropic':
-                    return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
-                else:
-                    return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg)
+                try:
+                    if cfg['provider'] == 'anthropic':
+                        return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
+                    else:
+                        return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg)
+                except _EmptyThinkingResponse:
+                    # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
+                    # Return empty JSON array so the track degrades gracefully instead of crashing.
+                    logger.error("[LLM] Both thinking and no_think attempts returned empty content. "
+                                 "Check LM Studio → Model Settings → Max Response Tokens (set to 0 = unlimited).")
+                    return "[]"
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
 
@@ -176,9 +182,14 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
             logger.error(f"[LLM] 400 Bad Request body: {r.text[:500]}")
         r.raise_for_status()
         data    = r.json()
-        content = data['choices'][0]['message']['content']
+        choice  = data['choices'][0]
+        content = choice['message']['content']
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
-        logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars")
+        finish  = choice.get('finish_reason', '?')
+        logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars | finish={finish}")
+        if finish == 'length':
+            logger.warning(f"[LLM] finish_reason=length — hit token cap ({tokens} tokens). "
+                           "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited).")
 
         # Guard: Qwen3 thinking mode sometimes emits only <think> tokens internally
         # and returns empty content field. Raise typed exception so retry logic can catch it.
@@ -261,6 +272,7 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+
 
 
 

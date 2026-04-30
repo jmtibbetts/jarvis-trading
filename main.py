@@ -1,5 +1,5 @@
 """
-Jarvis Trading AI — Python Edition v6.7
+Jarvis Trading AI — Python Edition v6.8
 FastAPI + APScheduler + SQLAlchemy + TA-Lib
 Run: python main.py
 """

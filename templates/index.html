@@ -702,6 +702,7 @@
           <option value="BREAKEVEN">BREAKEVEN</option>
         </select>
         <button class="btn btn-sm btn-outline-secondary" onclick="loadLearning()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="triggerBackfill()" id="backfill-btn" title="Import all closed paper trades into learning engine"><i class="bi bi-database-fill-up"></i> Backfill Paper</button>
       </div>
     </div>
 
@@ -1126,3 +1127,4 @@ function clearDecisions() {
 
 </body>
 </html>
+

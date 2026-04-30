@@ -1012,9 +1012,17 @@ def clear_decisions():
 # ── Learning Engine — Tier 1 & 2 ─────────────────────────────────────────────
 
 @router.get("/learning/outcomes")
-def get_outcomes(limit: int = 200, paper: bool = False):
-    """Return closed trade outcomes for the performance log."""
-    return get_all_outcomes(limit=limit, paper_mode=paper)
+def get_outcomes(limit: int = 200, paper: str = "false"):
+    """Return closed trade outcomes for the performance log.
+    paper: 'true'=paper only, 'false'=live only, 'all'=both
+    """
+    if paper == "all":
+        paper_mode = None  # None = no filter
+    elif paper in ("true", "1", "yes"):
+        paper_mode = True
+    else:
+        paper_mode = False
+    return get_all_outcomes(limit=limit, paper_mode=paper_mode)
 
 @router.get("/learning/accuracy")
 def get_accuracy():
@@ -1022,12 +1030,20 @@ def get_accuracy():
     return get_all_accuracy()
 
 @router.get("/learning/summary")
-def get_learning_summary():
-    """Return a portfolio-level learning summary."""
+def get_learning_summary(paper: str = "live"):
+    """Return a portfolio-level learning summary.
+    paper: 'live' = live only, 'paper' = paper only, 'all' = combined
+    """
     from app.database import engine
     from sqlalchemy import text as _text
+    if paper == "paper":
+        where = "WHERE paper_mode = 1"
+    elif paper == "all":
+        where = ""
+    else:
+        where = "WHERE paper_mode = 0"
     with engine.connect() as conn:
-        rows = conn.execute(_text("""
+        rows = conn.execute(_text(f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
@@ -1037,7 +1053,7 @@ def get_learning_summary():
                 ROUND(MAX(pnl_pct),3) as best_trade,
                 ROUND(MIN(pnl_pct),3) as worst_trade,
                 SUM(pnl_usd) as total_pnl_usd
-            FROM trade_outcomes WHERE paper_mode = 0
+            FROM trade_outcomes {where}
         """)).fetchone()
     if not rows or rows[0] == 0:
         return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
@@ -1103,3 +1119,4 @@ def get_futures_universe():
     except Exception as e:
         logger.error(f"[API] /futures/universe: {e}")
         return []
+

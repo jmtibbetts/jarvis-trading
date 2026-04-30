@@ -1,8 +1,11 @@
 """
-Job: Generate Trading Signals v6.4
+Job: Generate Trading Signals v6.8
 Architecture fix: read TA from cache only (no live OHLCV fetch during signal gen).
 The fetch_market_data job already runs every 15 min and populates ohlcv_cache.
 Signal gen just reads that cache → builds prompts → calls LLM. Fast and lock-friendly.
+
+v6.8 changes:
+- thinking=True on all LLM track calls for full chain-of-thought reasoning
 
 v6.4 changes:
 - Paper signals (Short, Short_Leveraged, Long_Leveraged) now generated via a dedicated Track E
@@ -432,7 +435,7 @@ def run():
     for name, syms, prompt, is_paper in tracks:
         try:
             logger.info(f"[Signals] Calling LLM for track {name}...")
-            r = call_lm_studio(prompt, system=sys_p, max_tokens=2500, temperature=0.15)
+            r = call_lm_studio(prompt, system=sys_p, max_tokens=2500, temperature=0.15, thinking=True)
             logger.info(f"[Signals] Track {name} → {len(r)} chars returned")
             sigs = parse_json(r)
             if isinstance(sigs, list):

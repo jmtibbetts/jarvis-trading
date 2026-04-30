@@ -1458,12 +1458,27 @@ async function paperExecuteSignal(signalId, symbol) {
 let allOutcomes = [];
 let allAccuracy = [];
 
-async function loadLearning() {
+// learningMode: 'live' | 'paper' | 'all'
+let learningMode = 'all';
+
+async function loadLearning(mode) {
+  if (mode !== undefined) learningMode = mode;
+
+  // Update toggle button states
+  ['live','paper','all'].forEach(m => {
+    const btn = document.getElementById('learn-mode-' + m);
+    if (btn) btn.classList.toggle('active', m === learningMode);
+  });
+
+  const paperParam = learningMode; // 'live','paper','all'
   try {
-    const [summary, outcomes, accuracy] = await Promise.all([
-      API('/learning/summary'),
-      API('/learning/outcomes?limit=500'),
+    const [summary, outcomes, accuracy, patterns, regimes, lessons] = await Promise.all([
+      API('/learning/summary?paper=' + paperParam),
+      API('/learning/outcomes?limit=500&paper=' + (paperParam === 'paper' ? 'true' : paperParam === 'all' ? 'all' : 'false')),
       API('/learning/accuracy'),
+      API('/learning/patterns'),
+      API('/learning/regimes'),
+      API('/learning/lessons?limit=30'),
     ]);
 
     allOutcomes = outcomes || [];
@@ -1471,14 +1486,18 @@ async function loadLearning() {
 
     // Populate symbol filter
     const symSel = document.getElementById('learning-filter');
-    const syms = [...new Set(allOutcomes.map(o => o.symbol))].sort();
-    symSel.innerHTML = '<option value="">All Symbols</option>' +
-      syms.map(s => `<option value="${s}">${s}</option>`).join('');
+    if (symSel) {
+      const syms = [...new Set(allOutcomes.map(o => o.symbol))].sort();
+      symSel.innerHTML = '<option value="">All Symbols</option>' +
+        syms.map(s => `<option value="${s}">${s}</option>`).join('');
+    }
 
-    // KPIs
     renderLearningSummary(summary);
     renderAccuracy(allAccuracy);
     filterOutcomes();
+    renderPatterns(patterns || []);
+    renderRegimes(regimes || []);
+    renderLessons(lessons || []);
 
   } catch(e) {
     console.error('loadLearning failed', e);
@@ -1590,39 +1609,7 @@ function renderOutcomes(rows) {
 
 // ── Learning Engine — Tier 3 / 4 / 5 extensions ─────────────────────────────
 
-// Override loadLearning to also fetch patterns, regimes, lessons
-const _loadLearningBase = loadLearning;
-async function loadLearning() {
-  try {
-    const [summary, outcomes, accuracy, patterns, regimes, lessons] = await Promise.all([
-      API('/learning/summary'),
-      API('/learning/outcomes?limit=500'),
-      API('/learning/accuracy'),
-      API('/learning/patterns'),
-      API('/learning/regimes'),
-      API('/learning/lessons?limit=30'),
-    ]);
-
-    allOutcomes = outcomes || [];
-    allAccuracy = accuracy || [];
-
-    // Populate symbol filter
-    const symSel = document.getElementById('learning-filter');
-    const syms = [...new Set(allOutcomes.map(o => o.symbol))].sort();
-    symSel.innerHTML = '<option value="">All Symbols</option>' +
-      syms.map(s => `<option value="${s}">${s}</option>`).join('');
-
-    renderLearningSummary(summary);
-    renderAccuracy(allAccuracy);
-    filterOutcomes();
-    renderPatterns(patterns || []);
-    renderRegimes(regimes || []);
-    renderLessons(lessons || []);
-
-  } catch(e) {
-    console.error('loadLearning failed', e);
-  }
-}
+// loadLearning v2 — merged above with mode toggle support
 
 function renderPatterns(rows) {
   const tbody = document.getElementById('patterns-tbody');
@@ -1798,3 +1785,4 @@ async function loadFuturesNews() {
     console.error('loadFuturesNews failed', e);
   }
 }
+

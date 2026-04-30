@@ -207,7 +207,11 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     # VWAP
     try:
         typical = (high + low + close) / 3
-        vwap_val = float((typical * vol).cumsum().iloc[-1] / vol.cumsum().iloc[-1])
+        vol_sum = vol.cumsum().iloc[-1]
+        vwap_val = float((typical * vol).cumsum().iloc[-1] / vol_sum) if vol_sum > 0 else None
+        if vwap_val is None:
+            result["vwap"] = None
+            raise ValueError("zero volume — no VWAP")
         pct_diff = (last - vwap_val) / vwap_val * 100 if vwap_val else 0
         result["vwap"] = {
             "value": round(vwap_val, 6), "pct_diff": round(pct_diff, 3),
@@ -315,3 +319,4 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
         if stoch or obv:
             lines.append(f"        {'Stoch K='+fmt(stoch.get('k'))+' D='+fmt(stoch.get('d'))+' ['+stoch.get('signal','')+']' if stoch else ''}  {'OBV='+obv if obv else ''}")
     return "\n".join(lines)
+

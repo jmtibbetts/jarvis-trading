@@ -1000,14 +1000,55 @@ def backfill_paper_trades() -> dict:
                     })
                     inserted += 1
 
-                    # Tier 3 — Pattern Memory (skip if no TA profile, but update regime)
-                    # No TA profile available in backfill — skip T3, do T4
-                    # Tier 4 — Regime performance (use NULL regime from backfill data)
-                    # Skip T4 since we don't have regime data in paper trades
+                    # Tier 3 — Pattern Memory via simplified price-action fingerprint
+                    # We don't have TA profiles in backfill, so we derive a lightweight
+                    # fingerprint from direction + asset_class + pnl bucket + side
+                    try:
+                        pnl_bucket = "profit" if pnl_pct > 2 else ("small_profit" if pnl_pct > 0.1 else ("small_loss" if pnl_pct > -2 else "loss"))
+                        bf_conditions = {
+                            "dir":    t["direction"].lower()[:4],
+                            "asset":  t["asset_class"].lower()[:6],
+                            "side":   t["side"].lower()[:5],
+                            "pnl_b":  pnl_bucket,
+                        }
+                        import hashlib as _hl
+                        bf_fp   = _hl.md5(json.dumps(bf_conditions, sort_keys=True).encode()).hexdigest()[:12]
+                        bf_desc = f"Dir={bf_conditions['dir'].upper()} | Asset={bf_conditions['asset']} | Side={bf_conditions['side']} | PnL={pnl_bucket}"
+                        _update_pattern_memory(bf_fp, bf_desc, t["asset_class"], t["timeframe"], outcome, pnl_pct, conn)
+                    except Exception as _t3e:
+                        logger.debug(f"[Backfill-T3] {t.get('symbol')}: {_t3e}")
+
+                    # Tier 4 — Regime performance using current regime as proxy
+                    try:
+                        from lib.market_regime import get_regime as _get_regime
+                        _bf_regime = _get_regime().get("label", "Unknown")
+                        _update_regime_performance(_bf_regime, outcome, pnl_pct, t["confidence"] or 0.5, conn)
+                    except Exception as _t4e:
+                        logger.debug(f"[Backfill-T4] {t.get('symbol')}: {_t4e}")
 
                 except Exception as e:
                     logger.warning(f"[Backfill] Error on {t.get('symbol')}: {e}")
                     errors += 1
+
+        # ── Post-insert: Tier 5 reasoning audit on LOSS trades with reasoning ─
+        try:
+            for t in trade_rows:
+                if t.get("reasoning") and t.get("pnl_pct", 0) < -0.5:
+                    try:
+                        with engine.connect() as _ac:
+                            _outcome_row = _ac.execute(text(
+                                "SELECT id, symbol, outcome, pnl_pct, signal_reasoning, entered_at, exited_at "
+                                "FROM trade_outcomes WHERE symbol=:sym AND exited_at=:ea AND paper_mode=1 LIMIT 1"
+                            ), {"sym": t["symbol"], "ea": t["closed_at"]}).fetchone()
+                        if _outcome_row:
+                            _run_reasoning_audit(dict(zip(
+                                ["id","symbol","outcome","pnl_pct","signal_reasoning","entered_at","exited_at"],
+                                _outcome_row
+                            )))
+                    except Exception as _t5e:
+                        logger.debug(f"[Backfill-T5] {t.get('symbol')}: {_t5e}")
+        except Exception as _t5_outer:
+            logger.warning(f"[Backfill-T5] audit pass failed: {_t5_outer}")
 
         # ── Post-insert: refresh Tier 2 accuracy for every unique symbol ──────
         done_syms = set()
@@ -1028,4 +1069,5 @@ def backfill_paper_trades() -> dict:
         errors += 1
 
     return {"inserted": inserted, "skipped": skipped, "errors": errors}
+
 

@@ -323,8 +323,9 @@ def run():
                 ta_txt = build_ta_prompt_block(s, profile, name)
                 # Learning context: only add if non-empty (avoids blank padding lines)
                 acc_txt = get_accuracy_context(s, lookback_days=30)
-                les_txt = get_lessons_context(symbol=s, limit=1)   # max 1 lesson per symbol
-                blocks.append(ta_txt + acc_txt + les_txt)           # dropped pat_txt — in acc already
+                pat_txt = get_pattern_context(profile, "long")
+                les_txt = get_lessons_context(symbol=s, limit=3)
+                blocks.append(ta_txt + acc_txt + pat_txt + les_txt)
         return "\n".join(blocks) or "No TA data available."
 
     held_ctx = ""
@@ -589,6 +590,7 @@ def run():
         score=float(saved)
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+
 
 
 

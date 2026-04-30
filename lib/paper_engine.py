@@ -15,6 +15,7 @@ v2.0 Fixes:
 import logging
 from datetime import datetime, timezone
 from app.database import get_db, PaperPosition, PaperTrade, PaperPortfolio
+from lib.learning_engine import record_trade_outcome as _record_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -346,11 +347,36 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
             "ok": True, "symbol": pos_symbol, "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 2), "reason": reason, "close_price": close_price
         }
-        log_symbol    = pos_symbol
-        log_direction = pos_direction
-        log_pnl       = pnl
-        log_pct       = pnl_pct
+        log_symbol     = pos_symbol
+        log_direction  = pos_direction
+        log_asset_cls  = pos_asset_cls
+        log_entry      = entry
+        log_qty        = qty
+        log_timeframe  = "4H"   # paper signals default to 4H
+        log_confidence = None
+        log_reasoning  = None
+        log_pnl        = pnl
+        log_pct        = pnl_pct
 
+    # ── Record to Learning Engine (Tiers 1-5) ───────────────────────────
+    try:
+        _record_outcome(
+            symbol=log_symbol,
+            asset_class=log_asset_cls,
+            direction=log_direction,
+            entry_price=log_entry,
+            exit_price=close_price,
+            qty=log_qty,
+            exit_reason=reason,
+            timeframe=log_timeframe,
+            signal_confidence=log_confidence,
+            signal_reasoning=log_reasoning,
+            ta_profile=None,   # TA not re-fetched at paper close — populated next cycle
+            market_regime=None,
+            paper_mode=True,
+        )
+    except Exception as _le:
+        logger.warning(f"[Paper][Learning] record_outcome failed: {_le}")
     logger.info(f"[Paper] Closed {log_symbol} ({log_direction}) @ ${close_price:.4f} | P&L=${log_pnl:.2f} ({log_pct:.1f}%) | {reason}")
     return result
 

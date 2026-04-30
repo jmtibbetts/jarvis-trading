@@ -162,10 +162,11 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     messages = [{"role": m["role"], "content": _sanitize(m["content"])} for m in messages]
 
     payload = {
-        "model":       cfg['model'],
-        "messages":    messages,
-        "max_tokens":  max_tokens,
-        "temperature": temperature,
+        "model":        cfg['model'],
+        "messages":     messages,
+        "max_tokens":   max_tokens,   # OpenAI-compat field
+        "num_predict":  max_tokens,   # llama.cpp / LM Studio native field (same value)
+        "temperature":  temperature,
     }
 
     url = f"{cfg['url']}/chat/completions"

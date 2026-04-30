@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 
 TRACK_A = ["RTX","LMT","NOC","GD","BA","XOM","CVX","COP","FANG","CEG","GLD","SLV","TLT","SPY","IWM","USO","UNG","GDX","GDXJ"]
 TRACK_B = ["NVDA","AMD","MSFT","GOOGL","AAPL","META","AMZN","AVGO","TSM","ANET","INTC","QCOM","SMCI","VRT","SOXX","QQQ","CRWV","NBIS","PLTR","TSLA","COIN","MSTR","ARM","HOOD"]
-# Top 12 crypto by liquidity — 18 was too large for 2500-token budget (thinking overflow)
-TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD"]
+TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD","SUI/USD","RENDER/USD","INJ/USD","NEAR/USD","OP/USD","ARB/USD"]
 # Track E: paper-only universe — best candidates for leveraged/short plays
 TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
 
@@ -433,25 +432,38 @@ def run():
         logger.info(f"[Signals] Track {name}: {len(syms)} syms | ~{len(prompt)//4} tokens")
 
     all_raw        = []  # (signal_dict, is_paper)
-    for name, syms, prompt, is_paper in tracks:
+    all_raw_lock   = threading.Lock()
+
+    def _run_track(name, syms, prompt, is_paper):
         try:
             logger.info(f"[Signals] Calling LLM for track {name}...")
-            r = call_lm_studio(prompt, system=sys_p, max_tokens=4096, temperature=0.15, thinking=True)
+            r = call_lm_studio(prompt, system=sys_p, max_tokens=32768, temperature=0.15, thinking=True)
             logger.info(f"[Signals] Track {name} → {len(r)} chars returned")
             sigs = parse_json(r)
+            results = []
             if isinstance(sigs, list):
                 logger.info(f"[Signals] Track {name} → parsed {len(sigs)} signals")
-                all_raw.extend((s, is_paper) for s in sigs)
+                results = [(s, is_paper) for s in sigs]
             elif isinstance(sigs, dict):
                 for k in ["signals", "trades", "setups", "results"]:
                     if sigs.get(k):
                         logger.info(f"[Signals] Track {name} → {len(sigs[k])} signals from key '{k}'")
-                        all_raw.extend((s, is_paper) for s in sigs[k])
+                        results = [(s, is_paper) for s in sigs[k]]
                         break
             else:
                 logger.warning(f"[Signals] Track {name} → unexpected response type {type(sigs)}: {r[:200]}")
+            with all_raw_lock:
+                all_raw.extend(results)
         except Exception as e:
             logger.error(f"[Signals] Track {name} FAILED: {type(e).__name__}: {e}")
+
+    # Run all tracks in parallel — LM Studio 4-slot semaphore in lmstudio.py caps concurrency
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="track") as pool:
+        futures = {pool.submit(_run_track, name, syms, prompt, is_paper): name
+                   for name, syms, prompt, is_paper in tracks}
+        for fut in as_completed(futures):
+            pass  # results already written to all_raw via _run_track
 
     logger.info(f"[Signals] {len(all_raw)} raw signals from LLM across all tracks")
 

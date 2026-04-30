@@ -12,7 +12,7 @@ v6.4 changes:
 - normalize_signal accepts an is_paper flag to skip the Long/Bounce enforcement
 - Paper signals are saved with paper_mode=True and paper_direction set
 """
-import logging, re, uuid
+import logging, re, uuid, threading
 from datetime import datetime, timezone, timedelta
 from app.routes import log_decision
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
@@ -590,4 +590,5 @@ def run():
         score=float(saved)
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+
 

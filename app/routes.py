@@ -958,9 +958,7 @@ def log_decision(source: str, action: str, reasoning: str,
                     score      REAL,
                     thinking   INTEGER DEFAULT 1,
                     created_at TEXT
-                );
-                -- self-heal: add thinking column to existing DBs
-                CREATE TABLE IF NOT EXISTS _dummy_thinking_migration (id TEXT);
+                )
             """))
             # Self-heal: add thinking column if missing (existing DBs)
             try:
@@ -1188,5 +1186,6 @@ def get_futures_universe():
     except Exception as e:
         logger.error(f"[API] /futures/universe: {e}")
         return []
+
 
 

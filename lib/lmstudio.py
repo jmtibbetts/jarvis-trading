@@ -112,10 +112,22 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         if _shutdown_event.is_set():
             raise RuntimeError("LLM call aborted — shutdown in progress")
         logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max} thinking={thinking}")
-        if cfg['provider'] == 'anthropic':
-            return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
-        else:
-            return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
+        try:
+            if cfg['provider'] == 'anthropic':
+                return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
+            else:
+                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
+        except RuntimeError as e:
+            # Auto-retry without thinking if model returned empty content
+            # This handles Qwen3 producing only <think> tokens with no final answer
+            if "empty content" in str(e).lower() and thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+                logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output")
+                fallback_system = '/no_think\n\n' + (system or '')
+                if cfg['provider'] == 'anthropic':
+                    return _call_anthropic(prompt, fallback_system, effective_max, temperature, cfg)
+                else:
+                    return _call_openai_compat(prompt, fallback_system, effective_max, temperature, cfg)
+            raise
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
@@ -159,6 +171,14 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         content = data['choices'][0]['message']['content']
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
         logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars")
+
+        # Guard: LM Studio with thinking models sometimes returns empty content
+        # when the model only produced <think> tokens with no final answer.
+        # Detect and raise so callers can handle gracefully.
+        if not content or not content.strip():
+            logger.warning(f"[LLM] Empty content returned ({tokens} tokens were thinking-only). Retrying without thinking...")
+            raise RuntimeError(f"LLM returned empty content after {tokens} completion tokens — model may have only produced thinking tokens with no final answer")
+
         return content
     except httpx.TimeoutException:
         raise RuntimeError(f"LLM timeout after {TIMEOUT}s — is {cfg['platform']} running at {cfg['url']}?")

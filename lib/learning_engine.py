@@ -766,19 +766,34 @@ def get_accuracy_context(symbol: str, timeframe: str = None, lookback_days: int 
 # API helpers — used by routes.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_all_outcomes(limit: int = 200, paper_mode: bool = False) -> list:
+def get_all_outcomes(limit: int = 200, paper_mode=False) -> list:
+    """paper_mode: False=live, True=paper, None=all"""
     from app.database import engine
     from sqlalchemy import text
     try:
-        with engine.connect() as conn:
-            rows = conn.execute(text("""
+        if paper_mode is None:
+            # All outcomes — no filter
+            query = """
+                SELECT id, signal_id, symbol, asset_class, direction, timeframe,
+                       entry_price, exit_price, qty, pnl_usd, pnl_pct, outcome,
+                       exit_reason, hold_duration_m, signal_confidence,
+                       market_regime, paper_mode, entered_at, exited_at
+                FROM trade_outcomes
+                ORDER BY exited_at DESC LIMIT :lim
+            """
+            params = {"lim": limit}
+        else:
+            query = """
                 SELECT id, signal_id, symbol, asset_class, direction, timeframe,
                        entry_price, exit_price, qty, pnl_usd, pnl_pct, outcome,
                        exit_reason, hold_duration_m, signal_confidence,
                        market_regime, paper_mode, entered_at, exited_at
                 FROM trade_outcomes WHERE paper_mode=:pm
                 ORDER BY exited_at DESC LIMIT :lim
-            """), {"pm": 1 if paper_mode else 0, "lim": limit}).fetchall()
+            """
+            params = {"pm": 1 if paper_mode else 0, "lim": limit}
+        with engine.connect() as conn:
+            rows = conn.execute(text(query), params).fetchall()
         keys = ["id","signal_id","symbol","asset_class","direction","timeframe",
                 "entry_price","exit_price","qty","pnl_usd","pnl_pct","outcome",
                 "exit_reason","hold_duration_m","signal_confidence",

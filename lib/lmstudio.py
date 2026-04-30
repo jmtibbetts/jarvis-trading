@@ -1,5 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v6.8: thinking param — prepends /no_think to system prompt for fast calls.
 v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
       Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
@@ -86,10 +87,13 @@ def check_health() -> dict:
 
 
 def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
-                   temperature: float = 0.15) -> str:
+                   temperature: float = 0.15, thinking: bool = True) -> str:
     """
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
     Aborts immediately if shutdown has been signalled.
+
+    thinking=True  → full chain-of-thought (signal gen, position mgmt, Tier 5 review)
+    thinking=False → /no_think prefix for fast classification (news tagging, heartbeat)
     """
     if _shutdown_event.is_set():
         raise RuntimeError("LLM call aborted — shutdown in progress")
@@ -97,14 +101,21 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     cfg = get_llm_config()
     effective_max = max_tokens or cfg['max_tokens']
 
+    # Qwen3 thinking toggle — only applies to local models (lmstudio / ollama)
+    # /no_think prefix suppresses chain-of-thought for fast, low-stakes calls
+    effective_system = system
+    if not thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+        prefix = '/no_think\n\n'
+        effective_system = prefix + (system or '')
+
     with _llm_lock:
         if _shutdown_event.is_set():
             raise RuntimeError("LLM call aborted — shutdown in progress")
-        logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max}")
+        logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max} thinking={thinking}")
         if cfg['provider'] == 'anthropic':
-            return _call_anthropic(prompt, system, effective_max, temperature, cfg)
+            return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
         else:
-            return _call_openai_compat(prompt, system, effective_max, temperature, cfg)
+            return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,

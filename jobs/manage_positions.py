@@ -398,7 +398,7 @@ def run():
                         )
                     except Exception as _le: logger.warning(f"[Learning] record failed: {_le}")
                     logger.info(f"[Positions] ✓ [RULE] Closed {sym} @ {plpc:+.1f}% | {label}")
-                    log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price)
+                    log_decision("positions", "EXIT", f"Hard rule: {label}", symbol=sym, pnl_pct=plpc, price=current_price, thinking=False)
                     with get_db() as db:
                         sig = db.query(TradingSignal).filter(
                             TradingSignal.asset_symbol.in_(_sym_variants(sym)),
@@ -414,7 +414,7 @@ def run():
 
             else:
                 logger.info(f"[Positions] ⟳ [RULE] Trail {sym} @ {plpc:+.1f}% — {trail_pct}% | {label}")
-                log_decision("positions", "TIGHTEN_STOP", f"Hard rule trail: {label} @ {trail_pct}%", symbol=sym, pnl_pct=plpc, price=current_price)
+                log_decision("positions", "TIGHTEN_STOP", f"Hard rule trail: {label} @ {trail_pct}%", symbol=sym, pnl_pct=plpc, price=current_price, thinking=False)
                 ok = _set_protective_order(alpaca_sym, qty, trail_pct, current_price)
                 if ok:
                     trailing += 1
@@ -439,7 +439,7 @@ def run():
         new_stop_pct = decision.get("new_stop_pct")
 
         logger.info(f"[Positions] 🤖 {sym} → {action} | {reason}")
-        log_decision("positions", action, reason, symbol=sym, pnl_pct=plpc, price=current_price)
+        log_decision("positions", action, reason, symbol=sym, pnl_pct=plpc, price=current_price, thinking=True)
 
         if action == "EXIT":
             # Don't double-close if hard rule already fired

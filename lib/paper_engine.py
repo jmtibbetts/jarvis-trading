@@ -352,11 +352,22 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
         log_asset_cls  = pos_asset_cls
         log_entry      = entry
         log_qty        = qty
-        log_timeframe  = "4H"   # paper signals default to 4H
-        log_confidence = None
-        log_reasoning  = None
         log_pnl        = pnl
         log_pct        = pnl_pct
+        # Pull signal metadata for learning engine
+        log_timeframe  = "4H"
+        log_confidence = None
+        log_reasoning  = None
+        if pos_signal_id:
+            try:
+                from app.database import TradingSignal
+                sig_row = db.query(TradingSignal).filter(TradingSignal.id == pos_signal_id).first()
+                if sig_row:
+                    log_timeframe  = sig_row.timeframe or "4H"
+                    log_confidence = float(sig_row.confidence) if sig_row.confidence else None
+                    log_reasoning  = sig_row.reasoning or None
+            except Exception:
+                pass
 
     # ── Record to Learning Engine (Tiers 1-5) ───────────────────────────
     try:

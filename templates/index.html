@@ -685,7 +685,13 @@
     <!-- Summary cards -->
     <div class="d-flex align-items-center justify-content-between mb-3">
       <h5 class="mb-0 text-white"><i class="bi bi-mortarboard-fill me-2 text-warning"></i>Learning Engine</h5>
-      <div class="d-flex gap-2">
+      <div class="d-flex gap-2 flex-wrap align-items-center">
+        <!-- Live / Paper / All mode toggle -->
+        <div class="btn-group btn-group-sm" role="group">
+          <button id="learn-mode-all"   class="btn btn-outline-secondary active" onclick="loadLearning('all')">All</button>
+          <button id="learn-mode-live"  class="btn btn-outline-success"          onclick="loadLearning('live')">Live</button>
+          <button id="learn-mode-paper" class="btn btn-outline-info"             onclick="loadLearning('paper')">Paper</button>
+        </div>
         <select id="learning-filter" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:160px" onchange="filterOutcomes()">
           <option value="">All Symbols</option>
         </select>
@@ -878,7 +884,8 @@
     <!-- Empty state -->
     <div id="learning-empty" class="text-center text-muted py-5" style="display:none">
       <i class="bi bi-mortarboard fs-1 d-block mb-2 opacity-50"></i>
-      <div>No closed trades yet. The learning engine will populate once positions close.</div>
+      <div>No closed trades in this mode yet.<br>
+        <span class="text-muted" style="font-size:0.85rem">Switch between All / Live / Paper above, or wait for positions to close.</span></div>
     </div>
   </div>
 

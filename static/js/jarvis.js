@@ -1569,42 +1569,146 @@ function filterOutcomes() {
 }
 
 function renderOutcomes(rows) {
-  const tbody = document.getElementById('outcomes-tbody');
-  const empty = document.getElementById('learning-empty');
+  const container = document.getElementById('outcomes-daily-groups');
+  const tbody     = document.getElementById('outcomes-tbody');
+  const empty     = document.getElementById('learning-empty');
+
+  // Support both old table layout and new grouped layout
+  const target = container || tbody;
 
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No trades match filter</td></tr>';
-    if (allOutcomes.length === 0) empty.style.display = '';
+    if (target) target.innerHTML = target === tbody
+      ? '<tr><td colspan="9" class="text-center text-muted py-3">No trades match filter</td></tr>'
+      : '<div class="text-center text-muted py-4"><i class="bi bi-journal-x fs-4 d-block mb-2 opacity-40"></i>No trades match the current filter</div>';
+    if (allOutcomes.length === 0 && empty) empty.style.display = '';
     return;
   }
-  empty.style.display = 'none';
+  if (empty) empty.style.display = 'none';
 
-  tbody.innerHTML = rows.map(r => {
+  // Group by calendar date (local)
+  const groups = {};
+  rows.forEach(r => {
+    const dateKey = r.exited_at
+      ? new Date(r.exited_at).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric'})
+      : 'Unknown Date';
+    (groups[dateKey] = groups[dateKey] || []).push(r);
+  });
+
+  const exitBadgeClass = {
+    'TAKE_PROFIT': 'badge bg-success',
+    'HARD_STOP':   'badge bg-danger',
+    'LLM_EXIT':    'badge bg-warning text-dark',
+    'MANUAL':      'badge bg-secondary',
+    'TIMEOUT':     'badge bg-secondary',
+  };
+
+  function tradeRow(r) {
     const outcomeIcon = r.outcome === 'WIN' ? '✅' : r.outcome === 'LOSS' ? '❌' : '➖';
-    const pnlColor = (r.pnl_pct || 0) >= 0 ? 'text-success' : 'text-danger';
-    const pnlUsdColor = (r.pnl_usd || 0) >= 0 ? 'text-success' : 'text-danger';
-    const holdMin = r.hold_duration_m || 0;
-    const holdStr = holdMin >= 60 ? (holdMin/60).toFixed(1)+'h' : Math.round(holdMin)+'m';
-    const exitedAt = r.exited_at ? new Date(r.exited_at).toLocaleString() : '—';
-    const exitBadge = {
-      'TAKE_PROFIT': 'badge bg-success',
-      'HARD_STOP':   'badge bg-danger',
-      'LLM_EXIT':    'badge bg-warning text-dark',
-      'MANUAL':      'badge bg-secondary',
-      'TIMEOUT':     'badge bg-secondary',
-    }[r.exit_reason] || 'badge bg-secondary';
+    const pnlColor    = (r.pnl_pct||0) >= 0 ? 'text-success' : 'text-danger';
+    const pnlUsdColor = (r.pnl_usd||0) >= 0 ? 'text-success' : 'text-danger';
+    const holdMin     = r.hold_duration_m || 0;
+    const holdStr     = holdMin >= 60 ? (holdMin/60).toFixed(1)+'h' : Math.round(holdMin)+'m';
+    const timeStr     = r.exited_at ? new Date(r.exited_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—';
+    const eBadge      = exitBadgeClass[r.exit_reason] || 'badge bg-secondary';
+    const dirBadge    = (r.direction==='BUY'||r.direction==='long') ? 'bg-success' : 'bg-danger';
     return `<tr>
       <td class="fw-semibold text-white">${r.symbol}</td>
-      <td><span class="badge ${r.direction==='BUY'||r.direction==='long'?'bg-success':'bg-danger'}">${r.direction||'—'}</span></td>
-      <td>${outcomeIcon} ${r.outcome}</td>
+      <td><span class="badge ${dirBadge}">${r.direction||'—'}</span></td>
+      <td>${outcomeIcon} <span class="fw-semibold">${r.outcome}</span></td>
       <td class="${pnlColor} fw-bold">${(r.pnl_pct||0) >= 0 ? '+' : ''}${(r.pnl_pct||0).toFixed(2)}%</td>
       <td class="${pnlUsdColor}">${(r.pnl_usd||0) >= 0 ? '+$' : '-$'}${Math.abs(r.pnl_usd||0).toFixed(2)}</td>
       <td class="text-muted">${holdStr}</td>
-      <td><span class="${exitBadge}">${r.exit_reason||'—'}</span></td>
-      <td class="text-muted" style="font-size:0.75rem">${r.market_regime||'—'}</td>
-      <td class="text-muted" style="font-size:0.75rem">${exitedAt}</td>
+      <td><span class="${eBadge}" style="font-size:0.7rem">${r.exit_reason||'—'}</span></td>
+      <td class="text-muted" style="font-size:0.72rem">${r.market_regime||'—'}</td>
+      <td class="text-muted" style="font-size:0.72rem">${timeStr}</td>
     </tr>`;
-  }).join('');
+  }
+
+  // If container exists, render collapsible day groups
+  if (container) {
+    let html = '';
+    let groupIdx = 0;
+    Object.entries(groups).forEach(([date, trades]) => {
+      const wins   = trades.filter(t => t.outcome === 'WIN').length;
+      const losses = trades.filter(t => t.outcome === 'LOSS').length;
+      const dayPnl = trades.reduce((s, t) => s + (t.pnl_usd||0), 0);
+      const dayPct = trades.reduce((s, t) => s + (t.pnl_pct||0), 0) / trades.length;
+      const dayPnlColor = dayPnl >= 0 ? 'text-success' : 'text-danger';
+      const collapseId  = `outcome-day-${groupIdx++}`;
+      const isFirst     = groupIdx === 1;
+      html += `
+        <div class="outcome-day-group mb-2">
+          <div class="outcome-day-header d-flex align-items-center justify-content-between px-3 py-2 rounded"
+               style="background:rgba(255,255,255,0.04);cursor:pointer;user-select:none"
+               data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="${isFirst}">
+            <div class="d-flex align-items-center gap-3">
+              <i class="bi bi-chevron-${isFirst ? 'down' : 'right'} text-muted collapse-chevron" style="font-size:0.8rem"></i>
+              <span class="fw-semibold text-white" style="font-size:0.85rem">${date}</span>
+              <span class="badge bg-secondary">${trades.length} trade${trades.length !== 1 ? 's' : ''}</span>
+              ${wins > 0 ? `<span class="badge bg-success bg-opacity-25 text-success">✅ ${wins}W</span>` : ''}
+              ${losses > 0 ? `<span class="badge bg-danger bg-opacity-25 text-danger">❌ ${losses}L</span>` : ''}
+            </div>
+            <div class="d-flex gap-3 align-items-center">
+              <span class="${dayPnlColor} fw-bold" style="font-size:0.82rem">${dayPnl >= 0 ? '+$' : '-$'}${Math.abs(dayPnl).toFixed(2)}</span>
+              <span class="text-muted" style="font-size:0.75rem">${dayPct >= 0 ? '+' : ''}${dayPct.toFixed(2)}% avg</span>
+            </div>
+          </div>
+          <div class="collapse ${isFirst ? 'show' : ''}" id="${collapseId}">
+            <div class="table-responsive mt-1">
+              <table class="table table-dark table-hover table-sm align-middle mb-0">
+                <thead style="font-size:0.72rem">
+                  <tr class="table-secondary">
+                    <th>Symbol</th><th>Dir</th><th>Outcome</th>
+                    <th>P&L %</th><th>P&L $</th><th>Hold</th>
+                    <th>Exit</th><th>Regime</th><th>Time</th>
+                  </tr>
+                </thead>
+                <tbody>${trades.map(tradeRow).join('')}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>`;
+    });
+    container.innerHTML = html;
+
+    // Toggle chevron icon on collapse events
+    container.querySelectorAll('.outcome-day-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const chevron = header.querySelector('.collapse-chevron');
+        if (!chevron) return;
+        const targetId = header.getAttribute('data-bs-target');
+        const collapseEl = document.querySelector(targetId);
+        if (!collapseEl) return;
+        const isOpen = collapseEl.classList.contains('show');
+        chevron.className = `bi bi-chevron-${isOpen ? 'right' : 'down'} text-muted collapse-chevron`;
+        chevron.style.fontSize = '0.8rem';
+      });
+    });
+    return;
+  }
+
+  // Fallback: old flat table
+  tbody.innerHTML = rows.map(tradeRow).join('');
+}
+
+function expandAllOutcomeDays() {
+  document.querySelectorAll('#outcomes-daily-groups .collapse').forEach(el => {
+    el.classList.add('show');
+  });
+  document.querySelectorAll('#outcomes-daily-groups .collapse-chevron').forEach(el => {
+    el.className = 'bi bi-chevron-down text-muted collapse-chevron';
+    el.style.fontSize = '0.8rem';
+  });
+}
+
+function collapseAllOutcomeDays() {
+  document.querySelectorAll('#outcomes-daily-groups .collapse').forEach(el => {
+    el.classList.remove('show');
+  });
+  document.querySelectorAll('#outcomes-daily-groups .collapse-chevron').forEach(el => {
+    el.className = 'bi bi-chevron-right text-muted collapse-chevron';
+    el.style.fontSize = '0.8rem';
+  });
 }
 
 // ── Learning Engine — Tier 3 / 4 / 5 extensions ─────────────────────────────

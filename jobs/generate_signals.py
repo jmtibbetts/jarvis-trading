@@ -282,7 +282,7 @@ def run():
     # Pull futures/commodity/forex news (Track F context)
     futures_news_ctx = ""
     try:
-        futures_news_ctx = get_futures_news_context(max_items=12)
+        futures_news_ctx = get_futures_news_context(max_items=6)
         if futures_news_ctx:
             logger.info("[Signals] Futures news context loaded")
     except Exception as _fn:
@@ -297,12 +297,12 @@ def run():
 
     threat_ctx = "\n".join([
         f"[{t.get('severity','?')}] {t.get('country','?')}: {t.get('title','')}"
-        for t in threats[:10]
+        for t in threats[:5]
     ]) or "No active threats."
 
     news_ctx = "\n".join([
         f"[{n.get('sentiment','neutral').upper()}] {n.get('title','')} ({n.get('source','')})"
-        for n in news[:15]
+        for n in news[:8]
     ]) or "No recent news."
 
     sys_p = "You are an expert quantitative trader. Output only valid JSON arrays, no commentary, no markdown."
@@ -314,18 +314,17 @@ def run():
     def ta_block(syms, futures_profiles=None):
         blocks = []
         for s in syms:
-            # Check regular TA profiles first
             profile = ta_profiles.get(s)
             if not profile and futures_profiles:
                 profile = futures_profiles.get(s)
             if profile:
                 fu_meta = FUTURES_UNIVERSE.get(s, {})
                 name = asset_map.get(s, {}).get("name") or fu_meta.get("name") or s
-                ta_txt  = build_ta_prompt_block(s, profile, name)
+                ta_txt = build_ta_prompt_block(s, profile, name)
+                # Learning context: only add if non-empty (avoids blank padding lines)
                 acc_txt = get_accuracy_context(s, lookback_days=30)
-                pat_txt = get_pattern_context(profile, "long")
-                les_txt = get_lessons_context(symbol=s, limit=3)
-                blocks.append(ta_txt + acc_txt + pat_txt + les_txt)
+                les_txt = get_lessons_context(symbol=s, limit=1)   # max 1 lesson per symbol
+                blocks.append(ta_txt + acc_txt + les_txt)           # dropped pat_txt — in acc already
         return "\n".join(blocks) or "No TA data available."
 
     held_ctx = ""
@@ -590,5 +589,6 @@ def run():
         score=float(saved)
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+
 
 

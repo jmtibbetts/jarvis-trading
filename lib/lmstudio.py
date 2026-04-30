@@ -126,9 +126,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             # Qwen3 produced only <think> tokens — retry immediately with /no_think
             if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
-                fallback_system = '/no_think
-
-' + (system or '')
+                fallback_system = '/no_think\n\n' + (system or '')
                 if cfg['provider'] == 'anthropic':
                     return _call_anthropic(prompt, fallback_system, effective_max, temperature, cfg)
                 else:
@@ -259,5 +257,6 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+
 
 

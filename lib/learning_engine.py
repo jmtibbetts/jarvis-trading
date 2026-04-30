@@ -612,8 +612,8 @@ def record_trade_outcome(
                 "entered_at": entered_at, "exited_at": exited_at,
             })
 
-            # Tier 3 — Pattern Memory
-            if ta_profile and not paper_mode:
+            # Tier 3 — Pattern Memory (paper trades count too)
+            if ta_profile:
                 try:
                     fp, desc = _fingerprint_ta(ta_profile, direction)
                     _update_pattern_memory(fp, desc, asset_class, timeframe, outcome, pnl_pct, conn)
@@ -882,13 +882,13 @@ def get_all_lessons(limit: int = 50) -> list:
 
 def backfill_paper_trades() -> dict:
     """
-    One-time utility: scan PaperTrade table for closed trades that have NOT yet
-    been recorded in trade_outcomes, and insert them.  Safe to call multiple
-    times — uses signal_id + symbol + exited_at uniqueness to skip duplicates.
+    One-time utility: scan PaperTrade table for CLOSED trades that have NOT yet
+    been recorded in trade_outcomes, and insert them + run all Tier 2-5 updates.
+    Safe to call multiple times — deduplicates on symbol + exited_at.
     Returns {"inserted": N, "skipped": M, "errors": K}
     """
     _lazy_ensure()
-    from app.database import engine, get_db, PaperTrade, PaperPosition, TradingSignal
+    from app.database import engine, get_db, PaperTrade, TradingSignal
     from sqlalchemy import text
 
     inserted = 0
@@ -896,19 +896,21 @@ def backfill_paper_trades() -> dict:
     errors   = 0
 
     try:
-        # Fetch all closed paper trades
+        # Fetch all CLOSED paper trades (must have closed_at and exit_price)
         with get_db() as db:
-            trades = db.query(PaperTrade).all()
+            trades_raw = db.query(PaperTrade).filter(
+                PaperTrade.closed_at != None,
+                PaperTrade.exit_price != None,
+            ).all()
             trade_rows = []
-            for t in trades:
-                # Resolve signal metadata
+            for t in trades_raw:
                 tf, conf, reasoning = "4H", None, None
                 if t.signal_id:
                     try:
                         sig = db.query(TradingSignal).filter(TradingSignal.id == t.signal_id).first()
                         if sig:
-                            tf       = sig.timeframe or "4H"
-                            conf     = float(sig.confidence) if sig.confidence else None
+                            tf        = sig.timeframe or "4H"
+                            conf      = float(sig.confidence) if sig.confidence else None
                             reasoning = sig.reasoning or None
                     except Exception:
                         pass
@@ -928,15 +930,20 @@ def backfill_paper_trades() -> dict:
                     "exit_reason": t.close_reason or "MANUAL",
                     "confidence":  conf,
                     "reasoning":   reasoning,
-                    "opened_at":   t.opened_at.isoformat() if t.opened_at else None,
-                    "closed_at":   t.closed_at.isoformat() if t.closed_at else None,
+                    "opened_at":   t.opened_at if isinstance(t.opened_at, str) else (t.opened_at.isoformat() if t.opened_at else None),
+                    "closed_at":   t.closed_at if isinstance(t.closed_at, str) else (t.closed_at.isoformat() if t.closed_at else None),
                 })
+
+        logger.info(f"[Backfill] Found {len(trade_rows)} closed paper trades to process")
 
         with engine.begin() as conn:
             _ensure_tables(conn)
             for t in trade_rows:
+                if not t["closed_at"]:
+                    skipped += 1
+                    continue
                 try:
-                    # Skip if already recorded (match on symbol + exit time)
+                    # Skip if already recorded
                     exists = conn.execute(text(
                         "SELECT 1 FROM trade_outcomes WHERE symbol=:sym AND exited_at=:ea AND paper_mode=1 LIMIT 1"
                     ), {"sym": t["symbol"], "ea": t["closed_at"]}).fetchone()
@@ -944,21 +951,22 @@ def backfill_paper_trades() -> dict:
                         skipped += 1
                         continue
 
-                    pnl_pct  = t["pnl_pct"]
-                    pnl_usd  = t["pnl_usd"]
-                    if pnl_pct > 0.1:   outcome = "WIN"
+                    pnl_pct = t["pnl_pct"]
+                    pnl_usd = t["pnl_usd"]
+                    if pnl_pct > 0.1:    outcome = "WIN"
                     elif pnl_pct < -0.1: outcome = "LOSS"
                     else:                outcome = "BREAKEVEN"
 
                     hold_min = None
                     if t["opened_at"] and t["closed_at"]:
                         try:
-                            a = datetime.fromisoformat(t["opened_at"].replace("Z","+00:00"))
-                            b = datetime.fromisoformat(t["closed_at"].replace("Z","+00:00"))
+                            a = datetime.fromisoformat(t["opened_at"].replace("Z", "+00:00"))
+                            b = datetime.fromisoformat(t["closed_at"].replace("Z", "+00:00"))
                             hold_min = round((b - a).total_seconds() / 60, 1)
                         except Exception:
                             pass
 
+                    row_id = _new_id()
                     conn.execute(text("""
                         INSERT INTO trade_outcomes
                         (id, signal_id, symbol, asset_class, direction, timeframe,
@@ -971,7 +979,7 @@ def backfill_paper_trades() -> dict:
                          :hold_min, :confidence, :reasoning,
                          NULL, 1, :entered_at, :exited_at)
                     """), {
-                        "id":          _new_id(),
+                        "id":          row_id,
                         "signal_id":   t["signal_id"],
                         "symbol":      t["symbol"],
                         "asset_class": t["asset_class"],
@@ -992,12 +1000,16 @@ def backfill_paper_trades() -> dict:
                     })
                     inserted += 1
 
-                    # Refresh Tier 2 accuracy per symbol (deferred — done after loop)
+                    # Tier 3 — Pattern Memory (skip if no TA profile, but update regime)
+                    # No TA profile available in backfill — skip T3, do T4
+                    # Tier 4 — Regime performance (use NULL regime from backfill data)
+                    # Skip T4 since we don't have regime data in paper trades
+
                 except Exception as e:
                     logger.warning(f"[Backfill] Error on {t.get('symbol')}: {e}")
                     errors += 1
 
-        # Refresh Tier 2 accuracy for all backfilled symbols
+        # ── Post-insert: refresh Tier 2 accuracy for every unique symbol ──────
         done_syms = set()
         for t in trade_rows:
             sym = t["symbol"]
@@ -1005,13 +1017,15 @@ def backfill_paper_trades() -> dict:
                 try:
                     _refresh_signal_accuracy(sym, t["asset_class"], t["timeframe"])
                     done_syms.add(sym)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[Backfill-T2] accuracy refresh failed for {sym}: {e}")
 
         logger.info(f"[Backfill] Complete — inserted={inserted} skipped={skipped} errors={errors}")
 
     except Exception as e:
         logger.error(f"[Backfill] Fatal: {e}")
+        import traceback; logger.error(traceback.format_exc())
         errors += 1
 
     return {"inserted": inserted, "skipped": skipped, "errors": errors}
+

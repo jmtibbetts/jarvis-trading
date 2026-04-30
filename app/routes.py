@@ -1103,6 +1103,48 @@ def get_lessons(limit: int = 50):
     """Return Tier 5 LLM reasoning audit lessons."""
     return get_all_lessons(limit=limit)
 
+@router.post("/learning/seed-test")
+def seed_test_outcome():
+    """Dev helper: inject a fake closed trade so the Learning Engine tables populate and the UI can be verified."""
+    from lib.learning_engine import record_trade_outcome
+    import random, datetime, uuid
+    symbols = ["AAPL", "NVDA", "SPY", "BTC/USD", "ETH/USD", "GC=F"]
+    sym = random.choice(symbols)
+    direction = random.choice(["BUY", "SELL"])
+    entry = round(random.uniform(50, 400), 2)
+    pnl_pct = round(random.uniform(-8, 15), 2)
+    exit_p = round(entry * (1 + pnl_pct / 100), 2)
+    outcome = "WIN" if pnl_pct > 0.5 else "LOSS" if pnl_pct < -0.5 else "BREAKEVEN"
+    entered_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=random.randint(1,48))).isoformat()
+    exited_at  = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    hold_min   = round(random.uniform(15, 600), 1)
+    exit_reasons = ["TAKE_PROFIT", "HARD_STOP", "LLM_EXIT", "TIMEOUT", "MANUAL"]
+    regimes = ["Risk-On Bull", "Range-Bound", "Bear / Risk-Off", "Neutral"]
+    record_trade_outcome(
+        signal_id=str(uuid.uuid4()),
+        symbol=sym,
+        asset_class="crypto" if "/" in sym else ("futures" if "=" in sym else "equity"),
+        direction=direction,
+        timeframe="4H",
+        entry_price=entry,
+        exit_price=exit_p,
+        qty=round(random.uniform(1, 20), 4),
+        pnl_usd=round(entry * random.uniform(0.01, 0.5) * (1 if outcome == "WIN" else -1), 2),
+        pnl_pct=pnl_pct,
+        outcome=outcome,
+        exit_reason=random.choice(exit_reasons),
+        hold_duration_m=hold_min,
+        signal_confidence=random.randint(55, 92),
+        signal_score=round(random.uniform(60, 95), 1),
+        signal_reasoning=f"Test seed: {sym} showed momentum setup on 4H.",
+        ta_summary="RSI oversold, MACD crossover, above VWAP",
+        market_regime=random.choice(regimes),
+        paper_mode=True,
+        entered_at=entered_at,
+        exited_at=exited_at,
+    )
+    return {"ok": True, "seeded": sym, "outcome": outcome, "pnl_pct": pnl_pct}
+
 # ─── Futures Data ─────────────────────────────────────────────────────────────
 
 @router.get("/futures/prices")

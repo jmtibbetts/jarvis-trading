@@ -49,6 +49,14 @@ def _new_id():
 
 _tables_ensured = False  # module-level flag — only run once per process
 
+def _safe_add_column(conn, table: str, column: str, col_type: str):
+    """Idempotent ALTER TABLE ADD COLUMN — swallows error if column already exists."""
+    from sqlalchemy import text
+    try:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+    except Exception:
+        pass  # column already present
+
 def _ensure_tables(conn):
     from sqlalchemy import text
     conn.execute(text("""CREATE TABLE IF NOT EXISTS trade_outcomes (
@@ -106,6 +114,14 @@ def _ensure_tables(conn):
         applied_count INTEGER DEFAULT 0,-- how many times injected into prompts
         created_at TEXT
     )"""))
+    # ── Column migrations (idempotent — swallow OperationalError if column exists) ──
+    _safe_add_column(conn, "llm_lessons",        "trade_outcome_id", "TEXT")
+    _safe_add_column(conn, "llm_lessons",        "lesson_category",  "TEXT")
+    _safe_add_column(conn, "llm_lessons",        "applied_count",    "INTEGER DEFAULT 0")
+    _safe_add_column(conn, "trade_outcomes",     "paper_mode",       "INTEGER DEFAULT 0")
+    _safe_add_column(conn, "trade_outcomes",     "market_regime",    "TEXT")
+    _safe_add_column(conn, "pattern_memory",     "asset_class",      "TEXT")
+    _safe_add_column(conn, "regime_performance", "avg_confidence",   "REAL DEFAULT 0.0")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -843,3 +859,4 @@ def get_all_lessons(limit: int = 50) -> list:
     except Exception as e:
         logger.error(f"[Learning] get_all_lessons error: {e}")
         return []
+

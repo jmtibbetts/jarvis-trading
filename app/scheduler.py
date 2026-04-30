@@ -272,8 +272,11 @@ Respond ONLY with valid JSON:
 }}"""
 
         try:
-            raw      = call_lm_studio(prompt, system="You are a precise portfolio risk manager. Respond only with JSON.", max_tokens=300)
+            raw      = call_lm_studio(prompt, system="You are a precise portfolio risk manager. Respond only with JSON.", max_tokens=300, thinking=True)
             decision = parse_json(raw)
+            if not isinstance(decision, dict):
+                logger.warning(f"[Guardian] LLM returned unparseable response (len={len(raw)}) — defaulting to HOLD")
+                decision = {"action": "HOLD", "reason": "LLM parse failed"}
         except Exception as e:
             logger.warning(f"[Guardian] LLM failed: {e} — defaulting to HOLD")
             decision = {"action": "HOLD", "reason": "LLM unavailable"}

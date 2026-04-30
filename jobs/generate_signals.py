@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 TRACK_A = ["RTX","LMT","NOC","GD","BA","XOM","CVX","COP","FANG","CEG","GLD","SLV","TLT","SPY","IWM","USO","UNG","GDX","GDXJ"]
 TRACK_B = ["NVDA","AMD","MSFT","GOOGL","AAPL","META","AMZN","AVGO","TSM","ANET","INTC","QCOM","SMCI","VRT","SOXX","QQQ","CRWV","NBIS","PLTR","TSLA","COIN","MSTR","ARM","HOOD"]
-TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD","SUI/USD","RENDER/USD","INJ/USD","NEAR/USD","OP/USD","ARB/USD"]
+# Top 12 crypto by liquidity — 18 was too large for 2500-token budget (thinking overflow)
+TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/USD","DOGE/USD","ADA/USD","AAVE/USD","DOT/USD","ATOM/USD"]
 # Track E: paper-only universe — best candidates for leveraged/short plays
 TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
 
@@ -435,7 +436,7 @@ def run():
     for name, syms, prompt, is_paper in tracks:
         try:
             logger.info(f"[Signals] Calling LLM for track {name}...")
-            r = call_lm_studio(prompt, system=sys_p, max_tokens=2500, temperature=0.15, thinking=True)
+            r = call_lm_studio(prompt, system=sys_p, max_tokens=4096, temperature=0.15, thinking=True)
             logger.info(f"[Signals] Track {name} → {len(r)} chars returned")
             sigs = parse_json(r)
             if isinstance(sigs, list):
@@ -577,3 +578,4 @@ def run():
         score=float(saved)
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+

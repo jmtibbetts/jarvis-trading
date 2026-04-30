@@ -269,54 +269,44 @@ def analyze_symbol(bars_by_tf: dict) -> dict:
 
 
 def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> str:
-    lines = [f"\n{'='*60}", f"  {symbol}  {asset_name}", f"{'='*60}"]
-
+    """Compact TA block — ~3 lines per symbol instead of ~30. Keeps signal quality, cuts tokens 80%."""
     def fmt(v, dec=2):
-        return f"{float(v):.{dec}f}" if v is not None else "N/A"
-
+        return f"{float(v):.{dec}f}" if v is not None else "?"
     def pfmt(p):
-        if p is None: return "N/A"
+        if p is None: return "?"
         p = float(p)
         return f"${p:,.0f}" if p > 1000 else f"${p:.4f}" if p < 1 else f"${p:.2f}"
 
-    for tf in ["1H", "2H", "4H", "1D"]:
+    lines = [f"[{symbol}]" + (f" {asset_name}" if asset_name else "")]
+    for tf in ["1H", "4H", "1D"]:   # dropped 2H — redundant
         d = ta_data.get(tf)
         if not d or d.get("error"):
-            lines.append(f"  [{tf}] no data")
             continue
-        p     = d.get("price", {})
-        e     = d.get("emas", {})
-        bb    = d.get("bollinger_bands") or {}
-        macd  = d.get("macd") or {}
-        sr    = d.get("support_resistance") or {}
-        vol   = d.get("volume") or {}
-        vwap  = d.get("vwap") or {}
-        atr   = d.get("atr") or {}
-        stoch = d.get("stochastic") or {}
-        adx   = d.get("adx") or {}
-        rsi   = d.get("rsi")
-        bias  = d.get("bias", "neutral").upper()
-        trend = d.get("trend", {})
-        obv   = d.get("obv_trend", "N/A")
-        last  = p.get("last", 0)
-        chg   = p.get("pct_change", 0)
-        sign  = "+" if chg >= 0 else ""
-        adx_s = f"ADX={fmt(adx.get('value'))}{'!' if adx.get('strong') else ''}" if adx else ""
-        lines.append(f"\n  [{tf}]  Price={pfmt(last)} ({sign}{fmt(chg)}%)  Bias={bias}  {adx_s}  Score={trend.get('pct',0)}%")
-        ep = [f"EMA{pp}={pfmt(e.get(f'ema{pp}'))}({'>' if last > (e.get(f'ema{pp}') or 0) else '<'})" for pp in [9,21,50,200] if e.get(f'ema{pp}')]
-        if ep: lines.append(f"        EMAs: {' | '.join(ep)}")
-        rsi_s  = f"RSI={fmt(rsi)} ({d.get('rsi_signal','N/A')})" if rsi else "RSI=N/A"
-        macd_s = f"MACD={fmt(macd.get('macd'),4)} hist={fmt(macd.get('histogram'),4)} [{macd.get('trend','').upper()}]" if macd.get('macd') is not None else "MACD=N/A"
-        lines.append(f"        {rsi_s}  |  {macd_s}")
-        if bb:
-            lines.append(f"        BB: {pfmt(bb.get('lower'))} - {pfmt(bb.get('mid'))} - {pfmt(bb.get('upper'))}  %B={fmt(bb.get('pct_b'),3)}  Pos={bb.get('position','N/A')}")
-        vwap_s = f"VWAP={pfmt(vwap.get('value'))} ({'+' if (vwap.get('pct_diff') or 0)>=0 else ''}{fmt(vwap.get('pct_diff'))}% {vwap.get('position','')})" if vwap else "VWAP=N/A"
-        atr_s  = f"ATR={fmt(atr.get('value'),4)} ({fmt(atr.get('pct'))}%)" if atr else "ATR=N/A"
-        vol_s  = f"Vol={vol.get('surge_ratio','?')}x {'SURGE' if vol.get('surge') else 'DRY' if vol.get('dry') else 'normal'}" if vol else "Vol=N/A"
-        lines.append(f"        {vwap_s}  |  {atr_s}  |  {vol_s}")
-        if sr:
-            lines.append(f"        S/R: Sup={pfmt(sr.get('support'))}  Res={pfmt(sr.get('resistance'))}  Pos={fmt(sr.get('position_in_range'),2)}")
-        if stoch or obv:
-            lines.append(f"        {'Stoch K='+fmt(stoch.get('k'))+' D='+fmt(stoch.get('d'))+' ['+stoch.get('signal','')+']' if stoch else ''}  {'OBV='+obv if obv else ''}")
-    return "\n".join(lines)
+        p    = d.get("price", {})
+        last = float(p.get("last") or 0)
+        chg  = float(p.get("pct_change") or 0)
+        rsi  = d.get("rsi")
+        bias = d.get("bias", "?")[:1].upper()   # B/S/N one char
+        macd = d.get("macd") or {}
+        mt   = (macd.get("trend") or "?")[:1].upper()   # U/D one char
+        mc   = "X" if macd.get("crossover") else ""
+        bb   = d.get("bollinger_bands") or {}
+        bbp  = (bb.get("position") or "?")[:3]          # low/mid/up
+        vol  = d.get("volume") or {}
+        vs   = "SRG" if vol.get("surge") else ("DRY" if vol.get("dry") else "nrm")
+        vwap = d.get("vwap") or {}
+        vp   = (vwap.get("position") or "?")[:3]        # abo/bel
+        atr  = d.get("atr") or {}
+        atrp = fmt(atr.get("pct"), 1)
+        sr   = d.get("support_resistance") or {}
+        sup  = pfmt(sr.get("support"))
+        res  = pfmt(sr.get("resistance"))
+        sign = "+" if chg >= 0 else ""
+        lines.append(
+            f"  {tf}: {pfmt(last)}({sign}{fmt(chg,1)}%) "
+            f"RSI={fmt(rsi,0)} Bias={bias} MACD={mt}{mc} "
+            f"BB={bbp} VWAP={vp} ATR={atrp}% Vol={vs} "
+            f"S={sup} R={res}"
+        )
+    return "\n".join(lines) + "\n"
 

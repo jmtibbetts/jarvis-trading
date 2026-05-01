@@ -1,6 +1,7 @@
 """
 lib/lmstudio.py — Unified LLM client.
-v6.9.4: Robust Qwen3 thinking-token fix.
+v6.9.5: Restore max_tokens to 16384 — LM Studio "Limit Response Length" was never checked.
+         The 2000/1024 API-level cap WAS the problem all along. Model has 130k context, unlimited output.
          - Strip <think>...</think> and partial <think> blocks from LLM output BEFORE
            declaring content empty. When finish=length, the response may contain post-think
            content even if the content field looks truncated.
@@ -27,7 +28,7 @@ TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to 
 
 # Max tokens to request on retry with /no_think — must stay under LM Studio's hard server cap.
 # Set conservatively so the model has budget for actual output after thinking tokens are stripped.
-RETRY_MAX_TOKENS = 2000
+RETRY_MAX_TOKENS = 16384
 
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
@@ -132,7 +133,7 @@ def get_llm_config() -> dict:
             if cfg:
                 platform = (cfg.platform or 'lmstudio').lower()
                 # Cap max_tokens at RETRY_MAX_TOKENS if the DB value exceeds LM Studio's hard limit
-                db_max = int(cfg.extra_field_2 or 2000)
+                db_max = int(cfg.extra_field_2 or 16384)
                 return {
                     'url':        (cfg.api_url or DEFAULT_URL).rstrip('/'),
                     'model':      cfg.extra_field_1 or DEFAULT_MODEL,
@@ -149,7 +150,7 @@ def get_llm_config() -> dict:
         'url':        os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
         'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':    os.getenv('OPENAI_API_KEY', ''),
-        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 2000)),
+        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 16384)),
         'platform':   'lmstudio',
         'provider':   'openai_compat',
     }

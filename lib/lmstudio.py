@@ -1,5 +1,8 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v6.9.6: Fix enable_thinking placement — must be top-level in LM Studio 0.4.x payload.
+         chat_template_kwargs is NOT needed; LM Studio reads enable_thinking directly.
+         Removed conflicting "thinking" key which is not a valid LM Studio field.
 v6.9.5: Restore max_tokens to 16384 — LM Studio "Limit Response Length" was never checked.
          The 2000/1024 API-level cap WAS the problem all along. Model has 130k context, unlimited output.
          - Strip <think>...</think> and partial <think> blocks from LLM output BEFORE
@@ -258,14 +261,13 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         "temperature":  temperature,
     }
 
-    # Qwen3 thinking control — belt-and-suspenders approach:
-    # 1. enable_thinking / thinking: Qwen3 native API fields
-    # 2. chat_template_kwargs: newer LM Studio builds honour this to disable reasoning mode
-    # 3. /no_think prefix in system prompt: handled by caller via effective_system
+    # Qwen3 thinking control for LM Studio 0.4.x:
+    # enable_thinking must be a TOP-LEVEL field in the JSON payload — NOT inside extra_body.
+    # LM Studio 0.4.x reads it directly from the request body and passes it to the chat template.
+    # The "thinking" key and chat_template_kwargs wrapper are NOT recognized by LM Studio.
+    # Reference: https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1559
     if cfg.get('platform') in ('lmstudio', 'ollama'):
-        payload["enable_thinking"]       = thinking_mode
-        payload["thinking"]              = thinking_mode
-        payload["chat_template_kwargs"]  = {"enable_thinking": thinking_mode}
+        payload["enable_thinking"] = thinking_mode
 
     url = f"{cfg['url']}/chat/completions"
     logger.info(f"[LLM] → POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt")

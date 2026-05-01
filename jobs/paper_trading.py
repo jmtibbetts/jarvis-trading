@@ -17,6 +17,7 @@ from app.database import get_db, TradingSignal, MarketAsset, PaperPosition, News
 logger = logging.getLogger(__name__)
 
 PAPER_MIN_CONFIDENCE = 55   # skip new entries scoring below this
+FUTURES_MIN_CONFIDENCE = 45  # lower bar for futures — macro-driven, even 47% conviction is tradeable
 
 # ── Same tier thresholds as real manage_positions.py ──────────────────────────
 TIERS_CRYPTO = [
@@ -381,7 +382,10 @@ def _get_pending_signals(db) -> list:
 
 def _evaluate_entry_with_ai(sig: dict, current_price: float, threat_ctx: str, news_ctx: str) -> dict:
     from lib.lmstudio import call_lm_studio
+    from lib.futures_data import FUTURES_UNIVERSE
     sym = sig["asset_symbol"]
+    is_futures = sym in FUTURES_UNIVERSE
+    min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
     ta_data = _fetch_ta(sym)
     try:
         from lib.ta_engine import build_ta_prompt_block
@@ -424,7 +428,7 @@ Is this setup still valid at current price ${current_price:.4f}? Does TA confirm
 Respond ONLY with valid JSON (no markdown):
 {{"approved": true/false, "score": 0-100, "reasoning": "1-2 sentences"}}
 
-approved=true means enter the paper trade. Score below {PAPER_MIN_CONFIDENCE} should set approved=false."""
+approved=true means enter the paper trade. Score below {min_conf} should set approved=false."""
 
     try:
         raw = call_lm_studio(
@@ -437,12 +441,14 @@ approved=true means enter the paper trade. Score below {PAPER_MIN_CONFIDENCE} sh
         approved = bool(result.get("approved", False))
         score = float(result.get("score", 50))
         reasoning = result.get("reasoning", "")
-        if score < PAPER_MIN_CONFIDENCE:
+        min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
+        if score < min_conf:
             approved = False
         return {"approved": approved, "score": score, "reasoning": reasoning}
     except Exception as e:
         logger.warning(f"[PaperTrading] Entry LLM eval failed for {sym}: {e} — using original confidence")
-        approved = sig["confidence"] >= PAPER_MIN_CONFIDENCE
+        min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
+        approved = sig["confidence"] >= min_conf
         return {"approved": approved, "score": sig["confidence"], "reasoning": "LLM unavailable — using original confidence"}
 
 

@@ -478,55 +478,122 @@ def _run_reasoning_audit(outcome_row: dict) -> dict | None:
         return None
 
 
-def get_lessons_context(symbol: str = None, limit: int = 5) -> str:
+def get_lessons_context(symbol: str = None, limit: int = 5,
+                        track_symbols: list = None,
+                        categories: list = None) -> str:
     """
-    Returns the most recent/relevant lessons for LLM prompt injection.
-    Increments applied_count so we can track usage.
+    Returns the most relevant lessons for LLM prompt injection.
+    
+    Priority ordering (highest first):
+      1. Symbol-specific lessons (exact match on the track's symbols)
+      2. Category-deduplicated lessons — max 2 per category to avoid repetition
+      3. Least-applied lessons first (applied_count ASC) so new lessons get exposure
+      4. Recency as tiebreaker (created_at DESC)
+
+    Args:
+        symbol:        Single symbol filter (legacy, still supported)
+        limit:         Max lessons to return (default 5; bumped to 8 when track_symbols given)
+        track_symbols: List of symbols in the current track (e.g. TRACK_A/B/C)
+        categories:    Optional whitelist of lesson_category values to include
+
+    Increments applied_count for all returned lessons.
     """
     _lazy_ensure()
     from app.database import engine
     from sqlalchemy import text
+
+    # When a full track is given, increase the pool to surface more variety
+    if track_symbols and limit <= 5:
+        limit = 8
+
     try:
         with engine.begin() as conn:
-            if symbol:
+            # ── Build the candidate pool ──────────────────────────────────────
+            if track_symbols:
+                # Placeholders for IN clause
+                placeholders = ",".join([f":s{i}" for i in range(len(track_symbols))])
+                params_sym   = {f"s{i}": s for i, s in enumerate(track_symbols)}
+
+                # 1. Symbol-specific lessons (exact match)
+                specific_rows = conn.execute(text(f"""
+                    SELECT id, symbol, outcome, lesson, lesson_category, applied_count
+                    FROM llm_lessons
+                    WHERE symbol IN ({placeholders})
+                    ORDER BY applied_count ASC, created_at DESC LIMIT :lim
+                """), {**params_sym, "lim": limit}).fetchall()
+
+                # 2. Global lessons NOT already in the symbol-specific set
+                existing_ids = {r[0] for r in specific_rows}
+                extra_limit  = max(0, limit - len(specific_rows))
+                global_rows  = []
+                if extra_limit > 0:
+                    all_global = conn.execute(text("""
+                        SELECT id, symbol, outcome, lesson, lesson_category, applied_count
+                        FROM llm_lessons
+                        ORDER BY applied_count ASC, created_at DESC LIMIT :lim
+                    """), {"lim": limit * 3}).fetchall()  # fetch a bigger pool then filter
+                    for r in all_global:
+                        if r[0] not in existing_ids and len(global_rows) < extra_limit:
+                            global_rows.append(r)
+
+                rows = list(specific_rows) + global_rows
+
+            elif symbol:
                 rows = conn.execute(text("""
-                    SELECT id, symbol, outcome, lesson, lesson_category
+                    SELECT id, symbol, outcome, lesson, lesson_category, applied_count
                     FROM llm_lessons
                     WHERE symbol=:sym
-                    ORDER BY created_at DESC LIMIT :lim
+                    ORDER BY applied_count ASC, created_at DESC LIMIT :lim
                 """), {"sym": symbol, "lim": limit}).fetchall()
-                # Also grab global lessons if not enough symbol-specific ones
+                # Backfill with global if sparse
                 if len(rows) < 3:
+                    existing_ids = {r[0] for r in rows}
                     extra = conn.execute(text("""
-                        SELECT id, symbol, outcome, lesson, lesson_category
+                        SELECT id, symbol, outcome, lesson, lesson_category, applied_count
                         FROM llm_lessons
                         WHERE symbol != :sym
-                        ORDER BY created_at DESC LIMIT :lim
+                        ORDER BY applied_count ASC, created_at DESC LIMIT :lim
                     """), {"sym": symbol, "lim": limit - len(rows)}).fetchall()
-                    rows = list(rows) + list(extra)
+                    rows = list(rows) + [r for r in extra if r[0] not in existing_ids]
+
             else:
                 rows = conn.execute(text("""
-                    SELECT id, symbol, outcome, lesson, lesson_category
+                    SELECT id, symbol, outcome, lesson, lesson_category, applied_count
                     FROM llm_lessons
-                    ORDER BY created_at DESC LIMIT :lim
-                """), {"lim": limit}).fetchall()
+                    ORDER BY applied_count ASC, created_at DESC LIMIT :lim
+                """), {"lim": limit * 3}).fetchall()  # over-fetch for dedup
 
             if not rows:
                 return ""
 
-            # Increment applied_count for fetched lessons
-            ids = [r[0] for r in rows]
-            for lid in ids:
+            # ── Category deduplication — max 2 per category ──────────────────
+            category_counts: dict = {}
+            deduped = []
+            for r in rows:
+                cat = r[4] or "OTHER"
+                if categories and cat not in categories:
+                    continue
+                if category_counts.get(cat, 0) >= 2:
+                    continue
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+                deduped.append(r)
+                if len(deduped) >= limit:
+                    break
+            rows = deduped
+
+            # ── Increment applied_count ───────────────────────────────────────
+            for r in rows:
                 conn.execute(text(
                     "UPDATE llm_lessons SET applied_count = applied_count + 1 WHERE id=:id"
-                ), {"id": lid})
+                ), {"id": r[0]})
 
         icons = {"LOSS": "❌", "WIN": "✅"}
-        lines = [f"\n📝 RECENT LESSONS FROM PAST TRADES (top {len(rows)}):"]
+        lines = [f"\n📝 PAST TRADE LESSONS — apply these rules to avoid repeat mistakes (top {len(rows)}):"]
         for r in rows:
-            _, sym, outcome, lesson, category = r
-            icon = icons.get(outcome, "➖")
-            lines.append(f"  {icon} [{category}] {sym}: {lesson}")
+            _, sym, outcome, lesson, category, applied = r
+            icon  = icons.get(outcome, "➖")
+            times = f"[applied {applied}×]" if applied else "[NEW — first application]"
+            lines.append(f"  {icon} [{category}] {sym} {times}: {lesson}")
         lines.append("")
         return "\n".join(lines)
 
@@ -535,9 +602,13 @@ def get_lessons_context(symbol: str = None, limit: int = 5) -> str:
         return ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TIER 1 — Record Trade Outcome (calls T2, T3, T4, T5 internally)
-# ─────────────────────────────────────────────────────────────────────────────
+def get_lessons_context_for_track(track_symbols: list, limit: int = 8) -> str:
+    """
+    Convenience wrapper: fetch lessons most relevant to a specific track's symbols.
+    Passes track_symbols for prioritized symbol-specific lesson retrieval.
+    """
+    return get_lessons_context(track_symbols=track_symbols, limit=limit)
+
 
 def record_trade_outcome(
     *,
@@ -1069,5 +1140,6 @@ def backfill_paper_trades() -> dict:
         errors += 1
 
     return {"inserted": inserted, "skipped": skipped, "errors": errors}
+
 
 

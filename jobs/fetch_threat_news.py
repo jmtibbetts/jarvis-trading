@@ -1,7 +1,6 @@
 """
 Job: Fetch Threat News v6.9.2 — RSS → LLM analysis → DB storage.
-v6.9.2: Batch size reduced to 3 articles per LLM call to give Qwen3 enough headroom
-        for JSON output after internal thinking tokens. Dynamic max_tokens per batch size.
+v6.9.2: Batch size increased to 8 articles (LM Studio unlimited). Max articles bumped to 60.
 v6.2:  thinking=False for news classification (no chain-of-thought needed).
 v6.1:  Dedup window reduced from 24h to 2h so new articles get through each run.
 """
@@ -54,8 +53,8 @@ RSS_FEEDS = [
 # Prompt boilerplate ≈ 150 tokens.
 # Batch of 3 → input ≈ 400 tokens → leaves ~1,600 tokens for thinking+output.
 # Thinking uses ~800-1000 tokens → leaves ~600-800 tokens for 3-article JSON. Safe.
-BATCH_SIZE = 3       # articles per LLM call (reduced from 5 — Qwen3 thinking headroom)
-MAX_ARTICLES = 30    # total cap processed per run (10 batches × 3 = 30)
+BATCH_SIZE = 8       # articles per LLM call (LM Studio unlimited — no token cap)
+MAX_ARTICLES = 60    # total cap processed per run (LM Studio unlimited)
 
 def fetch_feed(feed: dict) -> list[dict]:
     try:
@@ -83,7 +82,7 @@ def fetch_feed(feed: dict) -> list[dict]:
         return []
 
 def analyze_batch(articles: list[dict]) -> list[dict]:
-    """Send a small batch of articles to LLM. Compact prompt fits under 2k token cap."""
+    """Send a batch of articles to LLM for classification."""
     batch_text = '\n'.join([
         f"{i+1}. [{a['source']}] {a['title']} — {a['summary'][:200]}"
         for i, a in enumerate(articles)
@@ -101,7 +100,7 @@ Return [] if nothing significant."""
 
     # Scale max_tokens with batch size — smaller batches need less output headroom
     # With Qwen3's ~800-1000 token thinking overhead, leaving 600-800 for JSON is enough
-    batch_max_tokens = min(1200, 400 + len(articles) * 250)
+    batch_max_tokens = min(4096, 512 + len(articles) * 350)  # generous headroom — no server cap
 
     try:
         response = call_lm_studio(prompt, max_tokens=batch_max_tokens, temperature=0.1, thinking=False)
@@ -162,10 +161,10 @@ def run():
         logger.info("[News] No new articles since last run — skipping LLM call")
         return {'threats': 0, 'news': 0}
 
-    # 3. Process in small batches of BATCH_SIZE to stay under 2k token cap
+    # 3. Process in batches of BATCH_SIZE
     cap = new_articles[:MAX_ARTICLES]
     batches = [cap[i:i+BATCH_SIZE] for i in range(0, len(cap), BATCH_SIZE)]
-    logger.info(f"[News] Processing {len(cap)} articles in {len(batches)} batches of {BATCH_SIZE} (token-safe mode)")
+    logger.info(f"[News] Processing {len(cap)} articles in {len(batches)} batches of {BATCH_SIZE}")
 
     analyzed = []
     for batch_num, batch in enumerate(batches):

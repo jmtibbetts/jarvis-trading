@@ -1,5 +1,6 @@
 """
-Job: Fetch Threat News v6.1 — RSS → LLM analysis → DB storage.
+Job: Fetch Threat News v6.2 — RSS → LLM analysis → DB storage.
+v6.2: thinking=False for news classification (no chain-of-thought needed), batch capped at 20.
 v6.1: Dedup window reduced from 24h to 2h so new articles get through each run.
 """
 import feedparser, uuid, logging, hashlib, re
@@ -102,7 +103,7 @@ Output a JSON array:
 Only include articles that are genuinely significant. Return ONLY the JSON array."""
 
     try:
-        response = call_lm_studio(prompt, max_tokens=2000, temperature=0.1)
+        response = call_lm_studio(prompt, max_tokens=4096, temperature=0.1, thinking=False)
         parsed = parse_json(response)
         if isinstance(parsed, list):
             return parsed
@@ -149,9 +150,9 @@ def run():
     # Capping at 30 prevents context overflow and avoids hogging the local LLM
     # with repeated calls that block signal generation.
     analyzed = []
-    cap = new_articles[:30]
+    cap = new_articles[:20]
     if cap:
-        logger.info(f"[News] Sending {len(cap)} articles to LLM for analysis (1 call)...")
+        logger.info(f"[News] Sending {len(cap)} articles to LLM for analysis (thinking=False, fast classify)...")
         results = analyze_batch(cap)
         for r in results:
             idx = r.get('index', 1) - 1
@@ -232,3 +233,4 @@ def run():
             logger.debug(f"[News] Event notify failed: {e}")
 
     return {'threats': threat_count, 'news': news_count}
+

@@ -1,5 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.4: Default max_tokens changed from 32768 → 2000 (matches LM Studio server cap); no more per-file token juggling
 v7.3: Add max_output_tokens to payload (LM Studio native v1 field — overrides UI "Limit Response Length" cap)
 v7.2: Default thinking=False — LM Studio's 150-token server cap causes all thinking
       calls to fail immediately. Thinking mode is now opt-in via THINKING_ENABLED env
@@ -146,7 +147,7 @@ def get_llm_config() -> dict:
                     'url':           (cfg.api_url or DEFAULT_URL).rstrip('/'),
                     'model':         cfg.extra_field_1 or DEFAULT_MODEL,
                     'api_key':       cfg.api_key or '',
-                    'max_tokens':    int(cfg.extra_field_2 or 32768),
+                    'max_tokens':    int(cfg.extra_field_2 or 2000),   # LM Studio server cap default
                     'thinking_flag': cfg.extra_field_3 or '',
                     'platform':      platform,
                     'provider':      'anthropic' if platform == 'anthropic' else 'openai_compat',
@@ -158,7 +159,7 @@ def get_llm_config() -> dict:
         'url':           os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
         'model':         os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':       os.getenv('OPENAI_API_KEY', ''),
-        'max_tokens':    int(os.getenv('LM_STUDIO_MAX_TOKENS', 32768)),
+        'max_tokens':    int(os.getenv('LM_STUDIO_MAX_TOKENS', 2000)),   # LM Studio server cap default
         'thinking_flag': os.getenv('THINKING_ENABLED', ''),
         'platform':      'lmstudio',
         'provider':      'openai_compat',

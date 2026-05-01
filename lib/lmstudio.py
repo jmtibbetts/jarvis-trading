@@ -1,5 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.1: Send maxTokens (camelCase) in payload to override LM Studio server default
 v7.0: DeepSeek-R1 support — strips <think>...</think> blocks before JSON parsing,
       removes Qwen3-specific /no_think toggle, auto-detects R1 models.
 v6.9.1: Auto-resolve model ID from /v1/models when configured name is placeholder.
@@ -244,8 +245,9 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     payload = {
         "model":        cfg['model'],
         "messages":     messages,
-        "max_tokens":   max_tokens,
-        "num_predict":  max_tokens,
+        "max_tokens":   max_tokens,   # OpenAI-compat (snake_case)
+        "maxTokens":    max_tokens,   # LM Studio native (camelCase) — overrides server default
+        "num_predict":  max_tokens,   # llama.cpp / Ollama field
         "temperature":  temperature,
     }
 
@@ -368,3 +370,4 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+

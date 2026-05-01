@@ -1,5 +1,6 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.3: Add max_output_tokens to payload (LM Studio native v1 field — overrides UI "Limit Response Length" cap)
 v7.2: Default thinking=False — LM Studio's 150-token server cap causes all thinking
       calls to fail immediately. Thinking mode is now opt-in via THINKING_ENABLED env
       var or DB config extra_field_3 = 'thinking_on'. Eliminates wasted 3-4s retry
@@ -273,12 +274,13 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     messages.append({"role": "user", "content": _sanitize(prompt)})
 
     payload = {
-        "model":        cfg['model'],
-        "messages":     messages,
-        "max_tokens":   max_tokens,   # OpenAI-compat (snake_case)
-        "maxTokens":    max_tokens,   # LM Studio native (camelCase) — overrides server default
-        "num_predict":  max_tokens,   # llama.cpp / Ollama field
-        "temperature":  temperature,
+        "model":             cfg['model'],
+        "messages":          messages,
+        "max_tokens":        max_tokens,   # OpenAI-compat (snake_case)
+        "maxTokens":         max_tokens,   # LM Studio legacy camelCase
+        "max_output_tokens": max_tokens,   # LM Studio native v1 API field (overrides UI cap)
+        "num_predict":       max_tokens,   # llama.cpp / Ollama
+        "temperature":       temperature,
     }
 
     url = f"{cfg['url']}/chat/completions"

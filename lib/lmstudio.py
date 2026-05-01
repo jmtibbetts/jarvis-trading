@@ -1,5 +1,7 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.0: DeepSeek-R1 support — strips <think>...</think> blocks before JSON parsing,
+      removes Qwen3-specific /no_think toggle, auto-detects R1 models.
 v6.9.1: Auto-resolve model ID from /v1/models when configured name is placeholder.
 v6.9: 4-slot parallel semaphore (LLM_MAX_PARALLEL=4), 120k context / 32768 output tokens default.
 v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
-TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to prevent shutdown hangs
+TIMEOUT       = 180.0  # 3 min — R1 reasoning can take longer than Qwen3
 
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
@@ -24,9 +26,9 @@ _shutdown_event = threading.Event()
 # NOTE: Do NOT register signal handlers here — uvicorn owns SIGINT/SIGTERM.
 # The _shutdown_event is set by main.py's lifespan shutdown hook instead.
 
-# ── Typed sentinel for thinking-only empty responses ──────────────────────────
+# ── Typed sentinel for thinking-only empty responses (Qwen3 legacy) ───────────
 class _EmptyThinkingResponse(RuntimeError):
-    """Raised when LM Studio returns 0 chars because the model only produced <think> tokens."""
+    """Raised when model returns 0 chars (Qwen3 thinking-only token exhaustion)."""
     pass
 
 # ── Concurrency limiter — LM Studio supports N parallel inference slots ─────
@@ -36,8 +38,6 @@ _LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "4"))
 _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
 # ── Model auto-resolution cache ───────────────────────────────────────────────
-# When the DB/env model is the generic placeholder, we query /v1/models and cache
-# the first real loaded model ID so we don't hit LM Studio on every call.
 _resolved_model_cache: dict = {}   # keyed by base_url → resolved model id
 _model_cache_lock = threading.Lock()
 
@@ -46,6 +46,34 @@ OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', '
 ANTHROPIC_PLATFORMS     = {'anthropic'}
 
 PLACEHOLDER_MODELS = {'local-model', 'default', '', None}
+
+# R1 model name fragments — used to detect R1-family models for think-tag stripping
+R1_MODEL_FRAGMENTS = ('deepseek-r1', 'r1-distill', 'r1_distill')
+
+
+def _is_r1_model(model_id: str) -> bool:
+    """Returns True if the resolved model ID looks like a DeepSeek-R1 family model."""
+    if not model_id:
+        return False
+    lower = model_id.lower()
+    return any(frag in lower for frag in R1_MODEL_FRAGMENTS)
+
+
+def _strip_think_tags(text: str) -> tuple[str, int]:
+    """
+    Remove <think>...</think> blocks from R1 model output.
+    Returns (cleaned_text, think_token_estimate).
+    R1 puts chain-of-thought inside these tags before the actual answer.
+    """
+    think_content = ''
+    think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
+    if think_match:
+        think_content = think_match.group(1)
+        text = text[:think_match.start()] + text[think_match.end():]
+    # Also strip any trailing/leading whitespace left behind
+    text = text.strip()
+    think_tokens = len(think_content) // 4  # rough estimate
+    return text, think_tokens
 
 
 def _resolve_model(cfg: dict) -> str:
@@ -80,7 +108,6 @@ def _resolve_model(cfg: dict) -> str:
     except Exception as e:
         logger.warning(f"[LLM] Could not auto-resolve model from {base_url}/models: {e}")
 
-    # Can't reach server — return placeholder as-is and let the call fail with a clear error
     return model
 
 
@@ -133,7 +160,8 @@ def check_health() -> dict:
             if r.status_code == 200:
                 models = r.json().get('data', [])
                 return {'ok': True, 'platform': cfg['platform'], 'model': resolved,
-                        'url': cfg['url'], 'models': [m.get('id') for m in models[:5]]}
+                        'url': cfg['url'], 'models': [m.get('id') for m in models[:5]],
+                        'r1_mode': _is_r1_model(resolved)}
             return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
                     'status_code': r.status_code}
         elif cfg['provider'] == 'anthropic':
@@ -149,83 +177,83 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
     Aborts immediately if shutdown has been signalled.
 
-    thinking=True  → full chain-of-thought (signal gen, position mgmt, Tier 5 review)
-    thinking=False → /no_think prefix for fast classification (news tagging, heartbeat)
+    For R1 models: thinking parameter is ignored — R1 always reasons via <think> tags
+    and outputs the answer after. Think tags are stripped automatically before return.
+
+    For Qwen3 models: thinking=True uses full chain-of-thought,
+    thinking=False uses /no_think prefix for fast calls.
     """
     if _shutdown_event.is_set():
         raise RuntimeError("LLM call aborted — shutdown in progress")
 
     cfg = get_llm_config()
-    # Auto-resolve placeholder model names (e.g. "local-model") to the real loaded model ID
     cfg['model'] = _resolve_model(cfg)
     effective_max = max_tokens or cfg['max_tokens']
+    is_r1 = _is_r1_model(cfg['model'])
 
-    # Qwen3 thinking toggle — only applies to local models (lmstudio / ollama)
-    # /no_think prefix suppresses chain-of-thought for fast, low-stakes calls
+    # ── System prompt modification ─────────────────────────────────────────────
     effective_system = system
-    if not thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-        prefix = '/no_think\n\n'
-        effective_system = prefix + (system or '')
+    if not is_r1 and not thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+        # Qwen3 only: /no_think prefix suppresses chain-of-thought for fast calls
+        effective_system = '/no_think\n\n' + (system or '')
 
     with _llm_lock:
         if _shutdown_event.is_set():
             raise RuntimeError("LLM call aborted — shutdown in progress")
-        logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max} thinking={thinking}")
+        logger.debug(
+            f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} "
+            f"model={cfg['model']} max_tokens={effective_max} "
+            f"{'[R1-mode]' if is_r1 else f'thinking={thinking}'}"
+        )
         try:
             if cfg['provider'] == 'anthropic':
                 return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
             else:
-                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
+                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1)
         except _EmptyThinkingResponse:
-            # Qwen3 produced only <think> tokens — retry immediately with /no_think
-            if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+            # Qwen3 only — R1 never hits this path
+            if not is_r1 and thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
                 retry_max = max(effective_max, 32768)
                 try:
-                    if cfg['provider'] == 'anthropic':
-                        return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
-                    else:
-                        return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg)
+                    return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg, is_r1=False)
                 except _EmptyThinkingResponse:
-                    # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
-                    # Return empty JSON array so the track degrades gracefully instead of crashing.
-                    logger.error("[LLM] Both thinking and no_think attempts returned empty content. "
-                                 "Check LM Studio → Model Settings → Max Response Tokens (set to 0 = unlimited).")
+                    logger.error(
+                        "[LLM] Both thinking and no_think attempts returned empty content. "
+                        "Check LM Studio → Model Settings → Max Response Tokens (set to 0 = unlimited)."
+                    )
                     return "[]"
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
-                         temperature: float, cfg: dict) -> str:
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
+                         temperature: float, cfg: dict, is_r1: bool = False) -> str:
     headers = {"Content-Type": "application/json"}
     if cfg['api_key']:
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
 
-    # Sanitize messages — strip non-BMP Unicode (emoji, rare CJK, etc.) that
-    # some LM Studio builds reject with a 400 even on large-context models.
     def _sanitize(s: str) -> str:
         return s.encode('utf-8', errors='replace').decode('utf-8') if s else s
-    messages = [{"role": m["role"], "content": _sanitize(m["content"])} for m in messages]
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": _sanitize(system)})
+    messages.append({"role": "user", "content": _sanitize(prompt)})
 
     payload = {
         "model":        cfg['model'],
         "messages":     messages,
-        "max_tokens":   max_tokens,   # OpenAI-compat field
-        "num_predict":  max_tokens,   # llama.cpp / LM Studio native field (same value)
+        "max_tokens":   max_tokens,
+        "num_predict":  max_tokens,
         "temperature":  temperature,
     }
 
     url = f"{cfg['url']}/chat/completions"
-    logger.info(f"[LLM] → POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt")
+    no_think_active = system and '/no_think' in system
+    mode_tag = 'R1-mode' if is_r1 else ('thinking=True' if not no_think_active else 'thinking=False')
+    logger.info(f"[LLM] -> POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt | {mode_tag}")
 
-    # Use a streaming-capable client with a shorter connect timeout
-    # so we don't block forever if LM Studio is gone
     timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)
 
     try:
@@ -236,23 +264,35 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         r.raise_for_status()
         data    = r.json()
         choice  = data['choices'][0]
-        content = choice['message']['content']
+        content = choice['message']['content'] or ''
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')
-        logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars | finish={finish}")
-        if finish == 'length':
-            logger.warning(f"[LLM] finish_reason=length — hit token cap ({tokens} tokens). "
-                           "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited).")
 
-        # Guard: Qwen3 thinking mode sometimes emits only <think> tokens internally
-        # and returns empty content field. Raise typed exception so retry logic can catch it.
+        # ── R1: strip <think> tags, log reasoning depth ────────────────────────
+        if is_r1 and content:
+            content, think_tokens = _strip_think_tags(content)
+            if think_tokens > 0:
+                logger.info(f"[LLM] ← R1 reasoning: ~{think_tokens} think tokens | {len(content)} chars output | finish={finish}")
+            else:
+                logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars | finish={finish}")
+        else:
+            logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars | finish={finish}")
+
+        if finish == 'length':
+            logger.warning(
+                f"[LLM] finish_reason=length — hit token cap ({tokens} tokens). "
+                "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited)."
+            )
+
+        # Guard: empty content (Qwen3 thinking-only exhaustion)
         if not content or not content.strip():
             logger.warning(f"[LLM] Empty content ({tokens} thinking-only tokens) — will retry with /no_think")
             raise _EmptyThinkingResponse(f"Empty content after {tokens} tokens")
 
         return content
+
     except _EmptyThinkingResponse:
-        raise  # pass through to retry handler — do NOT wrap
+        raise
     except httpx.TimeoutException:
         raise RuntimeError(f"LLM timeout after {TIMEOUT}s — is {cfg['platform']} running at {cfg['url']}?")
     except Exception as e:
@@ -288,9 +328,12 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
 
 
 def parse_json(text: str):
-    """Extract JSON from LLM response, handling markdown fences and leading text."""
+    """Extract JSON from LLM response, handling markdown fences, leading text, and R1 think tags."""
     if not text:
         return None
+
+    # Strip any residual R1 think tags that slipped through (belt-and-suspenders)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
     text = re.sub(r'```(?:json)?\s*', '', text)
     text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)

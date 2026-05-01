@@ -1,5 +1,12 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v6.9.4: Robust Qwen3 thinking-token fix.
+         - Strip <think>...</think> and partial <think> blocks from LLM output BEFORE
+           declaring content empty. When finish=length, the response may contain post-think
+           content even if the content field looks truncated.
+         - Retry now uses a capped max_tokens (2000) so the model has budget for actual output.
+         - Added chat_template_kwargs: {enable_thinking: false} for newer LM Studio builds.
+         - The /no_think prefix is kept as a belt-and-suspenders measure.
 v6.9.3: Add enable_thinking/thinking payload fields — only reliable way to disable Qwen3 thinking.
          Prompt-level /no_think is ignored by LM Studio; API payload field works correctly.
 v6.9.1: Auto-resolve model ID from /v1/models when configured name is placeholder.
@@ -17,6 +24,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
 TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to prevent shutdown hangs
+
+# Max tokens to request on retry with /no_think — must stay under LM Studio's hard server cap.
+# Set conservatively so the model has budget for actual output after thinking tokens are stripped.
+RETRY_MAX_TOKENS = 2000
 
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
@@ -48,6 +59,27 @@ OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', '
 ANTHROPIC_PLATFORMS     = {'anthropic'}
 
 PLACEHOLDER_MODELS = {'local-model', 'default', '', None}
+
+
+def _strip_thinking_tokens(text: str) -> str:
+    """
+    Remove Qwen3 <think>...</think> blocks from LLM output.
+    Handles:
+      - Complete blocks: <think>...</think>content
+      - Partial blocks (truncated mid-think): <think>...EOF  → returns ''
+      - Blocks with no closing tag but content after last </think>
+    """
+    if not text:
+        return text
+
+    # Remove complete <think>...</think> blocks (non-greedy, handles multiline)
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
+    # If a <think> tag opened but never closed (truncated), drop everything from it
+    if '<think>' in cleaned:
+        cleaned = cleaned[:cleaned.index('<think>')]
+
+    return cleaned.strip()
 
 
 def _resolve_model(cfg: dict) -> str:
@@ -99,11 +131,13 @@ def get_llm_config() -> dict:
                   (llm_cfgs[0] if llm_cfgs else None)
             if cfg:
                 platform = (cfg.platform or 'lmstudio').lower()
+                # Cap max_tokens at RETRY_MAX_TOKENS if the DB value exceeds LM Studio's hard limit
+                db_max = int(cfg.extra_field_2 or 2000)
                 return {
                     'url':        (cfg.api_url or DEFAULT_URL).rstrip('/'),
                     'model':      cfg.extra_field_1 or DEFAULT_MODEL,
                     'api_key':    cfg.api_key or '',
-                    'max_tokens': int(cfg.extra_field_2 or 32768),
+                    'max_tokens': db_max,
                     'platform':   platform,
                     'provider':   'anthropic' if platform == 'anthropic' else 'openai_compat',
                 }
@@ -115,7 +149,7 @@ def get_llm_config() -> dict:
         'url':        os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
         'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':    os.getenv('OPENAI_API_KEY', ''),
-        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 32768)),
+        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 2000)),
         'platform':   'lmstudio',
         'provider':   'openai_compat',
     }
@@ -180,20 +214,20 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, thinking_mode=thinking)
         except _EmptyThinkingResponse:
             # Qwen3 produced only <think> tokens — retry immediately with /no_think
+            # Use RETRY_MAX_TOKENS (not the full requested amount) so the model has room to output
             if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-                logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
+                logger.warning(f"[LLM] Retrying with /no_think + {RETRY_MAX_TOKENS} token cap — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
-                retry_max = max(effective_max, 32768)
                 try:
                     if cfg['provider'] == 'anthropic':
-                        return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
+                        return _call_anthropic(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg)
                     else:
-                        return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg, thinking_mode=False)
+                        return _call_openai_compat(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg, thinking_mode=False)
                 except _EmptyThinkingResponse:
                     # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
                     # Return empty JSON array so the track degrades gracefully instead of crashing.
                     logger.error("[LLM] Both thinking and no_think attempts returned empty content. "
-                                 "Check LM Studio → Model Settings → Max Response Tokens (set to 0 = unlimited).")
+                                 "Check LM Studio → Model Settings → Max Response Tokens → set to 0 (unlimited).")
                     return "[]"
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
@@ -223,11 +257,14 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         "temperature":  temperature,
     }
 
-    # Qwen3 thinking control — the only reliable way to suppress <think> tokens.
-    # Prompt-level /no_think is ignored by LM Studio; these payload fields work correctly.
-    if not cfg.get('provider') == 'anthropic':
-        payload["enable_thinking"] = thinking_mode  # Qwen3 native parameter
-        payload["thinking"]        = thinking_mode  # alternate key for some LM Studio builds
+    # Qwen3 thinking control — belt-and-suspenders approach:
+    # 1. enable_thinking / thinking: Qwen3 native API fields
+    # 2. chat_template_kwargs: newer LM Studio builds honour this to disable reasoning mode
+    # 3. /no_think prefix in system prompt: handled by caller via effective_system
+    if cfg.get('platform') in ('lmstudio', 'ollama'):
+        payload["enable_thinking"]       = thinking_mode
+        payload["thinking"]              = thinking_mode
+        payload["chat_template_kwargs"]  = {"enable_thinking": thinking_mode}
 
     url = f"{cfg['url']}/chat/completions"
     logger.info(f"[LLM] → POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt")
@@ -244,21 +281,28 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         r.raise_for_status()
         data    = r.json()
         choice  = data['choices'][0]
-        content = choice['message']['content']
+        raw_content = choice['message']['content'] or ''
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')
-        logger.info(f"[LLM] ← {tokens} completion tokens | {len(content)} chars | finish={finish}")
+        logger.info(f"[LLM] ← {tokens} completion tokens | {len(raw_content)} chars | finish={finish}")
+
         if finish == 'length':
             logger.warning(f"[LLM] finish_reason=length — hit token cap ({tokens} tokens). "
                            "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited).")
 
-        # Guard: Qwen3 thinking mode sometimes emits only <think> tokens internally
-        # and returns empty content field. Raise typed exception so retry logic can catch it.
-        if not content or not content.strip():
-            logger.warning(f"[LLM] Empty content ({tokens} thinking-only tokens) — will retry with /no_think")
-            raise _EmptyThinkingResponse(f"Empty content after {tokens} tokens")
+        # Strip Qwen3 <think>...</think> blocks — these consume tokens but aren't output.
+        # Even when finish=length (truncated), there may be valid content AFTER the think block.
+        content = _strip_thinking_tokens(raw_content)
 
-        return content
+        if content:
+            if raw_content != content:
+                logger.debug(f"[LLM] Stripped thinking tokens → {len(content)} chars of real content remain")
+            return content
+
+        # Truly empty after stripping — raise typed sentinel for retry handler
+        logger.warning(f"[LLM] Empty content after stripping thinking tokens ({tokens} tokens used) — will retry with /no_think")
+        raise _EmptyThinkingResponse(f"Empty content after stripping {tokens} tokens")
+
     except _EmptyThinkingResponse:
         raise  # pass through to retry handler — do NOT wrap
     except httpx.TimeoutException:

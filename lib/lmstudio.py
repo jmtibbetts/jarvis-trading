@@ -240,21 +240,29 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             else:
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1)
         except _EmptyThinkingResponse:
-            # Safety net — should rarely fire now that thinking is disabled by default
-            if not is_r1 and effective_thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-                logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
-                logger.warning("[LLM] Consider setting THINKING_ENABLED=false in .env to skip this overhead")
-                fallback_system = '/no_think\n\n' + (system or '')
-                prompt = prompt.replace('/no_think\n\n', '')
-                prompt = '/no_think\n\n' + prompt
-                retry_max = max(effective_max, 32768)
+            # Qwen3 consumed all tokens on <think>. Retry with a MUCH smaller max_tokens
+            # so the model's thinking overhead still fits and JSON output can follow.
+            # This fires whether thinking=True or thinking=False — Qwen3 ignores /no_think
+            # when LM Studio's server cap overrides the API parameter.
+            if not is_r1:
+                logger.warning(
+                    "[LLM] Empty content (thinking-only) — retrying with reduced max_tokens=800 "
+                    "to force Qwen3 to truncate reasoning and emit JSON. "
+                    "Permanent fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
+                )
+                # Ensure /no_think prefix is set for the retry
+                retry_system = '/no_think\n\n' + (system or '').replace('/no_think\n\n', '')
+                retry_prompt  = '/no_think\n\n' + prompt.replace('/no_think\n\n', '')
                 try:
-                    return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg, is_r1=False)
+                    return _call_openai_compat(retry_prompt, retry_system, 800, temperature, cfg, is_r1=False)
                 except _EmptyThinkingResponse:
                     logger.error(
-                        "[LLM] Both thinking and no_think attempts returned empty content. "
-                        "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited)."
+                        "[LLM] Retry also returned empty content — LM Studio token cap is too tight. "
+                        "Fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
                     )
+                    return "[]"
+                except Exception as retry_err:
+                    logger.error(f"[LLM] Retry failed: {retry_err}")
                     return "[]"
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
@@ -402,3 +410,4 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
+

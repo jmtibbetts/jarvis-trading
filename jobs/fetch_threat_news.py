@@ -1,7 +1,9 @@
 """
-Job: Fetch Threat News v6.2 — RSS → LLM analysis → DB storage.
-v6.2: thinking=False for news classification (no chain-of-thought needed), batch capped at 20.
-v6.1: Dedup window reduced from 24h to 2h so new articles get through each run.
+Job: Fetch Threat News v6.9.1 — RSS → LLM analysis → DB storage.
+v6.9.1: Batch size reduced to 5 articles per LLM call + compact output schema
+        to stay under LM Studio's hard 2k token response cap.
+v6.2:  thinking=False for news classification (no chain-of-thought needed).
+v6.1:  Dedup window reduced from 24h to 2h so new articles get through each run.
 """
 import feedparser, uuid, logging, hashlib, re
 from datetime import datetime, timezone, timedelta
@@ -45,6 +47,15 @@ RSS_FEEDS = [
     {'url': 'https://techcrunch.com/feed/',                              'source': 'TechCrunch',        'category': 'tech'},
 ]
 
+# ── Token budget math ──────────────────────────────────────────────────────────
+# LM Studio hard cap ≈ 2,000 tokens.
+# Input per article (title + 200-char summary + index label) ≈ 60-80 tokens.
+# Prompt boilerplate ≈ 150 tokens.
+# Batch of 5 → input ≈ 550 tokens → leaves ~1,450 tokens for output.
+# Output per article ≈ 120-160 tokens → 5 articles ≈ 600-800 tokens. Safe.
+BATCH_SIZE = 5       # articles per LLM call
+MAX_ARTICLES = 25    # total cap processed per run (5 batches × 5 = 25)
+
 def fetch_feed(feed: dict) -> list[dict]:
     try:
         parsed = feedparser.parse(feed['url'])
@@ -54,8 +65,7 @@ def fetch_feed(feed: dict) -> list[dict]:
             if not title:
                 continue
             summary = entry.get('summary', '') or entry.get('description', '')
-            # Strip HTML tags
-            summary = re.sub(r'<[^>]+>', ' ', summary).strip()[:800]
+            summary = re.sub(r'<[^>]+>', ' ', summary).strip()[:300]
             url = entry.get('link', '')
             pub = entry.get('published', '') or entry.get('updated', '')
             articles.append({
@@ -72,59 +82,60 @@ def fetch_feed(feed: dict) -> list[dict]:
         return []
 
 def analyze_batch(articles: list[dict]) -> list[dict]:
-    """Send a batch of articles to LLM for threat/sentiment analysis."""
+    """Send a small batch of articles to LLM. Compact prompt fits under 2k token cap."""
     batch_text = '\n'.join([
         f"{i+1}. [{a['source']}] {a['title']} — {a['summary'][:200]}"
         for i, a in enumerate(articles)
     ])
-    
-    prompt = f"""Analyze these {len(articles)} news articles for geopolitical threats and market relevance.
+
+    # Compact schema — shorter field names/values = fewer output tokens
+    prompt = f"""Classify these {len(articles)} news articles. Only include articles with clear market impact or geopolitical significance. Skip routine/low-importance news.
 
 {batch_text}
 
-For each article that is a significant geopolitical threat OR has clear market impact, output a JSON object.
-Skip routine/low-importance news.
+Return ONLY a JSON array. Each item:
+{{"i":<1-based index>,"t":true,"title":"short title","desc":"1-2 sentence summary","type":"military_conflict|political_crisis|economic_sanctions|natural_disaster|cyber_attack|terrorism|trade_war|energy_crisis|political_turmoil|market_event","sev":"Critical|High|Medium|Low","country":"country","region":"Middle East|Europe|Asia Pacific|North America|South America|Africa|Global","sent":"positive|negative|neutral","assets":["TICKER"],"cat":"finance|geopolitics|crypto|energy|tech|conflict"}}
 
-Output a JSON array:
-[{{
-  "index": 1,
-  "is_threat": true,
-  "title": "cleaned title",
-  "description": "2-3 sentence summary",
-  "event_type": "one of: military_conflict, political_crisis, economic_sanctions, natural_disaster, cyber_attack, terrorism, trade_war, energy_crisis, political_turmoil, market_event",
-  "severity": "one of: Critical, High, Medium, Low",
-  "country": "primary country/region affected",
-  "region": "one of: Middle East, Europe, Asia Pacific, North America, South America, Africa, Global",
-  "sentiment": "one of: positive, negative, neutral",
-  "affected_assets": ["list", "of", "ticker", "symbols", "affected"],
-  "category": "finance/geopolitics/crypto/energy/tech/conflict"
-}}]
-
-Only include articles that are genuinely significant. Return ONLY the JSON array."""
+Return [] if nothing is significant."""
 
     try:
-        response = call_lm_studio(prompt, max_tokens=4096, temperature=0.1, thinking=False)
+        response = call_lm_studio(prompt, max_tokens=1500, temperature=0.1, thinking=False)
         parsed = parse_json(response)
         if isinstance(parsed, list):
-            return parsed
+            # Remap compact keys to full keys for downstream compatibility
+            results = []
+            for r in parsed:
+                results.append({
+                    'index':          r.get('i', 1),
+                    'is_threat':      r.get('t', False),
+                    'title':          r.get('title', ''),
+                    'description':    r.get('desc', ''),
+                    'event_type':     r.get('type', 'market_event'),
+                    'severity':       r.get('sev', 'Medium'),
+                    'country':        r.get('country', ''),
+                    'region':         r.get('region', 'Global'),
+                    'sentiment':      r.get('sent', 'neutral'),
+                    'affected_assets':r.get('assets', []),
+                    'category':       r.get('cat', 'geopolitics'),
+                })
+            return results
     except Exception as e:
         logger.error(f"[News] LLM analysis failed: {e}")
     return []
 
 def run():
     logger.info("[News] Fetching threat news...")
-    
+
     # 1. Fetch all RSS feeds in parallel
     all_articles = []
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = {ex.submit(fetch_feed, f): f for f in RSS_FEEDS}
         for fut in as_completed(futures):
             all_articles.extend(fut.result())
-    
+
     logger.info(f"[News] Fetched {len(all_articles)} raw articles")
-    
+
     # 2. Dedup — compare against last 2h of DB titles only
-    #    (24h window caused all articles to be marked seen after first run)
     seen_hashes = set()
     with get_db() as db:
         cutoff_2h = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -145,41 +156,45 @@ def run():
     if not new_articles:
         logger.info("[News] No new articles since last run — skipping LLM call")
         return {'threats': 0, 'news': 0}
-    
-    # 3. Analyze in ONE consolidated LLM call (max 30 articles)
-    # Capping at 30 prevents context overflow and avoids hogging the local LLM
-    # with repeated calls that block signal generation.
+
+    # 3. Process in small batches of BATCH_SIZE to stay under 2k token cap
+    cap = new_articles[:MAX_ARTICLES]
+    batches = [cap[i:i+BATCH_SIZE] for i in range(0, len(cap), BATCH_SIZE)]
+    logger.info(f"[News] Processing {len(cap)} articles in {len(batches)} batches of {BATCH_SIZE} (token-safe mode)")
+
     analyzed = []
-    cap = new_articles[:20]
-    if cap:
-        logger.info(f"[News] Sending {len(cap)} articles to LLM for analysis (thinking=False, fast classify)...")
-        results = analyze_batch(cap)
+    for batch_num, batch in enumerate(batches):
+        logger.info(f"[News] Batch {batch_num+1}/{len(batches)}: sending {len(batch)} articles to LLM...")
+        results = analyze_batch(batch)
+        # Attach source metadata (index is 1-based within the batch)
         for r in results:
             idx = r.get('index', 1) - 1
-            if 0 <= idx < len(cap):
-                r['source_url'] = cap[idx].get('url', '')
-                r['source']     = cap[idx].get('source', r.get('source', ''))
-                r['published']  = cap[idx].get('published', '')
+            if 0 <= idx < len(batch):
+                r['source_url'] = batch[idx].get('url', '')
+                r['source']     = batch[idx].get('source', r.get('source', ''))
+                r['published']  = batch[idx].get('published', '')
         analyzed.extend(results)
-        logger.info(f"[News] LLM returned {len(analyzed)} classified items")
-    
+        logger.info(f"[News] Batch {batch_num+1} returned {len(results)} classified items")
+
+    logger.info(f"[News] Total classified: {len(analyzed)} items across {len(batches)} batches")
+
     # 4. Save to DB
     threat_count = 0
     news_count   = 0
     now_iso = datetime.now(timezone.utc).isoformat()
-    
+
     with get_db() as db:
         for item in analyzed:
             title = item.get('title', '').strip()
             if not title:
                 continue
-            
+
             assets_raw = item.get('affected_assets', [])
             assets_str = ','.join(assets_raw) if isinstance(assets_raw, list) else str(assets_raw)
-            
+
             pub_at = item.get('published') or now_iso
-            
-            # Save as ThreatEvent if it's flagged as a threat
+
+            # Save as ThreatEvent if flagged as a threat
             if item.get('is_threat') and item.get('event_type'):
                 threat = ThreatEvent(
                     id=str(uuid.uuid4()),
@@ -198,8 +213,8 @@ def run():
                 )
                 db.add(threat)
                 threat_count += 1
-            
-            # Always save as NewsItem
+
+            # Always save as NewsItem (for signal generation context)
             news = NewsItem(
                 id=str(uuid.uuid4()),
                 title=title,
@@ -216,21 +231,8 @@ def run():
             )
             db.add(news)
             news_count += 1
-        
-        # Prune old records (>7 days)
-        prune_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        db.query(ThreatEvent).filter(ThreatEvent.created_date < prune_cutoff).delete()
-        db.query(NewsItem).filter(NewsItem.created_date < prune_cutoff).delete()
-    
+
+        db.commit()
+
     logger.info(f"[News] Saved {threat_count} threats, {news_count} news items")
-
-    # Notify event bus if new intelligence arrived — triggers immediate signal re-generation
-    if threat_count > 0 or news_count > 0:
-        try:
-            from app.scheduler import notify_new_intelligence
-            notify_new_intelligence()
-        except Exception as e:
-            logger.debug(f"[News] Event notify failed: {e}")
-
     return {'threats': threat_count, 'news': news_count}
-

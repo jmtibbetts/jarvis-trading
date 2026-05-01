@@ -195,8 +195,10 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     # ── System prompt modification ─────────────────────────────────────────────
     effective_system = system
     if not is_r1 and not thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-        # Qwen3 only: /no_think prefix suppresses chain-of-thought for fast calls
+        # Qwen3: /no_think in BOTH system and user prompt for reliable thinking suppression.
+        # System-only /no_think is ignored by Qwen3 when it enters a reasoning loop.
         effective_system = '/no_think\n\n' + (system or '')
+        prompt = '/no_think\n\n' + prompt  # inline user-turn flag
 
     with _llm_lock:
         if _shutdown_event.is_set():
@@ -216,6 +218,8 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             if not is_r1 and thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
+                prompt = prompt.replace('/no_think\n\n', '')  # avoid double prefix
+                prompt = '/no_think\n\n' + prompt
                 retry_max = max(effective_max, 32768)
                 try:
                     return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg, is_r1=False)

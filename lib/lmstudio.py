@@ -1,5 +1,7 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.5: Add enable_thinking=False to API payload — the ONLY reliable way to disable Qwen3 thinking.
+      Prompt-level /no_think is ignored by LM Studio. Removed /no_think prefix injection.
 v7.4: Default max_tokens changed from 32768 → 2000 (matches LM Studio server cap); no more per-file token juggling
 v7.3: Add max_output_tokens to payload (LM Studio native v1 field — overrides UI "Limit Response Length" cap)
 v7.2: Default thinking=False — LM Studio's 150-token server cap causes all thinking
@@ -223,9 +225,8 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
 
     # ── System prompt modification ─────────────────────────────────────────────
     effective_system = system
-    if not is_r1 and not effective_thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-        effective_system = '/no_think\n\n' + (system or '')
-        prompt = '/no_think\n\n' + prompt
+    # NOTE: /no_think prompt prefix is intentionally NOT used — LM Studio ignores it.
+    # Thinking is controlled via enable_thinking/thinking API payload fields instead.
 
     with _llm_lock:
         if _shutdown_event.is_set():
@@ -239,15 +240,15 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             if cfg['provider'] == 'anthropic':
                 return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
             else:
-                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1)
+                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1, thinking_mode=effective_thinking)
         except _EmptyThinkingResponse:
             # Qwen3 burned all tokens on <think> tags — LM Studio has a hard server cap
             # overriding our max_tokens. Strategy: retry with /no_think prefix and
             # progressively SMALLER max_tokens so the model is forced to emit JSON
             # before hitting the cap. Works even when cap is as low as 150 tokens.
             if not is_r1:
-                retry_system = '/no_think\n\n' + (system or '').replace('/no_think\n\n', '')
-                retry_prompt  = '/no_think\n\n' + prompt.replace('/no_think\n\n', '')
+                retry_system = system or ''
+                retry_prompt  = prompt
                 # Try descending token budgets: 120 → 80 → 60
                 for retry_max in (120, 80, 60):
                     logger.warning(
@@ -255,7 +256,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                         "Permanent fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
                     )
                     try:
-                        return _call_openai_compat(retry_prompt, retry_system, retry_max, temperature, cfg, is_r1=False)
+                        return _call_openai_compat(retry_prompt, retry_system, retry_max, temperature, cfg, is_r1=False, thinking_mode=False)
                     except _EmptyThinkingResponse:
                         continue  # try smaller budget
                     except Exception as retry_err:
@@ -267,7 +268,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
-                         temperature: float, cfg: dict, is_r1: bool = False) -> str:
+                         temperature: float, cfg: dict, is_r1: bool = False, thinking_mode: bool = False) -> str:
     headers = {"Content-Type": "application/json"}
     if cfg['api_key']:
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
@@ -280,6 +281,10 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         messages.append({"role": "system", "content": _sanitize(system)})
     messages.append({"role": "user", "content": _sanitize(prompt)})
 
+    # Detect whether this call wants thinking disabled
+    no_think_active = (system and '/no_think' in system) or (not is_r1 and not thinking_mode)
+    mode_tag = 'R1-mode' if is_r1 else ('thinking=True' if not no_think_active else 'thinking=False')
+
     payload = {
         "model":             cfg['model'],
         "messages":          messages,
@@ -290,9 +295,18 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         "temperature":       temperature,
     }
 
+    # Qwen3 thinking control — the ONLY reliable way to disable <think> tokens.
+    # Prompt-level /no_think is ignored by LM Studio. These API fields work:
+    if not is_r1:
+        if no_think_active:
+            # Disable thinking: Qwen3 stops generating <think> tokens entirely
+            payload["enable_thinking"] = False   # Qwen3 native (LM Studio passes through)
+            payload["thinking"]        = False   # alternate key used by some LM Studio builds
+        else:
+            payload["enable_thinking"] = True
+            payload["thinking"]        = True
+
     url = f"{cfg['url']}/chat/completions"
-    no_think_active = system and '/no_think' in system
-    mode_tag = 'R1-mode' if is_r1 else ('thinking=True' if not no_think_active else 'thinking=False')
     logger.info(f"[LLM] -> POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt | {mode_tag}")
 
     timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)

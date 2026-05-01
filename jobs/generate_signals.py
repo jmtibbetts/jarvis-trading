@@ -25,7 +25,7 @@ from app.routes import log_decision
 from app.database import get_db, TradingSignal, ThreatEvent, NewsItem, MarketAsset
 from lib.lmstudio import call_lm_studio, parse_json, get_llm_config
 from lib.ta_engine import analyze_symbol, build_ta_prompt_block
-from lib.learning_engine import get_accuracy_context, get_pattern_context, get_regime_context, get_lessons_context, get_confidence_adjustment
+from lib.learning_engine import get_accuracy_context, get_pattern_context, get_regime_context, get_lessons_context, get_lessons_context_for_track, get_confidence_adjustment
 from lib.futures_data import PAPER_FUTURES, get_futures_news_context, fetch_futures_multi_tf, FUTURES_UNIVERSE
 
 logger = logging.getLogger(__name__)
@@ -375,22 +375,26 @@ def run():
         ]
         held_ctx = "=== CURRENT OPEN POSITIONS (DO NOT generate signals for these unless adding to a winner >+5%) ===\n" + "\n".join(held_lines) + "\n\n"
 
-    # Global learning context — injected ONCE per prompt, not per symbol
-    global_lessons = get_lessons_context(symbol=None, limit=5)
-    regime_ctx     = get_regime_context(regime.get("label", ""))
+    # Learning context — fetched per-track so lessons are relevant to the symbols being analyzed.
+    # get_lessons_context_for_track prioritizes symbol-specific lessons, deduplicates by category
+    # (max 2 per category), and orders by applied_count ASC so new lessons get exposure first.
+    regime_ctx = get_regime_context(regime.get("label", ""))
 
     def make_prompt(label, syms, task, rule=None):
         r = rule if rule is not None else bounce_rule
         schema = PAPER_SIGNAL_SCHEMA if rule == paper_rule else SIGNAL_SCHEMA
         # Accuracy summary: only symbols in this track with recorded trade history
         acc_summary = build_accuracy_summary(syms)
+        # Track-specific lessons: prioritize lessons for the symbols in this track,
+        # then fill with globally relevant lessons — category-deduplicated, least-applied first
+        track_lessons = get_lessons_context_for_track(track_symbols=list(syms), limit=8)
         prompt = (
             f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
             f"=== MARKET NEWS ===\n{news_ctx}\n\n"
             f"=== MARKET REGIME ===\nCurrent: {regime.get('label','Unknown')} | Risk: {regime.get('risk','medium')}\n{regime_ctx}\n"
             f"{held_ctx}"
             f"{acc_summary}"
-            f"{global_lessons}"
+            f"{track_lessons}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
             f"=== TASK ===\n{task}{r}"
             f"IMPORTANT: Return ONLY the JSON array. Do not include any text before or after it.\nOutput format:\n{schema}"
@@ -455,7 +459,7 @@ def run():
         f"=== FUTURES / COMMODITY / FOREX NEWS ===\n{futures_news_ctx}\n\n"
         f"=== MARKET REGIME ===\nCurrent: {_fut_regime_label} | Risk: {_fut_regime_risk}\n"
         f"{regime_ctx}\n"
-        f"{global_lessons}"
+        f"{get_lessons_context_for_track(track_symbols=TRACK_F_FUTURES, limit=6)}"
         f"=== TECHNICAL ANALYSIS — FUTURES / FOREX / COMMODITIES ===\n"
         f"{_fut_ta_block}\n\n"
         f"=== ASSET REFERENCE ===\n{_fut_asset_ref}\n\n"
@@ -639,3 +643,4 @@ def run():
         thinking=True
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+

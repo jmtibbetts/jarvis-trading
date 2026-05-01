@@ -361,7 +361,7 @@ def run():
         for n in news[:8]
     ]) or "No recent news."
 
-    sys_p = "You are an expert quantitative trader. Output only valid JSON arrays, no commentary, no markdown."
+    sys_p = "You are an expert quantitative trader. Output only valid JSON arrays. No commentary, no markdown, no preamble — start your response with '[' and end with ']'."
     bounce_rule = "\nRULES: direction must be 'Long' or 'Bounce' only. stop_loss BELOW entry. target ABOVE entry. R:R >= 2.\n"
     paper_rule  = ("\nRULES: direction must be 'Short', 'Short_Leveraged', or 'Long_Leveraged' ONLY. "
                    "For Short/Short_Leveraged: stop_loss ABOVE entry, target_price BELOW entry. "
@@ -393,7 +393,7 @@ def run():
             f"{global_lessons}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
             f"=== TASK ===\n{task}{r}"
-            f"Output format (return ONLY this JSON array):\n{schema}"
+            f"IMPORTANT: Return ONLY the JSON array. Do not include any text before or after it.\nOutput format:\n{schema}"
         )
         tok_est = len(prompt) // 4
         logger.info(f"[Signals] Prompt '{label}': ~{tok_est} tokens input | {TRACK_MAX_TOKENS} max output")
@@ -464,7 +464,7 @@ def run():
         f"Use 5x for moderate conviction, 10x for high, 20x for very high (with tight stops). "
         f"Short overextended uptrends. Long breakout/oversold bounces. Generate 4-6 paper signals."
         f"{_fut_rules}\n"
-        f"Output format (return ONLY this JSON array):\n{FUTURES_PAPER_SCHEMA}"
+        f"IMPORTANT: Return ONLY the JSON array. Do not include any text before or after it.\nOutput format:\n{FUTURES_PAPER_SCHEMA}"
     )
     logger.info(f"[Signals] Prompt 'F_futures': ~{len(futures_prompt)//4} tokens input | {TRACK_MAX_TOKENS} max output")
 

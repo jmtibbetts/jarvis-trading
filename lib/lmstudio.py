@@ -1,5 +1,9 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v7.2: Default thinking=False — LM Studio's 150-token server cap causes all thinking
+      calls to fail immediately. Thinking mode is now opt-in via THINKING_ENABLED env
+      var or DB config extra_field_3 = 'thinking_on'. Eliminates wasted 3-4s retry
+      overhead on every signal evaluation.
 v7.1: Send maxTokens (camelCase) in payload to override LM Studio server default
 v7.0: DeepSeek-R1 support — strips <think>...</think> blocks before JSON parsing,
       removes Qwen3-specific /no_think toggle, auto-detects R1 models.
@@ -19,6 +23,24 @@ DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
 TIMEOUT       = 180.0  # 3 min — R1 reasoning can take longer than Qwen3
 
+# ── Thinking mode control ──────────────────────────────────────────────────────
+# Set THINKING_ENABLED=true in env OR extra_field_3='thinking_on' in DB config
+# to re-enable thinking mode. Default is OFF because LM Studio's server-side
+# 150-token cap causes all thinking calls to fail with empty output.
+_THINKING_ENABLED_ENV = os.getenv("THINKING_ENABLED", "false").lower() in ("true", "1", "yes")
+
+def _is_thinking_enabled(cfg: dict) -> bool:
+    """
+    Returns True only if thinking mode is explicitly enabled — either via:
+      - THINKING_ENABLED=true environment variable, OR
+      - DB config extra_field_3 = 'thinking_on'
+    Default is False to avoid wasted retry overhead from LM Studio's token cap.
+    """
+    if _THINKING_ENABLED_ENV:
+        return True
+    db_flag = (cfg.get('thinking_flag') or '').lower()
+    return db_flag == 'thinking_on'
+
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
 
@@ -33,13 +55,11 @@ class _EmptyThinkingResponse(RuntimeError):
     pass
 
 # ── Concurrency limiter — LM Studio supports N parallel inference slots ─────
-# BoundedSemaphore(4) allows 4 concurrent LLM calls, matching LM Studio's 4-slot config.
-# Increase LLM_MAX_PARALLEL env var to match your LM Studio "Parallel Requests" setting.
 _LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "4"))
 _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
 # ── Model auto-resolution cache ───────────────────────────────────────────────
-_resolved_model_cache: dict = {}   # keyed by base_url → resolved model id
+_resolved_model_cache: dict = {}
 _model_cache_lock = threading.Lock()
 
 # ── Provider detection ─────────────────────────────────────────────────────────
@@ -64,16 +84,14 @@ def _strip_think_tags(text: str) -> tuple[str, int]:
     """
     Remove <think>...</think> blocks from R1 model output.
     Returns (cleaned_text, think_token_estimate).
-    R1 puts chain-of-thought inside these tags before the actual answer.
     """
     think_content = ''
     think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
     if think_match:
         think_content = think_match.group(1)
         text = text[:think_match.start()] + text[think_match.end():]
-    # Also strip any trailing/leading whitespace left behind
     text = text.strip()
-    think_tokens = len(think_content) // 4  # rough estimate
+    think_tokens = len(think_content) // 4
     return text, think_tokens
 
 
@@ -81,12 +99,10 @@ def _resolve_model(cfg: dict) -> str:
     """
     If the configured model name is a generic placeholder, query the server's
     /v1/models endpoint and return the first loaded model ID.
-    Result is cached per base URL so subsequent calls are free.
-    Falls back gracefully to the placeholder if the server is unreachable.
     """
     model = cfg.get('model', '')
     if model not in PLACEHOLDER_MODELS:
-        return model  # Already a real name — nothing to do
+        return model
 
     base_url = cfg.get('url', DEFAULT_URL)
     with _model_cache_lock:
@@ -126,31 +142,31 @@ def get_llm_config() -> dict:
             if cfg:
                 platform = (cfg.platform or 'lmstudio').lower()
                 return {
-                    'url':        (cfg.api_url or DEFAULT_URL).rstrip('/'),
-                    'model':      cfg.extra_field_1 or DEFAULT_MODEL,
-                    'api_key':    cfg.api_key or '',
-                    'max_tokens': int(cfg.extra_field_2 or 32768),
-                    'platform':   platform,
-                    'provider':   'anthropic' if platform == 'anthropic' else 'openai_compat',
+                    'url':           (cfg.api_url or DEFAULT_URL).rstrip('/'),
+                    'model':         cfg.extra_field_1 or DEFAULT_MODEL,
+                    'api_key':       cfg.api_key or '',
+                    'max_tokens':    int(cfg.extra_field_2 or 32768),
+                    'thinking_flag': cfg.extra_field_3 or '',
+                    'platform':      platform,
+                    'provider':      'anthropic' if platform == 'anthropic' else 'openai_compat',
                 }
     except Exception as e:
         logger.debug(f"[LLM] DB config lookup failed: {e}")
 
-    # Fallback to env
     return {
-        'url':        os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
-        'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
-        'api_key':    os.getenv('OPENAI_API_KEY', ''),
-        'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 32768)),
-        'platform':   'lmstudio',
-        'provider':   'openai_compat',
+        'url':           os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
+        'model':         os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
+        'api_key':       os.getenv('OPENAI_API_KEY', ''),
+        'max_tokens':    int(os.getenv('LM_STUDIO_MAX_TOKENS', 32768)),
+        'thinking_flag': os.getenv('THINKING_ENABLED', ''),
+        'platform':      'lmstudio',
+        'provider':      'openai_compat',
     }
 
 
 def check_health() -> dict:
     """Ping the LLM server and return status."""
     cfg = get_llm_config()
-    # Invalidate cache so health check always probes live
     with _model_cache_lock:
         _resolved_model_cache.pop(cfg.get('url', DEFAULT_URL), None)
     resolved = _resolve_model(cfg)
@@ -160,9 +176,11 @@ def check_health() -> dict:
                           headers=({'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {}))
             if r.status_code == 200:
                 models = r.json().get('data', [])
+                thinking_on = _is_thinking_enabled(cfg)
                 return {'ok': True, 'platform': cfg['platform'], 'model': resolved,
                         'url': cfg['url'], 'models': [m.get('id') for m in models[:5]],
-                        'r1_mode': _is_r1_model(resolved)}
+                        'r1_mode': _is_r1_model(resolved),
+                        'thinking_enabled': thinking_on}
             return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
                     'status_code': r.status_code}
         elif cfg['provider'] == 'anthropic':
@@ -178,11 +196,16 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
     Aborts immediately if shutdown has been signalled.
 
-    For R1 models: thinking parameter is ignored — R1 always reasons via <think> tags
-    and outputs the answer after. Think tags are stripped automatically before return.
+    THINKING MODE (v7.2):
+    The 'thinking' parameter is now gated by _is_thinking_enabled(cfg).
+    If thinking is not enabled (default), all calls use /no_think mode regardless
+    of what callers pass. This eliminates wasted retry overhead from LM Studio's
+    server-side token cap causing all thinking calls to return empty output.
 
-    For Qwen3 models: thinking=True uses full chain-of-thought,
-    thinking=False uses /no_think prefix for fast calls.
+    To re-enable thinking: set THINKING_ENABLED=true in .env, or set
+    extra_field_3 = 'thinking_on' in the LLM's DB config row.
+
+    For R1 models: thinking parameter is always ignored — R1 uses <think> tags natively.
     """
     if _shutdown_event.is_set():
         raise RuntimeError("LLM call aborted — shutdown in progress")
@@ -192,13 +215,15 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     effective_max = max_tokens or cfg['max_tokens']
     is_r1 = _is_r1_model(cfg['model'])
 
+    # ── Gate thinking mode ─────────────────────────────────────────────────────
+    # If LM Studio has a token cap making thinking calls fail, skip thinking entirely
+    effective_thinking = thinking and _is_thinking_enabled(cfg) and not is_r1
+
     # ── System prompt modification ─────────────────────────────────────────────
     effective_system = system
-    if not is_r1 and not thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
-        # Qwen3: /no_think in BOTH system and user prompt for reliable thinking suppression.
-        # System-only /no_think is ignored by Qwen3 when it enters a reasoning loop.
+    if not is_r1 and not effective_thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
         effective_system = '/no_think\n\n' + (system or '')
-        prompt = '/no_think\n\n' + prompt  # inline user-turn flag
+        prompt = '/no_think\n\n' + prompt
 
     with _llm_lock:
         if _shutdown_event.is_set():
@@ -206,7 +231,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         logger.debug(
             f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} "
             f"model={cfg['model']} max_tokens={effective_max} "
-            f"{'[R1-mode]' if is_r1 else f'thinking={thinking}'}"
+            f"{'[R1-mode]' if is_r1 else f'thinking={effective_thinking}'}"
         )
         try:
             if cfg['provider'] == 'anthropic':
@@ -214,11 +239,12 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             else:
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1)
         except _EmptyThinkingResponse:
-            # Qwen3 only — R1 never hits this path
-            if not is_r1 and thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
+            # Safety net — should rarely fire now that thinking is disabled by default
+            if not is_r1 and effective_thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
                 logger.warning("[LLM] Retrying with /no_think — model produced thinking-only output on first attempt")
+                logger.warning("[LLM] Consider setting THINKING_ENABLED=false in .env to skip this overhead")
                 fallback_system = '/no_think\n\n' + (system or '')
-                prompt = prompt.replace('/no_think\n\n', '')  # avoid double prefix
+                prompt = prompt.replace('/no_think\n\n', '')
                 prompt = '/no_think\n\n' + prompt
                 retry_max = max(effective_max, 32768)
                 try:
@@ -226,7 +252,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 except _EmptyThinkingResponse:
                     logger.error(
                         "[LLM] Both thinking and no_think attempts returned empty content. "
-                        "Check LM Studio → Model Settings → Max Response Tokens (set to 0 = unlimited)."
+                        "In LM Studio: Model Settings → Max Response Tokens → set to 0 (unlimited)."
                     )
                     return "[]"
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
@@ -274,7 +300,7 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         tokens  = data.get('usage', {}).get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')
 
-        # ── R1: strip <think> tags, log reasoning depth ────────────────────────
+        # ── R1: strip <think> tags ─────────────────────────────────────────────
         if is_r1 and content:
             content, think_tokens = _strip_think_tags(content)
             if think_tokens > 0:
@@ -338,7 +364,7 @@ def parse_json(text: str):
     if not text:
         return None
 
-    # Strip any residual R1 think tags that slipped through (belt-and-suspenders)
+    # Strip any residual R1 think tags that slipped through
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
     text = re.sub(r'```(?:json)?\s*', '', text)
@@ -374,4 +400,3 @@ def parse_json(text: str):
 
     logger.warning(f"[LLM] Could not parse JSON (len={len(text)}): {text[:300]}")
     return None
-

@@ -1,7 +1,7 @@
 """
-Job: Fetch Threat News v6.9.1 — RSS → LLM analysis → DB storage.
-v6.9.1: Batch size reduced to 5 articles per LLM call + compact output schema
-        to stay under LM Studio's hard 2k token response cap.
+Job: Fetch Threat News v6.9.2 — RSS → LLM analysis → DB storage.
+v6.9.2: Batch size reduced to 3 articles per LLM call to give Qwen3 enough headroom
+        for JSON output after internal thinking tokens. Dynamic max_tokens per batch size.
 v6.2:  thinking=False for news classification (no chain-of-thought needed).
 v6.1:  Dedup window reduced from 24h to 2h so new articles get through each run.
 """
@@ -48,13 +48,14 @@ RSS_FEEDS = [
 ]
 
 # ── Token budget math ──────────────────────────────────────────────────────────
-# LM Studio hard cap ≈ 2,000 tokens.
+# LM Studio hard cap ≈ 2,000 tokens (server-side, overrides API params).
+# Qwen3 thinking overhead ≈ 800-1200 tokens before any output.
 # Input per article (title + 200-char summary + index label) ≈ 60-80 tokens.
 # Prompt boilerplate ≈ 150 tokens.
-# Batch of 5 → input ≈ 550 tokens → leaves ~1,450 tokens for output.
-# Output per article ≈ 120-160 tokens → 5 articles ≈ 600-800 tokens. Safe.
-BATCH_SIZE = 5       # articles per LLM call
-MAX_ARTICLES = 25    # total cap processed per run (5 batches × 5 = 25)
+# Batch of 3 → input ≈ 400 tokens → leaves ~1,600 tokens for thinking+output.
+# Thinking uses ~800-1000 tokens → leaves ~600-800 tokens for 3-article JSON. Safe.
+BATCH_SIZE = 3       # articles per LLM call (reduced from 5 — Qwen3 thinking headroom)
+MAX_ARTICLES = 30    # total cap processed per run (10 batches × 3 = 30)
 
 def fetch_feed(feed: dict) -> list[dict]:
     try:
@@ -89,17 +90,21 @@ def analyze_batch(articles: list[dict]) -> list[dict]:
     ])
 
     # Compact schema — shorter field names/values = fewer output tokens
-    prompt = f"""Classify these {len(articles)} news articles. Only include articles with clear market impact or geopolitical significance. Skip routine/low-importance news.
+    prompt = f"""/no_think
+Classify {len(articles)} news articles for market/geopolitical impact. Skip routine news.
 
 {batch_text}
 
-Return ONLY a JSON array. Each item:
-{{"i":<1-based index>,"t":true,"title":"short title","desc":"1-2 sentence summary","type":"military_conflict|political_crisis|economic_sanctions|natural_disaster|cyber_attack|terrorism|trade_war|energy_crisis|political_turmoil|market_event","sev":"Critical|High|Medium|Low","country":"country","region":"Middle East|Europe|Asia Pacific|North America|South America|Africa|Global","sent":"positive|negative|neutral","assets":["TICKER"],"cat":"finance|geopolitics|crypto|energy|tech|conflict"}}
+JSON array only. Each significant item:
+{{"i":<1-based>,"t":true,"title":"short","desc":"1 sentence","type":"military_conflict|political_crisis|economic_sanctions|cyber_attack|terrorism|trade_war|energy_crisis|market_event","sev":"Critical|High|Medium|Low","country":"","region":"Middle East|Europe|Asia Pacific|North America|South America|Africa|Global","sent":"positive|negative|neutral","assets":[],"cat":"finance|geopolitics|crypto|energy|tech|conflict"}}
+Return [] if nothing significant."""
 
-Return [] if nothing is significant."""
+    # Scale max_tokens with batch size — smaller batches need less output headroom
+    # With Qwen3's ~800-1000 token thinking overhead, leaving 600-800 for JSON is enough
+    batch_max_tokens = min(1200, 400 + len(articles) * 250)
 
     try:
-        response = call_lm_studio(prompt, max_tokens=1500, temperature=0.1, thinking=False)
+        response = call_lm_studio(prompt, max_tokens=batch_max_tokens, temperature=0.1, thinking=False)
         parsed = parse_json(response)
         if isinstance(parsed, list):
             # Remap compact keys to full keys for downstream compatibility
@@ -236,3 +241,4 @@ def run():
 
     logger.info(f"[News] Saved {threat_count} threats, {news_count} news items")
     return {'threats': threat_count, 'news': news_count}
+

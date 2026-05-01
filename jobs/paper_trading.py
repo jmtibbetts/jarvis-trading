@@ -250,23 +250,44 @@ def _manage_open_positions(prices: dict) -> dict:
 
         tier_label = tier["label"] if tier else "No tier action"
 
-        # Compact micro-prompt — keeps output under 60 tokens to beat LM Studio 150-token cap
-        # (deterministic rules already handled the heavy lifting above)
-        ta_snippet = ta_block[:150] if ta_data else "N/A"
-        news_snippet = sym_news_ctx[:80]
-        prompt = (
-            f"Paper {pos['direction']} {sym} | PnL:{plpc:+.1f}% ${pl_dollar:+.0f} | "
-            f"entry:{entry:.4f} price:{current_price:.4f} stop:{pos['stop_loss']:.4f} tp:{pos['target_price']:.4f} {pos['leverage']}x\n"
-            f"TA:{ta_snippet}\nNews:{news_snippet}\n"
-            f'Respond JSON only: {{"action":"HOLD","new_stop_pct":null,"reasoning":"brief"}} '
-            f'action=HOLD|TIGHTEN_STOP|EXIT'
-        )
+        prompt = f"""You are managing an open PAPER trade position. Evaluate and decide what to do RIGHT NOW.
+
+POSITION: {sym} ({'Crypto 24/7' if is_c else 'Equity'})
+  Direction:      {pos['direction']}
+  P&L:            {plpc:+.2f}%  (${pl_dollar:+.2f})
+  Entry:          ${entry:.4f}
+  Current Price:  ${current_price:.4f}
+  Stop Loss:      ${pos['stop_loss']:.4f}
+  Take Profit:    ${pos['target_price']:.4f}
+  Leverage:       {pos['leverage']}x
+  Deterministic tier: {tier_label}
+
+TECHNICAL ANALYSIS:
+{ta_block}
+
+SYMBOL NEWS:
+{sym_news_ctx}
+
+MACRO THREATS:
+{threat_ctx}
+
+RECENT MARKET NEWS:
+{news_ctx}
+
+TASK: Decide what to do with this position RIGHT NOW.
+Options:
+- HOLD: Setup still valid, stay in the trade
+- TIGHTEN_STOP: Position at risk but not yet at stop — move stop closer. Provide new_stop_pct (% below current price, e.g. 2.0 = stop at current_price * 0.98)
+- EXIT: Close this position now (bad setup, news headwind, deteriorating TA, etc.)
+
+Respond ONLY with valid JSON (no markdown):
+{{"action": "HOLD"|"TIGHTEN_STOP"|"EXIT", "new_stop_pct": null_or_float, "reasoning": "1-2 sentences"}}"""
 
         try:
             raw = call_lm_studio(
                 prompt,
-                system="Trading risk manager. JSON only: {action,new_stop_pct,reasoning}. No markdown.",
-                max_tokens=300
+                system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.",
+                max_tokens=150
             )
             cleaned = re.sub(r"```(?:json)?|```", "", raw or "").strip()
             result = json.loads(cleaned)
@@ -377,21 +398,39 @@ def _evaluate_entry_with_ai(sig: dict, current_price: float, threat_ctx: str, ne
             f"[{n.sentiment or 'neutral'}] {n.title}" for n in sym_news
         ) or "No symbol-specific news"
 
-    # Compact micro-prompt for entry eval — minimal tokens needed
-    ta_snippet = ta_block[:150] if ta_data else "N/A"
-    news_snippet = sym_news_ctx[:80]
-    prompt = (
-        f"Eval entry: {sym} {sig['direction']} {sig['asset_class']} | conf:{sig['confidence']:.0f}% | "
-        f"entry:{sig['entry_price']:.4f} target:{sig['target_price']:.4f} stop:{sig['stop_loss']:.4f} now:{current_price:.4f}\n"
-        f"TA:{ta_snippet}\nNews:{news_snippet}\n"
-        f'Respond JSON only: {{"approved":true,"score":75,"reasoning":"brief"}} min_score={PAPER_MIN_CONFIDENCE}'
-    )
+    prompt = f"""You are evaluating a paper trade entry for {sym} ({sig['asset_class']}).
+
+SIGNAL:
+  Direction: {sig['direction']}
+  Original confidence: {sig['confidence']:.0f}%
+  Entry: ${sig['entry_price']:.4f} | Target: ${sig['target_price']:.4f} | Stop: ${sig['stop_loss']:.4f}
+  Current price: ${current_price:.4f}
+  Original reasoning: {sig['reasoning'][:300]}
+
+TECHNICAL ANALYSIS:
+{ta_block}
+
+SYMBOL NEWS:
+{sym_news_ctx}
+
+MACRO THREATS:
+{threat_ctx}
+
+RECENT MARKET NEWS:
+{news_ctx}
+
+Is this setup still valid at current price ${current_price:.4f}? Does TA confirm {sig['direction']}?
+
+Respond ONLY with valid JSON (no markdown):
+{{"approved": true/false, "score": 0-100, "reasoning": "1-2 sentences"}}
+
+approved=true means enter the paper trade. Score below {PAPER_MIN_CONFIDENCE} should set approved=false."""
 
     try:
         raw = call_lm_studio(
             prompt,
-            system="Trading analyst. JSON only: {approved,score,reasoning}. No markdown.",
-            max_tokens=300
+            system="You are a precise trading analyst. Respond only with the JSON object, no markdown.",
+            max_tokens=150
         )
         cleaned = re.sub(r"```(?:json)?|```", "", raw or "").strip()
         result = json.loads(cleaned)

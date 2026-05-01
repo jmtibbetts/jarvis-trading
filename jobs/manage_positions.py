@@ -258,7 +258,7 @@ Respond ONLY with valid JSON:
 {{"action": "HOLD" | "TIGHTEN_STOP" | "EXIT", "reason": "1-2 sentence explanation", "new_stop_pct": <float or null>}}"""
 
     try:
-        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=200, thinking=True)
+        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=1024, thinking=False)
         result = parse_json(raw)
         if isinstance(result, dict) and result.get("action") in ("HOLD", "TIGHTEN_STOP", "EXIT"):
             return result
@@ -386,7 +386,7 @@ def run():
                         record_trade_outcome(
                             symbol=sym, asset_class=pos.asset_class or "equity",
                             direction=pos.side or "long",
-                            entry_price=float(pos.avg_entry or 0),
+                            entry_price=float(pos.avg_entry_price or 0),
                             exit_price=current_price,
                             qty=float(pos.qty or 0),
                             exit_reason="HARD_STOP" if plpc < 0 else "TAKE_PROFIT",
@@ -457,7 +457,7 @@ def run():
                     record_trade_outcome(
                         symbol=sym, asset_class=pos.asset_class or "equity",
                         direction=pos.side or "long",
-                        entry_price=float(pos.avg_entry or 0),
+                        entry_price=float(pos.avg_entry_price or 0),
                         exit_price=current_price,
                         qty=float(pos.qty or 0),
                         exit_reason="LLM_EXIT",
@@ -501,5 +501,6 @@ def run():
 
     logger.info(f"[Positions] Done — {closed} closed, {trailing} protective orders | equity=${equity:,.2f}")
     return {"closed": closed, "trailing": trailing, "total": len(positions), "equity": equity}
+
 
 

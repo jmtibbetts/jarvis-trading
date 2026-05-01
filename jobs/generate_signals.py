@@ -1,15 +1,24 @@
 """
-Job: Generate Trading Signals v6.9
-Context budget fix: learning context injected once per prompt (not per symbol).
-Per-symbol injection was causing Track B to consume 8-12k tokens of learning data
-before any TA, leaving insufficient room for LLM reasoning output.
+Job: Generate Trading Signals v7.0
+Batch-per-symbol architecture: each track is split into batches of BATCH_SIZE symbols.
+Each batch gets its own focused LLM call, guaranteed to fit within any token cap.
+
+v7.0 changes:
+- run_track() replaced with run_track_batched() — splits any track into N×BATCH_SIZE sub-calls
+- BATCH_SIZE = 5 symbols per LLM call (5 signals × ~160 tokens/signal ≈ 800 tokens output)
+- Each batch gets minimal but complete context: macro/news header + only its own TA blocks
+- Batch prompts stripped of per-track learning context bloat to keep input tokens low
+- TRACK_MAX_TOKENS set to 1800 — safe floor for any LM Studio token cap
+- Parallel ThreadPoolExecutor still used, now across all batches from all tracks
+- Track F (futures) also batched with FUTURES_BATCH_SIZE = 4
+
+v6.9.2 changes:
+- Smart Tier 5 lesson injection — get_lessons_context() now track-aware + category-deduplicated
 
 v6.9 changes:
 - ta_block() now builds TA-only text (no per-symbol learning context calls)
 - Global learning context (lessons + regime perf) injected once per make_prompt()
 - Accuracy context condensed: only symbols with >=3 trades get a summary line
-- Prompt token estimates logged at INFO level for observability
-- max_tokens capped at 8192 per track call (up from 32768) — output is JSON, not essays
 
 v6.8 changes:
 - thinking=True on all LLM track calls for full chain-of-thought reasoning
@@ -37,7 +46,6 @@ TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/US
 TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
 
 # Track F: paper-only futures / forex / commodities
-# Symbols from lib/futures_data.py — fetched via yfinance
 TRACK_F_FUTURES = [sym for sym in PAPER_FUTURES
                    if sym not in ["^VIX","^TNX","^TYX"]]  # exclude pure reference indices
 
@@ -48,16 +56,19 @@ ALL_SYMBOLS = list(dict.fromkeys(TRACK_A + TRACK_B + TRACK_C))
 
 COMMON_TICKERS = {"AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AMD","INTC","QCOM","AVGO","TSM","ARM","SMCI","PLTR","COIN","MSTR","HOOD","RBLX","SNAP","UBER","ABNB","SQ","PYPL","SHOP","NET","CRWD","PANW","ZS","DDOG","SNOW","MDB","AI","SOUN","IONQ","RXRX","ACHR","JOBY","RKLB","ASTS","XOM","CVX","COP","OXY","SLB","HAL","RTX","LMT","NOC","GD","BA","GLD","SLV","GDX","GDXJ","USO","UNG","SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","TLT","IEF","HYG","JPM","BAC","GS","BTC","ETH","SOL","XRP","BNB","AVAX","LINK","DOGE","ADA","AAVE","DOT","ATOM","SUI","RENDER","INJ","NEAR","OP","ARB","MATIC","UNI"}
 CRYPTO_BASES = {"SOL","XRP","BNB","AVAX","LINK","DOGE","ADA","AAVE","DOT","ATOM","SUI","RENDER","INJ","NEAR","OP","ARB","MATIC","UNI","PEPE","LTC"}
-SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Long","confidence":78,"timeframe":"4H","entry_price":875.00,"target_price":920.00,"stop_loss":850.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bullish"}]"""
+SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Long","confidence":78,"timeframe":"4H","entry_price":875.00,"target_price":920.00,"stop_loss":850.00,"reasoning":"brief TA rationale","key_risks":"key risk","momentum":"Bullish"}]"""
 
 # Paper signal schema — direction can be Short, Short_Leveraged, Long_Leveraged
-PAPER_SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Short_Leveraged","confidence":72,"timeframe":"4H","entry_price":875.00,"target_price":820.00,"stop_loss":900.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bearish"}]"""
-FUTURES_PAPER_SCHEMA = """[{"asset_symbol":"GC=F","asset_name":"Gold Futures","asset_class":"Futures","direction":"Long_5x","confidence":75,"timeframe":"4H","entry_price":2310.50,"target_price":2380.00,"stop_loss":2265.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bullish"}]"""
+PAPER_SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_class":"Equity","direction":"Short_Leveraged","confidence":72,"timeframe":"4H","entry_price":875.00,"target_price":820.00,"stop_loss":900.00,"reasoning":"brief TA rationale","key_risks":"key risk","momentum":"Bearish"}]"""
+FUTURES_PAPER_SCHEMA = """[{"asset_symbol":"GC=F","asset_name":"Gold Futures","asset_class":"Futures","direction":"Long_5x","confidence":75,"timeframe":"4H","entry_price":2310.50,"target_price":2380.00,"stop_loss":2265.00,"reasoning":"brief TA rationale","key_risks":"key risk","momentum":"Bullish"}]"""
 
 PAPER_DIRECTIONS = {"Short", "Short_Leveraged", "Long_Leveraged", "Long", "Bounce", "Long_5x", "Short_5x", "Long_10x", "Short_10x", "Long_20x", "Short_20x"}
 
-# Max output tokens per track — JSON signals only, 8192 is ample for 6 signals with reasoning
-TRACK_MAX_TOKENS = 8192
+# Batch sizes — tuned so output stays under LM Studio's 2000-token hard cap
+# 5 symbols × ~160 tokens/signal = ~800 tokens → safe margin for thinking tokens
+BATCH_SIZE         = 5   # equity / crypto tracks (A, B, C, E)
+FUTURES_BATCH_SIZE = 4   # futures / forex (Track F) — larger per-symbol TA blocks
+TRACK_MAX_TOKENS   = 1800  # conservative ceiling that works even on 2000-cap servers
 
 
 def _read_ta_from_cache(symbols: list, timeframes=None) -> dict:
@@ -113,7 +124,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     if not sym:
         return None
     # Futures universe check must come BEFORE crypto detection
-    # (some forex symbols contain '=' which would confuse crypto logic)
     if sym in FUTURES_UNIVERSE:
         fu_meta = FUTURES_UNIVERSE[sym]
         s["asset_class"] = "Forex" if fu_meta.get("category") == "Forex" else "Futures"
@@ -128,7 +138,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     direction = (s.get("direction") or "Long").replace(" ", "_").replace("-", "_")
 
     if is_paper:
-        # Paper mode: allow all direction types — just normalize the key
         dir_map = {
             "Long":             "Long",
             "Bounce":           "Bounce",
@@ -159,7 +168,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
         s["paper_mode"] = True
         s["paper_direction"] = direction
     else:
-        # Live mode: only Long or Bounce
         d_cap = direction.capitalize()
         s["direction"] = "Long" if d_cap not in ("Bounce", "Long") else d_cap
 
@@ -180,7 +188,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     atr_pct = (((ta.get("4H") or {}).get("atr") or {}).get("pct")) or 2.0
 
     if is_paper and s["direction"] in ("Short", "Short_Leveraged"):
-        # Short: stop ABOVE entry, target BELOW entry
         stop = float(s.get("stop_loss") or 0)
         if not stop or stop <= entry:
             stop = round(entry * (1 + max(atr_pct, 1.5) / 100 * 1.5), 4 if entry < 1 else 2)
@@ -190,7 +197,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
             target = round(entry * (1 - atr_pct / 100 * 2.5), 4 if entry < 1 else 2)
         s["target_price"] = target
     else:
-        # Long / Long_Leveraged / Bounce: stop BELOW entry, target ABOVE entry
         stop = float(s.get("stop_loss") or 0)
         if not stop or stop >= entry:
             stop = round(entry * (1 - max(atr_pct, 1.5) / 100 * 1.5), 4 if entry < 1 else 2)
@@ -221,8 +227,6 @@ def score_safe(signal, ta_profiles, regime, earnings_set):
 
 
 # ── TA block builder — TA only, no per-symbol learning context ────────────────
-# Learning context is injected ONCE at the prompt level (see make_prompt / make_futures_prompt).
-# Injecting per-symbol blew up Track B from ~4k to 12k+ input tokens.
 def ta_block(syms, futures_profiles=None):
     blocks = []
     for s in syms:
@@ -238,15 +242,13 @@ def ta_block(syms, futures_profiles=None):
 
 
 # ── Condensed accuracy summary across a list of symbols ─────────────────────
-# Only surfaces symbols with ≥3 trades to keep the block tight.
 def build_accuracy_summary(syms: list) -> str:
-    """Build a compact accuracy block for all symbols in a track (symbols with ≥3 trades only)."""
+    """Build a compact accuracy block — symbols with ≥3 trades only."""
     lines = []
     for sym in syms:
         try:
             txt = get_accuracy_context(sym, lookback_days=30)
             if txt and txt.strip():
-                # Condense to single line: strip the header, keep the Overall stats line only
                 for line in txt.splitlines():
                     if "Overall:" in line:
                         lines.append(f"  {sym}: {line.strip()}")
@@ -255,7 +257,7 @@ def build_accuracy_summary(syms: list) -> str:
             pass
     if not lines:
         return ""
-    return "\n📊 TRACK ACCURACY (symbols with ≥3 recent trades):\n" + "\n".join(lines) + "\n"
+    return "\n📊 ACCURACY:\n" + "\n".join(lines) + "\n"
 
 
 # Module-level references so ta_block() can access them without closure issues
@@ -263,10 +265,40 @@ ta_profiles_global = {}
 asset_map_global   = {}
 
 
+# ── Batch prompt builder ──────────────────────────────────────────────────────
+def make_batch_prompt(batch_syms: list, track_label: str, task_hint: str,
+                      threat_ctx: str, news_ctx: str, regime: dict,
+                      held_ctx: str, rule: str, schema: str,
+                      futures_profiles: dict = None) -> str:
+    """
+    Build a compact prompt for a single batch of symbols.
+    Input token budget target: ~600-800 tokens so output has full room within a 2000-token cap.
+    """
+    ta_txt = ta_block(batch_syms, futures_profiles=futures_profiles)
+    acc    = build_accuracy_summary(batch_syms)
+    regime_label = regime.get("label", "Unknown")
+    regime_risk  = regime.get("risk", "medium")
+
+    prompt = (
+        f"Regime: {regime_label} | Risk: {regime_risk}\n"
+        f"Threats: {threat_ctx}\n"
+        f"News: {news_ctx}\n"
+        f"{held_ctx}"
+        f"{acc}"
+        f"=== TA — {track_label} ===\n{ta_txt}\n\n"
+        f"Task: {task_hint}{rule}"
+        f"Return ONLY the JSON array starting with '[' and ending with ']'.\n"
+        f"Schema: {schema}"
+    )
+    tok_est = len(prompt) // 4
+    logger.info(f"[Signals] Batch '{track_label}' {batch_syms}: ~{tok_est} tok in | {TRACK_MAX_TOKENS} max out")
+    return prompt
+
+
 def run():
     global ta_profiles_global, asset_map_global
 
-    logger.info("[Signals] Starting signal generation v6.9 (context-budget-aware)...")
+    logger.info("[Signals] Starting signal generation v7.0 (batch architecture)...")
 
     try:
         cfg = get_llm_config()
@@ -335,10 +367,9 @@ def run():
     except Exception as e:
         logger.warning(f"[Signals] Regime check failed: {e}")
 
-    # Pull futures/commodity/forex news (Track F context)
     futures_news_ctx = ""
     try:
-        futures_news_ctx = get_futures_news_context(max_items=6)
+        futures_news_ctx = get_futures_news_context(max_items=4)
         if futures_news_ctx:
             logger.info("[Signals] Futures news context loaded")
     except Exception as _fn:
@@ -351,85 +382,80 @@ def run():
     except:
         pass
 
-    threat_ctx = "\n".join([
-        f"[{t.get('severity','?')}] {t.get('country','?')}: {t.get('title','')}"
-        for t in threats[:5]
+    # Compact single-line context strings — keep input tokens minimal
+    threat_ctx = " | ".join([
+        f"[{t.get('severity','?')}] {t.get('country','?')}: {t.get('title','')[:60]}"
+        for t in threats[:4]
     ]) or "No active threats."
 
-    news_ctx = "\n".join([
-        f"[{n.get('sentiment','neutral').upper()}] {n.get('title','')} ({n.get('source','')})"
-        for n in news[:8]
+    news_ctx = " | ".join([
+        f"[{n.get('sentiment','?').upper()}] {n.get('title','')[:60]}"
+        for n in news[:5]
     ]) or "No recent news."
 
-    sys_p = "You are an expert quantitative trader. Output only valid JSON arrays. No commentary, no markdown, no preamble — start your response with '[' and end with ']'."
-    bounce_rule = "\nRULES: direction must be 'Long' or 'Bounce' only. stop_loss BELOW entry. target ABOVE entry. R:R >= 2.\n"
-    paper_rule  = ("\nRULES: direction must be 'Short', 'Short_Leveraged', or 'Long_Leveraged' ONLY. "
-                   "For Short/Short_Leveraged: stop_loss ABOVE entry, target_price BELOW entry. "
-                   "For Long_Leveraged: stop_loss BELOW entry, target ABOVE entry. R:R >= 2.\n")
+    sys_p = "You are an expert quantitative trader. Output only valid JSON arrays. No commentary, no markdown — start with '[' end with ']'."
+    bounce_rule = " direction='Long' or 'Bounce'. stop_loss BELOW entry. target ABOVE entry. R:R>=2. Generate 1-2 best signals only.\n"
+    paper_rule  = " direction='Short','Short_Leveraged', or 'Long_Leveraged'. Short: stop ABOVE entry, target BELOW. LongLev: stop BELOW, target ABOVE. R:R>=2. Generate 1-2 best signals only.\n"
+    futures_rule = " direction: Long/Long_5x/Long_10x/Long_20x/Short/Short_5x/Short_10x/Short_20x. asset_class='Futures' or 'Forex'. Generate 1-2 best signals only.\n"
 
     held_ctx = ""
     if held_positions:
         held_lines = [
-            f"  {p['symbol']}: {p['pnl_pct']:+.1f}% | entry=${p['avg_entry']:.4f} | current=${p['current_price']:.4f} | MV=${p['market_value']:,.0f}"
+            f"{p['symbol']}:{p['pnl_pct']:+.1f}%"
             for p in held_positions
         ]
-        held_ctx = "=== CURRENT OPEN POSITIONS (DO NOT generate signals for these unless adding to a winner >+5%) ===\n" + "\n".join(held_lines) + "\n\n"
+        held_ctx = f"Open positions (skip unless adding to winner>+5%): {', '.join(held_lines)}\n"
 
-    # Learning context — fetched per-track so lessons are relevant to the symbols being analyzed.
-    # get_lessons_context_for_track prioritizes symbol-specific lessons, deduplicates by category
-    # (max 2 per category), and orders by applied_count ASC so new lessons get exposure first.
-    regime_ctx = get_regime_context(regime.get("label", ""))
+    # ── Build batch list across all tracks ──────────────────────────────────
+    # Each entry: (batch_id, batch_syms, prompt, is_paper)
+    all_batches = []
 
-    def make_prompt(label, syms, task, rule=None):
-        r = rule if rule is not None else bounce_rule
-        schema = PAPER_SIGNAL_SCHEMA if rule == paper_rule else SIGNAL_SCHEMA
-        # Accuracy summary: only symbols in this track with recorded trade history
-        acc_summary = build_accuracy_summary(syms)
-        # Track-specific lessons: prioritize lessons for the symbols in this track,
-        # then fill with globally relevant lessons — category-deduplicated, least-applied first
-        track_lessons = get_lessons_context_for_track(track_symbols=list(syms), limit=8)
-        prompt = (
-            f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
-            f"=== MARKET NEWS ===\n{news_ctx}\n\n"
-            f"=== MARKET REGIME ===\nCurrent: {regime.get('label','Unknown')} | Risk: {regime.get('risk','medium')}\n{regime_ctx}\n"
-            f"{held_ctx}"
-            f"{acc_summary}"
-            f"{track_lessons}"
-            f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
-            f"=== TASK ===\n{task}{r}"
-            f"IMPORTANT: Return ONLY the JSON array. Do not include any text before or after it.\nOutput format:\n{schema}"
+    def _chunk(lst, n):
+        """Yield successive n-sized chunks from list."""
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
+    # Track A — macro / defense / energy / commodities
+    for i, batch in enumerate(_chunk(TRACK_A, BATCH_SIZE)):
+        prompt = make_batch_prompt(
+            batch, "MACRO/GEO/COMMODITIES",
+            "Defense/energy/commodity/rates setup. Analyze TA for each symbol.",
+            threat_ctx, news_ctx, regime, held_ctx, bounce_rule, SIGNAL_SCHEMA
         )
-        tok_est = len(prompt) // 4
-        logger.info(f"[Signals] Prompt '{label}': ~{tok_est} tokens input | {TRACK_MAX_TOKENS} max output")
-        return prompt
+        all_batches.append((f"A{i}", batch, prompt, False))
 
-    tracks = [
-        ("A_macro", TRACK_A,
-         make_prompt("MACRO/GEO/COMMODITIES", TRACK_A,
-                     "Analyze defense (RTX/LMT/NOC/GD/BA), energy (XOM/CVX/COP), "
-                     "commodities (GLD/SLV/GDX), rates (TLT), broad market (SPY/IWM). "
-                     "Generate 4-6 high-conviction LONG or BOUNCE signals with TA references."), False),
-        ("B_tech", TRACK_B,
-         make_prompt("TECH/AI/GROWTH", TRACK_B,
-                     "Analyze AI/semis (NVDA/AMD/AVGO/TSM/ARM/SMCI), "
-                     "software (MSFT/GOOGL/META/AMZN), high-beta (PLTR/COIN/MSTR/TSLA). "
-                     "Generate 4-7 high-conviction LONG or BOUNCE signals."), False),
-        ("C_crypto", TRACK_C,
-         make_prompt("CRYPTO", TRACK_C,
-                     "Analyze BTC/ETH macro, L1s (SOL/XRP/BNB/AVAX), DeFi (LINK/AAVE). "
-                     "24/7 market. Wider stops (8-12% ATR ok). "
-                     "Generate 3-5 LONG or BOUNCE signals."), False),
-        ("E_paper", TRACK_E_PAPER,
-         make_prompt("PAPER TRADING — LEVERAGED/SHORT", TRACK_E_PAPER,
-                     "Identify the BEST candidates for SHORT, SHORT_LEVERAGED, or LONG_LEVERAGED paper trades. "
-                     "Use macro/news to find overextended longs (short candidates) or confirmed breakouts for leveraged longs. "
-                     "Generate 3-5 paper trading signals only.", rule=paper_rule), True),
-    ]
+    # Track B — tech / AI / growth
+    for i, batch in enumerate(_chunk(TRACK_B, BATCH_SIZE)):
+        prompt = make_batch_prompt(
+            batch, "TECH/AI/GROWTH",
+            "AI/semi/software/high-beta setup. Analyze TA for each symbol.",
+            threat_ctx, news_ctx, regime, held_ctx, bounce_rule, SIGNAL_SCHEMA
+        )
+        all_batches.append((f"B{i}", batch, prompt, False))
 
-    # Build futures TA profiles for Track F
+    # Track C — crypto
+    for i, batch in enumerate(_chunk(TRACK_C, BATCH_SIZE)):
+        crypto_rule = " direction='Long' or 'Bounce'. stop_loss BELOW entry (8-12% ATR ok). target ABOVE. R:R>=2. Generate 1-2 best signals only.\n"
+        prompt = make_batch_prompt(
+            batch, "CRYPTO",
+            "24/7 market. Wider stops acceptable. Analyze TA for each symbol.",
+            threat_ctx, news_ctx, regime, held_ctx, crypto_rule, SIGNAL_SCHEMA
+        )
+        all_batches.append((f"C{i}", batch, prompt, False))
+
+    # Track E — paper leveraged/short
+    for i, batch in enumerate(_chunk(TRACK_E_PAPER, BATCH_SIZE)):
+        prompt = make_batch_prompt(
+            batch, "PAPER LEVERAGED/SHORT",
+            "Find overextended longs (short) or breakout longs (leveraged long).",
+            threat_ctx, news_ctx, regime, held_ctx, paper_rule, PAPER_SIGNAL_SCHEMA
+        )
+        all_batches.append((f"E{i}", batch, prompt, True))
+
+    # Track F — futures / forex (fetch live TA)
     futures_ta_profiles = {}
     try:
-        futures_syms_to_analyze = TRACK_F_FUTURES[:10]  # Limit to avoid long fetch time
+        futures_syms_to_analyze = TRACK_F_FUTURES[:10]
         logger.info(f"[Signals] Fetching futures TA for {len(futures_syms_to_analyze)} symbols...")
         for fsym in futures_syms_to_analyze:
             bars_f = fetch_futures_multi_tf(fsym, ["1H", "4H", "1D"])
@@ -440,84 +466,68 @@ def run():
     except Exception as _fe:
         logger.warning(f"[Signals] Futures TA fetch failed: {_fe}")
 
-    _fut_asset_ref = "\n".join(
-        f"  {s}: {FUTURES_UNIVERSE.get(s,{}).get('name',s)} [{FUTURES_UNIVERSE.get(s,{}).get('category','?')}]"
-        for s in TRACK_F_FUTURES[:14]
-    )
-    _fut_ta_block = ta_block(TRACK_F_FUTURES[:10], futures_profiles=futures_ta_profiles)
-    _fut_regime_label = regime.get("label", "Unknown")
-    _fut_regime_risk  = regime.get("risk", "medium")
-    _fut_rules = (
-        "\nRULES: direction must be one of: Long, Long_5x, Long_10x, Long_20x, "
-        "Short, Short_5x, Short_10x, Short_20x.\n"
-        "asset_class must be 'Futures' or 'Forex'.\n"
-        "Use leverage appropriate to conviction: 5x moderate, 10x high, 20x very high with tight stops.\n"
-        "Generate 4-6 signals."
-    )
-    futures_prompt = (
-        f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
-        f"=== FUTURES / COMMODITY / FOREX NEWS ===\n{futures_news_ctx}\n\n"
-        f"=== MARKET REGIME ===\nCurrent: {_fut_regime_label} | Risk: {_fut_regime_risk}\n"
-        f"{regime_ctx}\n"
-        f"{get_lessons_context_for_track(track_symbols=TRACK_F_FUTURES, limit=6)}"
-        f"=== TECHNICAL ANALYSIS — FUTURES / FOREX / COMMODITIES ===\n"
-        f"{_fut_ta_block}\n\n"
-        f"=== ASSET REFERENCE ===\n{_fut_asset_ref}\n\n"
-        f"=== TASK ===\nYou are analyzing FUTURES, COMMODITIES, and FOREX pairs for paper trading. "
-        f"Identify macro trends: energy supply/demand, precious metals momentum, forex strength/weakness. "
-        f"Use 5x for moderate conviction, 10x for high, 20x for very high (with tight stops). "
-        f"Short overextended uptrends. Long breakout/oversold bounces. Generate 4-6 paper signals."
-        f"{_fut_rules}\n"
-        f"IMPORTANT: Return ONLY the JSON array. Do not include any text before or after it.\nOutput format:\n{FUTURES_PAPER_SCHEMA}"
-    )
-    logger.info(f"[Signals] Prompt 'F_futures': ~{len(futures_prompt)//4} tokens input | {TRACK_MAX_TOKENS} max output")
+    for i, batch in enumerate(_chunk(TRACK_F_FUTURES[:12], FUTURES_BATCH_SIZE)):
+        _fut_asset_ref = ", ".join(
+            f"{s}={FUTURES_UNIVERSE.get(s,{}).get('name',s)}"
+            for s in batch
+        )
+        prompt = make_batch_prompt(
+            batch, "FUTURES/FOREX/COMMODITIES",
+            f"Macro/commodity/forex setup. Symbols: {_fut_asset_ref}. Use 5x moderate/10x high/20x very high conviction.",
+            threat_ctx, futures_news_ctx or news_ctx, regime, "",
+            futures_rule, FUTURES_PAPER_SCHEMA, futures_profiles=futures_ta_profiles
+        )
+        all_batches.append((f"F{i}", batch, prompt, True))
 
-    tracks.append(("F_futures", TRACK_F_FUTURES[:14], futures_prompt, True))
-
+    # Track D — opportunistic
     if opp_syms:
-        tracks.append((
-            "D_opp", opp_syms,
-            make_prompt("OPPORTUNISTIC", opp_syms,
-                        f"These tickers appeared in threat/news: {opp_syms[:8]}. "
-                        "Generate 2-4 signals for the strongest setups only."), False
-        ))
+        for i, batch in enumerate(_chunk(opp_syms, BATCH_SIZE)):
+            prompt = make_batch_prompt(
+                batch, "OPPORTUNISTIC",
+                f"These appeared in threat/news: {batch}. Best setup only.",
+                threat_ctx, news_ctx, regime, held_ctx, bounce_rule, SIGNAL_SCHEMA
+            )
+            all_batches.append((f"D{i}", batch, prompt, False))
 
-    all_raw        = []  # (signal_dict, is_paper)
-    all_raw_lock   = threading.Lock()
+    logger.info(f"[Signals] {len(all_batches)} total batches across all tracks")
 
-    def _run_track(name, syms, prompt, is_paper):
+    # ── Run all batches in parallel (capped by LM Studio semaphore) ──────────
+    all_raw      = []  # (signal_dict, is_paper)
+    all_raw_lock = threading.Lock()
+
+    def _run_batch(batch_id, batch_syms, prompt, is_paper):
         try:
-            logger.info(f"[Signals] Calling LLM for track {name}...")
+            logger.info(f"[Signals] LLM call batch {batch_id} ({len(batch_syms)} syms)...")
             r = call_lm_studio(prompt, system=sys_p, max_tokens=TRACK_MAX_TOKENS,
-                               temperature=0.15, thinking=True)
-            logger.info(f"[Signals] Track {name} → {len(r)} chars returned")
+                               temperature=0.15, thinking=False)
+            logger.info(f"[Signals] Batch {batch_id} → {len(r)} chars")
             sigs = parse_json(r)
             results = []
             if isinstance(sigs, list):
-                logger.info(f"[Signals] Track {name} → parsed {len(sigs)} signals")
+                logger.info(f"[Signals] Batch {batch_id} → {len(sigs)} signals")
                 results = [(s, is_paper) for s in sigs]
             elif isinstance(sigs, dict):
                 for k in ["signals", "trades", "setups", "results"]:
                     if sigs.get(k):
-                        logger.info(f"[Signals] Track {name} → {len(sigs[k])} signals from key '{k}'")
                         results = [(s, is_paper) for s in sigs[k]]
                         break
             else:
-                logger.warning(f"[Signals] Track {name} → unexpected response type {type(sigs)}: {r[:200]}")
+                logger.warning(f"[Signals] Batch {batch_id} unexpected type {type(sigs)}: {r[:200]}")
             with all_raw_lock:
                 all_raw.extend(results)
         except Exception as e:
-            logger.error(f"[Signals] Track {name} FAILED: {type(e).__name__}: {e}")
+            logger.error(f"[Signals] Batch {batch_id} FAILED: {type(e).__name__}: {e}")
 
-    # Run all tracks in parallel — LM Studio 4-slot semaphore in lmstudio.py caps concurrency
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="track") as pool:
-        futures_exec = {pool.submit(_run_track, name, syms, prompt, is_paper): name
-                        for name, syms, prompt, is_paper in tracks}
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="batch") as pool:
+        futures_exec = {
+            pool.submit(_run_batch, bid, bsyms, bprompt, bpaper): bid
+            for bid, bsyms, bprompt, bpaper in all_batches
+        }
         for fut in as_completed(futures_exec):
-            pass  # results already written to all_raw via _run_track
+            pass  # results written to all_raw via _run_batch
 
-    logger.info(f"[Signals] {len(all_raw)} raw signals from LLM across all tracks")
+    logger.info(f"[Signals] {len(all_raw)} raw signals from LLM across all batches")
 
     if not all_raw:
         logger.warning("[Signals] No signals generated — check LLM connection and logs above")
@@ -544,11 +554,9 @@ def run():
         if expired:
             logger.info(f"[Signals] Expired {len(expired)} stale Active signals")
 
-        # Exclude PaperExecuted so each signal cycle can generate fresh paper entries
         live_records = db.query(TradingSignal).filter(
             TradingSignal.status.in_(["Active", "PendingApproval"])
         ).all()
-        # Key: (symbol, is_paper) to prevent collisions between live and paper signals
         existing_map = {}
         for rec in live_records:
             k = (rec.asset_symbol, bool(getattr(rec, 'paper_mode', False)))
@@ -569,7 +577,6 @@ def run():
                 else:
                     target_status = "Active" if market_open else "PendingApproval"
 
-                # Paper signals are always "Active" — they don't go to Alpaca
                 if is_paper:
                     target_status = "Active"
 
@@ -612,35 +619,31 @@ def run():
                         entry_price=scored.get("entry_price"),
                         target_price=scored.get("target_price"),
                         stop_loss=scored.get("stop_loss"),
-                        reasoning=scored.get("reasoning", ""),
-                        key_risks=scored.get("key_risks", ""),
-                        momentum=scored.get("momentum", ""),
-                        signal_source=scored.get("signal_source", "watchlist"),
+                        reasoning=scored.get("reasoning"),
+                        key_risks=scored.get("key_risks"),
+                        momentum=scored.get("momentum"),
+                        signal_source=scored.get("signal_source"),
                         earnings_risk=bool(scored.get("earnings_risk", False)),
                         rr_ratio=scored.get("rr_ratio"),
                         status=target_status,
-                        paper_mode=True if is_paper else False,
-                        paper_direction=scored.get("paper_direction") if is_paper else None,
                         generated_at=now_iso,
-                        created_date=now_iso,
-                        updated_date=now_iso,
+                        paper_mode=is_paper,
+                        paper_direction=scored.get("paper_direction") if is_paper else None,
+                        trigger_event=f"Regime:{regime.get('label','?')}",
+                        asset_class_raw=scored.get("asset_class"),
                     ))
-                    existing_map[rec_key] = True
+                    logger.debug(f"[Signals] New signal: {sym} (paper={is_paper}) → {target_status}")
                     saved += 1
-                    logger.debug(f"[Signals] New {'PAPER' if is_paper else 'LIVE'} signal: {sym} {scored.get('direction')} → {target_status}")
             except Exception as e:
-                logger.error(f"[Signals] Save error: {e} | raw={raw}")
+                logger.error(f"[Signals] Error processing signal {raw}: {e}")
                 skipped += 1
 
-    logger.info(
-        f"[Signals] Done — {saved} new | {updated} updated | {skipped} skipped | "
-        f"market={'OPEN' if market_open else 'CLOSED'} | regime={regime.get('label')}"
-    )
-    log_decision(
-        "signals", "GENERATED",
-        f"{saved} new signals | {updated} updated | regime={regime.get('label', '')} | market={'OPEN' if market_open else 'CLOSED'}",
-        score=float(saved),
-        thinking=True
-    )
-    return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
+        db.commit()
 
+    total = saved + updated
+    logger.info(f"[Signals] Done v7.0 — {saved} new, {updated} updated, {skipped} skipped | regime={regime.get('label')}")
+    log_decision("signals", "GENERATED",
+                 f"v7.0 batch run: {total} signals ({saved} new + {updated} updated) | regime={regime.get('label')} | batches={len(all_batches)}",
+                 score=total, thinking=False)
+    return {"saved": saved, "updated": updated, "skipped": skipped,
+            "regime": regime.get("label"), "batches": len(all_batches)}

@@ -1,8 +1,15 @@
 """
-Job: Generate Trading Signals v6.8
-Architecture fix: read TA from cache only (no live OHLCV fetch during signal gen).
-The fetch_market_data job already runs every 15 min and populates ohlcv_cache.
-Signal gen just reads that cache → builds prompts → calls LLM. Fast and lock-friendly.
+Job: Generate Trading Signals v6.9
+Context budget fix: learning context injected once per prompt (not per symbol).
+Per-symbol injection was causing Track B to consume 8-12k tokens of learning data
+before any TA, leaving insufficient room for LLM reasoning output.
+
+v6.9 changes:
+- ta_block() now builds TA-only text (no per-symbol learning context calls)
+- Global learning context (lessons + regime perf) injected once per make_prompt()
+- Accuracy context condensed: only symbols with >=3 trades get a summary line
+- Prompt token estimates logged at INFO level for observability
+- max_tokens capped at 8192 per track call (up from 32768) — output is JSON, not essays
 
 v6.8 changes:
 - thinking=True on all LLM track calls for full chain-of-thought reasoning
@@ -48,6 +55,9 @@ PAPER_SIGNAL_SCHEMA = """[{"asset_symbol":"NVDA","asset_name":"NVIDIA","asset_cl
 FUTURES_PAPER_SCHEMA = """[{"asset_symbol":"GC=F","asset_name":"Gold Futures","asset_class":"Futures","direction":"Long_5x","confidence":75,"timeframe":"4H","entry_price":2310.50,"target_price":2380.00,"stop_loss":2265.00,"reasoning":"detailed reasoning","key_risks":"risks","momentum":"Bullish"}]"""
 
 PAPER_DIRECTIONS = {"Short", "Short_Leveraged", "Long_Leveraged", "Long", "Bounce", "Long_5x", "Short_5x", "Long_10x", "Short_10x", "Long_20x", "Short_20x"}
+
+# Max output tokens per track — JSON signals only, 8192 is ample for 6 signals with reasoning
+TRACK_MAX_TOKENS = 8192
 
 
 def _read_ta_from_cache(symbols: list, timeframes=None) -> dict:
@@ -119,7 +129,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
 
     if is_paper:
         # Paper mode: allow all direction types — just normalize the key
-        # Map common variants
         dir_map = {
             "Long":             "Long",
             "Bounce":           "Bounce",
@@ -143,7 +152,6 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
             "Short10X":         "Short_10x",
             "Short20X":         "Short_20x",
         }
-        # Try exact match first, then capitalized variant
         direction = dir_map.get(direction, dir_map.get(direction.capitalize(), direction))
         if direction not in PAPER_DIRECTIONS:
             direction = "Long"
@@ -212,8 +220,53 @@ def score_safe(signal, ta_profiles, regime, earnings_set):
         return signal
 
 
+# ── TA block builder — TA only, no per-symbol learning context ────────────────
+# Learning context is injected ONCE at the prompt level (see make_prompt / make_futures_prompt).
+# Injecting per-symbol blew up Track B from ~4k to 12k+ input tokens.
+def ta_block(syms, futures_profiles=None):
+    blocks = []
+    for s in syms:
+        profile = ta_profiles_global.get(s)
+        if not profile and futures_profiles:
+            profile = futures_profiles.get(s)
+        if profile:
+            fu_meta = FUTURES_UNIVERSE.get(s, {})
+            name = asset_map_global.get(s, {}).get("name") or fu_meta.get("name") or s
+            ta_txt = build_ta_prompt_block(s, profile, name)
+            blocks.append(ta_txt)
+    return "\n".join(blocks) or "No TA data available."
+
+
+# ── Condensed accuracy summary across a list of symbols ─────────────────────
+# Only surfaces symbols with ≥3 trades to keep the block tight.
+def build_accuracy_summary(syms: list) -> str:
+    """Build a compact accuracy block for all symbols in a track (symbols with ≥3 trades only)."""
+    lines = []
+    for sym in syms:
+        try:
+            txt = get_accuracy_context(sym, lookback_days=30)
+            if txt and txt.strip():
+                # Condense to single line: strip the header, keep the Overall stats line only
+                for line in txt.splitlines():
+                    if "Overall:" in line:
+                        lines.append(f"  {sym}: {line.strip()}")
+                        break
+        except Exception:
+            pass
+    if not lines:
+        return ""
+    return "\n📊 TRACK ACCURACY (symbols with ≥3 recent trades):\n" + "\n".join(lines) + "\n"
+
+
+# Module-level references so ta_block() can access them without closure issues
+ta_profiles_global = {}
+asset_map_global   = {}
+
+
 def run():
-    logger.info("[Signals] Starting signal generation v6.4 (paper-enabled, position-aware)...")
+    global ta_profiles_global, asset_map_global
+
+    logger.info("[Signals] Starting signal generation v6.9 (context-budget-aware)...")
 
     try:
         cfg = get_llm_config()
@@ -235,6 +288,8 @@ def run():
         ]
         asset_map = {a.symbol: {"name": a.name, "price": a.price}
                      for a in db.query(MarketAsset).all()}
+
+    asset_map_global = asset_map
 
     held_positions = []
     held_symbols   = set()
@@ -268,6 +323,7 @@ def run():
     logger.info(f"[Signals] Reading TA from cache for {len(all_syms_dedup)} symbols...")
     bars = _read_ta_from_cache(all_syms_dedup)
     ta_profiles = {sym: analyze_symbol(sym_bars) for sym, sym_bars in bars.items()}
+    ta_profiles_global = ta_profiles
     has_ta = sum(1 for v in ta_profiles.values() if any(tf_data for tf_data in v.values() if tf_data is not None))
     logger.info(f"[Signals] TA profiles: {has_ta}/{len(all_syms_dedup)} have data")
 
@@ -311,23 +367,6 @@ def run():
                    "For Short/Short_Leveraged: stop_loss ABOVE entry, target_price BELOW entry. "
                    "For Long_Leveraged: stop_loss BELOW entry, target ABOVE entry. R:R >= 2.\n")
 
-    def ta_block(syms, futures_profiles=None):
-        blocks = []
-        for s in syms:
-            profile = ta_profiles.get(s)
-            if not profile and futures_profiles:
-                profile = futures_profiles.get(s)
-            if profile:
-                fu_meta = FUTURES_UNIVERSE.get(s, {})
-                name = asset_map.get(s, {}).get("name") or fu_meta.get("name") or s
-                ta_txt = build_ta_prompt_block(s, profile, name)
-                # Learning context: only add if non-empty (avoids blank padding lines)
-                acc_txt = get_accuracy_context(s, lookback_days=30)
-                pat_txt = get_pattern_context(profile, "long")
-                les_txt = get_lessons_context(symbol=s, limit=3)
-                blocks.append(ta_txt + acc_txt + pat_txt + les_txt)
-        return "\n".join(blocks) or "No TA data available."
-
     held_ctx = ""
     if held_positions:
         held_lines = [
@@ -336,19 +375,28 @@ def run():
         ]
         held_ctx = "=== CURRENT OPEN POSITIONS (DO NOT generate signals for these unless adding to a winner >+5%) ===\n" + "\n".join(held_lines) + "\n\n"
 
+    # Global learning context — injected ONCE per prompt, not per symbol
+    global_lessons = get_lessons_context(symbol=None, limit=5)
+    regime_ctx     = get_regime_context(regime.get("label", ""))
+
     def make_prompt(label, syms, task, rule=None):
         r = rule if rule is not None else bounce_rule
         schema = PAPER_SIGNAL_SCHEMA if rule == paper_rule else SIGNAL_SCHEMA
-        regime_ctx = get_regime_context(regime.get("label", ""))
+        # Accuracy summary: only symbols in this track with recorded trade history
+        acc_summary = build_accuracy_summary(syms)
         prompt = (
             f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
             f"=== MARKET NEWS ===\n{news_ctx}\n\n"
             f"=== MARKET REGIME ===\nCurrent: {regime.get('label','Unknown')} | Risk: {regime.get('risk','medium')}\n{regime_ctx}\n"
             f"{held_ctx}"
+            f"{acc_summary}"
+            f"{global_lessons}"
             f"=== TECHNICAL ANALYSIS — {label} ===\n{ta_block(syms)}\n\n"
             f"=== TASK ===\n{task}{r}"
             f"Output format (return ONLY this JSON array):\n{schema}"
         )
+        tok_est = len(prompt) // 4
+        logger.info(f"[Signals] Prompt '{label}': ~{tok_est} tokens input | {TRACK_MAX_TOKENS} max output")
         return prompt
 
     tracks = [
@@ -373,14 +421,15 @@ def run():
                      "Use macro/news to find overextended longs (short candidates) or confirmed breakouts for leveraged longs. "
                      "Generate 3-5 paper trading signals only.", rule=paper_rule), True),
     ]
+
     # Build futures TA profiles for Track F
     futures_ta_profiles = {}
     try:
         futures_syms_to_analyze = TRACK_F_FUTURES[:10]  # Limit to avoid long fetch time
         logger.info(f"[Signals] Fetching futures TA for {len(futures_syms_to_analyze)} symbols...")
         for fsym in futures_syms_to_analyze:
-            bars = fetch_futures_multi_tf(fsym, ["1H", "4H", "1D"])
-            valid_bars = {tf: df for tf, df in bars.items() if df is not None and len(df) >= 10}
+            bars_f = fetch_futures_multi_tf(fsym, ["1H", "4H", "1D"])
+            valid_bars = {tf: df for tf, df in bars_f.items() if df is not None and len(df) >= 10}
             if valid_bars:
                 futures_ta_profiles[fsym] = analyze_symbol(valid_bars)
         logger.info(f"[Signals] Futures TA ready: {len(futures_ta_profiles)} symbols")
@@ -392,7 +441,6 @@ def run():
         for s in TRACK_F_FUTURES[:14]
     )
     _fut_ta_block = ta_block(TRACK_F_FUTURES[:10], futures_profiles=futures_ta_profiles)
-    _fut_regime_ctx = get_regime_context(regime.get("label", ""))
     _fut_regime_label = regime.get("label", "Unknown")
     _fut_regime_risk  = regime.get("risk", "medium")
     _fut_rules = (
@@ -406,7 +454,8 @@ def run():
         f"=== GEOPOLITICAL / MACRO INTEL ===\n{threat_ctx}\n\n"
         f"=== FUTURES / COMMODITY / FOREX NEWS ===\n{futures_news_ctx}\n\n"
         f"=== MARKET REGIME ===\nCurrent: {_fut_regime_label} | Risk: {_fut_regime_risk}\n"
-        f"{_fut_regime_ctx}\n"
+        f"{regime_ctx}\n"
+        f"{global_lessons}"
         f"=== TECHNICAL ANALYSIS — FUTURES / FOREX / COMMODITIES ===\n"
         f"{_fut_ta_block}\n\n"
         f"=== ASSET REFERENCE ===\n{_fut_asset_ref}\n\n"
@@ -417,6 +466,7 @@ def run():
         f"{_fut_rules}\n"
         f"Output format (return ONLY this JSON array):\n{FUTURES_PAPER_SCHEMA}"
     )
+    logger.info(f"[Signals] Prompt 'F_futures': ~{len(futures_prompt)//4} tokens input | {TRACK_MAX_TOKENS} max output")
 
     tracks.append(("F_futures", TRACK_F_FUTURES[:14], futures_prompt, True))
 
@@ -428,16 +478,14 @@ def run():
                         "Generate 2-4 signals for the strongest setups only."), False
         ))
 
-    for name, syms, prompt, _ in tracks:
-        logger.info(f"[Signals] Track {name}: {len(syms)} syms | ~{len(prompt)//4} tokens")
-
     all_raw        = []  # (signal_dict, is_paper)
     all_raw_lock   = threading.Lock()
 
     def _run_track(name, syms, prompt, is_paper):
         try:
             logger.info(f"[Signals] Calling LLM for track {name}...")
-            r = call_lm_studio(prompt, system=sys_p, max_tokens=32768, temperature=0.15, thinking=True)
+            r = call_lm_studio(prompt, system=sys_p, max_tokens=TRACK_MAX_TOKENS,
+                               temperature=0.15, thinking=True)
             logger.info(f"[Signals] Track {name} → {len(r)} chars returned")
             sigs = parse_json(r)
             results = []
@@ -460,9 +508,9 @@ def run():
     # Run all tracks in parallel — LM Studio 4-slot semaphore in lmstudio.py caps concurrency
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="track") as pool:
-        futures = {pool.submit(_run_track, name, syms, prompt, is_paper): name
-                   for name, syms, prompt, is_paper in tracks}
-        for fut in as_completed(futures):
+        futures_exec = {pool.submit(_run_track, name, syms, prompt, is_paper): name
+                        for name, syms, prompt, is_paper in tracks}
+        for fut in as_completed(futures_exec):
             pass  # results already written to all_raw via _run_track
 
     logger.info(f"[Signals] {len(all_raw)} raw signals from LLM across all tracks")
@@ -586,11 +634,8 @@ def run():
     )
     log_decision(
         "signals", "GENERATED",
-        f"{saved} new signals | {updated} updated | regime={regime.get('label', thinking=True)} | market={'OPEN' if market_open else 'CLOSED'}",
-        score=float(saved)
+        f"{saved} new signals | {updated} updated | regime={regime.get('label', '')} | market={'OPEN' if market_open else 'CLOSED'}",
+        score=float(saved),
+        thinking=True
     )
     return {"saved": saved, "updated": updated, "skipped": skipped, "regime": regime.get("label"), "market_open": market_open}
-
-
-
-

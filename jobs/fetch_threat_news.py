@@ -89,8 +89,7 @@ def analyze_batch(articles: list[dict]) -> list[dict]:
     ])
 
     # Compact schema — shorter field names/values = fewer output tokens
-    prompt = f"""/no_think
-Classify {len(articles)} news articles for market/geopolitical impact. Skip routine news.
+    prompt = f"""Classify {len(articles)} news articles for market/geopolitical impact. Skip routine news.
 
 {batch_text}
 
@@ -103,7 +102,9 @@ Return [] if nothing significant."""
     batch_max_tokens = min(4096, 512 + len(articles) * 350)  # generous headroom — no server cap
 
     try:
-        response = call_lm_studio(prompt, max_tokens=batch_max_tokens, temperature=0.1, thinking=False)
+        response = call_lm_studio(prompt,
+                               system="You are a data classifier. Answer directly without reasoning. Return ONLY a JSON array, no markdown, no explanation.",
+                               max_tokens=batch_max_tokens, temperature=0.1, thinking=False)
         parsed = parse_json(response)
         if isinstance(parsed, list):
             # Remap compact keys to full keys for downstream compatibility

@@ -1,5 +1,5 @@
 """
-APScheduler-based job scheduler v2.0
+APScheduler-based job scheduler v2.1
 - Event-driven signal generation: fires immediately when new threats/news arrive
 - Portfolio drawdown ceiling: checked every 5 min, goes defensive if breached
 - Cross-position regime shift detection: tightens all crypto/equity if regime flips
@@ -368,50 +368,72 @@ def create_scheduler() -> BackgroundScheduler:
 
     now = datetime.now(timezone.utc)
 
-    # Market data every 15 min — notifies event bus when new data arrives
+    # ── STARTUP SEQUENCE ───────────────────────────────────────────────────────
+    # Phase 1 — Data ingestion (runs immediately): market data + threats/news
+    #           These populate the DB/cache so the LLM has real data to work with.
+    # Phase 2 — LLM tasks (wait 3 min): signals, execute, guardian
+    #           By T+3min both market and threat jobs have finished their first run,
+    #           the OHLCV cache is warm, news/threats are in DB.
+    # Phase 3 — Housekeeping (staggered): positions, paper, telegram
+    #
+    # This prevents the model hitting its token budget on an empty DB while also
+    # fighting for threads with 6 other jobs all starting simultaneously.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # ── PHASE 1: Data pipeline — fires immediately ─────────────────────────────
+    # Market data every 15 min
     sched.add_job(make_job_runner('market', market_run),
                   'interval', minutes=15, id='market', next_run_time=now)
 
-    # Threat/news every 15 min — notifies event bus when new items arrive
+    # Threat/news every 15 min
     sched.add_job(make_job_runner('threats', threats_run),
-                  'interval', minutes=15, id='threats', next_run_time=now)
+                  'interval', minutes=15, id='threats',
+                  next_run_time=now + timedelta(seconds=5))  # 5s after market
 
-    # Scheduled signal generation every 30 min (baseline)
+    # ── PHASE 2: LLM tasks — wait 3 min for data pipeline to complete ─────────
+    # Signal generation every 30 min — first run at T+3min
     sched.add_job(make_job_runner('signals', signals_run),
                   'interval', minutes=30, id='signals',
-                  next_run_time=now + timedelta(seconds=90))
-
-    # Event-driven signal check every 2 min (fires if new intel arrived)
-    sched.add_job(event_driven_signals,
-                  'interval', minutes=2, id='event_signals',
-                  next_run_time=now + timedelta(minutes=2))
-
-    # Execute every 30 min
-    sched.add_job(make_job_runner('execute', execute_run),
-                  'interval', minutes=30, id='execute',
                   next_run_time=now + timedelta(minutes=3))
 
-    # Position management every 5 min
+    # Execute every 30 min — first run at T+4min (signals need to be saved first)
+    sched.add_job(make_job_runner('execute', execute_run),
+                  'interval', minutes=30, id='execute',
+                  next_run_time=now + timedelta(minutes=4))
+
+    # Portfolio guardian every 5 min — first run at T+3.5min
+    sched.add_job(make_job_runner('guardian', portfolio_guardian),
+                  'interval', minutes=5, id='guardian',
+                  next_run_time=now + timedelta(minutes=3, seconds=30))
+
+    # Event-driven signal check every 2 min — arms after T+3min so events
+    # during the data pipeline don't fire the LLM before cache is warm
+    sched.add_job(event_driven_signals,
+                  'interval', minutes=2, id='event_signals',
+                  next_run_time=now + timedelta(minutes=3))
+
+    # ── PHASE 3: Housekeeping — staggered starts ───────────────────────────────
+    # Position management every 5 min — first run at T+30s (non-LLM, just Alpaca)
     sched.add_job(make_job_runner('positions', positions_run),
                   'interval', minutes=5, id='positions',
                   next_run_time=now + timedelta(seconds=30))
 
+    # Paper trading every 15 min — first run at T+5min
     sched.add_job(make_job_runner('paper', paper_run),
                   'interval', minutes=15, id='paper_trading',
                   next_run_time=now + timedelta(minutes=5),
                   replace_existing=True, max_instances=1, misfire_grace_time=180)
 
-    # Portfolio guardian every 5 min (offset from positions by 2.5 min)
-    sched.add_job(make_job_runner('guardian', portfolio_guardian),
-                  'interval', minutes=5, id='guardian',
-                  next_run_time=now + timedelta(minutes=2, seconds=30))
-
-    # Telegram every 1 min
+    # Telegram every 1 min — fires immediately (no LLM, just polls)
     sched.add_job(make_job_runner('telegram', telegram_run),
                   'interval', minutes=1, id='telegram', next_run_time=now)
 
-    logger.info("[Scheduler] v2.0 — all jobs registered (event-driven + guardian active)")
+    logger.info(
+        "[Scheduler] v2.1 — startup sequenced: data pipeline T+0s → LLM tasks T+3min → "
+        "execute T+4min → guardian T+3.5min | event signals arm at T+3min"
+    )
     return sched
+
 
 
 

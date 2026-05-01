@@ -240,30 +240,28 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             else:
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, is_r1=is_r1)
         except _EmptyThinkingResponse:
-            # Qwen3 consumed all tokens on <think>. Retry with a MUCH smaller max_tokens
-            # so the model's thinking overhead still fits and JSON output can follow.
-            # This fires whether thinking=True or thinking=False — Qwen3 ignores /no_think
-            # when LM Studio's server cap overrides the API parameter.
+            # Qwen3 burned all tokens on <think> tags — LM Studio has a hard server cap
+            # overriding our max_tokens. Strategy: retry with /no_think prefix and
+            # progressively SMALLER max_tokens so the model is forced to emit JSON
+            # before hitting the cap. Works even when cap is as low as 150 tokens.
             if not is_r1:
-                logger.warning(
-                    "[LLM] Empty content (thinking-only) — retrying with reduced max_tokens=800 "
-                    "to force Qwen3 to truncate reasoning and emit JSON. "
-                    "Permanent fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
-                )
-                # Ensure /no_think prefix is set for the retry
                 retry_system = '/no_think\n\n' + (system or '').replace('/no_think\n\n', '')
                 retry_prompt  = '/no_think\n\n' + prompt.replace('/no_think\n\n', '')
-                try:
-                    return _call_openai_compat(retry_prompt, retry_system, 800, temperature, cfg, is_r1=False)
-                except _EmptyThinkingResponse:
-                    logger.error(
-                        "[LLM] Retry also returned empty content — LM Studio token cap is too tight. "
-                        "Fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
+                # Try descending token budgets: 120 → 80 → 60
+                for retry_max in (120, 80, 60):
+                    logger.warning(
+                        f"[LLM] Empty content (thinking-only) — retrying with max_tokens={retry_max} + /no_think. "
+                        "Permanent fix: LM Studio → Model Settings → Max Response Tokens → 0 (unlimited)."
                     )
-                    return "[]"
-                except Exception as retry_err:
-                    logger.error(f"[LLM] Retry failed: {retry_err}")
-                    return "[]"
+                    try:
+                        return _call_openai_compat(retry_prompt, retry_system, retry_max, temperature, cfg, is_r1=False)
+                    except _EmptyThinkingResponse:
+                        continue  # try smaller budget
+                    except Exception as retry_err:
+                        logger.error(f"[LLM] Retry (max={retry_max}) failed: {retry_err}")
+                        break
+                logger.error("[LLM] All retries exhausted — LM Studio cap too tight. Returning empty string.")
+                return ""
             raise RuntimeError("LLM returned empty content (thinking-only) and no retry possible")
 
 

@@ -227,7 +227,9 @@ def _llm_evaluate_position(sym: str, plpc: float, avg: float, current_price: flo
     orig_conf   = original_signal.get("confidence", "N/A")
     orig_reason = original_signal.get("reasoning", "N/A")
 
-    prompt = f"""You are an active position manager for a trading AI. Evaluate this open position and decide what to do RIGHT NOW.
+    prompt = f"""Answer directly. Return only the JSON object specified below.
+
+You are an active position manager for a trading AI. Evaluate this open position and decide what to do RIGHT NOW.
 
 POSITION: {sym} ({asset_type})
   Current P&L:    {plpc:+.2f}%  (${pl:+.2f})
@@ -258,7 +260,7 @@ Respond ONLY with valid JSON:
 {{"action": "HOLD" | "TIGHTEN_STOP" | "EXIT", "reason": "1-2 sentence explanation", "new_stop_pct": <float or null>}}"""
 
     try:
-        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.", max_tokens=1024, thinking=False)
+        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Answer directly without reasoning. Return ONLY the JSON object, no markdown, no explanation, no thinking.", max_tokens=1024, thinking=False)
         result = parse_json(raw)
         if isinstance(result, dict) and result.get("action") in ("HOLD", "TIGHTEN_STOP", "EXIT"):
             return result

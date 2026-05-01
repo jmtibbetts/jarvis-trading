@@ -1,5 +1,7 @@
 """
 lib/lmstudio.py — Unified LLM client.
+v6.9.3: Add enable_thinking/thinking payload fields — only reliable way to disable Qwen3 thinking.
+         Prompt-level /no_think is ignored by LM Studio; API payload field works correctly.
 v6.9.1: Auto-resolve model ID from /v1/models when configured name is placeholder.
 v6.9: 4-slot parallel semaphore (LLM_MAX_PARALLEL=4), 120k context / 32768 output tokens default.
 v6.2: Global threading lock — only one LLM call at a time (local model can't parallelize).
@@ -175,7 +177,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
             if cfg['provider'] == 'anthropic':
                 return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
             else:
-                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg)
+                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, thinking_mode=thinking)
         except _EmptyThinkingResponse:
             # Qwen3 produced only <think> tokens — retry immediately with /no_think
             if thinking and cfg.get('platform') in ('lmstudio', 'ollama'):
@@ -186,7 +188,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                     if cfg['provider'] == 'anthropic':
                         return _call_anthropic(prompt, fallback_system, retry_max, temperature, cfg)
                     else:
-                        return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg)
+                        return _call_openai_compat(prompt, fallback_system, retry_max, temperature, cfg, thinking_mode=False)
                 except _EmptyThinkingResponse:
                     # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
                     # Return empty JSON array so the track degrades gracefully instead of crashing.
@@ -197,7 +199,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
-                         temperature: float, cfg: dict) -> str:
+                         temperature: float, cfg: dict, thinking_mode: bool = False) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -220,6 +222,12 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         "num_predict":  max_tokens,   # llama.cpp / LM Studio native field (same value)
         "temperature":  temperature,
     }
+
+    # Qwen3 thinking control — the only reliable way to suppress <think> tokens.
+    # Prompt-level /no_think is ignored by LM Studio; these payload fields work correctly.
+    if not cfg.get('provider') == 'anthropic':
+        payload["enable_thinking"] = thinking_mode  # Qwen3 native parameter
+        payload["thinking"]        = thinking_mode  # alternate key for some LM Studio builds
 
     url = f"{cfg['url']}/chat/completions"
     logger.info(f"[LLM] → POST {url} | model={cfg['model']} | ~{len(prompt)//4} tokens prompt")

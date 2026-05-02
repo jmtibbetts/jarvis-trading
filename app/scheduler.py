@@ -43,6 +43,7 @@ job_status = {
     'telegram':  {'status': 'idle', 'last': None, 'error': None},
     'guardian':  {'status': 'idle', 'last': None, 'error': None},
     'paper':     {'status': 'idle', 'last': None, 'error': None},
+    'scanner':   {'status': 'idle', 'last': None, 'error': None},
 }
 
 # ── Event bus: news/threat jobs signal here when new items arrive ──────────────
@@ -365,6 +366,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.manage_positions  import run as positions_run
     from jobs.telegram_bot      import run as telegram_run
     from jobs.paper_trading     import run as paper_run
+    from jobs.scan_opportunities import run as scanner_run
 
     now = datetime.now(timezone.utc)
 
@@ -428,9 +430,31 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('telegram', telegram_run),
                   'interval', minutes=1, id='telegram', next_run_time=now)
 
+
+    # ── OPPORTUNITY SCANNER ────────────────────────────────────────────────────
+    # Pre-market scan at 6:30 AM PT (13:30 UTC) every weekday
+    sched.add_job(make_job_runner('scanner', lambda: scanner_run('pre_market')),
+                  'cron', day_of_week='mon-fri', hour=13, minute=30,
+                  id='scanner_premarket', timezone='UTC')
+
+    # Intraday scan every 30 min during market hours (Mon-Fri 13:30-20:00 UTC)
+    sched.add_job(make_job_runner('scanner', lambda: scanner_run('intraday')),
+                  'cron', day_of_week='mon-fri', hour='13-19', minute='0,30',
+                  id='scanner_intraday', timezone='UTC')
+
+    # Crypto scan every 60 min, 24/7
+    sched.add_job(make_job_runner('scanner', lambda: scanner_run('crypto')),
+                  'interval', minutes=60, id='scanner_crypto',
+                  next_run_time=now + timedelta(minutes=8))
+
+    # Futures/forex scan every 4 hours, 24/7
+    sched.add_job(make_job_runner('scanner', lambda: scanner_run('futures')),
+                  'interval', hours=4, id='scanner_futures',
+                  next_run_time=now + timedelta(minutes=10))
+
     logger.info(
-        "[Scheduler] v2.1 — startup sequenced: data pipeline T+0s → LLM tasks T+3min → "
-        "execute T+4min → guardian T+3.5min | event signals arm at T+3min"
+        "[Scheduler] v2.2 — startup sequenced: data pipeline T+0s → LLM tasks T+3min → "
+        "execute T+4min → guardian T+3.5min | scanner: crypto T+8min / futures T+10min"
     )
     return sched
 

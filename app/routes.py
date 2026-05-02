@@ -4,7 +4,8 @@ Added: /regime, /portfolio/equity, /market/full, /positions/close, /signals/clea
 """
 import logging, uuid
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 from app.database import get_db, AiDecision, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot

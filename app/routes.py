@@ -792,6 +792,41 @@ def paper_reset():
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@router.post("/scanner/run")
+async def run_scanner(request: Request):
+    """Manually trigger the opportunity scanner. mode: pre_market|intraday|crypto|futures|all"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode = body.get("mode", "all")
+    valid_modes = {"pre_market", "intraday", "crypto", "futures", "all"}
+    if mode not in valid_modes:
+        return JSONResponse({"error": f"Invalid mode. Use: {valid_modes}"}, status_code=400)
+
+    import threading
+    from jobs.scan_opportunities import run as scanner_run
+    def _run():
+        try:
+            scanner_run(mode)
+        except Exception as e:
+            logger.error(f"[Routes] Scanner run({mode}) failed: {e}")
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return {"status": "started", "mode": mode, "message": f"Opportunity scanner [{mode}] running in background"}
+
+
+@router.get("/scanner/status")
+def get_scanner_status():
+    """Get scanner job status."""
+    try:
+        from app.scheduler import job_status
+        return {"scanner": job_status.get("scanner", {"status": "unknown"})}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.post("/paper/run-mtm")
 def paper_run_mtm():
     """Manually trigger mark-to-market cycle."""

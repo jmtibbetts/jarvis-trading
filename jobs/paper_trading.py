@@ -77,13 +77,39 @@ def _get_all_prices() -> dict:
     with get_db() as db:
         assets = db.query(MarketAsset).all()
         prices = {}
+        # Pass 1: canonical symbols only (each MarketAsset row's own exact
+        # symbol). These are authoritative and must never be overwritten by
+        # a *different* asset's convenience alias below.
         for a in assets:
             if a.price and float(a.price) > 0:
                 prices[a.symbol] = float(a.price)
-                if "/" in a.symbol:
-                    prices[a.symbol.replace("/", "")] = float(a.price)
-                elif a.symbol.endswith("USD") and len(a.symbol) > 3:
-                    prices[a.symbol[:-3] + "/USD"] = float(a.price)
+        # Pass 2: convenience aliases (slash-stripped crypto pair, bare "SYM"
+        # -> "SYM/USD") so mark_to_market's lookup can find a price even when
+        # a position's stored symbol format doesn't exactly match a DB row.
+        # Only fill in a key that's still empty — an alias must never
+        # overwrite another asset's canonical entry. Without this guard, a
+        # crypto pair's bare-symbol alias (e.g. "BEAT/USD" -> "BEAT") can
+        # silently collide with an unrelated equity ticker sharing the same
+        # bare symbol (NASDAQ: BEAT), handing a completely different
+        # instrument's price to a mark-to-market lookup. Confirmed root
+        # cause of a $148M phantom paper gain on 2026-08-10: a BEAT/USD
+        # crypto position (entry $0.000039) was marked-to-market and closed
+        # against BEAT the equity's price ($2.87) once the crypto quote
+        # temporarily went missing and the lookup fell through to this
+        # alias. See lib/paper_engine.py's _price_move_is_plausible() for
+        # the defense-in-depth guard against this class of bug recurring.
+        for a in assets:
+            if not (a.price and float(a.price) > 0):
+                continue
+            price = float(a.price)
+            if "/" in a.symbol:
+                alias = a.symbol.replace("/", "")
+                if alias not in prices:
+                    prices[alias] = price
+            elif a.symbol.endswith("USD") and len(a.symbol) > 3:
+                alias = a.symbol[:-3] + "/USD"
+                if alias not in prices:
+                    prices[alias] = price
 
     # Layer 2: Futures / Forex via yfinance (cached, 5-min TTL)
     try:

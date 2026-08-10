@@ -25,6 +25,27 @@ MAX_LEVERAGE           = 20.0         # Max leverage multiplier (5x/10x/20x supp
 MARGIN_CALL_THRESHOLD  = 0.15         # Liquidate if equity < 15% of margin (lost 85% of capital)
 DEFAULT_POSITION_SIZE  = 3_000.0      # $3k margin per trade (3% of $100k)
 
+# A candidate close/mark price implying more than this multiple away from
+# entry, in either direction, is rejected as an implausible single-interval
+# move rather than trusted. No genuine mark-to-market tick (run every few
+# minutes) legitimately moves a price 50x, let alone the 74,000x seen in the
+# incident this guards against: a BEAT/USD crypto position (entry $0.000039)
+# got marked-to-market against NASDAQ-listed BEAT's equity price ($2.87)
+# when the crypto quote briefly went missing and an upstream symbol-lookup
+# fallback fell through to the unrelated equity's bare ticker (see
+# jobs/paper_trading.py's _get_all_prices/_get_current_price). That single
+# bad tick inflated the paper portfolio's realized P&L by ~$148M. This is
+# the last line of defense — it protects portfolio integrity from *any*
+# upstream price-source bug, not just this specific collision.
+MAX_PLAUSIBLE_PRICE_MULTIPLE = 50.0
+
+
+def _price_move_is_plausible(entry: float, price: float) -> bool:
+    if entry is None or price is None or entry <= 0 or price <= 0:
+        return False
+    ratio = price / entry
+    return (1.0 / MAX_PLAUSIBLE_PRICE_MULTIPLE) <= ratio <= MAX_PLAUSIBLE_PRICE_MULTIPLE
+
 # Leverage by asset class — futures get tighter margin than equity
 ASSET_CLASS_MARGIN = {
     "futures":  1_500.0,   # Futures use smaller margin (higher leverage)
@@ -325,6 +346,14 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
         lev    = float(pos.leverage or 1.0)
         side   = 1 if pos_side == "long" else -1
 
+        if not _price_move_is_plausible(entry, close_price):
+            logger.error(
+                f"[Paper] Rejected close for {pos_symbol}: entry=${entry:.6g} candidate_close=${close_price:.6g} "
+                f"is a {close_price / entry if entry else 0:.1f}x move — almost certainly a bad price (symbol "
+                f"collision or stale/wrong data source), not a real market move. Position left open."
+            )
+            return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
+
         pnl, pnl_pct = _calc_pnl(entry, close_price, qty, side, lev, pos_margin)
 
         portfolio = _get_portfolio_cash(db)
@@ -448,6 +477,14 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
         remain_notional = notional - close_notional
         if close_qty <= 0 or remain_qty <= 0:
             return {"error": "Position too small to split"}
+
+        if not _price_move_is_plausible(entry, close_price):
+            logger.error(
+                f"[Paper] Rejected partial close for {pos_symbol}: entry=${entry:.6g} candidate_close=${close_price:.6g} "
+                f"is a {close_price / entry if entry else 0:.1f}x move — almost certainly a bad price, not a real "
+                f"market move. Position left open, unmodified."
+            )
+            return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
 
         pnl, pnl_pct = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin)
 
@@ -574,6 +611,15 @@ def mark_to_market(prices: dict) -> dict:
         lev    = pos["leverage"]
         margin = pos["margin_used"]
         side   = 1 if pos["side"] == "long" else -1
+
+        if not _price_move_is_plausible(entry, price):
+            logger.error(
+                f"[Paper] Rejected MTM price for {sym}: entry=${entry:.6g} candidate=${price:.6g} "
+                f"is a {price / entry if entry else 0:.1f}x move — almost certainly a symbol collision or bad "
+                f"tick from an upstream price source, not a real move. Skipping this cycle; position stays open "
+                f"at its last known-good price."
+            )
+            continue
 
         pnl, pct = _calc_pnl(entry, price, qty, side, lev, margin)
 

@@ -96,7 +96,8 @@ export type PerformanceAnalytics = {
   period_days: number;
   sharpe_ratio: number | null;
   max_drawdown_pct: number | null;
-  by_source?: Record<string, { count: number; win_rate_pct: number; avg_pnl_pct: number }>;
+  trades_analyzed: number;
+  by_signal_source: { signal_source: string; total: number; wins: number; losses: number; win_rate_pct: number; avg_pnl_pct: number }[];
 };
 
 export type ScannerStatus = { scanner: Record<string, JobStatus> };
@@ -142,6 +143,54 @@ export type PaperSummary = {
   };
   positions: PaperPosition[];
   trades: PaperTrade[];
+};
+
+export type Decision = {
+  id: string;
+  source: string;
+  symbol: string | null;
+  action: string;
+  reasoning: string;
+  price: number | null;
+  pnl_pct: number | null;
+  score: number | null;
+  created_at: string;
+};
+
+export type LearningSummary = {
+  total: number;
+  wins: number;
+  losses: number;
+  avg_pnl: number;
+  [key: string]: unknown;
+};
+
+export type BacktestRun = {
+  id: string;
+  symbols: string[];
+  timeframes: string[];
+  trade_mode: string;
+  start_date: string;
+  end_date: string;
+  status: "running" | "completed" | "failed";
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  result?: {
+    total_signals: number;
+    decided: number;
+    wins: number;
+    losses: number;
+    win_rate_pct: number;
+    starting_equity: number;
+    final_equity: number;
+    total_return_pct: number;
+    equity_curve: [string, number][];
+    max_drawdown: { max_drawdown_pct: number };
+    sharpe_ratio: number | null;
+    date_range_clamped: boolean;
+    symbols_skipped: { symbol: string; reason: string }[];
+  };
 };
 
 export type AutoSimSummary = {
@@ -225,4 +274,12 @@ export const api = {
 
   autoSimSummary: () => get<AutoSimSummary>(`/auto-paper/summary`),
   autoSimRun: () => post<Record<string, unknown>>(`/auto-paper/run`),
+
+  decisions: (limit = 100) => get<Decision[]>(`/decisions?limit=${limit}`),
+  learningSummary: (paper: "live" | "paper" | "all" = "live") => get<LearningSummary>(`/learning/summary?paper=${paper}`),
+
+  backtestRun: (body: { symbols: string[]; start_date: string; end_date: string; timeframes?: string[]; trade_mode?: string }) =>
+    post<{ run_id: string; status: string }>(`/backtest/run`, body),
+  backtestGet: (runId: string) => get<BacktestRun>(`/backtest/${runId}`),
+  backtestList: () => get<{ runs: Omit<BacktestRun, "timeframes" | "error" | "result">[] }>(`/backtest`),
 };

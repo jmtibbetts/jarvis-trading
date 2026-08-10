@@ -1,6 +1,7 @@
 <script lang="ts">
   import TopHud from "./lib/components/TopHud.svelte";
   import NavRail from "./lib/components/NavRail.svelte";
+  import Toaster from "./lib/components/Toaster.svelte";
   import CommandCenter from "./lib/sections/CommandCenter.svelte";
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
@@ -33,6 +34,7 @@
       <Ops />
     {/if}
   </main>
+  <Toaster />
 </div>
 
 <style>

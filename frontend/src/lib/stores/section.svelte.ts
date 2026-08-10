@@ -8,7 +8,7 @@ export type SectionId =
 
 export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
   { id: "command", label: "Command Center", ready: true },
-  { id: "signals", label: "Signals & Scanner", ready: false },
+  { id: "signals", label: "Signals & Scanner", ready: true },
   { id: "positions", label: "Positions & Paper", ready: false },
   { id: "intelligence", label: "Intelligence", ready: false },
   { id: "performance", label: "Performance & Learning", ready: false },

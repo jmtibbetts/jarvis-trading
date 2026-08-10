@@ -19,6 +19,7 @@ export type Signal = {
   generated_at: string;
   signal_source: string;
   paper_mode: boolean;
+  paper_direction: string | null;
   rr_ratio: number | null;
 };
 
@@ -79,9 +80,35 @@ export type PerformanceAnalytics = {
   by_source?: Record<string, { count: number; win_rate_pct: number; avg_pnl_pct: number }>;
 };
 
+export type ScannerStatus = { scanner: Record<string, JobStatus> };
+export type AnalyzeResult = {
+  symbol: string;
+  ta: Record<string, any>;
+  signal: (Record<string, any> & { error?: string }) | null;
+};
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`/api${path}`);
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+  return res.json();
+}
+
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail ?? detail?.error ?? `POST ${path} -> ${res.status}`);
+  }
+  return res.json();
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`/api${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE ${path} -> ${res.status}`);
   return res.json();
 }
 
@@ -95,4 +122,19 @@ export const api = {
   jobStatus: () => get<JobStatusMap>(`/jobs/status`),
   performanceAnalytics: (days = 30) => get<PerformanceAnalytics>(`/performance/analytics?days=${days}`),
   news: (limit = 20) => get<{ title: string; sentiment: string | null; source: string }[]>(`/news?limit=${limit}`),
+
+  approveSignal: (id: string) => post<{ ok: boolean }>(`/signals/${id}/approve`),
+  rejectSignal: (id: string) => post<{ ok: boolean }>(`/signals/${id}/reject`),
+  executeSignal: (id: string) => post<Record<string, unknown>>(`/signals/${id}/execute`, {}),
+  paperExecuteSignal: (id: string, direction = "Long") =>
+    post<Record<string, unknown>>(`/signals/${id}/paper-execute?direction=${direction}`),
+  deleteSignal: (id: string) => del<{ ok: boolean }>(`/signals/${id}`),
+  clearExpiredSignals: () => del<{ ok: boolean; cleared?: number }>(`/signals/clear/expired`),
+
+  runScanner: (mode: "pre_market" | "intraday" | "crypto" | "futures" | "all") =>
+    post<{ status: string; mode: string }>(`/scanner/run`, { mode }),
+  scannerStatus: () => get<ScannerStatus>(`/scanner/status`),
+
+  analyze: (symbol: string, timeframes: string[], generate_signal: boolean) =>
+    post<AnalyzeResult>(`/analyze`, { symbol, timeframes, generate_signal }),
 };

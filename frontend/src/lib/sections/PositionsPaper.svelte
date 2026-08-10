@@ -2,16 +2,20 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
-  import { api, type PositionsResponse, type PaperSummary, type AutoSimSummary } from "../api";
+  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary } from "../api";
   import { toastStore } from "../stores/toast.svelte";
 
   type Account = "live" | "paper" | "autosim";
   let account = $state<Account>("live");
 
-  let live = $state<PositionsResponse | null>(null);
+  let live = $state<{ positions: PositionWithSignal[]; account: { equity: number; cash: number; unrealized_pl: number } } | null>(null);
   let paper = $state<PaperSummary | null>(null);
   let autosim = $state<AutoSimSummary | null>(null);
+  let slippage = $state<SlippageSummary | null>(null);
   let busy = $state<Set<string>>(new Set());
+  let expandedLive = $state<Set<string>>(new Set());
+  let showManualOpen = $state(false);
+  let manualOpen = $state({ symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" });
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -19,15 +23,46 @@
     busy = next;
   }
 
+  function toggleExpand(symbol: string) {
+    const next = new Set(expandedLive);
+    next.has(symbol) ? next.delete(symbol) : next.add(symbol);
+    expandedLive = next;
+  }
+
   async function loadAll() {
-    const [l, p, a] = await Promise.all([
-      api.positions().catch(() => null),
+    const [l, p, a, s] = await Promise.all([
+      api.positionsWithSignals().catch(() => null),
       api.paperSummary().catch(() => null),
       api.autoSimSummary().catch(() => null),
+      api.slippageSummary(50).catch(() => null),
     ]);
     live = l;
     paper = p;
     autosim = a;
+    slippage = s;
+  }
+
+  async function openManualPosition() {
+    if (!manualOpen.symbol.trim()) {
+      toastStore.err("Enter a symbol");
+      return;
+    }
+    try {
+      await api.paperOpen({
+        symbol: manualOpen.symbol.trim().toUpperCase(),
+        asset_class: manualOpen.asset_class,
+        paper_direction: manualOpen.paper_direction,
+        entry_price: manualOpen.entry_price ? Number(manualOpen.entry_price) : undefined,
+        target_price: manualOpen.target_price ? Number(manualOpen.target_price) : undefined,
+        stop_loss: manualOpen.stop_loss ? Number(manualOpen.stop_loss) : undefined,
+      });
+      toastStore.ok(`${manualOpen.symbol}: paper position opened`);
+      manualOpen = { symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" };
+      showManualOpen = false;
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Open failed: ${e}`);
+    }
   }
 
   $effect(() => {
@@ -101,7 +136,7 @@
     <KpiTile label="Open Positions" value={String(live?.positions.length ?? "—")} />
   </div>
   <div class="stack">
-  <Panel title="Live Positions" meta="Alpaca">
+  <Panel title="Live Positions" meta="Alpaca — click a row for signal context">
     {#if live && live.positions.length}
       <table class="tbl">
         <thead>
@@ -109,20 +144,65 @@
         </thead>
         <tbody>
           {#each live.positions as p (p.symbol)}
-            <tr>
-              <td class="sym">{p.symbol}</td>
+            <tr class="expandable" onclick={() => toggleExpand(p.symbol)}>
+              <td class="sym">{expandedLive.has(p.symbol) ? "▾" : "▸"} {p.symbol}</td>
               <td><Pill label={p.side} tone={p.side === "long" ? "good" : "bad"} /></td>
               <td class="num">{p.qty}</td>
               <td class="num">{p.avg_entry_price}</td>
               <td class="num">{p.current_price}</td>
               <td class="num {p.unrealized_plpc >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(p.unrealized_plpc)}</td>
-              <td><button class="btn tiny bad" disabled={busy.has(p.symbol)} onclick={() => closeLive(p.symbol)}>Close</button></td>
+              <td>
+                <button class="btn tiny bad" disabled={busy.has(p.symbol)} onclick={(e) => { e.stopPropagation(); closeLive(p.symbol); }}>Close</button>
+              </td>
             </tr>
+            {#if expandedLive.has(p.symbol)}
+              <tr class="expand-row">
+                <td colspan="7">
+                  <div class="sig-context">
+                    <div class="sc-row">
+                      <span>Direction</span><b>{p.signal.direction}</b>
+                      <span>Entry</span><b class="num">{p.signal.entry_price}</b>
+                      <span>Target</span><b class="num pl-up">{p.signal.target_price ?? "—"}</b>
+                      <span>Stop</span><b class="num pl-down">{p.signal.stop_loss ?? "—"}</b>
+                      {#if p.signal.rr != null}<span>R:R</span><b class="num">{p.signal.rr}:1</b>{/if}
+                      {#if p.signal.progress_pct != null}<span>Progress</span><b class="num">{p.signal.progress_pct}%</b>{/if}
+                    </div>
+                    {#if p.signal.reasoning}<p class="sc-reasoning">{p.signal.reasoning}</p>{/if}
+                    {#if p.signal.key_risks}<p class="sc-risks"><b>Key risks:</b> {p.signal.key_risks}</p>{/if}
+                  </div>
+                </td>
+              </tr>
+            {/if}
           {/each}
         </tbody>
       </table>
     {:else}
       <div class="empty">No open live positions{live ? "" : " — Alpaca unreachable"}</div>
+    {/if}
+  </Panel>
+
+  <Panel title="Execution Slippage" meta={slippage?.count ? `${slippage.count} fills` : "no data"}>
+    {#if slippage && slippage.count}
+      <div class="slip-stats">
+        <div class="slip-stat"><span>Avg</span><b class="num">{slippage.avg_slippage_pct?.toFixed(3)}%</b></div>
+        <div class="slip-stat"><span>Median</span><b class="num">{slippage.median_slippage_pct?.toFixed(3)}%</b></div>
+        <div class="slip-stat"><span>Worst</span><b class="num pl-down">{slippage.worst_slippage_pct?.toFixed(3)}%</b></div>
+      </div>
+      <table class="tbl">
+        <thead><tr><th>Symbol</th><th>Intended</th><th>Filled</th><th>Slippage</th></tr></thead>
+        <tbody>
+          {#each slippage.trades.slice(0, 10) as t (t.fill_recorded_at + t.symbol)}
+            <tr>
+              <td class="sym">{t.symbol}</td>
+              <td class="num">{t.entry_price}</td>
+              <td class="num">{t.actual_fill_price}</td>
+              <td class="num {Math.abs(t.slippage_pct) < 0.1 ? '' : 'pl-down'}">{t.slippage_pct >= 0 ? "+" : ""}{t.slippage_pct.toFixed(3)}%</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {:else}
+      <div class="empty">No live fills recorded yet — slippage is tracked the first time manage_positions observes a filled live position.</div>
     {/if}
   </Panel>
   </div>
@@ -137,8 +217,36 @@
   <Panel title="Paper Positions" meta="{paper?.positions.length ?? 0} open">
     {#snippet children()}
       <div class="panel-actions">
+        <button class="btn small outline" onclick={() => (showManualOpen = !showManualOpen)}>
+          {showManualOpen ? "Cancel" : "+ Open Manual Position"}
+        </button>
         <button class="btn small outline" onclick={resetPaper}>Reset to $100k</button>
       </div>
+
+      {#if showManualOpen}
+        <div class="manual-form">
+          <input placeholder="Symbol (AAPL, BTC/USD...)" bind:value={manualOpen.symbol} />
+          <select bind:value={manualOpen.asset_class}>
+            <option value="Equity">Equity</option>
+            <option value="Crypto">Crypto</option>
+            <option value="Futures">Futures</option>
+            <option value="Forex">Forex</option>
+          </select>
+          <select bind:value={manualOpen.paper_direction}>
+            <option value="Long">Long</option>
+            <option value="Long_Leveraged">Long 2x</option>
+            <option value="Long_5x">Long 5x</option>
+            <option value="Short">Short</option>
+            <option value="Short_Leveraged">Short 2x</option>
+            <option value="Short_5x">Short 5x</option>
+          </select>
+          <input placeholder="Entry (blank = market)" bind:value={manualOpen.entry_price} />
+          <input placeholder="Target" bind:value={manualOpen.target_price} />
+          <input placeholder="Stop" bind:value={manualOpen.stop_loss} />
+          <button class="btn small primary" onclick={openManualPosition}>Open</button>
+        </div>
+      {/if}
+
       {#if paper && paper.positions.length}
         <table class="tbl">
           <thead>
@@ -244,7 +352,89 @@
   .panel-actions {
     display: flex;
     justify-content: flex-end;
+    gap: 8px;
     margin-bottom: 10px;
+  }
+
+  .manual-form {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr auto;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .manual-form input,
+  .manual-form select {
+    background: var(--bg);
+    border: 1px solid var(--line-bright);
+    border-radius: 6px;
+    color: var(--ink);
+    padding: 6px 8px;
+    font-size: 11.5px;
+    min-width: 0;
+  }
+  .btn.primary {
+    background: rgba(124, 154, 255, 0.15);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  tr.expandable {
+    cursor: pointer;
+  }
+  tr.expandable:hover td {
+    background: rgba(124, 154, 255, 0.04);
+  }
+  tr.expand-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .sig-context {
+    background: rgba(124, 154, 255, 0.03);
+    padding: 10px 14px;
+  }
+  .sc-row {
+    display: grid;
+    grid-template-columns: repeat(6, auto);
+    gap: 4px 10px;
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+  .sc-row span {
+    color: var(--ink-faint);
+  }
+  .sc-reasoning,
+  .sc-risks {
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+    margin: 4px 0;
+  }
+
+  .slip-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .slip-stat {
+    text-align: center;
+    background: var(--surface-raised);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .slip-stat span {
+    display: block;
+    font-size: 9.5px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 3px;
+  }
+  .slip-stat b {
+    font-size: 14px;
   }
   .btn {
     background: var(--surface-raised);

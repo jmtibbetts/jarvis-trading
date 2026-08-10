@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -10,19 +10,49 @@
   let equities = $state<MarketAsset[]>([]);
   let crypto = $state<MarketAsset[]>([]);
   let marketTab = $state<"equities" | "crypto">("equities");
+  let sources = $state<IntelligenceSource[]>([]);
+  let intelStatus = $state<IntelligenceStatus | null>(null);
+
+  let threatConfirm = $state<string>("");
+  let threatMinReliability = $state<number>(0);
+  let newsConfirm = $state<string>("");
+  let newsMinReliability = $state<number>(0);
+  let newsStale = $state<string>("");
+  let expandedThreat = $state<string | null>(null);
+  let expandedNews = $state<string | null>(null);
+  let showSources = $state(false);
+
+  async function loadThreats() {
+    threats = await api.threats(60, {
+      confirmation: threatConfirm || undefined,
+      minReliability: threatMinReliability || undefined,
+    });
+  }
+
+  async function loadNews() {
+    news = await api.news(40, {
+      confirmation: newsConfirm || undefined,
+      minReliability: newsMinReliability || undefined,
+      stale: newsStale === "" ? undefined : newsStale === "stale",
+    });
+  }
 
   async function loadAll() {
-    const [r, t, n, m] = await Promise.all([
+    const [r, t, n, m, s, st] = await Promise.all([
       api.regime().catch(() => null),
-      api.threats(30),
-      api.news(30),
+      api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
+      api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
       api.marketFull().catch(() => ({ equities: [], crypto: [], count: 0 })),
+      api.intelligenceSources().catch(() => []),
+      api.intelligenceStatus().catch(() => null),
     ]);
     regime = r;
     threats = t;
     news = n;
     equities = m.equities.slice(0, 12);
     crypto = m.crypto.slice(0, 12);
+    sources = s;
+    intelStatus = st;
   }
 
   $effect(() => {
@@ -33,7 +63,13 @@
 
   const sevTone = (s: string) => (s === "Critical" ? "critical" : s === "High" ? "warm" : s === "Low" ? "good" : "neutral");
   const sentTone = (s: string | null) => (s === "positive" ? "good" : s === "negative" ? "bad" : "neutral");
-  const fmtAgo = (iso: string | null) => {
+  const confirmTone = (s: string | null | undefined) =>
+    s === "corroborated" ? "good" : s === "unconfirmed_social" ? "warm" : s === "single_source" ? "neutral" : "neutral";
+  const confirmLabel = (s: string | null | undefined) =>
+    s === "corroborated" ? "corroborated" : s === "unconfirmed_social" ? "unconfirmed" : s === "single_source" ? "single source" : "—";
+  const sourceStatusTone = (s: string) => (s === "healthy" ? "good" : s === "degraded" ? "warm" : "bad");
+  const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+  const fmtAgo = (iso: string | null | undefined) => {
     if (!iso) return "—";
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (s < 60) return "just now";
@@ -75,39 +111,173 @@
     </Panel>
   </div>
 
+  <div class="span-12">
+    <Panel title="Intelligence Ingestion Health" meta={intelStatus ? intelStatus.status : "—"}>
+      {#snippet children()}
+        {#if intelStatus}
+          <div class="ih-strip">
+            <div class="ih-stat">
+              <span class="ih-label">Sources</span>
+              <span class="ih-val">{intelStatus.source_count}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Healthy</span>
+              <span class="ih-val good">{intelStatus.healthy_sources}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Failing</span>
+              <span class="ih-val {intelStatus.failing_sources > 0 ? 'bad' : ''}">{intelStatus.failing_sources}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">News (24h)</span>
+              <span class="ih-val">{intelStatus.recent_news}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Corroborated</span>
+              <span class="ih-val good">{intelStatus.corroborated_recent}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Unconfirmed social</span>
+              <span class="ih-val warm">{intelStatus.social_unconfirmed_recent}</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Last run</span>
+              <span class="ih-val small">{intelStatus.latest_run ? fmtAgo(intelStatus.latest_run.finished_at) : "never"}</span>
+            </div>
+            <button class="ih-toggle" onclick={() => (showSources = !showSources)}>
+              {showSources ? "Hide sources ▲" : "Show sources ▼"}
+            </button>
+          </div>
+          {#if showSources}
+            <table class="tbl src-tbl">
+              <thead>
+                <tr><th>Source</th><th>Kind</th><th>Reliability</th><th>Status</th><th>Success/Fail</th><th>Last success</th><th>Last error</th></tr>
+              </thead>
+              <tbody>
+                {#each sources as s (s.source)}
+                  <tr>
+                    <td class="sym">{s.source}</td>
+                    <td class="name">{s.source_kind ?? "—"}{s.provider ? ` · ${s.provider}` : ""}</td>
+                    <td class="num">{pct(s.reliability_score)}</td>
+                    <td><Pill label={s.status} tone={sourceStatusTone(s.status)} /></td>
+                    <td class="num">{s.success_count}/{s.failure_count}</td>
+                    <td class="num">{fmtAgo(s.last_success_at)}</td>
+                    <td class="err">{s.last_error || "—"}</td>
+                  </tr>
+                {:else}
+                  <tr><td colspan="7" class="empty">No source health data yet</td></tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        {:else}
+          <div class="empty">Ingestion status unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
   <div class="span-6">
     <Panel title="Active Threats" meta="{threats.length} active">
-      <div class="list">
-        {#each threats as t (t.id)}
-          <div class="row">
-            <Pill label={t.severity} tone={sevTone(t.severity)} />
-            <div class="row-main">
-              <div class="row-title">{t.title}</div>
-              <div class="row-meta">{t.country || t.region || "Global"} &middot; {fmtAgo(t.published_at)}</div>
+      {#snippet children()}
+        <div class="filters">
+          <select bind:value={threatConfirm} onchange={loadThreats}>
+            <option value="">All confirmations</option>
+            <option value="corroborated">Corroborated</option>
+            <option value="single_source">Single source</option>
+            <option value="unconfirmed_social">Unconfirmed social</option>
+          </select>
+          <select bind:value={threatMinReliability} onchange={loadThreats}>
+            <option value={0}>Any reliability</option>
+            <option value={0.5}>≥ 50%</option>
+            <option value={0.7}>≥ 70%</option>
+            <option value={0.85}>≥ 85%</option>
+          </select>
+        </div>
+        <div class="list">
+          {#each threats as t (t.id)}
+            <div
+              class="row clickable"
+              role="button"
+              tabindex="0"
+              onclick={() => (expandedThreat = expandedThreat === t.id ? null : t.id)}
+              onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); expandedThreat = expandedThreat === t.id ? null : t.id; } }}
+            >
+              <Pill label={t.severity} tone={sevTone(t.severity)} />
+              <div class="row-main">
+                <div class="row-title">{t.title}</div>
+                <div class="row-meta">
+                  {t.country || t.region || "Global"} &middot; {fmtAgo(t.published_at)}
+                  {#if t.confirmation_status}
+                    &middot; <span class="confirm-tag {confirmTone(t.confirmation_status)}">{confirmLabel(t.confirmation_status)}{t.corroboration_count ? ` (${t.corroboration_count})` : ""}</span>
+                  {/if}
+                  {#if t.reliability_score != null}
+                    &middot; reliability {pct(t.reliability_score)}
+                  {/if}
+                </div>
+                {#if expandedThreat === t.id}
+                  <div class="row-detail">
+                    {#if t.description}<p>{t.description}</p>{/if}
+                    {#if t.source_url}<a href={t.source_url} target="_blank" rel="noopener">{t.source || "source"} ↗</a>{/if}
+                  </div>
+                {/if}
+              </div>
             </div>
-          </div>
-        {:else}
-          <div class="empty">No active threats</div>
-        {/each}
-      </div>
+          {:else}
+            <div class="empty">No active threats</div>
+          {/each}
+        </div>
+      {/snippet}
     </Panel>
   </div>
 
   <div class="span-6">
     <Panel title="News" meta="{news.length} items">
-      <div class="list">
-        {#each news as n (n.id)}
-          <div class="row">
-            <Pill label={n.sentiment ?? "neutral"} tone={sentTone(n.sentiment)} />
-            <div class="row-main">
-              <div class="row-title">{n.title}</div>
-              <div class="row-meta">{n.source} &middot; {fmtAgo(n.published_at)}</div>
+      {#snippet children()}
+        <div class="filters">
+          <select bind:value={newsConfirm} onchange={loadNews}>
+            <option value="">All confirmations</option>
+            <option value="corroborated">Corroborated</option>
+            <option value="single_source">Single source</option>
+            <option value="unconfirmed_social">Unconfirmed social</option>
+          </select>
+          <select bind:value={newsStale} onchange={loadNews}>
+            <option value="">Fresh + stale</option>
+            <option value="fresh">Fresh only</option>
+            <option value="stale">Stale only</option>
+          </select>
+        </div>
+        <div class="list">
+          {#each news as n (n.id)}
+            <div
+              class="row clickable"
+              role="button"
+              tabindex="0"
+              onclick={() => (expandedNews = expandedNews === n.id ? null : n.id)}
+              onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); expandedNews = expandedNews === n.id ? null : n.id; } }}
+            >
+              <Pill label={n.sentiment ?? "neutral"} tone={sentTone(n.sentiment)} />
+              <div class="row-main">
+                <div class="row-title">{n.title}{#if n.is_stale}<span class="stale-tag"> stale</span>{/if}</div>
+                <div class="row-meta">
+                  {n.source} &middot; {fmtAgo(n.published_at)}
+                  {#if n.confirmation_status}
+                    &middot; <span class="confirm-tag {confirmTone(n.confirmation_status)}">{confirmLabel(n.confirmation_status)}{n.corroboration_count ? ` (${n.corroboration_count})` : ""}</span>
+                  {/if}
+                </div>
+                {#if expandedNews === n.id}
+                  <div class="row-detail">
+                    {#if n.summary}<p>{n.summary}</p>{/if}
+                    {#if n.url}<a href={n.url} target="_blank" rel="noopener">Read source ↗</a>{/if}
+                  </div>
+                {/if}
+              </div>
             </div>
-          </div>
-        {:else}
-          <div class="empty">No recent news</div>
-        {/each}
-      </div>
+          {:else}
+            <div class="empty">No recent news</div>
+          {/each}
+        </div>
+      {/snippet}
     </Panel>
   </div>
 
@@ -227,6 +397,118 @@
     font-size: 10.5px;
     color: var(--ink-faint);
     margin-top: 3px;
+  }
+  .row.clickable {
+    cursor: pointer;
+  }
+  .row-detail {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line);
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+  .row-detail p {
+    margin: 0 0 6px;
+  }
+  .row-detail a {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 11px;
+  }
+  .confirm-tag {
+    text-transform: capitalize;
+  }
+  .confirm-tag.good {
+    color: var(--good);
+  }
+  .confirm-tag.warm {
+    color: var(--warm);
+  }
+  .confirm-tag.neutral {
+    color: var(--ink-faint);
+  }
+  .stale-tag {
+    color: var(--warm);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 6px;
+  }
+
+  .filters {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .filters select {
+    background: var(--bg-alt, #0d1117);
+    border: 1px solid var(--line-bright);
+    color: var(--ink-dim);
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+  }
+
+  .ih-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 22px;
+  }
+  .ih-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ih-label {
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .ih-val {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 15px;
+    font-weight: 650;
+  }
+  .ih-val.small {
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .ih-val.good {
+    color: var(--good);
+  }
+  .ih-val.bad {
+    color: var(--bad);
+  }
+  .ih-val.warm {
+    color: var(--warm);
+  }
+  .ih-toggle {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--line-bright);
+    color: var(--accent);
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .src-tbl {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .src-tbl .err {
+    color: var(--ink-faint);
+    font-size: 10.5px;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .mtabs {

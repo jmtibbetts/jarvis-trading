@@ -7,8 +7,8 @@ from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, field_validator
+from typing import Optional, Union
 from app.database import (
     AiDecision, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
     NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
@@ -217,19 +217,44 @@ def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
         except Exception as e:
             raise HTTPException(500, str(e))
 
+_CONFIDENCE_WORDS = {"low": 40, "medium": 60, "moderate": 60, "high": 80, "very high": 90}
+
 class SaveSignalRequest(BaseModel):
+    # entry_price/target_price/stop_loss/confidence/key_risks accept loosely-typed
+    # values because this model's main caller sends raw LLM-generated JSON
+    # (see /analyze's `signal` field) — the model isn't guaranteed to return
+    # confidence as a number or key_risks as a single string, so both are
+    # normalized below rather than rejected with a 422.
     asset_symbol: Optional[str] = None
     asset_name:   Optional[str] = None
     asset_class:  Optional[str] = "Equity"
     direction:    Optional[str] = "Long"
-    confidence:   Optional[int] = 65
+    confidence:   Optional[Union[int, float, str]] = 65
     timeframe:    Optional[str] = "4H"
     entry_price:  Optional[float] = None
     target_price: Optional[float] = None
     stop_loss:    Optional[float] = None
     reasoning:    Optional[str]   = ""
-    key_risks:    Optional[str]   = ""
+    key_risks:    Optional[Union[str, list]] = ""
     momentum:     Optional[str]   = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, v):
+        if v is None or isinstance(v, (int, float)):
+            return v
+        s = str(v).strip()
+        try:
+            return float(s.rstrip("%"))
+        except ValueError:
+            return _CONFIDENCE_WORDS.get(s.lower(), 65)
+
+    @field_validator("key_risks", mode="before")
+    @classmethod
+    def _normalize_key_risks(cls, v):
+        if isinstance(v, list):
+            return "; ".join(str(item) for item in v)
+        return v
 
 @router.post("/signals/save")
 def save_signal(body: SaveSignalRequest):

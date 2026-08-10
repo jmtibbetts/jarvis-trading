@@ -88,6 +88,50 @@
     }
   }
 
+  // ── pending queue bulk actions ──────────────────────────────────────
+  async function approveAllPending() {
+    if (!confirm(`Force-execute all pending signals now, ahead of the 9:30 AM ET auto-execute?`)) return;
+    try {
+      const res = await api.approveAllSignals();
+      toastStore.ok(`Approved ${res.approved ?? "all"} pending signal(s)`);
+      await loadSignals();
+    } catch (e) {
+      toastStore.err(`Approve all failed: ${e}`);
+    }
+  }
+
+  async function rejectAllPending() {
+    if (!confirm(`Reject all pending signals? They will not auto-execute.`)) return;
+    try {
+      const res = await api.rejectAllSignals();
+      toastStore.ok(`Rejected ${res.rejected ?? "all"} pending signal(s)`);
+      await loadSignals();
+    } catch (e) {
+      toastStore.err(`Reject all failed: ${e}`);
+    }
+  }
+
+  async function cancelAllOpenOrders() {
+    if (!confirm(`Cancel every open Alpaca order?`)) return;
+    try {
+      await api.cancelAllOrders();
+      toastStore.ok("All open orders cancelled");
+    } catch (e) {
+      toastStore.err(`Cancel all orders failed: ${e}`);
+    }
+  }
+
+  async function saveGeneratedSignal() {
+    if (!analyzeResult?.signal || analyzeResult.signal.error) return;
+    try {
+      await api.saveSignal({ ...analyzeResult.signal, asset_symbol: analyzeResult.symbol });
+      toastStore.ok(`${analyzeResult.symbol}: signal saved`);
+      await loadSignals();
+    } catch (e) {
+      toastStore.err(`Save failed: ${e}`);
+    }
+  }
+
   // ── scanner ──────────────────────────────────────────────────────────
   const SCANNER_MODES: { key: "pre_market" | "intraday" | "crypto" | "futures"; label: string }[] = [
     { key: "pre_market", label: "Pre-Market" },
@@ -223,7 +267,10 @@
           {/each}
           {#if analyzeResult.signal && !analyzeResult.signal.error}
             <div class="an-signal">
-              <div class="an-signal-head">Generated signal</div>
+              <div class="an-signal-head">
+                Generated signal
+                <button class="btn tiny outline save-btn" onclick={saveGeneratedSignal}>Save to Signals</button>
+              </div>
               <div class="num">
                 {analyzeResult.signal.direction} @ {analyzeResult.signal.entry_price} → {analyzeResult.signal.target_price}
                 / stop {analyzeResult.signal.stop_loss}
@@ -278,6 +325,17 @@
           </select>
           <button class="btn small outline" onclick={clearExpired}>Clear Expired</button>
         </div>
+
+        {#if statusFilter === "PendingApproval"}
+          <div class="pending-banner">
+            <span>These auto-execute at <b>9:30 AM ET</b> if left untouched. Reject any you don't want, or force them through now.</span>
+            <div class="pending-actions">
+              <button class="btn tiny good" onclick={approveAllPending}>Force Execute All</button>
+              <button class="btn tiny bad" onclick={rejectAllPending}>Reject All</button>
+              <button class="btn tiny outline" onclick={cancelAllOpenOrders}>Cancel All Open Orders</button>
+            </div>
+          </div>
+        {/if}
 
         <div class="sig-table">
           {#each filteredSignals as sig (sig.id)}
@@ -510,12 +568,39 @@
     font-size: 11.5px;
   }
   .an-signal-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     color: var(--good);
     font-weight: 600;
     margin-bottom: 4px;
     font-size: 10.5px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .save-btn {
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
+  .pending-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    background: rgba(255, 180, 84, 0.06);
+    border: 1px solid rgba(255, 180, 84, 0.25);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 11.5px;
+    color: var(--ink-dim);
+  }
+  .pending-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
   }
 
   .scanner-row {

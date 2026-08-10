@@ -26,12 +26,24 @@ export type Signal = {
 export type Threat = {
   id: string;
   title: string;
+  description?: string | null;
+  event_type?: string | null;
   severity: string;
   country: string | null;
   region: string | null;
   latitude: number | null;
   longitude: number | null;
+  source?: string | null;
+  source_url?: string | null;
+  status?: string | null;
   published_at: string | null;
+  created_date?: string | null;
+  source_kind?: string | null;
+  reliability_score?: number | null;
+  confirmation_status?: string | null;
+  corroboration_count?: number;
+  claim_confidence?: number | null;
+  cluster_id?: string | null;
 };
 
 export type Position = {
@@ -84,9 +96,69 @@ export type NewsArticle = {
   title: string;
   summary: string;
   source: string;
+  url?: string | null;
   category: string | null;
   sentiment: string | null;
+  affected_assets?: string[];
+  region?: string | null;
   published_at: string | null;
+  created_date?: string | null;
+  canonical_url?: string | null;
+  source_kind?: string | null;
+  provider?: string | null;
+  ingested_at?: string | null;
+  reliability_score?: number | null;
+  confirmation_status?: string | null;
+  corroboration_count?: number;
+  corroborated_sources?: string[];
+  claim_confidence?: number | null;
+  is_stale?: boolean;
+  entities?: Record<string, unknown>;
+};
+
+export type IntelligenceSource = {
+  source: string;
+  source_kind: string | null;
+  provider: string | null;
+  url: string | null;
+  reliability_score: number | null;
+  status: "healthy" | "degraded" | "failing";
+  success_count: number;
+  failure_count: number;
+  consecutive_failures: number;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+  last_latency_ms: number | null;
+  last_article_count: number;
+  updated_at: string | null;
+};
+
+export type IngestionRun = {
+  id: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  source_count: number;
+  failed_sources: number;
+  fetched_count: number;
+  fresh_count: number;
+  selected_count: number;
+  saved_news: number;
+  saved_threats: number;
+  error: string | null;
+};
+
+export type IntelligenceStatus = {
+  status: "healthy" | "degraded" | "not_run";
+  source_count: number;
+  healthy_sources: number;
+  failing_sources: number;
+  recent_news: number;
+  corroborated_recent: number;
+  social_unconfirmed_recent: number;
+  latest_run: IngestionRun | null;
+  checked_at: string;
 };
 
 export type JobStatus = { status: "idle" | "running" | "ok" | "error"; last: string | null; error: string | null };
@@ -187,6 +259,33 @@ export type PaperSummary = {
   };
   positions: PaperPosition[];
   trades: PaperTrade[];
+};
+
+export type SlippageSummary = {
+  count: number;
+  avg_slippage_pct: number | null;
+  median_slippage_pct: number | null;
+  worst_slippage_pct: number | null;
+  trades: { symbol: string; asset_class: string; entry_price: number; actual_fill_price: number; slippage_pct: number; fill_recorded_at: string }[];
+};
+
+export type PositionWithSignal = Position & {
+  signal: {
+    asset_symbol: string;
+    direction: string;
+    entry_price: number;
+    target_price: number | null;
+    stop_loss: number | null;
+    confidence: number | null;
+    composite_score: number | null;
+    timeframe: string | null;
+    rr: number | null;
+    progress_pct: number | null;
+    reasoning: string | null;
+    key_risks: string | null;
+    signal_source: string;
+    _manual?: boolean;
+  };
 };
 
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
@@ -402,13 +501,27 @@ async function del<T>(path: string): Promise<T> {
 export const api = {
   signals: (status?: string, limit = 150) =>
     get<Signal[]>(`/signals${status ? `?status=${status}&limit=${limit}` : `?limit=${limit}`}`),
-  threats: (limit = 60) => get<Threat[]>(`/threats?limit=${limit}`),
+  threats: (limit = 60, filters?: { confirmation?: string; minReliability?: number }) => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (filters?.confirmation) p.set("confirmation", filters.confirmation);
+    if (filters?.minReliability != null) p.set("min_reliability", String(filters.minReliability));
+    return get<Threat[]>(`/threats?${p.toString()}`);
+  },
   positions: () => get<PositionsResponse>(`/positions`),
   equity: (hours = 24) => get<EquityPoint[]>(`/portfolio/equity?hours=${hours}`),
   regime: () => get<Regime>(`/regime`),
   jobStatus: () => get<JobStatusMap>(`/jobs/status`),
   performanceAnalytics: (days = 30) => get<PerformanceAnalytics>(`/performance/analytics?days=${days}`),
-  news: (limit = 20) => get<NewsArticle[]>(`/news?limit=${limit}`),
+  news: (limit = 20, filters?: { confirmation?: string; minReliability?: number; stale?: boolean; category?: string }) => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (filters?.confirmation) p.set("confirmation", filters.confirmation);
+    if (filters?.minReliability != null) p.set("min_reliability", String(filters.minReliability));
+    if (filters?.stale != null) p.set("stale", String(filters.stale));
+    if (filters?.category) p.set("category", filters.category);
+    return get<NewsArticle[]>(`/news?${p.toString()}`);
+  },
+  intelligenceSources: () => get<IntelligenceSource[]>(`/intelligence/sources`),
+  intelligenceStatus: () => get<IntelligenceStatus>(`/intelligence/status`),
   marketFull: () => get<{ equities: MarketAsset[]; crypto: MarketAsset[]; count: number }>(`/market/full`),
 
   approveSignal: (id: string) => post<{ ok: boolean }>(`/signals/${id}/approve`),
@@ -442,6 +555,10 @@ export const api = {
   cancelOrder: (id: string) => del<{ ok: boolean }>(`/alpaca/orders/${id}`),
 
   closeLivePosition: (symbol: string) => post<{ ok: boolean }>(`/positions/${symbol}/close`),
+  positionsWithSignals: () => get<{ positions: PositionWithSignal[]; account: PositionsResponse["account"] }>(`/positions/with-signals`),
+  slippageSummary: (limit = 200) => get<SlippageSummary>(`/execution/slippage?limit=${limit}`),
+  paperOpen: (body: { symbol: string; asset_class?: string; paper_direction?: string; entry_price?: number; target_price?: number; stop_loss?: number }) =>
+    post<Record<string, unknown>>(`/paper/open`, body),
 
   paperSummary: () => get<PaperSummary>(`/paper/summary`),
   paperClose: (id: string) => post<Record<string, unknown>>(`/paper/close/${id}`),

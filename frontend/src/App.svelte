@@ -8,13 +8,27 @@
   import Intelligence from "./lib/sections/Intelligence.svelte";
   import Performance from "./lib/sections/Performance.svelte";
   import Ops from "./lib/sections/Ops.svelte";
-  import { sectionStore } from "./lib/stores/section.svelte";
+  import { sectionStore, SECTIONS } from "./lib/stores/section.svelte";
   import { killSwitchStore } from "./lib/stores/kill.svelte";
   import { wsStore } from "./lib/stores/ws.svelte";
 
   killSwitchStore.load();
   wsStore.connect();
+
+  // 1-6 jump between sections — ignored while typing in a form field so it
+  // doesn't fight with e.g. entering "AAPL" in the Manual Analysis symbol box.
+  function onKeydown(e: KeyboardEvent) {
+    const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+    if (tag === "input" || tag === "select" || tag === "textarea") return;
+    const n = Number(e.key);
+    if (n >= 1 && n <= SECTIONS.length) {
+      const section = SECTIONS[n - 1];
+      if (section.ready) sectionStore.go(section.id);
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="shell">
   <TopHud />

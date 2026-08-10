@@ -20,7 +20,7 @@
       href="#{section.id}"
       class:on={sectionStore.current === section.id}
       class:disabled={!section.ready}
-      title={section.ready ? section.label : `${section.label} — coming soon`}
+      title={section.ready ? `${section.label} (${i + 1})` : `${section.label} — coming soon`}
       onclick={(e) => {
         e.preventDefault();
         if (section.ready) sectionStore.go(section.id);

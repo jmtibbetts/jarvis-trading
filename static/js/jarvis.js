@@ -832,9 +832,10 @@ async function runScan() {
       const bias = td.bias||'neutral';
       const bc   = bias==='bullish'?'success':bias==='bearish'?'danger':'secondary';
       const p    = td.price||{};
+      const emas = td.emas||{};
       const rsi  = td.rsi;
       const macd = td.macd||{};
-      const bb   = td.bollinger||{};
+      const bb   = td.bollinger_bands||{};
       const vol  = td.volume||{};
       const atr  = td.atr||{};
       const srUp = (td.support_resistance||{}).resistance;
@@ -849,15 +850,15 @@ async function runScan() {
             '<div class="col-sm-6">' +
               '<table class="table table-dark table-sm mb-0" style="font-size:.78rem">' +
                 '<tr><td class="text-muted">Price</td><td class="fw-bold text-info">'+fmtPrice(p.last)+'</td></tr>' +
-                '<tr><td class="text-muted">EMA20</td><td>'+fmtPrice(p.ema20)+'</td></tr>' +
-                '<tr><td class="text-muted">EMA50</td><td>'+fmtPrice(p.ema50)+'</td></tr>' +
+                '<tr><td class="text-muted">EMA21</td><td>'+fmtPrice(emas.ema21)+'</td></tr>' +
+                '<tr><td class="text-muted">EMA50</td><td>'+fmtPrice(emas.ema50)+'</td></tr>' +
                 '<tr><td class="text-muted">RSI</td><td class="'+(rsi>70?'text-danger':rsi<30?'text-success':'')+'fw-bold">'+(rsi!=null?rsi.toFixed(1):'N/A')+'</td></tr>' +
                 '<tr><td class="text-muted">ATR %</td><td>'+(atr.pct!=null?atr.pct.toFixed(2)+'%':'N/A')+'</td></tr>' +
               '</table>' +
             '</div>' +
             '<div class="col-sm-6">' +
               '<table class="table table-dark table-sm mb-0" style="font-size:.78rem">' +
-                '<tr><td class="text-muted">MACD</td><td>'+(macd.value!=null?macd.value.toFixed(4):'N/A')+'</td></tr>' +
+                '<tr><td class="text-muted">MACD</td><td>'+(macd.macd!=null?macd.macd.toFixed(4):'N/A')+'</td></tr>' +
                 '<tr><td class="text-muted">Signal</td><td>'+(macd.signal!=null?macd.signal.toFixed(4):'N/A')+'</td></tr>' +
                 '<tr><td class="text-muted">BB Upper</td><td>'+(bb.upper!=null?fmtPrice(bb.upper):'N/A')+'</td></tr>' +
                 '<tr><td class="text-muted">BB Lower</td><td>'+(bb.lower!=null?fmtPrice(bb.lower):'N/A')+'</td></tr>' +

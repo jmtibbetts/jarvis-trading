@@ -2,22 +2,41 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
-  import { api, type PerformanceAnalytics, type Decision, type LearningSummary, type BacktestRun } from "../api";
+  import LearningPanel from "../components/LearningPanel.svelte";
+  import { api, type PerformanceAnalytics, type Decision, type BacktestRun } from "../api";
   import { toastStore } from "../stores/toast.svelte";
 
   let perf = $state<PerformanceAnalytics | null>(null);
   let decisions = $state<Decision[]>([]);
-  let learning = $state<LearningSummary | null>(null);
+  let decisionSource = $state("");
+  let decisionAction = $state("");
 
   async function loadAll() {
-    const [p, d, l] = await Promise.all([
-      api.performanceAnalytics(30).catch(() => null),
-      api.decisions(30).catch(() => []),
-      api.learningSummary("live").catch(() => null),
-    ]);
+    const [p, d] = await Promise.all([api.performanceAnalytics(30).catch(() => null), api.decisions(300).catch(() => [])]);
     perf = p;
     decisions = d;
-    learning = l;
+  }
+
+  const filteredDecisions = $derived(
+    decisions
+      .filter((d) => !decisionSource || d.source === decisionSource)
+      .filter((d) => !decisionAction || d.action === decisionAction),
+  );
+  const decisionCounts = $derived.by(() => {
+    const counts: Record<string, number> = {};
+    for (const d of decisions) counts[d.action] = (counts[d.action] ?? 0) + 1;
+    return counts;
+  });
+
+  async function clearDecisions() {
+    if (!confirm("Clear the entire AI decision log? This cannot be undone.")) return;
+    try {
+      await api.clearDecisions();
+      toastStore.ok("Decision log cleared");
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Clear failed: ${e}`);
+    }
   }
 
   $effect(() => {
@@ -99,6 +118,52 @@
 </div>
 
 <div class="grid">
+  <div class="span-8">
+    <Panel title="AI Decision Log" meta="{filteredDecisions.length} of {decisions.length}">
+      {#snippet children()}
+        <div class="decision-toolbar">
+          <div class="decision-stats">
+            {#each Object.entries(decisionCounts) as [action, count] (action)}
+              <Pill label="{action}: {count}" tone={action === "EXIT" ? "bad" : action === "HOLD" ? "good" : action === "TIGHTEN_STOP" ? "warm" : "neutral"} />
+            {/each}
+          </div>
+          <div class="decision-filters">
+            <select bind:value={decisionSource}>
+              <option value="">All Sources</option>
+              <option value="guardian">Guardian</option>
+              <option value="positions">Positions</option>
+              <option value="paper">Paper</option>
+              <option value="signals">Signals</option>
+            </select>
+            <select bind:value={decisionAction}>
+              <option value="">All Actions</option>
+              <option value="EXIT">EXIT</option>
+              <option value="HOLD">HOLD</option>
+              <option value="TIGHTEN_STOP">TIGHTEN_STOP</option>
+              <option value="APPROVED">APPROVED</option>
+              <option value="REJECTED">REJECTED</option>
+            </select>
+            <button class="btn tiny outline" onclick={clearDecisions}>Clear</button>
+          </div>
+        </div>
+        <div class="list">
+          {#each filteredDecisions.slice(0, 30) as d (d.id)}
+            <div class="drow">
+              <Pill label={d.action} tone={d.action === "EXIT" ? "bad" : d.action === "HOLD" ? "good" : d.action === "TIGHTEN_STOP" ? "warm" : "neutral"} />
+              <div class="drow-main">
+                <div class="drow-title">{d.symbol ?? d.source}</div>
+                <div class="drow-meta">{(d.reasoning ?? "").slice(0, 90)}</div>
+              </div>
+              <div class="drow-time num">{d.created_at?.slice(5, 16).replace("T", " ")}</div>
+            </div>
+          {:else}
+            <div class="empty">No decisions logged yet</div>
+          {/each}
+        </div>
+      {/snippet}
+    </Panel>
+  </div>
+
   <div class="span-4">
     <Panel title="Performance Analytics" meta="{perf?.period_days ?? 30}d">
       <div class="stat-list">
@@ -118,36 +183,9 @@
     </Panel>
   </div>
 
-  <div class="span-4">
-    <Panel title="Learning Summary" meta="live signals">
-      {#if learning}
-        <div class="stat-list">
-          <div class="stat"><span>Total Evaluated</span><b class="num">{learning.total}</b></div>
-          <div class="stat"><span>Wins / Losses</span><b class="num">{learning.wins} / {learning.losses}</b></div>
-          <div class="stat"><span>Avg P&amp;L</span><b class="num">{fmtPct(learning.avg_pnl)}</b></div>
-        </div>
-      {:else}
-        <div class="empty">No learning data yet</div>
-      {/if}
-    </Panel>
-  </div>
-
-  <div class="span-4">
-    <Panel title="AI Decision Log" meta="last {decisions.length}">
-      <div class="list">
-        {#each decisions.slice(0, 10) as d (d.id)}
-          <div class="drow">
-            <Pill label={d.action} tone={d.action === "EXIT" ? "bad" : d.action === "HOLD" ? "neutral" : "good"} />
-            <div class="drow-main">
-              <div class="drow-title">{d.symbol ?? d.source}</div>
-              <div class="drow-meta">{(d.reasoning ?? "").slice(0, 70)}</div>
-            </div>
-          </div>
-        {:else}
-          <div class="empty">No decisions logged yet</div>
-        {/each}
-      </div>
-    </Panel>
+  <div class="span-12">
+    <div class="section-divider">Learning Engine</div>
+    <LearningPanel />
   </div>
 
   <div class="span-12">
@@ -280,10 +318,45 @@
     padding: 4px 0;
   }
 
+  .decision-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .decision-stats {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .decision-filters {
+    display: flex;
+    gap: 6px;
+  }
+  .decision-filters select {
+    background: var(--bg);
+    border: 1px solid var(--line-bright);
+    border-radius: 6px;
+    color: var(--ink);
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  .btn.tiny.outline {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 4px 9px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
   .list {
     display: flex;
     flex-direction: column;
-    max-height: 260px;
+    max-height: 340px;
     overflow-y: auto;
   }
   .drow {
@@ -296,6 +369,10 @@
   .drow:last-child {
     border-bottom: none;
   }
+  .drow-main {
+    flex: 1;
+    min-width: 0;
+  }
   .drow-title {
     font-size: 12px;
     font-weight: 600;
@@ -304,6 +381,22 @@
     font-size: 10.5px;
     color: var(--ink-faint);
     margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .drow-time {
+    font-size: 10px;
+    color: var(--ink-faint);
+    flex: none;
+  }
+
+  .section-divider {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 10px;
+    padding-top: 4px;
   }
 
   .bt-form {

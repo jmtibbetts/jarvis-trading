@@ -219,6 +219,84 @@ export type ConfigCreate = {
   notes?: string;
 };
 
+export type LearningFullSummary = {
+  total: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_pnl: number;
+  avg_hold_min: number;
+  best_trade: number;
+  worst_trade: number;
+  total_pnl_usd: number;
+};
+
+export type TradeOutcome = {
+  id: string;
+  symbol: string;
+  asset_class: string;
+  direction: string;
+  timeframe: string;
+  entry_price: number;
+  exit_price: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  outcome: string;
+  exit_reason: string;
+  hold_duration_m: number | null;
+  paper_mode: number;
+  entered_at: string;
+  exited_at: string;
+};
+
+export type SignalAccuracy = {
+  id: string;
+  symbol: string;
+  asset_class: string;
+  timeframe: string;
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_pnl_pct: number;
+  avg_hold_min: number;
+  best_pnl_pct: number;
+  worst_pnl_pct: number;
+};
+
+export type PatternMemory = {
+  id: string;
+  pattern_desc: string;
+  asset_class: string;
+  timeframe: string;
+  total: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_pnl_pct: number;
+};
+
+export type RegimeStat = {
+  id: string;
+  regime: string;
+  total: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_pnl_pct: number;
+  avg_confidence: number;
+};
+
+export type Lesson = {
+  id: string;
+  symbol: string;
+  outcome: string;
+  lesson: string;
+  lesson_category: string;
+  applied_count: number;
+  created_at: string;
+};
+
 export type Decision = {
   id: string;
   source: string;
@@ -365,7 +443,15 @@ export const api = {
   autoSimRun: () => post<Record<string, unknown>>(`/auto-paper/run`),
 
   decisions: (limit = 100) => get<Decision[]>(`/decisions?limit=${limit}`),
-  learningSummary: (paper: "live" | "paper" | "all" = "live") => get<LearningSummary>(`/learning/summary?paper=${paper}`),
+  clearDecisions: () => del<{ ok: boolean }>(`/decisions/clear`),
+  learningSummary: (paper: "live" | "paper" | "all" = "live") => get<LearningFullSummary>(`/learning/summary?paper=${paper}`),
+  learningOutcomes: (mode: "live" | "paper" | "all" = "live", limit = 200) =>
+    get<TradeOutcome[]>(`/learning/outcomes?paper=${mode === "paper" ? "true" : mode === "all" ? "all" : "false"}&limit=${limit}`),
+  learningAccuracy: () => get<SignalAccuracy[]>(`/learning/accuracy`),
+  learningPatterns: () => get<PatternMemory[]>(`/learning/patterns`),
+  learningRegimes: () => get<RegimeStat[]>(`/learning/regimes`),
+  learningLessons: (limit = 50) => get<Lesson[]>(`/learning/lessons?limit=${limit}`),
+  learningBackfillPaper: () => post<{ ok: boolean; imported?: number }>(`/learning/backfill-paper`),
 
   backtestRun: (body: { symbols: string[]; start_date: string; end_date: string; timeframes?: string[]; trade_mode?: string }) =>
     post<{ run_id: string; status: string }>(`/backtest/run`, body),

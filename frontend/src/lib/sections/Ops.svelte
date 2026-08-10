@@ -1,7 +1,8 @@
 <script lang="ts">
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate } from "../api";
+  import TelegramWizard from "../components/TelegramWizard.svelte";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
 
@@ -10,6 +11,10 @@
   let busy = $state<Set<string>>(new Set());
   let showAddForm = $state(false);
   let newCfg = $state<ConfigCreate>({ label: "", platform: "llm", config_type: "api", api_key: "", api_url: "" });
+  let llmHealth = $state<LlmHealth | null>(null);
+  let cacheStats = $state<CacheStats | null>(null);
+  let backfilling = $state(false);
+  let orders = $state<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>([]);
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -20,6 +25,45 @@
   async function loadAll() {
     jobs = await api.jobStatus().catch(() => ({}));
     configs = await api.settingsList().catch(() => []);
+    llmHealth = await api.llmHealth().catch(() => null);
+    cacheStats = await api.cacheStats().catch(() => null);
+    orders = await api.alpacaOrders().catch(() => []);
+  }
+
+  async function runBackfill() {
+    backfilling = true;
+    try {
+      const res = await api.cacheBackfill();
+      toastStore.ok(res.message ?? "Backfill started");
+    } catch (e) {
+      toastStore.err(`Backfill failed: ${e}`);
+    } finally {
+      setTimeout(() => (backfilling = false), 2000);
+    }
+  }
+
+  async function cancelOrder(id: string, symbol: string) {
+    setBusy(id, true);
+    try {
+      await api.cancelOrder(id);
+      toastStore.ok(`${symbol}: order cancelled`);
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Cancel failed: ${e}`);
+    } finally {
+      setBusy(id, false);
+    }
+  }
+
+  async function cancelAllOrders() {
+    if (!confirm(`Cancel all ${orders.length} open orders?`)) return;
+    try {
+      await api.cancelAllOrders();
+      toastStore.ok("All open orders cancelled");
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Cancel all failed: ${e}`);
+    }
   }
 
   $effect(() => {
@@ -126,6 +170,39 @@
 </div>
 
 <div class="grid">
+  <div class="span-6">
+    <Panel title="LM Studio" dotColor={llmHealth?.ok ? "var(--good)" : "var(--bad)"} meta={llmHealth?.ok ? "reachable" : "unreachable"}>
+      {#if llmHealth}
+        <div class="stat-list">
+          <div class="stat"><span>Platform</span><b>{llmHealth.platform ?? "—"}</b></div>
+          <div class="stat"><span>Model</span><b>{llmHealth.model ?? "—"}</b></div>
+          {#if llmHealth.error}<div class="stat"><span>Error</span><b class="pl-down">{llmHealth.error}</b></div>{/if}
+        </div>
+      {:else}
+        <div class="empty">Checking…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-6">
+    <Panel title="OHLCV Cache" meta={cacheStats ? `${cacheStats.db_size_mb} MB` : ""}>
+      {#snippet children()}
+        {#if cacheStats}
+          <div class="stat-list">
+            <div class="stat"><span>Total Bars</span><b class="num">{cacheStats.total_bars.toLocaleString()}</b></div>
+            <div class="stat"><span>Symbols Cached</span><b class="num">{cacheStats.symbols_cached}</b></div>
+            <div class="stat"><span>Latest Bar</span><b class="num">{cacheStats.latest_bar_ts?.slice(0, 16).replace("T", " ") || "—"}</b></div>
+          </div>
+        {:else}
+          <div class="empty">Loading…</div>
+        {/if}
+        <button class="btn tiny outline backfill-btn" disabled={backfilling} onclick={runBackfill}>
+          {backfilling ? "Starting…" : "Backfill Now"}
+        </button>
+      {/snippet}
+    </Panel>
+  </div>
+
   <div class="span-8">
     <Panel title="Jobs" meta="{jobEntries.filter(([, j]) => j.status === 'ok').length}/{jobEntries.length} ok">
       <div class="job-grid">
@@ -197,6 +274,37 @@
       {/snippet}
     </Panel>
   </div>
+
+  <div class="span-6">
+    <TelegramWizard {configs} onSaved={loadAll} />
+  </div>
+
+  <div class="span-6">
+    <Panel title="Alpaca Open Orders" meta="{orders.length} open">
+      {#snippet children()}
+        {#if orders.length}
+          <button class="btn tiny outline cancel-all-btn" onclick={cancelAllOrders}>Cancel All</button>
+        {/if}
+        <table class="tbl">
+          <thead><tr><th>Sym</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {#each orders as o (o.id)}
+              <tr>
+                <td class="sym">{o.symbol}</td>
+                <td>{o.side}</td>
+                <td class="num">{o.qty}</td>
+                <td>{o.type}</td>
+                <td>{o.status}</td>
+                <td><button class="btn tiny ghost" disabled={busy.has(o.id)} onclick={() => cancelOrder(o.id, o.symbol)}>✕</button></td>
+              </tr>
+            {:else}
+              <tr><td colspan="6" class="empty">No open orders</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {/snippet}
+    </Panel>
+  </div>
 </div>
 
 <style>
@@ -221,8 +329,64 @@
   .span-4 {
     grid-column: span 4;
   }
+  .span-6 {
+    grid-column: span 6;
+  }
   .span-8 {
     grid-column: span 8;
+  }
+
+  .stat-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+  }
+  .stat b {
+    font-family: var(--mono);
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pl-down {
+    color: var(--bad);
+  }
+  .backfill-btn,
+  .cancel-all-btn {
+    margin-top: 10px;
+    width: 100%;
+  }
+
+  table.tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    margin-top: 8px;
+  }
+  table.tbl th {
+    text-align: left;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  table.tbl td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  table.tbl .sym {
+    font-weight: 650;
+  }
+  table.tbl .num {
+    font-family: var(--mono);
   }
 
   .job-grid {
@@ -364,6 +528,7 @@
 
   @media (max-width: 1180px) {
     .span-4,
+    .span-6,
     .span-8 {
       grid-column: span 12;
     }

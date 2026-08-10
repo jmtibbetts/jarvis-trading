@@ -189,6 +189,15 @@ export type PaperSummary = {
   trades: PaperTrade[];
 };
 
+export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
+export type CacheStats = {
+  total_bars: number;
+  symbols_cached: number;
+  by_timeframe: Record<string, { symbols: number; bars: number; latest_bar_ts: string; last_updated: string }>;
+  latest_bar_ts: string;
+  db_size_mb: number;
+};
+
 export type PlatformConfig = {
   id: string;
   key: string;
@@ -460,6 +469,15 @@ export const api = {
 
   jobReset: (name: string) => post<{ ok: boolean }>(`/jobs/${name}/reset`),
   jobTrigger: (name: string) => post<{ ok: boolean; already_running?: boolean; detail?: string }>(`/jobs/${name}/trigger`),
+
+  llmHealth: () => get<LlmHealth>(`/llm/health`),
+  cacheStats: () => get<CacheStats>(`/cache/stats`),
+  cacheBackfill: () => post<{ ok: boolean; message: string }>(`/cache/backfill`),
+
+  telegramDetectChat: (body: { config_id?: string; bot_token?: string; chat_id?: string }) =>
+    post<{ ok: boolean; chat_id: string; chat_name: string }>(`/settings/telegram/detect-chat`, body),
+  telegramTest: (body: { config_id?: string; bot_token?: string; chat_id?: string }) =>
+    post<{ ok: boolean; bot_name: string; bot_username: string; chat_id: string }>(`/settings/telegram/test`, body),
 
   settingsList: () => get<PlatformConfig[]>(`/settings`),
   settingsCreate: (body: ConfigCreate) => post<PlatformConfig>(`/settings`, body),

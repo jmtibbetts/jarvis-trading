@@ -106,8 +106,15 @@ def get_positions():
     return client.get_all_positions()
 
 def get_open_orders():
+    # OrderStatus (imported above) enumerates an order's terminal/lifecycle
+    # state (FILLED, CANCELED, ...) — it has no OPEN member. The query filter
+    # enum is QueryOrderStatus, used correctly elsewhere in this file
+    # (see cancel_open_orders_for_symbol below). This was a real, pre-existing
+    # bug — get_open_orders() has been broken since it was written and threw
+    # on every call; it just had no caller/UI exercising it until now.
+    from alpaca.trading.enums import QueryOrderStatus
     client = get_trading_client()
-    return client.get_orders(GetOrdersRequest(status=OrderStatus.OPEN))
+    return client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
 
 def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                           take_profit: float, stop_loss: float,

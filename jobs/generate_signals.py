@@ -270,8 +270,14 @@ def score_safe(signal, ta_profiles, regime, earnings_set, accuracy_map=None, new
         return signal
 
 
-def build_ta_fallback_signals(symbols, ta_profiles, asset_map, trade_mode="all", is_paper=False):
-    """Build conservative signals from cached TA when an LLM batch is unavailable."""
+def build_ta_fallback_signals(symbols, ta_profiles, asset_map, trade_mode="all", is_paper=False,
+                                reason="Local LLM unavailable"):
+    """Build conservative signals from cached TA when an LLM batch didn't run.
+    `reason` should describe WHY the LLM wasn't used for this batch — the LLM
+    being genuinely down is only one of several causes (time-budget cutoff,
+    an unparseable response, a batch never selected this cycle); the caller
+    knows which one applies and should pass an accurate reason so the signal's
+    key_risks field doesn't claim the LLM is down when it isn't."""
     timeframe_sets = {
         "scalp": ["1m", "3m", "5m", "15m"],
         "longer": ["30m", "1H", "2H", "4H", "1D"],
@@ -357,7 +363,7 @@ def build_ta_fallback_signals(symbols, ta_profiles, asset_map, trade_mode="all",
                 f"TA fallback: {dominant}/{len(valid)} timeframes {expected_bias}; "
                 f"{timeframe} trend={strength:.0f}%, RSI={rsi}, MACD={macd}."
             ),
-            "key_risks": "Local LLM unavailable; deterministic TA only. Invalidate at stop or bias reversal.",
+            "key_risks": f"{reason}; deterministic TA only. Invalidate at stop or bias reversal.",
             "momentum": "Bullish" if direction == "Long" else "Bearish",
             "signal_source": "ta_fallback",
             "setup_type": "scalp" if timeframe in {"1m", "3m", "5m"} else "swing",
@@ -721,19 +727,23 @@ def run():
     all_raw_lock = threading.Lock()
     fallback_profiles = {**ta_profiles, **futures_ta_profiles}
 
-    def _append_fallback(batch_id, batch_syms, is_paper):
+    def _append_fallback(batch_id, batch_syms, is_paper, reason="Local LLM unavailable"):
         fallback = build_ta_fallback_signals(
             batch_syms, fallback_profiles, asset_map, trade_mode, is_paper=is_paper,
+            reason=reason,
         )
         if fallback:
             with all_raw_lock:
                 all_raw.extend((signal, is_paper) for signal in fallback)
             logger.warning(
-                f"[Signals] Batch {batch_id} used TA fallback -> {len(fallback)} signals"
+                f"[Signals] Batch {batch_id} used TA fallback ({reason}) -> {len(fallback)} signals"
             )
         return len(fallback)
 
-    llm_budget = max(10.0, float(os.getenv("SIGNAL_LLM_TIME_BUDGET_SECONDS", "90")))
+    # 90s was too tight for local "thinking" models (Qwen3 etc. burn tokens reasoning
+    # before answering) — most batches were hitting the fallback path well before the
+    # LLM was actually unavailable. 240s still leaves headroom inside the 30-min cycle.
+    llm_budget = max(10.0, float(os.getenv("SIGNAL_LLM_TIME_BUDGET_SECONDS", "240")))
     llm_request_timeout = max(5.0, float(os.getenv("SIGNAL_LLM_REQUEST_TIMEOUT_SECONDS", "30")))
     llm_queue_timeout = max(1.0, float(os.getenv("SIGNAL_LLM_QUEUE_TIMEOUT_SECONDS", "8")))
     llm_deadline = time.monotonic() + llm_budget
@@ -743,7 +753,10 @@ def run():
             remaining = llm_deadline - time.monotonic()
             if remaining <= 1.0:
                 logger.warning(f"[Signals] Batch {batch_id} skipped after LLM time budget expired")
-                _append_fallback(batch_id, batch_syms, is_paper)
+                _append_fallback(
+                    batch_id, batch_syms, is_paper,
+                    reason=f"LLM time budget ({llm_budget:.0f}s) exhausted before this batch ran",
+                )
                 return
             logger.info(f"[Signals] LLM call batch {batch_id} ({len(batch_syms)} syms)...")
             r = call_lm_studio(prompt, system=sys_p, max_tokens=TRACK_MAX_TOKENS,
@@ -767,10 +780,18 @@ def run():
                 with all_raw_lock:
                     all_raw.extend(results)
             else:
-                _append_fallback(batch_id, batch_syms, is_paper)
+                _append_fallback(
+                    batch_id, batch_syms, is_paper,
+                    reason="LLM response was empty or unparseable for this batch",
+                )
         except Exception as e:
             logger.error(f"[Signals] Batch {batch_id} FAILED: {type(e).__name__}: {e}")
-            _append_fallback(batch_id, batch_syms, is_paper)
+            is_conn_err = "running at" in str(e) or "LLM call failed" in str(e)
+            reason = (
+                f"Local LLM unreachable ({e})" if is_conn_err
+                else f"LLM call failed for this batch ({type(e).__name__})"
+            )
+            _append_fallback(batch_id, batch_syms, is_paper, reason=reason)
 
     max_llm_batches = int(os.getenv("SIGNAL_LLM_MAX_BATCHES", "0"))
     llm_workers = max(1, min(4, int(os.getenv("SIGNAL_LLM_WORKERS", "1"))))
@@ -783,7 +804,10 @@ def run():
 
     for bid, bsyms, _, bpaper in all_batches:
         if bid not in selected_ids:
-            _append_fallback(bid, bsyms, bpaper)
+            _append_fallback(
+                bid, bsyms, bpaper,
+                reason=f"Batch not selected this cycle (SIGNAL_LLM_MAX_BATCHES cap: {max_llm_batches})",
+            )
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=llm_workers, thread_name_prefix="batch") as pool:
@@ -805,6 +829,7 @@ def run():
     if not all_raw:
         emergency = build_ta_fallback_signals(
             all_syms_dedup, fallback_profiles, asset_map, trade_mode, is_paper=False,
+            reason="Local LLM produced no usable signals this cycle",
         )
         all_raw.extend(
             (signal, direction_requires_paper(signal.get("direction")))

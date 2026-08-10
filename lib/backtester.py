@@ -144,7 +144,10 @@ def evaluate_checkpoint(
             continue
     asset_map = {symbol: {"price": last_close or 0.0}}
 
-    candidates = build_ta_fallback_signals([symbol], {symbol: ta_profile}, asset_map, trade_mode=trade_mode)
+    candidates = build_ta_fallback_signals(
+        [symbol], {symbol: ta_profile}, asset_map, trade_mode=trade_mode,
+        reason="Backtest: deterministic signal (no LLM used in backtesting)",
+    )
     if not candidates:
         return None
     signal = candidates[0]

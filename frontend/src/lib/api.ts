@@ -145,6 +145,36 @@ export type PaperSummary = {
   trades: PaperTrade[];
 };
 
+export type PlatformConfig = {
+  id: string;
+  key: string;
+  label: string;
+  platform: string;
+  config_type: string;
+  api_url: string;
+  has_api_key: boolean;
+  has_api_secret: boolean;
+  extra_field_1: string;
+  extra_field_2: string;
+  is_active: boolean;
+  is_default: boolean;
+  notes: string;
+};
+
+export type ConfigCreate = {
+  label: string;
+  platform: string;
+  config_type?: string;
+  api_key?: string;
+  api_secret?: string;
+  api_url?: string;
+  extra_field_1?: string;
+  extra_field_2?: string;
+  is_active?: boolean;
+  is_default?: boolean;
+  notes?: string;
+};
+
 export type Decision = {
   id: string;
   source: string;
@@ -282,4 +312,16 @@ export const api = {
     post<{ run_id: string; status: string }>(`/backtest/run`, body),
   backtestGet: (runId: string) => get<BacktestRun>(`/backtest/${runId}`),
   backtestList: () => get<{ runs: Omit<BacktestRun, "timeframes" | "error" | "result">[] }>(`/backtest`),
+
+  jobReset: (name: string) => post<{ ok: boolean }>(`/jobs/${name}/reset`),
+  jobTrigger: (name: string) => post<{ ok: boolean; already_running?: boolean; detail?: string }>(`/jobs/${name}/trigger`),
+
+  settingsList: () => get<PlatformConfig[]>(`/settings`),
+  settingsCreate: (body: ConfigCreate) => post<PlatformConfig>(`/settings`, body),
+  settingsUpdate: (id: string, body: Partial<ConfigCreate>) =>
+    fetch(`/api/settings/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(
+      (r) => r.json() as Promise<PlatformConfig>,
+    ),
+  settingsDelete: (id: string) => del<{ ok: boolean }>(`/settings/${id}`),
+  settingsSetDefault: (id: string) => post<{ ok: boolean }>(`/settings/${id}/set-default`),
 };

@@ -81,6 +81,64 @@ export type PerformanceAnalytics = {
 };
 
 export type ScannerStatus = { scanner: Record<string, JobStatus> };
+
+export type PaperPosition = {
+  id: string;
+  symbol: string;
+  direction: string;
+  side: string;
+  leverage: number;
+  qty: number;
+  entry_price: number;
+  current_price: number;
+  target_price: number;
+  stop_loss: number;
+  unrealized_pnl: number;
+  unrealized_pct: number;
+  margin_used: number;
+  asset_class: string;
+  opened_at: string;
+};
+
+export type PaperTrade = {
+  id: string;
+  symbol: string;
+  direction: string;
+  realized_pnl: number;
+  pnl_pct: number;
+  close_reason: string;
+  closed_at: string;
+};
+
+export type PaperSummary = {
+  portfolio: {
+    cash: number;
+    equity: number;
+    open_pnl: number;
+    margin_in_use: number;
+    win_rate: number;
+    total_trades: number;
+    starting_capital: number;
+    total_return_pct: number;
+  };
+  positions: PaperPosition[];
+  trades: PaperTrade[];
+};
+
+export type AutoSimSummary = {
+  paper_only: boolean;
+  summary: {
+    starting_cash: number;
+    equity: number;
+    realized_pnl: number;
+    unrealized_pnl: number;
+    total_pnl: number;
+    total_trades: number;
+    wins: number;
+    losses: number;
+    win_rate: number;
+  };
+};
 export type AnalyzeResult = {
   symbol: string;
   ta: Record<string, any>;
@@ -137,4 +195,14 @@ export const api = {
 
   analyze: (symbol: string, timeframes: string[], generate_signal: boolean) =>
     post<AnalyzeResult>(`/analyze`, { symbol, timeframes, generate_signal }),
+
+  closeLivePosition: (symbol: string) => post<{ ok: boolean }>(`/positions/${symbol}/close`),
+
+  paperSummary: () => get<PaperSummary>(`/paper/summary`),
+  paperClose: (id: string) => post<Record<string, unknown>>(`/paper/close/${id}`),
+  paperReset: () => post<{ ok: boolean }>(`/paper/reset`),
+  paperRunMtm: () => post<Record<string, unknown>>(`/paper/run-mtm`),
+
+  autoSimSummary: () => get<AutoSimSummary>(`/auto-paper/summary`),
+  autoSimRun: () => post<Record<string, unknown>>(`/auto-paper/run`),
 };

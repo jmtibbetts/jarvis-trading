@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
-  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary } from "../api";
+  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist } from "../api";
   import { toastStore } from "../stores/toast.svelte";
 
   type Account = "live" | "paper" | "autosim";
@@ -12,10 +12,74 @@
   let paper = $state<PaperSummary | null>(null);
   let autosim = $state<AutoSimSummary | null>(null);
   let slippage = $state<SlippageSummary | null>(null);
+  let earnings = $state<EarningsWatchlist | null>(null);
   let busy = $state<Set<string>>(new Set());
   let expandedLive = $state<Set<string>>(new Set());
   let showManualOpen = $state(false);
   let manualOpen = $state({ symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" });
+  let sizer = $state({ equity: "", riskPct: "1", entry: "", stop: "" });
+
+  const earningsRisk = (symbol: string) => earnings?.at_risk_symbols.includes(symbol.replace("/USD", "").toUpperCase()) ?? false;
+
+  const sizerResult = $derived.by(() => {
+    const equity = Number(sizer.equity) || 0;
+    const riskPct = Number(sizer.riskPct) || 0;
+    const entry = Number(sizer.entry) || 0;
+    const stop = Number(sizer.stop) || 0;
+    if (!equity || !riskPct || !entry || !stop || entry === stop) return null;
+    const riskDollars = equity * (riskPct / 100);
+    const perUnitRisk = Math.abs(entry - stop);
+    const qty = riskDollars / perUnitRisk;
+    const notional = qty * entry;
+    return { riskDollars, qty, notional, notionalPctOfEquity: equity ? (notional / equity) * 100 : 0 };
+  });
+
+  const exposure = $derived.by(() => {
+    type Row = { symbol: string; asset_class: string; direction: "long" | "short"; value: number };
+    const rows: Row[] = [];
+    if (live) for (const p of live.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.market_value) });
+    if (paper) for (const p of paper.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.qty * p.current_price) });
+    const totalEquity = (live?.account.equity ?? 0) + (paper?.portfolio.equity ?? 0);
+    const byClass = new Map<string, number>();
+    let long = 0, short = 0;
+    for (const r of rows) {
+      byClass.set(r.asset_class, (byClass.get(r.asset_class) ?? 0) + r.value);
+      if (r.direction === "short") short += r.value; else long += r.value;
+    }
+    const topConcentration = rows.length ? rows.reduce((max, r) => (r.value > max.value ? r : max), rows[0]) : null;
+    return {
+      totalEquity,
+      byClass: [...byClass.entries()]
+        .map(([asset_class, value]) => ({ asset_class, value, pct: totalEquity ? (value / totalEquity) * 100 : 0 }))
+        .sort((a, b) => b.value - a.value),
+      long, short,
+      longPct: totalEquity ? (long / totalEquity) * 100 : 0,
+      shortPct: totalEquity ? (short / totalEquity) * 100 : 0,
+      topConcentration: topConcentration ? { symbol: topConcentration.symbol, pct: totalEquity ? (topConcentration.value / totalEquity) * 100 : 0 } : null,
+    };
+  });
+
+  const atRiskPositions = $derived.by(() => {
+    type Row = { symbol: string; kind: "live" | "paper"; pctToStop: number };
+    const rows: Row[] = [];
+    if (live) for (const p of live.positions) {
+      const stop = p.signal?.stop_loss;
+      const entry = p.signal?.entry_price ?? p.avg_entry_price;
+      if (stop == null || entry == null || entry === stop) continue;
+      const totalDist = Math.abs(entry - stop);
+      const remaining = Math.abs(p.current_price - stop);
+      const pct = totalDist ? (remaining / totalDist) * 100 : 100;
+      if (pct <= 25) rows.push({ symbol: p.symbol, kind: "live", pctToStop: Math.max(0, Math.round(pct)) });
+    }
+    if (paper) for (const p of paper.positions) {
+      if (p.stop_loss == null || p.entry_price === p.stop_loss) continue;
+      const totalDist = Math.abs(p.entry_price - p.stop_loss);
+      const remaining = Math.abs(p.current_price - p.stop_loss);
+      const pct = totalDist ? (remaining / totalDist) * 100 : 100;
+      if (pct <= 25) rows.push({ symbol: p.symbol, kind: "paper", pctToStop: Math.max(0, Math.round(pct)) });
+    }
+    return rows.sort((a, b) => a.pctToStop - b.pctToStop);
+  });
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -30,16 +94,18 @@
   }
 
   async function loadAll() {
-    const [l, p, a, s] = await Promise.all([
+    const [l, p, a, s, e] = await Promise.all([
       api.positionsWithSignals().catch(() => null),
       api.paperSummary().catch(() => null),
       api.autoSimSummary().catch(() => null),
       api.slippageSummary(50).catch(() => null),
+      api.earningsWatchlist().catch(() => null),
     ]);
     live = l;
     paper = p;
     autosim = a;
     slippage = s;
+    earnings = e;
   }
 
   async function openManualPosition() {
@@ -124,6 +190,71 @@
   <button class="tab" class:on={account === "autosim"} onclick={() => (account = "autosim")}>Auto Sim</button>
 </div>
 
+{#if atRiskPositions.length}
+  <div class="at-risk-banner">
+    <b>⚠ {atRiskPositions.length} position{atRiskPositions.length > 1 ? "s" : ""} near stop:</b>
+    {#each atRiskPositions as r (r.kind + r.symbol)}
+      <span class="at-risk-chip">{r.symbol} <i>({r.kind})</i> {r.pctToStop}% of stop buffer left</span>
+    {/each}
+  </div>
+{/if}
+
+<div class="stack" style="margin-bottom:14px">
+  <div class="two-col">
+    <Panel title="Portfolio Risk" meta="{fmtUsd(exposure.totalEquity)} combined equity">
+      {#snippet children()}
+        {#if exposure.totalEquity}
+          <div class="risk-split">
+            <div class="risk-bar">
+              <div class="risk-bar-long" style="width:{exposure.longPct}%"></div>
+              <div class="risk-bar-short" style="width:{exposure.shortPct}%"></div>
+            </div>
+            <div class="risk-split-labels">
+              <span class="pl-up">Long {fmtUsd(exposure.long)} ({exposure.longPct.toFixed(1)}%)</span>
+              <span class="pl-down">Short {fmtUsd(exposure.short)} ({exposure.shortPct.toFixed(1)}%)</span>
+            </div>
+          </div>
+          <div class="exposure-list">
+            {#each exposure.byClass as c (c.asset_class)}
+              <div class="exposure-row">
+                <span>{c.asset_class}</span>
+                <div class="exposure-track"><div class="exposure-fill" style="width:{Math.min(100, c.pct)}%"></div></div>
+                <b class="num">{c.pct.toFixed(1)}%</b>
+              </div>
+            {/each}
+          </div>
+          {#if exposure.topConcentration && exposure.topConcentration.pct >= 20}
+            <p class="risk-warning">⚠ {exposure.topConcentration.symbol} is {exposure.topConcentration.pct.toFixed(1)}% of combined equity — concentrated.</p>
+          {/if}
+        {:else}
+          <div class="empty">No open exposure</div>
+        {/if}
+      {/snippet}
+    </Panel>
+
+    <Panel title="Position Sizing Calculator" meta="risk-based share count">
+      {#snippet children()}
+        <div class="sizer-form">
+          <label>Account equity<input placeholder="100000" bind:value={sizer.equity} /></label>
+          <label>Risk %<input placeholder="1" bind:value={sizer.riskPct} /></label>
+          <label>Entry price<input placeholder="0.00" bind:value={sizer.entry} /></label>
+          <label>Stop price<input placeholder="0.00" bind:value={sizer.stop} /></label>
+        </div>
+        {#if sizerResult}
+          <div class="sizer-result">
+            <div><span>Risk</span><b class="num">{fmtUsd(sizerResult.riskDollars)}</b></div>
+            <div><span>Size</span><b class="num">{sizerResult.qty.toFixed(4)}</b></div>
+            <div><span>Notional</span><b class="num">{fmtUsd(sizerResult.notional)}</b></div>
+            <div><span>% of equity</span><b class="num {sizerResult.notionalPctOfEquity > 50 ? 'pl-down' : ''}">{sizerResult.notionalPctOfEquity.toFixed(1)}%</b></div>
+          </div>
+        {:else}
+          <div class="empty small">Enter equity, risk %, entry, and stop</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+</div>
+
 {#if account === "live"}
   <div class="kpis">
     <KpiTile label="Equity" value={live ? fmtUsd(live.account.equity) : "—"} />
@@ -145,7 +276,7 @@
         <tbody>
           {#each live.positions as p (p.symbol)}
             <tr class="expandable" onclick={() => toggleExpand(p.symbol)}>
-              <td class="sym">{expandedLive.has(p.symbol) ? "▾" : "▸"} {p.symbol}</td>
+              <td class="sym">{expandedLive.has(p.symbol) ? "▾" : "▸"} {p.symbol}{#if earningsRisk(p.symbol)}<span class="earnings-tag" title="Reports earnings this week">EARNINGS</span>{/if}</td>
               <td><Pill label={p.side} tone={p.side === "long" ? "good" : "bad"} /></td>
               <td class="num">{p.qty}</td>
               <td class="num">{p.avg_entry_price}</td>
@@ -255,7 +386,7 @@
           <tbody>
             {#each paper.positions as p (p.id)}
               <tr>
-                <td class="sym">{p.symbol}</td>
+                <td class="sym">{p.symbol}{#if earningsRisk(p.symbol)}<span class="earnings-tag" title="Reports earnings this week">EARNINGS</span>{/if}</td>
                 <td><Pill label={p.direction} tone={p.side === "long" ? "good" : "bad"} /></td>
                 <td class="num">{p.leverage}x</td>
                 <td class="num">{p.entry_price}</td>
@@ -517,9 +648,160 @@
     gap: 14px;
   }
 
+  .at-risk-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 180, 84, 0.08);
+    border: 1px solid rgba(255, 180, 84, 0.35);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 12px;
+    color: var(--warm);
+    margin-bottom: 14px;
+  }
+  .at-risk-chip {
+    background: rgba(255, 180, 84, 0.12);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    color: var(--ink-dim);
+  }
+  .at-risk-chip i {
+    font-style: normal;
+    color: var(--ink-faint);
+  }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+
+  .risk-split {
+    margin-bottom: 14px;
+  }
+  .risk-bar {
+    display: flex;
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--surface-raised);
+  }
+  .risk-bar-long {
+    background: var(--good);
+  }
+  .risk-bar-short {
+    background: var(--bad);
+  }
+  .risk-split-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    margin-top: 6px;
+  }
+  .exposure-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .exposure-row {
+    display: grid;
+    grid-template-columns: 70px 1fr 44px;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+  }
+  .exposure-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .exposure-fill {
+    height: 100%;
+    background: var(--accent);
+  }
+  .risk-warning {
+    margin: 12px 0 0;
+    font-size: 11.5px;
+    color: var(--warm);
+  }
+
+  .sizer-form {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .sizer-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .sizer-form input {
+    background: var(--bg);
+    border: 1px solid var(--line-bright);
+    border-radius: 6px;
+    color: var(--ink);
+    padding: 7px 9px;
+    font-size: 12.5px;
+    font-family: var(--mono);
+  }
+  .sizer-result {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .sizer-result div {
+    text-align: center;
+  }
+  .sizer-result span {
+    display: block;
+    font-size: 9.5px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 3px;
+  }
+  .sizer-result b {
+    font-size: 13px;
+  }
+
+  .earnings-tag {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 8.5px;
+    letter-spacing: 0.05em;
+    color: var(--warm);
+    border: 1px solid rgba(255, 180, 84, 0.4);
+    border-radius: 4px;
+    padding: 1px 4px;
+    vertical-align: middle;
+  }
+
+  .empty.small {
+    padding: 10px 0;
+    font-size: 11px;
+  }
+
   @media (max-width: 900px) {
     .kpis {
       grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 1000px) {
+    .two-col {
+      grid-template-columns: 1fr;
     }
   }
 </style>

@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats } from "../api";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
 
@@ -15,6 +15,7 @@
   let cacheStats = $state<CacheStats | null>(null);
   let backfilling = $state(false);
   let orders = $state<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>([]);
+  let errorRate = $state<ErrorRateSummary | null>(null);
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -28,6 +29,7 @@
     llmHealth = await api.llmHealth().catch(() => null);
     cacheStats = await api.cacheStats().catch(() => null);
     orders = await api.alpacaOrders().catch(() => []);
+    errorRate = await api.errorRate(15).catch(() => null);
   }
 
   async function runBackfill() {
@@ -170,7 +172,7 @@
 </div>
 
 <div class="grid">
-  <div class="span-6">
+  <div class="span-4">
     <Panel title="LM Studio" dotColor={llmHealth?.ok ? "var(--good)" : "var(--bad)"} meta={llmHealth?.ok ? "reachable" : "unreachable"}>
       {#if llmHealth}
         <div class="stat-list">
@@ -184,7 +186,28 @@
     </Panel>
   </div>
 
-  <div class="span-6">
+  <div class="span-4">
+    <Panel title="API Error Rate" dotColor={errorRate && errorRate.error_rate_pct > 5 ? "var(--bad)" : "var(--good)"} meta={errorRate ? `${errorRate.window_minutes}m window` : ""}>
+      {#if errorRate}
+        <div class="stat-list">
+          <div class="stat"><span>Requests</span><b class="num">{errorRate.total_requests}</b></div>
+          <div class="stat"><span>5xx Errors</span><b class="num {errorRate.error_count ? 'pl-down' : ''}">{errorRate.error_count}</b></div>
+          <div class="stat"><span>Error Rate</span><b class="num {errorRate.error_rate_pct > 5 ? 'pl-down' : ''}">{errorRate.error_rate_pct}%</b></div>
+        </div>
+        {#if errorRate.top_error_paths.length}
+          <div class="err-paths">
+            {#each errorRate.top_error_paths as p (p.path)}
+              <div class="err-path-row"><span>{p.path}</span><b class="num">{p.count}</b></div>
+            {/each}
+          </div>
+        {/if}
+      {:else}
+        <div class="empty">Loading…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
     <Panel title="OHLCV Cache" meta={cacheStats ? `${cacheStats.db_size_mb} MB` : ""}>
       {#snippet children()}
         {#if cacheStats}
@@ -356,6 +379,26 @@
   }
   .pl-down {
     color: var(--bad);
+  }
+  .err-paths {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .err-path-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: var(--ink-faint);
+  }
+  .err-path-row span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 70%;
   }
   .backfill-btn,
   .cancel-all-btn {

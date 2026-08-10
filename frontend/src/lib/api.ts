@@ -21,6 +21,7 @@ export type Signal = {
   paper_mode: boolean;
   paper_direction: string | null;
   rr_ratio: number | null;
+  notes?: string | null;
 };
 
 export type Threat = {
@@ -288,6 +289,36 @@ export type PositionWithSignal = Position & {
   };
 };
 
+export type RMultipleSummary = {
+  trades: { id: string; symbol: string; direction: string; entry_price: number; stop_loss: number | null; exit_price: number; qty: number; realized_pnl: number; pnl_pct: number; close_reason: string; closed_at: string; r_multiple: number }[];
+  count: number;
+  skipped: number;
+  avg_r: number | null;
+  expectancy_r: number | null;
+  win_rate_pct: number | null;
+  avg_win_r: number | null;
+  avg_loss_r: number | null;
+  best_r: number | null;
+  worst_r: number | null;
+};
+
+export type EarningsWatchlist = { at_risk_symbols: string[]; checked_at: string };
+
+export type ThreatExposure = {
+  exposure: Record<string, { id: string; title: string; severity: string; country: string | null; region: string | null }[]>;
+  symbols_checked: number;
+  symbols_exposed: number;
+};
+
+export type ErrorRateSummary = {
+  window_minutes: number;
+  total_requests: number;
+  error_count: number;
+  error_rate_pct: number;
+  top_error_paths: { path: string; count: number }[];
+  logged_since: number | null;
+};
+
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
 export type CacheStats = {
   total_bars: number;
@@ -541,6 +572,12 @@ export const api = {
 
   signalAnalysis: (id: string) => get<SignalAnalysis>(`/signals/${id}/analysis`),
   saveSignal: (body: Record<string, unknown>) => post<Signal>(`/signals/save`, body),
+  saveSignalNotes: (id: string, notes: string) => post<{ ok: boolean }>(`/signals/${id}/notes`, { notes }),
+
+  rMultiples: (limit = 200) => get<RMultipleSummary>(`/performance/r-multiples?limit=${limit}`),
+  earningsWatchlist: () => get<EarningsWatchlist>(`/earnings/watchlist`),
+  threatExposure: () => get<ThreatExposure>(`/positions/threat-exposure`),
+  errorRate: (windowMinutes = 15) => get<ErrorRateSummary>(`/ops/error-rate?window_minutes=${windowMinutes}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

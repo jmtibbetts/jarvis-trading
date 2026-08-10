@@ -10,12 +10,17 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let activeTf = $state<string>("4H");
+  let notesInput = $state("");
+  let notesSaving = $state(false);
+  let notesDirty = $state(false);
 
   async function load() {
     loading = true;
     error = null;
     try {
       data = await api.signalAnalysis(signalId);
+      notesInput = data.signal.notes ?? "";
+      notesDirty = false;
       // land on the signal's own timeframe if it has candles, else the first tf with data
       const sigTf = data.signal.timeframe;
       if (sigTf && data.candles[sigTf]?.length) {
@@ -28,6 +33,19 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function saveNotes() {
+    notesSaving = true;
+    try {
+      await api.saveSignalNotes(signalId, notesInput);
+      notesDirty = false;
+      toastStore.ok("Journal note saved");
+    } catch (e) {
+      toastStore.err(`Save failed: ${e}`);
+    } finally {
+      notesSaving = false;
     }
   }
 
@@ -162,6 +180,18 @@
           {#if s.invalidation}<p class="invalidation"><b>Invalidation:</b> {s.invalidation}</p>{/if}
         </div>
       {/if}
+
+      <div class="journal">
+        <div class="section-label">Trade Journal</div>
+        <textarea
+          placeholder="Why did you take this trade? What would you do differently?"
+          bind:value={notesInput}
+          oninput={() => (notesDirty = true)}
+        ></textarea>
+        <button class="btn tiny primary" disabled={!notesDirty || notesSaving} onclick={saveNotes}>
+          {notesSaving ? "Saving…" : "Save note"}
+        </button>
+      </div>
 
       <div class="context-grid">
         <div>
@@ -409,6 +439,37 @@
     color: var(--ink-faint);
     margin-bottom: 8px;
     font-weight: 700;
+  }
+
+  .journal {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .journal textarea {
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--line-bright);
+    border-radius: 8px;
+    color: var(--ink);
+    padding: 9px 11px;
+    font-size: 12.5px;
+    font-family: inherit;
+    line-height: 1.5;
+    margin-bottom: 8px;
+    box-sizing: border-box;
+  }
+  .btn.primary {
+    background: rgba(124, 154, 255, 0.15);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .context-grid {

@@ -166,6 +166,19 @@ def delete_signal(signal_id: str):
         db.delete(sig)
     return {"ok":True}
 
+class NotesRequest(BaseModel):
+    notes: str = ""
+
+@router.post("/signals/{signal_id}/notes")
+def save_signal_notes(signal_id: str, body: NotesRequest):
+    """Trade journal note — freeform, attached to the signal for its whole lifecycle."""
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig: raise HTTPException(404)
+        sig.notes = body.notes
+        sig.updated_date = datetime.now(timezone.utc).isoformat()
+    return {"ok": True}
+
 class ExecuteRequest(BaseModel):
     qty: Optional[int] = None
 
@@ -403,6 +416,51 @@ def get_market_full():
     return {"equities": equities, "crypto": crypto, "count": len(asset_dicts)}
 
 
+@router.get("/ops/error-rate")
+def get_error_rate(window_minutes: int = 15):
+    from app.request_metrics import error_rate_summary
+    return error_rate_summary(window_minutes)
+
+
+@router.get("/positions/threat-exposure")
+def get_positions_threat_exposure():
+    """Which currently-held symbols (live + paper) are directly named in an
+    active geopolitical threat — reuses the same term-matching logic as
+    per-signal threat linking (_context_terms/_related_signal_context),
+    scoped to direct symbol/name mentions only so this doesn't just flag
+    every position against generic market-wide threats."""
+    symbols = set()
+    try:
+        from lib.alpaca_client import get_positions
+        for p in get_positions():
+            symbols.add(str(p.symbol).upper())
+    except Exception:
+        pass
+    with get_db() as db:
+        from app.database import PaperPosition
+        for row in db.query(PaperPosition.symbol).filter(PaperPosition.status == "Open").all():
+            if row[0]:
+                symbols.add(row[0].upper())
+
+        threat_rows = db.query(ThreatEvent).filter(ThreatEvent.status == "Active").order_by(
+            ThreatEvent.created_date.desc()
+        ).limit(200).all()
+
+        exposure = {}
+        for sym in symbols:
+            terms = _context_terms({"asset_symbol": sym, "asset_name": ""})
+            if not terms:
+                continue
+            matches = []
+            for t in threat_rows:
+                haystack = f"{t.title or ''} {t.description or ''}".upper()
+                if any(re.search(rf"\b{re.escape(term)}\b", haystack) for term in terms):
+                    matches.append({"id": t.id, "title": t.title, "severity": t.severity, "country": t.country, "region": t.region})
+            if matches:
+                exposure[sym] = matches[:5]
+    return {"exposure": exposure, "symbols_checked": len(symbols), "symbols_exposed": len(exposure)}
+
+
 @router.get("/positions/with-signals")
 def get_positions_with_signals():
     """Positions enriched with their originating signal data."""
@@ -590,6 +648,53 @@ def get_slippage_summary(limit: int = 200):
         "worst_slippage_pct": round(worst, 4),
         "trades": trades,
     }
+
+
+@router.get("/earnings/watchlist")
+def get_earnings_watchlist():
+    """Which currently-held or active-signal equity symbols report earnings
+    within the next 5 days (Yahoo Finance calendar, no paid API)."""
+    from lib.earnings_calendar import get_earnings_this_week
+    reporting = get_earnings_this_week()
+    with get_db() as db:
+        symbols = set()
+        for row in db.query(TradingSignal.asset_symbol).filter(TradingSignal.status.in_(["Active", "PendingApproval", "Executed"])).all():
+            symbols.add((row[0] or "").upper())
+        from app.database import PaperPosition
+        for row in db.query(PaperPosition.symbol).filter(PaperPosition.status == "Open").all():
+            symbols.add((row[0] or "").upper())
+    at_risk = sorted(s for s in symbols if s.replace("/USD", "") in reporting)
+    return {"at_risk_symbols": at_risk, "checked_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.get("/performance/r-multiples")
+def get_r_multiples(limit: int = 200):
+    """R-multiple (realized P&L / initial $ risk) for closed paper trades.
+    Joins paper_trades back to paper_positions for the original stop_loss,
+    since paper_trades itself doesn't store it."""
+    from lib.performance_analytics import compute_r_multiples
+    from app.database import PaperTrade, PaperPosition
+    with get_db() as db:
+        trade_rows = db.query(PaperTrade).order_by(PaperTrade.closed_at.desc()).limit(limit).all()
+        position_ids = [t.position_id for t in trade_rows if t.position_id]
+        stop_by_pos = {}
+        if position_ids:
+            positions = db.query(PaperPosition).filter(PaperPosition.id.in_(position_ids)).all()
+            stop_by_pos = {p.id: p.stop_loss for p in positions}
+        trades = [{
+            "id": t.id,
+            "symbol": t.symbol,
+            "direction": t.direction,
+            "entry_price": t.entry_price,
+            "stop_loss": stop_by_pos.get(t.position_id),
+            "exit_price": t.exit_price,
+            "qty": t.qty,
+            "realized_pnl": t.realized_pnl,
+            "pnl_pct": t.pnl_pct,
+            "close_reason": t.close_reason,
+            "closed_at": t.closed_at,
+        } for t in trade_rows]
+    return compute_r_multiples(trades)
 
 
 @router.get("/performance/analytics")
@@ -1122,6 +1227,7 @@ def _sig_dict(s):
         "market_data_at": getattr(s, "market_data_at", None),
         "expires_at": getattr(s, "expires_at", None),
         "trade_horizon": getattr(s, "trade_horizon", None),
+        "notes": getattr(s, "notes", None),
     }
 
 def _threat_dict(t):

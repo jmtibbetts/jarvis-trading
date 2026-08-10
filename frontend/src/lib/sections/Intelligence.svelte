@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -21,6 +21,28 @@
   let expandedThreat = $state<string | null>(null);
   let expandedNews = $state<string | null>(null);
   let showSources = $state(false);
+  let exposure = $state<ThreatExposure | null>(null);
+
+  const threatTrend = $derived.by(() => {
+    const days: { date: string; critical: number; high: number; other: number; total: number }[] = [];
+    const byDate = new Map<string, { critical: number; high: number; other: number }>();
+    for (const t of threats) {
+      const raw = t.created_date || t.published_at;
+      if (!raw) continue;
+      const day = raw.slice(0, 10);
+      const bucket = byDate.get(day) ?? { critical: 0, high: 0, other: 0 };
+      if (t.severity === "Critical") bucket.critical++;
+      else if (t.severity === "High") bucket.high++;
+      else bucket.other++;
+      byDate.set(day, bucket);
+    }
+    const sortedDays = [...byDate.keys()].sort().slice(-7);
+    for (const day of sortedDays) {
+      const b = byDate.get(day)!;
+      days.push({ date: day, ...b, total: b.critical + b.high + b.other });
+    }
+    return days;
+  });
 
   async function loadThreats() {
     threats = await api.threats(60, {
@@ -38,13 +60,14 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st] = await Promise.all([
+    const [r, t, n, m, s, st, ex] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
       api.marketFull().catch(() => ({ equities: [], crypto: [], count: 0 })),
       api.intelligenceSources().catch(() => []),
       api.intelligenceStatus().catch(() => null),
+      api.threatExposure().catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -53,6 +76,7 @@
     crypto = m.crypto.slice(0, 12);
     sources = s;
     intelStatus = st;
+    exposure = ex;
   }
 
   $effect(() => {
@@ -172,6 +196,60 @@
           {/if}
         {:else}
           <div class="empty">Ingestion status unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-6">
+    <Panel title="Threat Escalation Trend" meta="last {threatTrend.length} days">
+      {#snippet children()}
+        {#if threatTrend.length}
+          <div class="trend-chart">
+            {#each threatTrend as d (d.date)}
+              {@const maxTotal = Math.max(1, ...threatTrend.map((x) => x.total))}
+              <div class="trend-col">
+                <div class="trend-bar" style="height:{(d.total / maxTotal) * 100}%">
+                  {#if d.critical}<div class="trend-seg critical" style="height:{(d.critical / d.total) * 100}%"></div>{/if}
+                  {#if d.high}<div class="trend-seg high" style="height:{(d.high / d.total) * 100}%"></div>{/if}
+                  {#if d.other}<div class="trend-seg other" style="height:{(d.other / d.total) * 100}%"></div>{/if}
+                </div>
+                <span class="trend-count">{d.total}</span>
+                <span class="trend-date">{d.date.slice(5)}</span>
+              </div>
+            {/each}
+          </div>
+          <div class="trend-legend">
+            <span><i class="dot critical"></i>Critical</span>
+            <span><i class="dot high"></i>High</span>
+            <span><i class="dot other"></i>Other</span>
+          </div>
+        {:else}
+          <div class="empty">Not enough dated threats to chart a trend</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-6">
+    <Panel title="Position Exposure to Active Threats" meta={exposure ? `${exposure.symbols_exposed}/${exposure.symbols_checked} symbols` : "—"}>
+      {#snippet children()}
+        {#if exposure && exposure.symbols_exposed}
+          <div class="list">
+            {#each Object.entries(exposure.exposure) as [symbol, matches] (symbol)}
+              <div class="row">
+                <Pill label={matches[0].severity} tone={sevTone(matches[0].severity)} />
+                <div class="row-main">
+                  <div class="row-title">{symbol}</div>
+                  <div class="row-meta">{matches.map((m) => m.title).join(" · ").slice(0, 100)}</div>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {:else if exposure}
+          <div class="empty">No open position is directly named in an active threat</div>
+        {:else}
+          <div class="empty">Exposure check unavailable</div>
         {/if}
       {/snippet}
     </Panel>
@@ -574,6 +652,76 @@
     text-align: center;
     color: var(--ink-faint);
     font-size: 12px;
+  }
+
+  .trend-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    height: 120px;
+    padding-top: 8px;
+  }
+  .trend-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    gap: 4px;
+  }
+  .trend-bar {
+    width: 100%;
+    max-width: 28px;
+    display: flex;
+    flex-direction: column-reverse;
+    border-radius: 3px 3px 0 0;
+    overflow: hidden;
+    margin-top: auto;
+    min-height: 2px;
+  }
+  .trend-seg.critical {
+    background: var(--critical, #ff3864);
+  }
+  .trend-seg.high {
+    background: var(--warm);
+  }
+  .trend-seg.other {
+    background: var(--accent);
+  }
+  .trend-count {
+    font-size: 10px;
+    color: var(--ink-dim);
+    font-family: var(--mono);
+  }
+  .trend-date {
+    font-size: 9px;
+    color: var(--ink-faint);
+  }
+  .trend-legend {
+    display: flex;
+    gap: 14px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-size: 10.5px;
+    color: var(--ink-faint);
+  }
+  .trend-legend .dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .trend-legend .dot.critical {
+    background: var(--critical, #ff3864);
+  }
+  .trend-legend .dot.high {
+    background: var(--warm);
+  }
+  .trend-legend .dot.other {
+    background: var(--accent);
   }
 
   @media (max-width: 1180px) {

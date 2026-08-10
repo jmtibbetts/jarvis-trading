@@ -102,3 +102,47 @@ def signal_source_breakdown(trade_outcomes: list[dict]) -> list[dict]:
         })
     result.sort(key=lambda r: r["total"], reverse=True)
     return result
+
+
+def compute_r_multiples(trades: list[dict]) -> dict:
+    """R-multiple per closed trade: realized_pnl / initial $ risk, where
+    initial $ risk = |entry_price - stop_loss| * qty. This uses the same
+    qty/side basis as paper_engine's raw_pnl, so a trade stopped out exactly
+    at its stop lands at R = -1.0 and a trade closed exactly at its original
+    target lands at R = the signal's rr_ratio.
+    Each row in `trades` needs: entry_price, stop_loss, qty, realized_pnl,
+    symbol, closed_at. Rows with no usable stop (None, or equal to entry) are
+    skipped — they can't produce a meaningful R and are reported as `skipped`.
+    """
+    valid = []
+    skipped = 0
+    for t in trades:
+        entry = t.get("entry_price")
+        stop = t.get("stop_loss")
+        qty = t.get("qty")
+        pnl = t.get("realized_pnl")
+        if not entry or not stop or not qty or pnl is None or entry == stop:
+            skipped += 1
+            continue
+        risk_dollars = abs(entry - stop) * qty
+        if risk_dollars <= 0:
+            skipped += 1
+            continue
+        r = pnl / risk_dollars
+        valid.append({**t, "r_multiple": round(r, 3)})
+
+    r_values = [v["r_multiple"] for v in valid]
+    wins = [r for r in r_values if r > 0]
+    losses = [r for r in r_values if r <= 0]
+    return {
+        "trades": sorted(valid, key=lambda v: v.get("closed_at") or "", reverse=True),
+        "count": len(valid),
+        "skipped": skipped,
+        "avg_r": round(sum(r_values) / len(r_values), 3) if r_values else None,
+        "expectancy_r": round(sum(r_values) / len(r_values), 3) if r_values else None,
+        "win_rate_pct": round(len(wins) / len(r_values) * 100, 2) if r_values else None,
+        "avg_win_r": round(sum(wins) / len(wins), 3) if wins else None,
+        "avg_loss_r": round(sum(losses) / len(losses), 3) if losses else None,
+        "best_r": round(max(r_values), 3) if r_values else None,
+        "worst_r": round(min(r_values), 3) if r_values else None,
+    }

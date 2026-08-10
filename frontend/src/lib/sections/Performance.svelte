@@ -3,19 +3,39 @@
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
   import LearningPanel from "../components/LearningPanel.svelte";
-  import { api, type PerformanceAnalytics, type Decision, type BacktestRun } from "../api";
+  import { api, type PerformanceAnalytics, type Decision, type BacktestRun, type RMultipleSummary } from "../api";
   import { toastStore } from "../stores/toast.svelte";
 
   let perf = $state<PerformanceAnalytics | null>(null);
   let decisions = $state<Decision[]>([]);
   let decisionSource = $state("");
   let decisionAction = $state("");
+  let rmult = $state<RMultipleSummary | null>(null);
 
   async function loadAll() {
-    const [p, d] = await Promise.all([api.performanceAnalytics(30).catch(() => null), api.decisions(300).catch(() => [])]);
+    const [p, d, r] = await Promise.all([
+      api.performanceAnalytics(30).catch(() => null),
+      api.decisions(300).catch(() => []),
+      api.rMultiples(200).catch(() => null),
+    ]);
     perf = p;
     decisions = d;
+    rmult = r;
   }
+
+  const rBuckets = $derived.by(() => {
+    if (!rmult?.trades.length) return [];
+    const edges = [-Infinity, -1, -0.5, 0, 0.5, 1, 2, Infinity];
+    const labels = ["< -1R", "-1R to -0.5R", "-0.5R to 0R", "0R to 0.5R", "0.5R to 1R", "1R to 2R", "> 2R"];
+    const counts = new Array(labels.length).fill(0);
+    for (const t of rmult.trades) {
+      for (let i = 0; i < edges.length - 1; i++) {
+        if (t.r_multiple > edges[i] && t.r_multiple <= edges[i + 1]) { counts[i]++; break; }
+      }
+    }
+    const max = Math.max(1, ...counts);
+    return labels.map((label, i) => ({ label, count: counts[i], pct: (counts[i] / max) * 100 }));
+  });
 
   const filteredDecisions = $derived(
     decisions
@@ -180,6 +200,37 @@
           </div>
         {/each}
       {/if}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="R-Multiple Distribution" meta="{rmult?.count ?? 0} closed trades with a stop on record">
+      {#snippet children()}
+        {#if rmult && rmult.count}
+          <div class="stat-list r-kpis">
+            <div class="stat"><span>Avg R</span><b class="num {rmult.avg_r != null && rmult.avg_r >= 0 ? 'pl-up' : 'pl-down'}">{rmult.avg_r?.toFixed(2) ?? "—"}</b></div>
+            <div class="stat"><span>Win Rate</span><b class="num">{rmult.win_rate_pct?.toFixed(1) ?? "—"}%</b></div>
+            <div class="stat"><span>Avg Win R</span><b class="num pl-up">{rmult.avg_win_r?.toFixed(2) ?? "—"}</b></div>
+            <div class="stat"><span>Avg Loss R</span><b class="num pl-down">{rmult.avg_loss_r?.toFixed(2) ?? "—"}</b></div>
+            <div class="stat"><span>Best R</span><b class="num pl-up">{rmult.best_r?.toFixed(2) ?? "—"}</b></div>
+            <div class="stat"><span>Worst R</span><b class="num pl-down">{rmult.worst_r?.toFixed(2) ?? "—"}</b></div>
+          </div>
+          <div class="r-hist">
+            {#each rBuckets as b (b.label)}
+              <div class="r-hist-row">
+                <span class="r-hist-label">{b.label}</span>
+                <div class="r-hist-track"><div class="r-hist-fill" style="width:{b.pct}%"></div></div>
+                <span class="num r-hist-count">{b.count}</span>
+              </div>
+            {/each}
+          </div>
+          {#if rmult.skipped}
+            <p class="r-skipped">{rmult.skipped} closed trade{rmult.skipped > 1 ? "s" : ""} skipped — no stop recorded at open.</p>
+          {/if}
+        {:else}
+          <div class="empty">No closed trades with a recorded stop yet</div>
+        {/if}
+      {/snippet}
     </Panel>
   </div>
 
@@ -517,6 +568,74 @@
   }
   .empty.err {
     color: var(--bad);
+  }
+
+  .num {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .pl-up {
+    color: var(--good);
+  }
+  .pl-down {
+    color: var(--bad);
+  }
+
+  .r-kpis {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .r-kpis .stat {
+    flex-direction: column;
+    gap: 4px;
+    text-align: center;
+    background: var(--surface-raised);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .r-kpis .stat span {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+  }
+  .r-kpis .stat b {
+    font-size: 14px;
+  }
+  .r-hist {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .r-hist-row {
+    display: grid;
+    grid-template-columns: 120px 1fr 30px;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+  }
+  .r-hist-label {
+    color: var(--ink-faint);
+  }
+  .r-hist-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .r-hist-fill {
+    height: 100%;
+    background: var(--accent);
+  }
+  .r-hist-count {
+    text-align: right;
+  }
+  .r-skipped {
+    margin: 12px 0 0;
+    font-size: 11px;
+    color: var(--ink-faint);
   }
 
   @media (max-width: 1180px) {

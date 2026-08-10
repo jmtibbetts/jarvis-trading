@@ -2,6 +2,7 @@ import unittest
 
 from lib.performance_analytics import (
     daily_equity_curve, compute_max_drawdown, compute_sharpe_ratio, signal_source_breakdown,
+    compute_r_multiples,
 )
 
 
@@ -74,6 +75,48 @@ class SignalSourceBreakdownTests(unittest.TestCase):
 
     def test_empty_input_returns_empty_list(self):
         self.assertEqual(signal_source_breakdown([]), [])
+
+
+class RMultipleTests(unittest.TestCase):
+    def test_stop_out_trade_is_minus_one_r(self):
+        trades = [{"entry_price": 100.0, "stop_loss": 95.0, "qty": 10.0, "realized_pnl": -50.0, "closed_at": "d1", "symbol": "X"}]
+        result = compute_r_multiples(trades)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["trades"][0]["r_multiple"], -1.0)
+
+    def test_two_r_winner(self):
+        trades = [{"entry_price": 100.0, "stop_loss": 95.0, "qty": 10.0, "realized_pnl": 100.0, "closed_at": "d1", "symbol": "X"}]
+        result = compute_r_multiples(trades)
+        self.assertEqual(result["trades"][0]["r_multiple"], 2.0)
+
+    def test_trade_with_no_stop_is_skipped_not_dropped_silently(self):
+        trades = [{"entry_price": 100.0, "stop_loss": None, "qty": 10.0, "realized_pnl": 50.0, "closed_at": "d1", "symbol": "X"}]
+        result = compute_r_multiples(trades)
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["skipped"], 1)
+
+    def test_entry_equal_to_stop_is_skipped(self):
+        trades = [{"entry_price": 100.0, "stop_loss": 100.0, "qty": 10.0, "realized_pnl": 50.0, "closed_at": "d1", "symbol": "X"}]
+        result = compute_r_multiples(trades)
+        self.assertEqual(result["skipped"], 1)
+
+    def test_aggregate_stats_across_mixed_trades(self):
+        trades = [
+            {"entry_price": 100.0, "stop_loss": 95.0, "qty": 10.0, "realized_pnl": -50.0, "closed_at": "d1", "symbol": "A"},  # -1R
+            {"entry_price": 100.0, "stop_loss": 95.0, "qty": 10.0, "realized_pnl": 100.0, "closed_at": "d2", "symbol": "B"},  # +2R
+            {"entry_price": 50.0, "stop_loss": 48.0, "qty": 5.0, "realized_pnl": 20.0, "closed_at": "d3", "symbol": "C"},   # +2R
+        ]
+        result = compute_r_multiples(trades)
+        self.assertEqual(result["count"], 3)
+        self.assertAlmostEqual(result["win_rate_pct"], 66.67, places=1)
+        self.assertEqual(result["best_r"], 2.0)
+        self.assertEqual(result["worst_r"], -1.0)
+        self.assertAlmostEqual(result["avg_r"], 1.0, places=2)
+
+    def test_empty_input(self):
+        result = compute_r_multiples([])
+        self.assertEqual(result["count"], 0)
+        self.assertIsNone(result["avg_r"])
 
 
 if __name__ == "__main__":

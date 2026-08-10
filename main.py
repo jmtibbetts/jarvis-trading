@@ -116,6 +116,18 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ── API request/error tracking (in-memory, resets on restart — this is a
+# live-ops signal, not an audit record, so it doesn't need to survive a
+# restart the way the DB-backed job/decision logs do) ───────────────────────
+from app.request_metrics import record as _record_api_request
+
+@app.middleware("http")
+async def _track_api_requests(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        _record_api_request(request.url.path, response.status_code)
+    return response
+
 # ── Database init ──────────────────────────────────────────────────────────────
 from app.database import init_db
 init_db()

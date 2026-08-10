@@ -88,6 +88,7 @@ class TradingSignal(Base):
     fill_recorded_at = Column(String)
     scaled_out       = Column(Boolean, default=False)   # partial-close-at-TP1 already applied
     scaled_out_qty   = Column(Float)
+    notes            = Column(Text)                     # free-text trade journal note
     user_id          = Column(String, default=DEFAULT_USER_ID)
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
@@ -666,6 +667,7 @@ def _migrate_columns():
             ("fill_recorded_at", "TEXT"),
             ("scaled_out", "INTEGER DEFAULT 0"),
             ("scaled_out_qty", "REAL"),
+            ("notes", "TEXT"),
         ],
         "news_items": [
             ("canonical_url", "TEXT"),

@@ -52,6 +52,31 @@ ALPACA_CONNECT_TIMEOUT = 10   # seconds
 ALPACA_READ_TIMEOUT    = 12   # seconds — bail if SDK call is slow; fallback handles rest
 
 
+_SENTINEL = object()
+
+
+def _call_with_timeout(fn, timeout_seconds, *args, **kwargs):
+    """Run fn(*args, **kwargs) with a hard wall-clock timeout. Returns _SENTINEL
+    on timeout or any exception (caller decides how to treat that) instead of
+    raising, so a call site can fall through to its next fallback in one line.
+    Deliberately not a `with ThreadPoolExecutor(...)` block — see the equity/
+    crypto price fetch functions in this file for why: `with` calls
+    shutdown(wait=True) on exit, which blocks until the submitted thread
+    finishes even after result(timeout=...) already gave up, negating the
+    timeout entirely."""
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = ex.submit(fn, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeout:
+            return _SENTINEL
+        except Exception:
+            return _SENTINEL
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
 def _check_alpaca_reachable(host='data.alpaca.markets', port=443, timeout=5) -> bool:
     """
     Deprecated: TCP probe was unreliable — port 443 being open doesn't mean the
@@ -168,14 +193,24 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
     success = 0
     failed  = 0
 
+    # This loop runs one HTTP round-trip per (symbol, timeframe) pair — with the
+    # default 6 timeframes and 100+ symbols that's several hundred sequential
+    # calls per cycle. None of the underlying SDK/yfinance calls have their own
+    # timeout, so previously a single stalled connection (not a fast failure —
+    # a socket that opens but never responds) could hang this entire job
+    # forever, permanently stuck at status=running and blocking every future
+    # scheduled/manual run behind it. Every blocking call below now goes
+    # through _call_with_timeout so one bad symbol can't take down the job.
+    PER_CALL_TIMEOUT = ALPACA_READ_TIMEOUT
+
     def alpaca_fn(sym, tf):
         return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
 
     for sym in symbols:
         for tf in timeframes:
             try:
-                df = alpaca_fn(sym, tf)
-                if df is not None and not df.empty:
+                df = _call_with_timeout(alpaca_fn, PER_CALL_TIMEOUT, sym, tf)
+                if df is not None and df is not _SENTINEL and not df.empty:
                     _store_bars(sym, tf, df, source='alpaca')
                     success += 1
                     logger.debug(f"[Market] Cached {sym}/{tf}: {len(df)} bars")
@@ -188,15 +223,17 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
                         start = end - timedelta(days=cfg['lookback_days'])
                         if is_crypto_data_symbol(sym):
                             crypto_sym = normalize_crypto_symbol(sym)
-                            crypto_df = fetch_crypto_ohlcv(sym, tf, limit=cfg['bar_count'])
-                            if crypto_df is not None and not crypto_df.empty:
+                            crypto_df = _call_with_timeout(
+                                fetch_crypto_ohlcv, PER_CALL_TIMEOUT, sym, tf, limit=cfg['bar_count'],
+                            )
+                            if crypto_df is not None and crypto_df is not _SENTINEL and not crypto_df.empty:
                                 source = crypto_df.attrs.get("source", "crypto_api")
                                 _store_bars(crypto_sym, tf, crypto_df, source=source)
                                 success += 1
                                 logger.debug(f"[Market] Cached {crypto_sym}/{tf}: {len(crypto_df)} bars ({source})")
                             elif ALLOW_YFINANCE_CRYPTO_FALLBACK:
-                                yf_df = _yf_fetch(sym, tf, start, end)
-                                if yf_df is not None and not yf_df.empty:
+                                yf_df = _call_with_timeout(_yf_fetch, PER_CALL_TIMEOUT, sym, tf, start, end)
+                                if yf_df is not None and yf_df is not _SENTINEL and not yf_df.empty:
                                     _store_bars(crypto_sym, tf, yf_df, source='yfinance')
                                     success += 1
                                     logger.debug(f"[Market] Cached {crypto_sym}/{tf}: {len(yf_df)} bars (yfinance)")
@@ -205,8 +242,8 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
                             else:
                                 failed += 1
                         else:
-                            yf_df = _yf_fetch(sym, tf, start, end)
-                            if yf_df is not None and not yf_df.empty:
+                            yf_df = _call_with_timeout(_yf_fetch, PER_CALL_TIMEOUT, sym, tf, start, end)
+                            if yf_df is not None and yf_df is not _SENTINEL and not yf_df.empty:
                                 _store_bars(sym, tf, yf_df, source='yfinance')
                                 success += 1
                                 logger.debug(f"[Market] Cached {sym}/{tf}: {len(yf_df)} bars (yfinance)")

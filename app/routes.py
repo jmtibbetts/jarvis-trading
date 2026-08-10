@@ -614,17 +614,56 @@ def get_performance_analytics(days: int = 90):
 
 @router.post("/jobs/{job_name}/trigger")
 def trigger_job(job_name: str):
-    job_map={"market":"jobs.fetch_market_data","threats":"jobs.fetch_threat_news",
-             "signals":"jobs.generate_signals","execute":"jobs.execute_signals",
-             "positions":"jobs.manage_positions","telegram":"jobs.telegram_bot",
-             "autosim":"jobs.auto_simulator",
-             "evaluation":"jobs.evaluate_signals"}
+    # (module path, function name) — defaults to "run" for the common case.
+    # Scanner modes each have a dedicated zero-arg entry point (matching how
+    # app/scheduler.py itself invokes them); "guardian" lives directly in
+    # app.scheduler rather than a jobs.* module, so it can't use the generic
+    # "jobs.X".run pattern either.
+    job_map={"market":("jobs.fetch_market_data","run"),"threats":("jobs.fetch_threat_news","run"),
+             "signals":("jobs.generate_signals","run"),"execute":("jobs.execute_signals","run"),
+             "positions":("jobs.manage_positions","run"),"telegram":("jobs.telegram_bot","run"),
+             "autosim":("jobs.auto_simulator","run"),
+             "evaluation":("jobs.evaluate_signals","run"),
+             "paper":("jobs.paper_trading","run"),
+             "guardian":("app.scheduler","portfolio_guardian"),
+             "scanner_premarket":("jobs.scan_opportunities","run_pre_market"),
+             "scanner_intraday":("jobs.scan_opportunities","run_intraday"),
+             "scanner_crypto":("jobs.scan_opportunities","run_crypto"),
+             "scanner_futures":("jobs.scan_opportunities","run_futures")}
     if job_name not in job_map: raise HTTPException(404)
+    # make_job_runner silently no-ops a trigger while the job is already
+    # "running" — that's correct for the scheduler (avoids double-execution),
+    # but a manual "Run Now" click would otherwise appear to succeed (200 OK)
+    # while doing nothing, with zero feedback that it was skipped. Surface it
+    # instead of spawning a thread we already know will no-op.
+    if job_status.get(job_name, {}).get("status") == "running":
+        return {"ok": False, "already_running": True,
+                "detail": f"'{job_name}' is already running — wait for it to finish, or use Reset if it's stuck."}
     import importlib, threading
     from app.scheduler import make_job_runner
-    mod = importlib.import_module(job_map[job_name])
-    threading.Thread(target=make_job_runner(job_name, mod.run), daemon=True).start()
+    module_path, func_name = job_map[job_name]
+    mod = importlib.import_module(module_path)
+    fn = getattr(mod, func_name)
+    threading.Thread(target=make_job_runner(job_name, fn), daemon=True).start()
     return {"ok":True,"job":job_name}
+
+
+@router.post("/jobs/{job_name}/reset")
+def reset_job_status(job_name: str):
+    """Force a job's tracked status back to idle without restarting the app.
+    For recovering from a genuinely hung run (e.g. a network call that never
+    timed out) whose status is permanently stuck at "running", which — by
+    design — blocks every subsequent scheduled or manual trigger for that
+    job. This does NOT stop whatever thread is actually still running (Python
+    has no safe way to kill a thread); it only clears the tracking flag so
+    new runs aren't blocked. If the old thread eventually finishes, it will
+    overwrite the status again with its own (stale) result."""
+    if job_name not in job_status:
+        raise HTTPException(404, f"Unknown job '{job_name}'")
+    job_status[job_name]["status"] = "idle"
+    job_status[job_name]["error"] = None
+    return {"ok": True, "job": job_name, "status": "idle"}
+
 
 @router.get("/llm/health")
 def llm_health():

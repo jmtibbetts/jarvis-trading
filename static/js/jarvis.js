@@ -1188,7 +1188,10 @@ async function loadJobs() {
             <div class="small text-muted mb-1">Schedule: ${schedules[name]||'—'}</div>
             <div class="small text-muted mb-2">Last run: ${info.last?timeAgo(info.last):'Never'}</div>
             ${info.error?`<div class="alert alert-danger py-1 small mb-2">${info.error}</div>`:''}
-            <button class="btn btn-outline-primary btn-sm w-100" onclick="triggerJob('${name}')"><i class="bi bi-play-fill"></i> Run Now</button>
+            <div class="d-flex gap-2">
+              <button class="btn btn-outline-primary btn-sm flex-grow-1" onclick="triggerJob('${name}')"><i class="bi bi-play-fill"></i> Run Now</button>
+              ${info.status==='running'?`<button class="btn btn-outline-warning btn-sm" title="Force this job's status back to idle if it's stuck (does not stop an actual hung thread)" onclick="resetJob('${name}')"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>`:''}
+            </div>
           </div>
         </div>
       </div>`;
@@ -1258,8 +1261,20 @@ async function loadJobs() {
 }
 
 async function triggerJob(name) {
-  const res=await POST(`/jobs/${name}/trigger`,{});
-  if(res.ok) { setTimeout(loadJobs,1500); }
+  try {
+    const res=await POST(`/jobs/${name}/trigger`,{});
+    if(res.ok) { setTimeout(loadJobs,1500); }
+    else { showToast(res.detail || `Could not start '${name}' — it may already be running`, 'warning'); }
+  } catch(e) { showToast(`Could not start '${name}': ${e}`, 'danger'); }
+}
+
+async function resetJob(name) {
+  if(!confirm(`Reset '${name}' status to idle? This only clears the tracking flag — it doesn't stop a thread that's actually still running, and if that old run eventually finishes it will overwrite this again.`)) return;
+  try {
+    const res=await POST(`/jobs/${name}/reset`,{});
+    if(res.ok) { showToast(`'${name}' reset to idle`, 'success'); loadJobs(); }
+    else { showToast(res.detail || `Could not reset '${name}'`, 'warning'); }
+  } catch(e) { showToast(`Could not reset '${name}': ${e}`, 'danger'); }
 }
 
 async function triggerBackfill() {

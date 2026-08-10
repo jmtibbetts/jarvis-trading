@@ -12,7 +12,7 @@ from typing import Optional
 from app.database import (
     AiDecision, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
     NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
-    ThreatEvent, TradingSignal, get_db,
+    ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
 from lib.learning_engine import get_all_outcomes, get_all_accuracy, get_all_patterns, get_all_regime_stats, get_all_lessons
 from app.scheduler import job_status
@@ -171,6 +171,10 @@ class ExecuteRequest(BaseModel):
 
 @router.post("/signals/{signal_id}/execute")
 def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
+    from lib.kill_switch import get_kill_switch_state
+    kill_state = get_kill_switch_state()
+    if not kill_state["live_trading_enabled"]:
+        raise HTTPException(423, f"Live trading is paused: {kill_state.get('paused_reason') or 'manually paused'}")
     with get_db() as db:
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
         if not sig: raise HTTPException(404)
@@ -509,6 +513,105 @@ def get_regime_endpoint():
 @router.get("/jobs/status")
 def jobs_status(): return job_status
 
+
+class TradingStatusRequest(BaseModel):
+    enabled: bool
+    reason: Optional[str] = None
+
+@router.get("/system/trading-status")
+def get_trading_status():
+    """Global kill-switch state. When live_trading_enabled is False, execute_signals
+    and the manual approve/execute routes refuse to submit new live orders — existing
+    positions' hard stop-loss/take-profit enforcement in manage_positions is unaffected."""
+    from lib.kill_switch import get_kill_switch_state
+    return get_kill_switch_state()
+
+@router.post("/system/trading-status")
+def set_trading_status(body: TradingStatusRequest):
+    from lib.kill_switch import set_live_trading_enabled
+    return set_live_trading_enabled(body.enabled, body.reason)
+
+
+@router.get("/execution/slippage")
+def get_slippage_summary(limit: int = 200):
+    """Execution quality: gap between a live signal's intended entry price and
+    the broker's actual fill price, recorded the first time each position is
+    observed by manage_positions. Paper fills are never included — they always
+    fill at the requested price by construction."""
+    with get_db() as db:
+        rows = db.query(TradingSignal).filter(
+            TradingSignal.slippage_pct.is_not(None),
+            TradingSignal.paper_mode.is_not(True),
+        ).order_by(TradingSignal.fill_recorded_at.desc()).limit(min(max(limit, 1), 1000)).all()
+        trades = [{
+            "symbol": r.asset_symbol,
+            "asset_class": r.asset_class,
+            "entry_price": r.entry_price,
+            "actual_fill_price": r.actual_fill_price,
+            "slippage_pct": r.slippage_pct,
+            "fill_recorded_at": r.fill_recorded_at,
+        } for r in rows]
+    if not trades:
+        return {"count": 0, "avg_slippage_pct": None, "median_slippage_pct": None,
+                "worst_slippage_pct": None, "trades": []}
+    values = sorted(t["slippage_pct"] for t in trades)
+    n = len(values)
+    median = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+    worst = max(values, key=abs)
+    return {
+        "count": n,
+        "avg_slippage_pct": round(sum(values) / n, 4),
+        "median_slippage_pct": round(median, 4),
+        "worst_slippage_pct": round(worst, 4),
+        "trades": trades,
+    }
+
+
+@router.get("/performance/analytics")
+def get_performance_analytics(days: int = 90):
+    """Real portfolio analytics computed from history: Sharpe ratio and max
+    drawdown from daily equity snapshots, plus win-rate/avg P&L broken down
+    by originating signal source (watchlist LLM vs ta_fallback vs scanner)."""
+    from lib.performance_analytics import (
+        daily_equity_curve, compute_max_drawdown, compute_sharpe_ratio, signal_source_breakdown,
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    with get_db() as db:
+        snapshots = [
+            {"snapshot_at": s.snapshot_at, "equity": s.equity}
+            for s in db.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.snapshot_at >= cutoff)
+                .order_by(PortfolioSnapshot.snapshot_at.asc()).all()
+        ]
+
+        outcome_rows = db.query(TradeOutcome).filter(TradeOutcome.exited_at >= cutoff).all()
+        signal_ids = [o.signal_id for o in outcome_rows if o.signal_id]
+        source_by_id = {}
+        if signal_ids:
+            sigs = db.query(TradingSignal).filter(TradingSignal.id.in_(signal_ids)).all()
+            source_by_id = {s.id: (s.signal_source or "watchlist") for s in sigs}
+        outcomes = [{
+            "signal_source": source_by_id.get(o.signal_id, "unknown"),
+            "outcome": o.outcome,
+            "pnl_pct": o.pnl_pct,
+        } for o in outcome_rows]
+
+    curve = daily_equity_curve(snapshots)
+    drawdown = compute_max_drawdown(curve)
+    sharpe = compute_sharpe_ratio(curve)
+
+    return {
+        "period_days": days,
+        "equity_curve_points": len(curve),
+        "sharpe_ratio": sharpe,
+        "max_drawdown_pct": drawdown["max_drawdown_pct"],
+        "drawdown_peak_date": drawdown["peak_date"],
+        "drawdown_trough_date": drawdown["trough_date"],
+        "trades_analyzed": len(outcomes),
+        "by_signal_source": signal_source_breakdown(outcomes),
+    }
+
 @router.post("/jobs/{job_name}/trigger")
 def trigger_job(job_name: str):
     job_map={"market":"jobs.fetch_market_data","threats":"jobs.fetch_threat_news",
@@ -728,6 +831,10 @@ def get_pending_signals():
 @router.post("/signals/{signal_id}/approve")
 def approve_signal(signal_id: str):
     """Approve a pending signal — immediately submit the order to Alpaca."""
+    from lib.kill_switch import get_kill_switch_state
+    kill_state = get_kill_switch_state()
+    if not kill_state["live_trading_enabled"]:
+        raise HTTPException(423, f"Live trading is paused: {kill_state.get('paused_reason') or 'manually paused'}")
     with get_db() as db:
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
         if not sig:
@@ -786,6 +893,10 @@ def reject_signal(signal_id: str):
 @router.post("/signals/approve-all")
 def approve_all_signals():
     """Approve ALL pending signals — submit all to Alpaca."""
+    from lib.kill_switch import get_kill_switch_state
+    kill_state = get_kill_switch_state()
+    if not kill_state["live_trading_enabled"]:
+        raise HTTPException(423, f"Live trading is paused: {kill_state.get('paused_reason') or 'manually paused'}")
     from lib.alpaca_client import submit_bracket_order, normalize_symbol, get_account
     account = get_account()
     buying_power = float(account.buying_power)
@@ -1256,6 +1367,137 @@ def get_scanner_status():
         return {"scanner": modes}
     except Exception as e:
         return {"error": str(e)}
+
+
+@router.post("/backtest/run")
+async def run_backtest_endpoint(request: Request):
+    """Kick off a historical, no-LLM backtest in a background thread. Body:
+    {symbols: list[str], start_date: str, end_date: str,
+     timeframes: list[str] = None, trade_mode: str = "longer"}
+    Returns immediately with a run_id; poll GET /api/backtest/{run_id}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    symbols = body.get("symbols") or []
+    start_date = body.get("start_date")
+    end_date = body.get("end_date")
+    timeframes = body.get("timeframes")
+    trade_mode = body.get("trade_mode", "longer")
+
+    if not isinstance(symbols, list) or not symbols:
+        return JSONResponse({"error": "symbols must be a non-empty list"}, status_code=400)
+    MAX_BACKTEST_SYMBOLS = 10
+    if len(symbols) > MAX_BACKTEST_SYMBOLS:
+        return JSONResponse(
+            {"error": f"Too many symbols — max {MAX_BACKTEST_SYMBOLS} per backtest run"},
+            status_code=400,
+        )
+    if not start_date or not end_date:
+        return JSONResponse({"error": "start_date and end_date are required"}, status_code=400)
+
+    from app.database import BacktestRun, new_id, now_iso
+
+    run_id = new_id()
+    with get_db() as db:
+        db.add(BacktestRun(
+            id=run_id,
+            symbols=json.dumps(symbols),
+            timeframes=json.dumps(timeframes) if timeframes else json.dumps([]),
+            trade_mode=trade_mode,
+            start_date=start_date,
+            end_date=end_date,
+            status="running",
+            created_at=now_iso(),
+        ))
+
+    import threading
+    def _run():
+        from app.database import BacktestRun as _BacktestRun
+        try:
+            from lib.backtester import run_backtest
+            result = run_backtest(
+                symbols=symbols, start_date=start_date, end_date=end_date,
+                timeframes=timeframes, trade_mode=trade_mode,
+            )
+            with get_db() as db:
+                row = db.query(_BacktestRun).filter(_BacktestRun.id == run_id).first()
+                if row:
+                    row.status = "completed"
+                    row.result_json = json.dumps(result, default=str)
+                    row.finished_at = now_iso()
+        except Exception as e:
+            logger.error(f"[Routes] Backtest run {run_id} failed: {e}")
+            try:
+                with get_db() as db:
+                    row = db.query(_BacktestRun).filter(_BacktestRun.id == run_id).first()
+                    if row:
+                        row.status = "failed"
+                        row.error = str(e)
+                        row.finished_at = now_iso()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return {"run_id": run_id, "status": "started"}
+
+
+@router.get("/backtest/{run_id}")
+def get_backtest_run(run_id: str):
+    """Return a backtest run's status, and its parsed result once completed."""
+    from app.database import BacktestRun
+    with get_db() as db:
+        row = db.query(BacktestRun).filter(BacktestRun.id == run_id).first()
+        if not row:
+            raise HTTPException(404, "Backtest run not found")
+        out = {
+            "id": row.id,
+            "symbols": json.loads(row.symbols) if row.symbols else [],
+            "timeframes": json.loads(row.timeframes) if row.timeframes else [],
+            "trade_mode": row.trade_mode,
+            "start_date": row.start_date,
+            "end_date": row.end_date,
+            "status": row.status,
+            "error": row.error,
+            "created_at": row.created_at,
+            "finished_at": row.finished_at,
+        }
+        if row.status == "completed" and row.result_json:
+            try:
+                out["result"] = json.loads(row.result_json)
+            except Exception:
+                out["result"] = None
+        return out
+
+
+@router.get("/backtest")
+def list_backtest_runs():
+    """List recent backtest runs (light — no full result payload)."""
+    from app.database import BacktestRun
+    with get_db() as db:
+        rows = (
+            db.query(BacktestRun)
+            .order_by(BacktestRun.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "runs": [
+                {
+                    "id": r.id,
+                    "symbols": json.loads(r.symbols) if r.symbols else [],
+                    "trade_mode": r.trade_mode,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                    "finished_at": r.finished_at,
+                }
+                for r in rows
+            ]
+        }
 
 
 @router.post("/paper/run-mtm")

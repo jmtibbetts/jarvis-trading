@@ -213,8 +213,10 @@ def portfolio_heat(positions: list, equity: float) -> dict:
     Returns metrics useful for deciding whether to add more positions.
     """
     if not positions or not equity:
-        return {'heat': 0.0, 'total_value': 0.0, 'position_count': 0,
-                'max_drawdown_est': 0.0, 'status': 'safe'}
+        # Real max-drawdown (computed from equity-snapshot history) lives in
+        # lib/performance_analytics.py / GET /api/performance/analytics —
+        # this function only assesses current point-in-time exposure.
+        return {'heat': 0.0, 'total_value': 0.0, 'position_count': 0, 'status': 'safe'}
     
     total_value = sum(float(p.get('market_value', 0)) for p in positions)
     deployment_pct = total_value / equity * 100

@@ -229,7 +229,12 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     s["asset_class"] = s.get("asset_class") or "Equity"
     s["momentum"] = s.get("momentum") or ""
     s["key_risks"] = s.get("key_risks") or ""
-    from lib.signal_levels import validate_signal_levels
+
+    from lib.signal_levels import validate_signal_levels, clamp_stop_to_atr
+    s, atr_clamped, atr_reason = clamp_stop_to_atr(s, atr_pct)
+    if atr_clamped:
+        logger.debug(f"[Signals] {sym} stop ATR-clamped: {atr_reason}")
+
     levels_ok, _ = validate_signal_levels(s)
     if not levels_ok:
         distance_pct = max(0.5, min(float(atr_pct or 2.0), 10.0)) / 100.0

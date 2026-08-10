@@ -862,10 +862,29 @@ def handle(cmd, chat_id, token):
         except Exception as e:
             send(token, chat_id, f"Error: {e}")
 
+    elif base in ("/pause", "/stop"):
+        from lib.kill_switch import set_live_trading_enabled
+        state = set_live_trading_enabled(False, reason="Paused via Telegram")
+        send(token, chat_id,
+             "⏸ <b>Live trading PAUSED</b>\n"
+             "No new live orders will be submitted. Existing positions keep their "
+             "hard stop-loss/take-profit protection. Send /resume to re-enable.")
+
+    elif base in ("/resume", "/start_trading"):
+        from lib.kill_switch import set_live_trading_enabled
+        set_live_trading_enabled(True)
+        send(token, chat_id, "▶️ <b>Live trading RESUMED</b>\nNew live orders can be submitted again.")
+
     elif base == "/status":
         from app.scheduler import job_status
+        from lib.kill_switch import get_kill_switch_state
+        kill_state = get_kill_switch_state()
         icons = {"ok": "✅", "running": "⏳", "error": "❌", "idle": "⏸"}
-        lines = ["🤖 <b>Jarvis v6.1</b>", f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", ""]
+        trading_line = (
+            "🟢 Live trading: ENABLED" if kill_state["live_trading_enabled"]
+            else f"⏸ Live trading: PAUSED ({kill_state.get('paused_reason') or 'manual'})"
+        )
+        lines = ["🤖 <b>Jarvis v6.1</b>", f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", trading_line, ""]
         for name, info in job_status.items():
             last = info.get("last", "Never")
             if last and last != "Never":
@@ -898,7 +917,9 @@ def handle(cmd, chat_id, token):
              "/pnl — portfolio equity & cash\n"
              "/risk — portfolio heat & risk status\n"
              "/perf — trade performance summary\n"
-             "/status — job scheduler status\n"
+             "/status — job scheduler + live trading status\n"
+             "/pause — stop all new live orders (existing stops/targets stay active)\n"
+             "/resume — re-enable live trading\n"
              "\n💡 Proactive alerts enabled for new signals ≥70% and Critical/High threats.")
 
 

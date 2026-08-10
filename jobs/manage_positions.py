@@ -53,6 +53,9 @@ MIN_DYNAMIC_TRAIL_PCT = _env_float("MIN_DYNAMIC_TRAIL_PCT", 0.75, 0.1, 5.0)
 TARGET_REWARD_MULTIPLIER = _env_float("TARGET_REWARD_MULTIPLIER", 2.8, 1.2, 6.0)
 EXIT_ORDER_REPRICE_PCT = _env_float("EXIT_ORDER_REPRICE_PCT", 0.25, 0.05, 2.0)
 ALLOW_STANDALONE_TAKE_PROFIT = os.getenv("ALLOW_STANDALONE_TAKE_PROFIT", "false").lower() in ("1", "true", "yes")
+SCALE_OUT_ENABLED = os.getenv("SCALE_OUT_ENABLED", "true").lower() in ("1", "true", "yes")
+SCALE_OUT_FRACTION = _env_float("SCALE_OUT_FRACTION", 0.5, 0.1, 0.9)
+SCALE_OUT_TP1_PCT_OF_TARGET = _env_float("SCALE_OUT_TP1_PCT_OF_TARGET", 0.5, 0.2, 0.9)
 
 
 def _tier(plpc: float, is_crypto: bool = False):
@@ -233,6 +236,96 @@ def _dynamic_exit_plan(pos, current_price: float, ta_data: dict, original_signal
         "risk_dollars": MAX_LOSS_PER_TRADE_USD,
         "side": side,
     }
+
+
+def _record_slippage(signal_id: str, intended_entry: float, actual_fill_price: float, now_iso: str) -> None:
+    """Persist the gap between a signal's intended entry price and the broker's
+    actual fill price, the first time a live position for it is observed. Only
+    meaningful for live (non-paper) fills — paper fills always fill exactly at
+    the requested price, so there's no execution quality to measure there."""
+    if not signal_id or not intended_entry or not actual_fill_price:
+        return
+    try:
+        with get_db() as db:
+            sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+            if sig and sig.actual_fill_price is None:
+                sig.actual_fill_price = actual_fill_price
+                sig.slippage_pct = round((actual_fill_price - intended_entry) / intended_entry * 100, 4)
+                sig.fill_recorded_at = now_iso
+    except Exception as e:
+        logger.debug(f"[Positions] Slippage record failed for signal {signal_id}: {e}")
+
+
+def _maybe_scale_out(sym: str, alpaca_sym: str, qty: float, avg: float, current_price: float,
+                       is_c: bool, original_signal: dict, current_regime: str, now_iso: str) -> bool:
+    """Lock in partial profit at an intermediate target (TP1) instead of an
+    all-or-nothing exit: close SCALE_OUT_FRACTION of the position, move the
+    remaining runner's stop to breakeven, and let it ride toward the original
+    target. Only fires once per position (tracked via TradingSignal.scaled_out)
+    and only for long positions — live execution is long-only today."""
+    if not SCALE_OUT_ENABLED or qty <= 0:
+        return False
+    sig_id = original_signal.get("id")
+    entry = float(original_signal.get("entry_price") or 0)
+    target = float(original_signal.get("target_price") or 0)
+    if not sig_id or not entry or not target or target <= entry:
+        return False
+    if original_signal.get("scaled_out"):
+        return False
+
+    tp1_price = entry + (target - entry) * SCALE_OUT_TP1_PCT_OF_TARGET
+    if current_price < tp1_price:
+        return False
+
+    close_qty = _safe_qty(qty * SCALE_OUT_FRACTION, is_c)
+    remaining_qty = _safe_qty(qty - close_qty, is_c)
+    # Both halves must be tradeable — don't scale a position too small to split.
+    if close_qty <= 0 or remaining_qty <= 0:
+        return False
+
+    try:
+        from lib.alpaca_client import partial_close_position
+        partial_close_position(alpaca_sym, close_qty)
+    except Exception as e:
+        logger.warning(f"[Positions] Scale-out partial close failed {sym}: {e}")
+        return False
+
+    try:
+        record_trade_outcome(
+            symbol=sym, asset_class="crypto" if is_c else "equity",
+            direction="long", entry_price=avg, exit_price=current_price,
+            qty=close_qty, exit_reason="SCALE_OUT_TP1",
+            signal_id=sig_id, timeframe=original_signal.get("timeframe", "1D"),
+            signal_confidence=original_signal.get("confidence"),
+            signal_reasoning=original_signal.get("reasoning"),
+            market_regime=current_regime,
+        )
+    except Exception as e:
+        logger.warning(f"[Learning] Scale-out record failed {sym}: {e}")
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == sig_id).first()
+        if sig:
+            sig.scaled_out = True
+            sig.scaled_out_qty = close_qty
+            sig.updated_date = now_iso
+
+    # Move the remaining runner's stop to breakeven and keep the original target —
+    # _sync_exit_orders replaces just the stop/target legs in place (no destructive
+    # cancel-everything), so a resting take-profit for the reduced qty survives.
+    breakeven_stop = entry
+    _sync_exit_orders(alpaca_sym, remaining_qty, "long", breakeven_stop, target, is_c, current_price=current_price)
+
+    logger.info(
+        f"[Positions] ✂ Scaled out {sym}: closed {close_qty:.6g} @ ${current_price:.4f} "
+        f"(TP1 ${tp1_price:.4f}), {remaining_qty:.6g} remaining with stop @ breakeven ${breakeven_stop:.4f}"
+    )
+    log_decision(
+        "positions", "SCALE_OUT",
+        f"Locked in {SCALE_OUT_FRACTION*100:.0f}% at TP1 (${tp1_price:.4f}), stop moved to breakeven",
+        symbol=sym, pnl_pct=(current_price - entry) / entry * 100, price=current_price, thinking=False,
+    )
+    return True
 
 
 def _price_changed_enough(old_price: float, new_price: float) -> bool:
@@ -723,12 +816,16 @@ def run():
             TradingSignal.direction.in_(["Long", "Bounce"]),
         ).order_by(TradingSignal.generated_at.asc()).all()
         sig_map = {s.asset_symbol.upper().replace("/", ""): {
+            "id":           s.id,
             "entry_price":  s.entry_price,
             "target_price": s.target_price,
             "stop_loss":    s.stop_loss,
             "confidence":   s.confidence,
             "timeframe":    s.timeframe or "1D",
             "reasoning":    s.reasoning or "",
+            "signal_source": s.signal_source or "watchlist",
+            "actual_fill_price": s.actual_fill_price,
+            "scaled_out":   bool(s.scaled_out),
         } for s in exec_sigs}
 
         # Rebuild positions table
@@ -791,6 +888,8 @@ def run():
         tier = _tier(plpc, is_crypto=is_c)
         ta_data = _fetch_ta(sym, is_crypto=is_c)
         original_signal = sig_map.get(sym.upper().replace("/", ""), {})
+        if original_signal.get("id") and original_signal.get("actual_fill_price") is None:
+            _record_slippage(original_signal["id"], float(original_signal.get("entry_price") or 0), avg, now_iso)
         risk_plan = _dynamic_exit_plan(
             pos, current_price, ta_data, original_signal, is_crypto=is_c,
         )
@@ -869,6 +968,7 @@ def run():
                             exit_price=current_price,
                             qty=float(pos.qty or 0),
                             exit_reason="HARD_STOP" if plpc < 0 else "TAKE_PROFIT",
+                            signal_id=_sig_data.get("id"),
                             timeframe=_sig_data.get("timeframe", "1D"),
                             signal_confidence=_sig_data.get("confidence"),
                             signal_reasoning=_sig_data.get("reasoning"),
@@ -901,6 +1001,9 @@ def run():
                     trailing += 1
                 # Still fall through to LLM for deeper analysis even after setting stop
                 # (LLM might escalate to EXIT if thesis is broken)
+
+        if _maybe_scale_out(sym, alpaca_sym, qty, avg, current_price, is_c, original_signal, current_regime, now_iso):
+            continue
 
         # ── STEP 2: LLM evaluation — TA + news + threats ──────────────────────
         logger.info(f"[Positions] 🤖 LLM evaluating {sym}...")
@@ -945,6 +1048,7 @@ def run():
                         exit_price=current_price,
                         qty=float(pos.qty or 0),
                         exit_reason="LLM_EXIT",
+                        signal_id=_sig_data2.get("id"),
                         timeframe=_sig_data2.get("timeframe", "1D"),
                         signal_confidence=_sig_data2.get("confidence"),
                         signal_reasoning=_sig_data2.get("reasoning"),

@@ -83,6 +83,11 @@ class TradingSignal(Base):
     expires_at       = Column(String)
     trade_horizon    = Column(String, default="all")
     alpaca_order_id  = Column(String)
+    actual_fill_price = Column(Float)   # Alpaca avg_entry_price once the position is observed live
+    slippage_pct     = Column(Float)    # (actual_fill_price - entry_price) / entry_price * 100
+    fill_recorded_at = Column(String)
+    scaled_out       = Column(Boolean, default=False)   # partial-close-at-TP1 already applied
+    scaled_out_qty   = Column(Float)
     user_id          = Column(String, default=DEFAULT_USER_ID)
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
@@ -194,6 +199,18 @@ class PortfolioSnapshot(Base):
     unrealized_pl  = Column(Float)
     position_count = Column(Float)
     snapshot_at    = Column(String, default=now_iso)
+
+
+class SystemState(Base):
+    """System-wide operational state (kill switch), separate from per-user
+    preferences — a global control an operator flips regardless of which
+    user's settings say, independent of the paper-only Auto Trading toggle."""
+    __tablename__ = "system_state"
+    id                    = Column(String, primary_key=True, default=lambda: "global")
+    live_trading_enabled  = Column(Boolean, default=True)
+    paused_reason         = Column(Text)
+    paused_at             = Column(String)
+    updated_at            = Column(String, default=now_iso)
 
 
 class TradeOutcome(Base):
@@ -421,6 +438,23 @@ class AutoSimPortfolio(Base):
     losses       = Column(Integer, default=0)
     updated_at   = Column(String, default=now_iso)
 
+class BacktestRun(Base):
+    """A historical backtest run (lib/backtester.run_backtest) — purely
+    additive new table, not touching any existing table's columns."""
+    __tablename__ = "backtest_runs"
+    id           = Column(String, primary_key=True, default=new_id)
+    symbols      = Column(Text)             # JSON-encoded list[str]
+    timeframes   = Column(Text)             # JSON-encoded list[str]
+    trade_mode   = Column(String)
+    start_date   = Column(String)
+    end_date     = Column(String)
+    status       = Column(String, default="running")   # running | completed | failed
+    result_json  = Column(Text)             # JSON-encoded full result dict once complete
+    error        = Column(Text)
+    created_at   = Column(String, default=now_iso)
+    finished_at  = Column(String)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     # Run migrations for any missing columns
@@ -428,7 +462,21 @@ def init_db():
     _seed_local_account()
     # Seed paper portfolio if missing
     _seed_paper_portfolio()
+    _seed_system_state()
     print("[DB] Schema initialized")
+
+
+def _seed_system_state():
+    """Ensure the global kill-switch row exists, defaulting to trading enabled."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT OR IGNORE INTO system_state
+                    (id, live_trading_enabled, paused_reason, paused_at, updated_at)
+                VALUES ('global', 1, NULL, NULL, :now)
+            """), {"now": now_iso()})
+    except Exception as exc:
+        print(f"[DB] system_state seed skipped: {exc}")
 
 
 def _seed_local_account():
@@ -613,6 +661,11 @@ def _migrate_columns():
             ("trigger_event", "TEXT"),
             ("trigger_event_id", "TEXT"),
             ("alpaca_order_id", "TEXT"),
+            ("actual_fill_price", "REAL"),
+            ("slippage_pct", "REAL"),
+            ("fill_recorded_at", "TEXT"),
+            ("scaled_out", "INTEGER DEFAULT 0"),
+            ("scaled_out_qty", "REAL"),
         ],
         "news_items": [
             ("canonical_url", "TEXT"),
@@ -653,6 +706,8 @@ def _migrate_columns():
             ("unrealized_pnl",  "REAL DEFAULT 0.0"),
             ("unrealized_pct",  "REAL DEFAULT 0.0"),
             ("signal_id",       "TEXT"),
+            ("scaled_out",      "INTEGER DEFAULT 0"),
+            ("scaled_out_qty",  "REAL"),
         ],
         "paper_trades": [
             ("user_id",          "TEXT DEFAULT 'local'"),
@@ -855,6 +910,8 @@ class PaperPosition(Base):
     unrealized_pct= Column(Float, default=0.0)
     signal_id     = Column(String)          # FK to trading_signals.id (optional)
     status        = Column(String, default="Open")  # Open | Closed
+    scaled_out    = Column(Boolean, default=False)  # partial-close-at-TP1 already applied
+    scaled_out_qty = Column(Float)
     opened_at     = Column(String, default=now_iso)
     updated_at    = Column(String, default=now_iso)
 

@@ -272,6 +272,34 @@ def _get_cached_bars(symbol: str, tf: str, start: datetime, end: datetime) -> Op
         return _cache_to_df(rows) if rows else None
 
 
+def get_cached_range(symbol: str, tf: str, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
+    """Query OHLCVBar directly for a symbol/timeframe/date range and return a
+    DataFrame shaped like other OHLCV frames in this codebase (DatetimeIndex,
+    columns open/high/low/close/volume, sorted ascending). Unlike
+    fetch_with_cache(), this never touches Alpaca/yfinance/crypto APIs — it is
+    a pure cache read, intended for backtesting over historical ranges.
+
+    Normalizes crypto symbols the same way fetch_with_cache()/backfill_symbol()
+    do (e.g. 'BTC/USD' -> 'BTC-USD' style internal cache key) so callers can
+    pass either the display symbol or the cache-normalized one.
+    """
+    cache_symbol = symbol
+    try:
+        from lib.crypto_market_data import is_crypto_symbol, normalize_crypto_symbol
+        if is_crypto_symbol(symbol):
+            cache_symbol = normalize_crypto_symbol(symbol)
+    except Exception:
+        pass
+    with get_cache_db() as db:
+        rows = db.query(OHLCVBar).filter(
+            OHLCVBar.symbol == cache_symbol,
+            OHLCVBar.timeframe == tf,
+            OHLCVBar.ts >= start.isoformat(),
+            OHLCVBar.ts <= end.isoformat(),
+        ).order_by(OHLCVBar.ts.asc()).all()
+        return _cache_to_df(rows)
+
+
 def _get_bar_count(symbol: str, tf: str) -> int:
     """Count cached bars for a symbol/tf."""
     with get_cache_db() as db:

@@ -411,6 +411,104 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
     return result
 
 
+def partial_close_paper_position(pos_id: str, close_fraction: float, close_price: float, reason: str = "scale_out") -> dict:
+    """Realize P&L on a fraction of an open paper position and keep the rest
+    open with reduced size — mirrors close_paper_position but for a partial
+    exit (e.g. locking in profit at an intermediate target). The remaining
+    qty/notional/margin are reduced proportionally; the position stays Open."""
+    if not (0 < close_fraction < 1):
+        return {"error": "close_fraction must be between 0 and 1 (exclusive)"}
+
+    with get_db() as db:
+        pos = db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()
+        if not pos or pos.status != "Open":
+            return {"error": "Position not found or already closed"}
+        if bool(pos.scaled_out):
+            return {"error": "Position has already been scaled out"}
+
+        pos_symbol    = pos.symbol
+        pos_direction = pos.direction
+        pos_side      = pos.side
+        pos_asset_cls = pos.asset_class
+        pos_signal_id = pos.signal_id
+        pos_opened_at = pos.opened_at
+
+        entry = float(pos.entry_price)
+        qty   = float(pos.qty)
+        lev   = float(pos.leverage or 1.0)
+        side  = 1 if pos_side == "long" else -1
+        notional = float(pos.notional or 0)
+        margin   = float(pos.margin_used or DEFAULT_POSITION_SIZE)
+
+        close_qty   = qty * close_fraction
+        remain_qty  = qty - close_qty
+        close_margin   = margin * close_fraction
+        remain_margin  = margin - close_margin
+        close_notional = notional * close_fraction
+        remain_notional = notional - close_notional
+        if close_qty <= 0 or remain_qty <= 0:
+            return {"error": "Position too small to split"}
+
+        pnl, pnl_pct = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin)
+
+        portfolio = _get_portfolio_cash(db)
+        portfolio.cash        += close_margin + pnl
+        portfolio.realized_pnl = (portfolio.realized_pnl or 0) + pnl
+        portfolio.total_trades = (portfolio.total_trades or 0) + 1
+        if pnl > 0:
+            portfolio.winning_trades = (portfolio.winning_trades or 0) + 1
+        portfolio.updated_at = _now()
+
+        from app.database import new_id
+        db.add(PaperTrade(
+            id           = new_id(),
+            position_id  = pos_id,
+            symbol       = pos_symbol,
+            asset_class  = pos_asset_cls,
+            direction    = pos_direction,
+            side         = pos_side,
+            leverage     = lev,
+            qty          = close_qty,
+            entry_price  = entry,
+            exit_price   = close_price,
+            notional     = close_notional,
+            realized_pnl = pnl,
+            pnl_pct      = pnl_pct,
+            close_reason = reason,
+            signal_id    = pos_signal_id,
+            opened_at    = pos_opened_at,
+            closed_at    = _now(),
+        ))
+
+        pos.qty            = remain_qty
+        pos.notional        = remain_notional
+        pos.margin_used     = remain_margin
+        pos.scaled_out       = True
+        pos.scaled_out_qty   = close_qty
+        pos.updated_at       = _now()
+
+        result = {
+            "ok": True, "symbol": pos_symbol, "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2), "reason": reason, "close_price": close_price,
+            "closed_qty": close_qty, "remaining_qty": remain_qty,
+        }
+
+    try:
+        _record_outcome(
+            symbol=pos_symbol, asset_class=pos_asset_cls, direction=pos_direction,
+            entry_price=entry, exit_price=close_price, qty=close_qty,
+            exit_reason=reason, paper_mode=True,
+        )
+    except Exception as _le:
+        logger.warning(f"[Paper][Learning] partial-close record_outcome failed: {_le}")
+
+    logger.info(
+        f"[Paper] Scaled out {pos_symbol} ({pos_direction}): closed {close_qty:.6g} @ ${close_price:.4f} "
+        f"| P&L=${pnl:.2f} ({pnl_pct:.1f}%) | {remain_qty:.6g} remaining"
+    )
+    return result
+
+
 def mark_to_market(prices: dict) -> dict:
     """
     Update unrealized P&L for all open paper positions.

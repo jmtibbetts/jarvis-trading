@@ -17,6 +17,9 @@
       <i class="bi bi-robot text-success"></i> Jarvis Trading AI <span class="badge bg-success ms-1" style="font-size:.6rem">v7.0 Python Edition</span>
     </span>
     <div class="d-flex align-items-center gap-3 ms-auto">
+      <button id="kill-switch-btn" class="btn btn-sm" onclick="toggleKillSwitch()" title="Pause/resume all new live orders. Existing positions keep their stop-loss/take-profit protection.">
+        <span id="kill-switch-label">…</span>
+      </button>
       <div id="regime-badge" class="small"></div>
       <div id="job-indicators" class="d-flex gap-2 small"></div>
       <span id="last-refresh" class="text-muted small"></span>
@@ -38,6 +41,7 @@
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-jobs"><i class="bi bi-cpu"></i> Jobs</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-performance"><i class="bi bi-bar-chart-line-fill"></i> Performance</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-paper" onclick="loadPaperTab()"><i class="bi bi-journal-richtext"></i> Paper</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-auto-paper"><i class="bi bi-play-circle-fill"></i> Auto Sim</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-decisions" onclick="loadDecisions()"><i class="bi bi-robot"></i> AI Log</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-learning" onclick="loadLearning()"><i class="bi bi-mortarboard-fill"></i> Learning</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-settings"><i class="bi bi-gear-fill"></i> Settings</a></li>
@@ -49,31 +53,78 @@
   <div class="tab-pane fade show active" id="tab-signals">
     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <div class="d-flex gap-2 flex-wrap">
-        <select id="sig-filter-status" class="form-select form-select-sm w-auto">
-          <option value="">All Status</option>
-          <option value="Active" selected>Active</option>
+        <div class="input-group input-group-sm signal-search">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="search" id="sig-search" class="form-control" placeholder="Symbol or name" aria-label="Search signals">
+        </div>
+        <select id="sig-filter-status" class="form-select form-select-sm w-auto" aria-label="Filter signals by status">
+          <option value="" selected>All Status</option>
+          <option value="Active">Active</option>
           <option value="Executed">Executed</option>
           <option value="PendingApproval">Pending Approval</option>
           <option value="Closed">Closed</option>
           <option value="Expired">Expired</option>
         </select>
-        <select id="sig-filter-class" class="form-select form-select-sm w-auto">
+        <select id="sig-filter-class" class="form-select form-select-sm w-auto" aria-label="Filter signals by asset class">
+          <option value="stocks" selected>Stocks / ETFs</option>
+          <option value="crypto">Crypto 24/7</option>
+          <option value="futures">Futures / Forex</option>
+          <option value="paper">Paper</option>
           <option value="">All Classes</option>
-          <option value="Equity">Equity</option>
-          <option value="Crypto">Crypto</option>
         </select>
-        <select id="sig-sort" class="form-select form-select-sm w-auto">
+        <select id="sig-filter-direction" class="form-select form-select-sm w-auto" aria-label="Filter signals by direction">
+          <option value="" selected>Long + Short</option>
+          <option value="long">Long Side</option>
+          <option value="short">Short Side</option>
+        </select>
+        <select id="sig-sort" class="form-select form-select-sm w-auto" aria-label="Sort signals">
           <option value="score">Sort: Composite Score</option>
           <option value="confidence">Sort: LLM Confidence</option>
           <option value="time">Sort: Newest</option>
+          <option value="long-first">Sort: Long First</option>
+          <option value="short-first">Sort: Short First</option>
         </select>
       </div>
       <div class="d-flex gap-2 align-items-center">
+        <div class="btn-group btn-group-sm" id="trade-mode-control" role="group" aria-label="Signal trade horizon">
+          <button type="button" class="btn btn-outline-info" data-trade-mode="scalp" onclick="setTradeMode('scalp')"><i class="bi bi-lightning-charge"></i> Scalp</button>
+          <button type="button" class="btn btn-outline-info" data-trade-mode="longer" onclick="setTradeMode('longer')"><i class="bi bi-hourglass-split"></i> Longer</button>
+          <button type="button" class="btn btn-outline-info" data-trade-mode="all" onclick="setTradeMode('all')"><i class="bi bi-layers"></i> Both</button>
+        </div>
         <span class="badge bg-secondary" id="signal-count">0 signals</span>
         <button class="btn btn-outline-danger btn-sm" onclick="clearExpiredSignals()"><i class="bi bi-trash"></i> Clear Expired</button>
       </div>
     </div>
     <div id="signals-grid" class="row g-3"></div>
+  </div>
+
+  <div class="tab-pane fade" id="tab-auto-paper">
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+      <h5 class="mb-0 text-white"><i class="bi bi-play-circle-fill text-info me-2"></i>Automatic Signal Simulator <span class="badge bg-info text-dark">PAPER ONLY</span></h5>
+      <button class="btn btn-sm btn-outline-info" onclick="runAutoPaper(this)"><i class="bi bi-arrow-repeat"></i> Run Now</button>
+    </div>
+    <div id="auto-paper-state" class="small text-muted mb-2">Loading...</div>
+    <div class="row g-2 mb-3" id="auto-paper-kpis"></div>
+    <div class="row g-3">
+      <div class="col-xl-7">
+        <h6 class="small text-uppercase text-muted">Open positions</h6>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover table-sm align-middle">
+            <thead><tr><th>Symbol</th><th>Direction</th><th>Entry</th><th>Current</th><th>Target</th><th>Stop</th><th>Open P/L</th></tr></thead>
+            <tbody id="auto-paper-positions"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="col-xl-5">
+        <h6 class="small text-uppercase text-muted">Completed trades</h6>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover table-sm align-middle">
+            <thead><tr><th>Symbol</th><th>Direction</th><th>P/L</th><th>Result</th><th>Closed</th></tr></thead>
+            <tbody id="auto-paper-trades"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ── POSITIONS ─────────────────────────────────────────────────────────── -->
@@ -188,6 +239,12 @@
           <option value="North America">North America</option>
           <option value="Global">Global</option>
         </select>
+        <select id="threat-filter-confirmation" class="form-select form-select-sm w-auto" aria-label="Filter threats by confirmation">
+          <option value="">All Confirmation</option>
+          <option value="corroborated">Corroborated</option>
+          <option value="single_source">Single source</option>
+          <option value="unconfirmed_social">Unconfirmed social</option>
+        </select>
       </div>
       <span class="badge bg-secondary" id="threat-count">0 threats</span>
     </div>
@@ -196,39 +253,84 @@
 
   <!-- ── NEWS ─────────────────────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-news">
-    <div class="d-flex gap-2 mb-3">
-      <select id="news-filter-cat" class="form-select form-select-sm w-auto">
+    <div id="news-health" class="intelligence-status mb-3" aria-live="polite">
+      <span class="spinner-border spinner-border-sm"></span><span>Checking intelligence sources...</span>
+    </div>
+    <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+      <select id="news-filter-cat" class="form-select form-select-sm w-auto" aria-label="Filter news by category">
         <option value="">All Categories</option>
         <option value="finance">Finance</option>
         <option value="geopolitics">Geopolitics</option>
+        <option value="politics">Politics</option>
+        <option value="social_politics">Social posts</option>
         <option value="crypto">Crypto</option>
         <option value="conflict">Conflict</option>
         <option value="energy">Energy</option>
         <option value="tech">Tech</option>
+        <option value="ai_infrastructure">AI infrastructure</option>
+        <option value="semiconductors">Semiconductors</option>
+        <option value="data_centers">Data centers</option>
+        <option value="supply_chain">Supply chain</option>
       </select>
-      <select id="news-filter-sent" class="form-select form-select-sm w-auto">
+      <select id="news-filter-sent" class="form-select form-select-sm w-auto" aria-label="Filter news by sentiment">
         <option value="">All Sentiment</option>
         <option value="positive">Positive</option>
         <option value="negative">Negative</option>
         <option value="neutral">Neutral</option>
       </select>
+      <select id="news-filter-source" class="form-select form-select-sm w-auto" aria-label="Filter news by source">
+        <option value="">All Sources</option>
+      </select>
+      <select id="news-filter-confirmation" class="form-select form-select-sm w-auto" aria-label="Filter news by confirmation">
+        <option value="">All Confirmation</option>
+        <option value="corroborated">Corroborated</option>
+        <option value="single_source">Single source</option>
+        <option value="unconfirmed_social">Unconfirmed social</option>
+        <option value="aggregated">Aggregator</option>
+      </select>
+      <select id="news-filter-reliability" class="form-select form-select-sm w-auto" aria-label="Filter news by source reliability">
+        <option value="0">All Reliability</option>
+        <option value="0.8">High reliability</option>
+        <option value="0.7">Medium or better</option>
+      </select>
+      <select id="news-filter-freshness" class="form-select form-select-sm w-auto" aria-label="Filter news by freshness">
+        <option value="0">All Freshness</option>
+        <option value="6">Last 6 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="72">Last 3 days</option>
+      </select>
+      <div class="input-group input-group-sm news-asset-filter">
+        <span class="input-group-text"><i class="bi bi-search"></i></span>
+        <input id="news-filter-asset" type="search" class="form-control" placeholder="Asset" aria-label="Filter news by asset">
+      </div>
+      <span id="news-count" class="badge bg-secondary ms-auto">0 articles</span>
     </div>
     <div id="news-list"></div>
   </div>
 
   <!-- ── SCANNER ─────────────────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-scanner">
-    <div class="row g-3">
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+      <div>
+        <h5 class="mb-0 text-white"><i class="bi bi-search me-2 text-info"></i>Opportunity Scanner</h5>
+        <small class="text-muted">Crypto scans run 24/7. Stocks, futures, and forex stay in separate lanes.</small>
+      </div>
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadScannerSignals()">
+        <i class="bi bi-arrow-clockwise"></i> Refresh
+      </button>
+    </div>
+
+    <div class="row g-3 mb-3">
       <div class="col-lg-4">
         <div class="card">
           <div class="card-header py-2"><span class="small fw-bold"><i class="bi bi-search"></i> Manual Analysis</span></div>
           <div class="card-body">
             <div class="mb-3">
-              <label class="form-label small">Symbol</label>
-              <input type="text" id="scan-symbol" class="form-control form-control-sm" placeholder="NVDA, BTC/USD..." style="text-transform:uppercase"/>
+              <label class="form-label small" for="scan-symbol">Symbol</label>
+              <input type="text" id="scan-symbol" class="form-control form-control-sm" placeholder="NVDA, BTC/USDT..." style="text-transform:uppercase"/>
             </div>
             <div class="mb-3">
-              <label class="form-label small">Timeframes</label>
+              <div class="form-label small">Timeframes</div>
               <div class="d-flex gap-2 flex-wrap">
                 <div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" id="tf-1h" value="1H" checked><label class="form-check-label small" for="tf-1h">1H</label></div>
                 <div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" id="tf-4h" value="4H" checked><label class="form-check-label small" for="tf-4h">4H</label></div>
@@ -251,6 +353,58 @@
         <div id="scan-result" class="text-muted small">Enter a symbol and click Analyze.</div>
       </div>
     </div>
+
+    <div class="row g-3">
+      <div class="col-lg-4">
+        <div class="card h-100 border-info">
+          <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span class="small fw-bold"><i class="bi bi-currency-bitcoin text-warning"></i> Crypto 24/7</span>
+            <button class="btn btn-sm btn-info py-0" onclick="runScannerMode('crypto')">Run</button>
+          </div>
+          <div class="card-body">
+            <div class="small text-muted mb-2">Exchange-confirmed crypto opportunities. Long spot can go live; shorts/leverage route to paper.</div>
+            <div id="scanner-crypto-list" class="d-flex flex-column gap-2">
+              <div class="text-muted small">Loading crypto scanner signals...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card h-100 border-success">
+          <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span class="small fw-bold"><i class="bi bi-graph-up-arrow text-success"></i> Stocks / ETFs</span>
+            <div class="btn-group btn-group-sm">
+              <button class="btn btn-success py-0" onclick="runScannerMode('pre_market')">Pre</button>
+              <button class="btn btn-outline-success py-0" onclick="runScannerMode('intraday')">Intra</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="small text-muted mb-2">Equity movers and watchlist breakouts. After-hours signals stay out of the crypto lane.</div>
+            <div id="scanner-equity-list" class="d-flex flex-column gap-2">
+              <div class="text-muted small">Loading stock scanner signals...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card h-100 border-warning">
+          <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span class="small fw-bold"><i class="bi bi-globe2 text-warning"></i> Futures / Forex</span>
+            <button class="btn btn-sm btn-warning py-0" onclick="runScannerMode('futures')">Run</button>
+          </div>
+          <div class="card-body">
+            <div class="small text-muted mb-2">Macro, commodities, index futures, and FX setups. These route through paper/leverage logic.</div>
+            <div id="scanner-futures-list" class="d-flex flex-column gap-2">
+              <div class="text-muted small">Loading futures/forex scanner signals...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="scanner-run-status" class="small text-muted mt-3"></div>
   </div>
 
   <!-- ── MONDAY QUEUE ─────────────────────────────────────────────────────── -->
@@ -283,7 +437,12 @@
 
   <!-- ── JOBS ─────────────────────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-jobs">
-    <div class="row g-3" id="jobs-grid"></div>
+    <div class="row g-3" id="jobs-grid">
+      <div class="col-12 text-center text-muted py-5">
+        <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+        Loading job status...
+      </div>
+    </div>
     <div class="mt-3 small text-muted">Jobs refresh automatically. Click Run to trigger manually.</div>
   </div>
 
@@ -300,6 +459,42 @@
     </div>
     <!-- KPI cards -->
     <div class="row g-3 mb-3" id="perf-kpis"></div>
+
+    <!-- Real analytics: Sharpe, max drawdown, per-source win rate -->
+    <div class="card mb-3">
+      <div class="card-header py-2"><span class="small fw-bold"><i class="bi bi-graph-up-arrow text-success"></i> Realized Performance Analytics</span></div>
+      <div class="card-body py-2">
+        <div class="row g-3 mb-2" id="perf-analytics-kpis">
+          <div class="col-6 col-md-3">
+            <div class="small text-muted">Sharpe Ratio</div>
+            <div class="fs-5 fw-bold" id="perf-sharpe">—</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="small text-muted">Max Drawdown</div>
+            <div class="fs-5 fw-bold" id="perf-drawdown">—</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="small text-muted">Equity Points</div>
+            <div class="fs-5 fw-bold" id="perf-equity-points">—</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="small text-muted">Trades Analyzed</div>
+            <div class="fs-5 fw-bold" id="perf-trades-analyzed">—</div>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover table-sm align-middle mb-0">
+            <thead class="table-secondary">
+              <tr><th>Signal Source</th><th>Total</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Avg P&L</th></tr>
+            </thead>
+            <tbody id="perf-source-body">
+              <tr><td colspan="6" class="text-center text-muted py-3">No data yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Daily volume chart -->
     <div class="card mb-3">
       <div class="card-header py-2"><span class="small fw-bold"><i class="bi bi-bar-chart-fill text-info"></i> Daily Signal Execution Volume</span></div>
@@ -884,6 +1079,75 @@
   </div>
 
   <div class="tab-pane fade" id="tab-settings">
+    <section class="telegram-setup mb-4" aria-labelledby="telegram-setup-title">
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <div>
+          <h2 class="h6 mb-1" id="telegram-setup-title"><i class="bi bi-telegram text-info me-1"></i> Telegram Bot Setup</h2>
+          <div class="small text-muted">Send Jarvis signals, position updates, and threat alerts to one private Telegram chat.</div>
+        </div>
+        <span class="badge bg-secondary ms-auto" id="tg-config-badge">Not configured</span>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-xl-5">
+          <ol class="telegram-steps mb-3">
+            <li>
+              Open <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather <i class="bi bi-box-arrow-up-right"></i></a>
+              in Telegram and tap <strong>Start</strong>.
+            </li>
+            <li>Send <code>/newbot</code>, choose a display name, then choose a username ending in <code>bot</code>.</li>
+            <li>Copy the HTTP API token BotFather gives you and paste it into <strong>Bot Token</strong>.</li>
+            <li>Open your new bot, tap <strong>Start</strong>, and send <code>/start</code>.</li>
+            <li>Click <strong>Detect Chat ID</strong>, then save and send the test message.</li>
+          </ol>
+          <div class="telegram-command-list small text-muted">
+            After setup: <code>/signals</code> <code>/paper</code> <code>/positions</code> <code>/threats</code>
+            <code>/regime</code> <code>/pnl</code> <code>/risk</code> <code>/status</code> <code>/help</code>
+          </div>
+          <div class="small text-muted mt-2">
+            Signal buttons execute virtual paper trades only. Use <code>/paper</code> to manage open paper positions.
+            Turning Auto Trading off stops automatic entries and TA-driven adjustments; hard stop-loss and take-profit checks stay active.
+          </div>
+        </div>
+
+        <div class="col-xl-7">
+          <input type="hidden" id="tg-config-id"/>
+          <div class="row g-2">
+            <div class="col-12">
+              <label class="form-label small" for="tg-token">Bot Token</label>
+              <div class="input-group input-group-sm">
+                <input type="password" id="tg-token" class="form-control font-monospace" autocomplete="new-password" placeholder="123456789:AA..."/>
+                <button class="btn btn-outline-secondary" type="button" id="tg-token-toggle" onclick="toggleTelegramToken()" title="Show token" aria-label="Show bot token">
+                  <i class="bi bi-eye"></i>
+                </button>
+              </div>
+              <div class="form-text" id="tg-token-help">The saved token is never returned to the browser.</div>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label small" for="tg-chat-id">Chat ID</label>
+              <input type="text" id="tg-chat-id" class="form-control form-control-sm font-monospace" inputmode="numeric" placeholder="123456789"/>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <button class="btn btn-outline-info btn-sm w-100" type="button" onclick="detectTelegramChat()">
+                <i class="bi bi-search"></i> Detect Chat ID
+              </button>
+            </div>
+            <div class="col-12 d-flex flex-wrap align-items-center gap-3 mt-3">
+              <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" role="switch" id="tg-active" checked/>
+                <label class="form-check-label small" for="tg-active">Enable alerts and commands</label>
+              </div>
+              <button class="btn btn-info btn-sm ms-md-auto" type="button" id="tg-save-test" onclick="saveAndTestTelegram()">
+                <i class="bi bi-send-check"></i> Save &amp; Send Test
+              </button>
+            </div>
+          </div>
+          <div class="telegram-result mt-3" id="tg-result" role="status" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="small fw-bold text-uppercase text-muted mb-2">Other integrations</div>
     <div class="row g-3">
       <div class="col-lg-5">
         <div class="card">
@@ -891,37 +1155,36 @@
           <div class="card-body">
             <input type="hidden" id="cfg-edit-id"/>
             <div class="mb-2">
-              <label class="form-label small">Label</label>
+              <label class="form-label small" for="cfg-label">Label</label>
               <input type="text" id="cfg-label" class="form-control form-control-sm" placeholder="My Alpaca Paper"/>
             </div>
             <div class="mb-2">
-              <label class="form-label small">Platform</label>
+              <label class="form-label small" for="cfg-platform">Platform</label>
               <select id="cfg-platform" class="form-select form-select-sm">
                 <option value="alpaca_paper">Alpaca Paper</option>
                 <option value="alpaca_live">Alpaca Live</option>
                 <option value="lmstudio">LM Studio</option>
-                <option value="telegram">Telegram</option>
                 <option value="other">Other</option>
               </select>
             </div>
             <div class="mb-2">
-              <label class="form-label small">API Key / Token</label>
+              <label class="form-label small" for="cfg-key">API Key / Token</label>
               <input type="text" id="cfg-key" class="form-control form-control-sm font-monospace" placeholder="pk_..."/>
             </div>
             <div class="mb-2">
-              <label class="form-label small">API Secret</label>
+              <label class="form-label small" for="cfg-secret">API Secret</label>
               <input type="password" id="cfg-secret" class="form-control form-control-sm font-monospace" placeholder="..."/>
             </div>
             <div class="mb-2">
-              <label class="form-label small">API URL (optional)</label>
+              <label class="form-label small" for="cfg-url">API URL (optional)</label>
               <input type="text" id="cfg-url" class="form-control form-control-sm" placeholder="https://paper-api.alpaca.markets"/>
             </div>
             <div class="mb-2">
-              <label class="form-label small" id="extra1-label">Extra Field 1 (model/mode/chat_id)</label>
+              <label class="form-label small" id="extra1-label" for="cfg-extra1">Extra Field 1 (model/mode/chat_id)</label>
               <input type="text" id="cfg-extra1" class="form-control form-control-sm" placeholder="e.g. paper / mistral-7b / @chat_id"/>
             </div>
             <div class="mb-3">
-              <label class="form-label small">Notes</label>
+              <label class="form-label small" for="cfg-notes">Notes</label>
               <input type="text" id="cfg-notes" class="form-control form-control-sm" placeholder="optional notes"/>
             </div>
             <div class="d-flex gap-2">
@@ -1059,6 +1322,67 @@ function clearDecisions() {
   
 
   <!-- ── TRADE EXECUTION MODAL ──────────────────────────────────────────────── -->
+  <!-- SIGNAL ANALYSIS MODAL -->
+  <div class="modal fade" id="signalAnalysisModal" tabindex="-1" aria-labelledby="sa-title" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-lg-down">
+      <div class="modal-content bg-dark border-secondary">
+        <div class="modal-header border-secondary py-2">
+          <div>
+            <h5 class="modal-title" id="sa-title">Signal analysis</h5>
+            <div id="sa-meta" class="d-flex flex-wrap gap-2 mt-1"></div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="sa-loading" class="text-center text-muted py-5">
+            <span class="spinner-border spinner-border-sm me-2"></span>Loading current market data and technical analysis...
+          </div>
+          <div id="sa-content" style="display:none">
+            <div id="sa-overview" class="sa-overview mb-3"></div>
+            <div id="sa-score-breakdown" class="signal-evidence-strip mb-3"></div>
+
+            <div class="row g-3 mb-3">
+              <div class="col-lg-8">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
+                  <strong id="sa-chart-label" class="small">Price and volume</strong>
+                  <div id="sa-timeframes" class="btn-group sa-timeframe-strip" role="group" aria-label="Chart timeframe"></div>
+                </div>
+                <div class="sa-chart-wrap">
+                  <canvas id="sa-chart"></canvas>
+                  <div id="sa-chart-empty" class="text-muted small text-center py-5" style="display:none">No chart bars available for this timeframe.</div>
+                </div>
+              </div>
+              <div class="col-lg-4">
+                <section class="mb-3">
+                  <h6 class="small text-uppercase text-muted">Original trade thesis</h6>
+                  <div id="sa-thesis" class="small sa-copy"></div>
+                </section>
+                <section>
+                  <h6 class="small text-uppercase text-muted">Risks and conflicts</h6>
+                  <div id="sa-risks"></div>
+                </section>
+              </div>
+            </div>
+
+            <h6 class="small text-uppercase text-muted mb-2">Technical analysis by timeframe</h6>
+            <div id="sa-ta-grid" class="sa-ta-grid mb-4"></div>
+
+            <div class="row g-3">
+              <div class="col-lg-6">
+                <h6><i class="bi bi-newspaper text-info me-1"></i>Related news</h6>
+                <div id="sa-news" class="sa-context-list"></div>
+              </div>
+              <div class="col-lg-6">
+                <h6><i class="bi bi-shield-exclamation text-warning me-1"></i>Related threats</h6>
+                <div id="sa-threats" class="sa-context-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal fade" id="tradeModal" tabindex="-1">
     <div class="modal-dialog modal-sm">
       <div class="modal-content bg-dark border-secondary">

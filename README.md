@@ -166,11 +166,13 @@ The Auto Sim tab is a separate paper-only ledger that follows every eligible sig
 
 ### Account and Telegram security foundation
 
-Existing data is assigned to the backward-compatible `local` user during migration. Account preferences, hashed expiring Telegram link tokens, linked chats, deliveries, and callback receipts have a schema for separate ownership-scoped tables, and `lib/account_security.py` implements one-time token use, callback ownership, duplicate callback rejection, preference routing, and paper-only short/leverage actions with test coverage in `tests/test_account_security.py`. **This module is not yet wired into the running bot** — `jobs/telegram_bot.py` currently authorizes with a simpler single-tenant check (the incoming chat id must match the one configured chat id). Provider secrets are redacted from Settings API responses and blank edits preserve stored credentials.
+Existing data is assigned to the backward-compatible `local` user during migration. Account preferences, hashed expiring Telegram link tokens, linked chats, deliveries, and callback receipts have a schema for separate ownership-scoped tables, and `lib/account_security.py` implements one-time token use, callback ownership, duplicate callback rejection, preference routing, and paper-only short/leverage actions with test coverage in `tests/test_account_security.py`. **This module is not yet wired into the running bot** — `jobs/telegram_bot.py` currently authorizes with a simpler single-tenant check (the incoming chat id must match the one configured chat id; state-changing actions are rejected outright if no chat id has been configured yet). Provider secrets are redacted from Settings API responses and blank edits preserve stored credentials.
 
 Per-user outbound Telegram delivery is intentionally not enabled until authenticated web account ownership is added, and `lib/account_security.py` is connected in its place. The schema and authorization tests are ready, but enabling delivery before login/session enforcement would allow an unauthenticated browser session to choose another user's destination.
 
 Telegram trade setup alerts use persistent inline controls. `Execute Paper` opens the signal only in Jarvis's virtual paper portfolio, while `Deny` rejects it. The `/paper` command lists each open paper position with `Take Profit`, `Close`, and `Auto Trading` controls. `Take Profit` refuses losing positions so a loss cannot be mislabeled as profit; `Close` is the explicit exit at either a gain or loss. Callback receipts (a DB-level unique constraint, not just an in-memory check) prevent a retried Telegram update from executing twice. Turning Auto Trading off disables automatic paper entries and discretionary TA/LLM management, but hard stop-loss and take-profit enforcement remains active.
+
+The dashboard API itself has no authentication layer and CORS is currently open — anything reachable on the configured port can call trade-executing endpoints (`/api/signals/{id}/execute`, `/approve`, `/approve-all`). Treat the port as trusted-network-only (e.g. behind a firewall/VPN, not exposed to the public internet) until an API key or session layer is added.
 
 ### Crypto data providers
 
@@ -196,7 +198,25 @@ Crypto symbols can collide across providers. For example, `BANK` or `BEAT` may r
 
 ### Trade management guardrails
 
-Approved/executed positions are checked by the position managers every cycle. `MAX_LOSS_PER_TRADE_USD` defaults to `$15` and is clamped to the `$10-$20` band. Stops ratchet tighter as price improves, paper positions update their stored stop/target directly, and live Alpaca positions try to replace existing stop/take-profit orders when available. This reduces loss exposure, but exact fills still depend on market gaps, liquidity, slippage, broker support, and API availability.
+Approved/executed positions are checked by the position managers every cycle. `MAX_LOSS_PER_TRADE_USD` defaults to `$15` and is clamped to the `$10-$20` band. Stops ratchet tighter as price improves — never looser, even from an LLM-suggested tighten — and are clamped to a sane range so a bad LLM value can't install a near-worthless stop. Paper positions update their stored stop/target directly, and live Alpaca positions try to replace existing stop/take-profit orders when available. This reduces loss exposure, but exact fills still depend on market gaps, liquidity, slippage, broker support, and API availability.
+
+Stop-loss distance is sanity-checked against the symbol's own ATR (`lib/signal_levels.py:clamp_stop_to_atr`) before a signal is saved — an LLM- or scanner-picked stop closer than 0.5× ATR or farther than 5× ATR is widened or tightened into that band, so a quiet stock and a volatile one aren't sized with the same flat distance.
+
+At roughly the halfway point between entry and target ("TP1"), both live and paper positions scale out — closing half the position to lock in realized profit, moving the remaining runner's stop to breakeven, and leaving the original target in place for the rest. This fires once per position (`SCALE_OUT_ENABLED`, `SCALE_OUT_FRACTION` env vars) instead of every exit being all-or-nothing.
+
+The gap between a live signal's intended entry price and Alpaca's actual fill price is recorded the first time each position is observed (`TradingSignal.slippage_pct`) and summarized at `GET /api/execution/slippage` — paper fills are excluded since they always fill exactly at the requested price.
+
+### Kill switch
+
+`GET/POST /api/system/trading-status` exposes a global, system-wide pause independent of any per-user setting — when disabled, `execute_signals` and the manual approve/execute routes refuse to submit new live orders. It does **not** touch existing positions: `manage_positions`'s hard stop-loss/take-profit enforcement keeps running regardless, the same "protection never turns off" philosophy already used for the paper Auto Trading toggle. Toggle it from the dashboard navbar, or via Telegram `/pause` and `/resume`.
+
+### Performance analytics
+
+`GET /api/performance/analytics` computes a real Sharpe ratio and max drawdown from the portfolio's daily equity-snapshot history (`lib/performance_analytics.py`), plus a win-rate/avg-P&L breakdown by originating signal source (watchlist LLM vs. `ta_fallback` vs. opportunistic scanner) so it's visible which source is actually performing. These are genuine computations over `PortfolioSnapshot`/`TradeOutcome` history, not placeholders.
+
+### Backtesting
+
+`POST /api/backtest/run` (`lib/backtester.py`) replays cached historical OHLCV bars through the same deterministic TA-fallback signal logic the live bot falls back to when the LLM is unavailable — never the LLM itself, so a multi-month backtest across several symbols runs in seconds instead of requiring hundreds of model calls. It walks forward one day at a time using only bars up to that checkpoint, builds a candidate signal with `build_ta_fallback_signals` + `score_signal` from the existing pipeline, and resolves each hypothetical trade with the same forward-only evaluator (`lib/signal_evaluation.py`) used for live signal grading — so there's no lookahead bias baked into the results. Runs in a background thread and return a `run_id` immediately; poll `GET /api/backtest/{run_id}` for status and results (win rate, R-multiple equity curve, Sharpe, max drawdown) or `GET /api/backtest` to list recent runs. Capped at 10 symbols per run, and the requested date range is silently clamped to what's actually backfillable per timeframe (`date_range_clamped` in the response) rather than failing outright — check that flag before trusting a long-range result. This evaluates the deterministic fallback strategy only; it does not simulate what the LLM would have generated historically.
 
 ---
 
@@ -226,8 +246,11 @@ lib/
   market_regime.py          — SPY-based market regime detection
   risk_manager.py           — Kelly criterion + regime-adjusted position sizing
   signal_scorer.py          — Multi-factor composite signal scoring (0–100)
+  signal_levels.py          — Entry/stop/target validation + ATR-based stop clamping
   paper_engine.py           — Virtual portfolio: Long/Short/Leveraged P&L tracking
   earnings_calendar.py      — Yahoo Finance earnings calendar (IV crush guard)
+  kill_switch.py            — Global live-trading pause, independent of per-user settings
+  performance_analytics.py  — Sharpe ratio, max drawdown, per-signal-source win rate
 static/                     — CSS + JS frontend assets
 templates/index.html        — Single-page dashboard
 ```
@@ -394,6 +417,14 @@ Supports long, short, and leveraged virtual positions independent of broker supp
 ---
 
 ## 📦 Changelog
+
+### v7.1
+- New: **Global kill switch** — `/api/system/trading-status`, dashboard navbar toggle, Telegram `/pause` and `/resume`. Blocks new live orders without touching existing positions' stop-loss/take-profit enforcement.
+- New: **Partial position scaling** — live and paper positions scale out 50% at the halfway point to target, move the remaining runner's stop to breakeven, and let it ride toward the original target.
+- New: **ATR-based stop validation** — `lib/signal_levels.py:clamp_stop_to_atr` widens/tightens an LLM- or scanner-picked stop into a 0.5×–5× ATR band before the signal is saved.
+- New: **Slippage tracking** — `GET /api/execution/slippage` compares each live signal's intended entry price to Alpaca's actual fill price.
+- New: **Real performance analytics** — `GET /api/performance/analytics` computes an actual Sharpe ratio and max drawdown from equity-snapshot history (previously a hardcoded `0.0` stub), plus win-rate/avg-P&L by signal source, surfaced on the Performance tab.
+- New: **Backtesting engine** — replay cached historical OHLCV through the deterministic TA-fallback signal logic (no LLM) to see historical strategy performance before risking capital.
 
 ### v6.5
 - New: **Real vs Paper comparison card** — side-by-side Alpaca vs virtual account on Paper tab with dual return progress bars and delta label

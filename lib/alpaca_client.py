@@ -299,6 +299,19 @@ def close_position(symbol: str):
         raise
 
 
+def partial_close_position(symbol: str, qty: float):
+    """Close part of a position by an explicit qty (NOT percentage — Alpaca's
+    percentage="1" bug that close_position()'s docstring warns about only
+    applies to the percentage field; qty is unambiguous). Caller is
+    responsible for cancelling/resubmitting any bracket stop/target legs
+    for the reduced remaining qty afterward."""
+    from alpaca.trading.requests import ClosePositionRequest
+    client = get_trading_client()
+    s = symbol.upper().strip().replace("/", "")
+    qty_str = f"{qty:.8f}".rstrip("0").rstrip(".")
+    return client.close_position(s, close_options=ClosePositionRequest(qty=qty_str))
+
+
 def cancel_open_orders_for_symbol(symbol: str):
     """Cancel all open orders for a symbol — needed before closing a position that has bracket legs."""
     try:

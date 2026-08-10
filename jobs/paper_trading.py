@@ -10,13 +10,34 @@ Changes from v4.0:
 - New entries still go through LLM+TA evaluation before opening
 - No position cap — limited only by available virtual cash
 """
-import logging, json, re
+import logging, json, re, os
 from datetime import datetime, timezone, timedelta
-from app.database import get_db, TradingSignal, MarketAsset, PaperPosition, NewsItem, ThreatEvent
+from app.database import (
+    DEFAULT_USER_ID, get_db, TradingSignal, MarketAsset, PaperPosition,
+    NewsItem, ThreatEvent, UserPreference,
+)
 
 logger = logging.getLogger(__name__)
 
 PAPER_MIN_CONFIDENCE = 55   # skip new entries scoring below this
+SCALE_OUT_ENABLED = os.getenv("SCALE_OUT_ENABLED", "true").lower() in ("1", "true", "yes")
+SCALE_OUT_FRACTION = 0.5
+SCALE_OUT_TP1_PCT_OF_TARGET = 0.5
+
+
+def _env_float(name: str, default: float, min_value: float, max_value: float) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except Exception:
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+MAX_LOSS_PER_TRADE_USD = _env_float("MAX_LOSS_PER_TRADE_USD", 15.0, 10.0, 20.0)
+PROFIT_LOCK_USD = _env_float("PROFIT_LOCK_USD", 10.0, 0.0, 50.0)
+MIN_DYNAMIC_TRAIL_PCT = _env_float("MIN_DYNAMIC_TRAIL_PCT", 0.75, 0.1, 5.0)
+TARGET_REWARD_MULTIPLIER = _env_float("TARGET_REWARD_MULTIPLIER", 2.8, 1.2, 6.0)
+EXIT_ORDER_REPRICE_PCT = _env_float("EXIT_ORDER_REPRICE_PCT", 0.25, 0.05, 2.0)
 FUTURES_MIN_CONFIDENCE = 45  # lower bar for futures — macro-driven, even 47% conviction is tradeable
 
 # ── Same tier thresholds as real manage_positions.py ──────────────────────────
@@ -127,6 +148,7 @@ def _get_open_paper_positions() -> list:
             "stop_loss":    float(p.stop_loss or 0),
             "target_price": float(p.target_price or 0),
             "opened_at":    str(p.opened_at or ""),
+            "scaled_out":   bool(p.scaled_out),
         } for p in rows]
 
 
@@ -183,6 +205,111 @@ def _fetch_ta(sym: str) -> dict:
         return {}
 
 
+def _price_changed_enough(old_price: float, new_price: float) -> bool:
+    if not old_price or old_price <= 0:
+        return True
+    return abs(new_price - old_price) / old_price * 100 >= EXIT_ORDER_REPRICE_PCT
+
+
+def _primary_ta(ta_data: dict) -> dict:
+    for tf in ("4H", "1H", "1D"):
+        data = ta_data.get(tf) if isinstance(ta_data, dict) else None
+        if data and not data.get("error"):
+            return data
+    return {}
+
+
+def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data: dict) -> dict:
+    qty = abs(float(pos.get("qty") or 0))
+    leverage = max(1.0, float(pos.get("leverage") or 1.0))
+    entry = float(pos.get("entry_price") or 0)
+    if qty <= 0 or entry <= 0 or current_price <= 0:
+        return {"ok": False}
+    if pl_dollar <= -MAX_LOSS_PER_TRADE_USD:
+        return {"ok": True, "action": "EXIT", "reason": f"Max paper loss ${MAX_LOSS_PER_TRADE_USD:.2f} breached"}
+
+    primary = _primary_ta(ta_data)
+    atr = float(((primary.get("atr") or {}).get("value")) or current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
+    trail = max(atr * 1.15, current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
+    risk_per_unit = MAX_LOSS_PER_TRADE_USD / (qty * leverage)
+    lock_per_unit = PROFIT_LOCK_USD / (qty * leverage) if PROFIT_LOCK_USD else 0
+    direction = str(pos.get("direction") or "Long").lower()
+    is_short = "short" in direction
+    old_stop = float(pos.get("stop_loss") or 0)
+    old_target = float(pos.get("target_price") or 0)
+
+    if not is_short:
+        stop = max(entry - risk_per_unit, current_price - trail, old_stop or 0)
+        if pl_dollar >= PROFIT_LOCK_USD and lock_per_unit > 0:
+            stop = max(stop, entry + lock_per_unit)
+        stop = min(stop, current_price * 0.995)
+        target = max(old_target or 0, current_price + max(atr * 3.0, (current_price - stop) * TARGET_REWARD_MULTIPLIER))
+    else:
+        candidates = [entry + risk_per_unit, current_price + trail]
+        if old_stop > 0:
+            candidates.append(old_stop)
+        stop = min(candidates)
+        if pl_dollar >= PROFIT_LOCK_USD and lock_per_unit > 0:
+            stop = min(stop, entry - lock_per_unit)
+        stop = max(stop, current_price * 1.005)
+        target = min(old_target if old_target > 0 else current_price, current_price - max(atr * 3.0, (stop - current_price) * TARGET_REWARD_MULTIPLIER))
+
+    precision = 6 if current_price < 1 else 2
+    return {
+        "ok": True,
+        "action": "ADJUST",
+        "stop_loss": round(max(stop, 0.000001), precision),
+        "target_price": round(max(target, 0.000001), precision),
+    }
+
+
+def _maybe_scale_out_paper(pos: dict, current_price: float) -> dict | None:
+    """Lock in partial profit at an intermediate target (TP1): close
+    SCALE_OUT_FRACTION of the position, move the remaining runner's stop to
+    breakeven, and leave the original target in place. Only fires once per
+    position (tracked via PaperPosition.scaled_out). Direction-aware —
+    unlike live, paper positions can be short."""
+    if not SCALE_OUT_ENABLED or pos.get("scaled_out"):
+        return None
+    entry = float(pos.get("entry_price") or 0)
+    target = float(pos.get("target_price") or 0)
+    qty = float(pos.get("qty") or 0)
+    if entry <= 0 or target <= 0 or qty <= 0:
+        return None
+
+    is_short = "short" in str(pos.get("direction") or "").lower()
+    if is_short:
+        if target >= entry:
+            return None
+        tp1_price = entry - (entry - target) * SCALE_OUT_TP1_PCT_OF_TARGET
+        reached = current_price <= tp1_price
+    else:
+        if target <= entry:
+            return None
+        tp1_price = entry + (target - entry) * SCALE_OUT_TP1_PCT_OF_TARGET
+        reached = current_price >= tp1_price
+
+    if not reached:
+        return None
+
+    from lib.paper_engine import partial_close_paper_position
+    result = partial_close_paper_position(pos["id"], SCALE_OUT_FRACTION, current_price, reason="scale_out_tp1")
+    if not result.get("ok"):
+        return None
+
+    breakeven_stop = entry
+    with get_db() as db:
+        p = db.query(PaperPosition).filter(PaperPosition.id == pos["id"]).first()
+        if p:
+            p.stop_loss = breakeven_stop
+
+    logger.info(
+        f"[PaperTrading] ✂ Scaled out {pos['symbol']}: closed {result['closed_qty']:.6g} @ ${current_price:.4f} "
+        f"(TP1 ${tp1_price:.4f}), {result['remaining_qty']:.6g} remaining with stop @ breakeven ${breakeven_stop:.4f}"
+    )
+    return result
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # AI POSITION MANAGEMENT
 # ────────────────────────────────────────────────────────────────────────────
@@ -207,6 +334,7 @@ def _manage_open_positions(prices: dict) -> dict:
     evaluated = 0
     closed = 0
     held = 0
+    adjusted = 0
 
     for pos in positions:
         sym = pos["symbol"]
@@ -225,6 +353,28 @@ def _manage_open_positions(prices: dict) -> dict:
         plpc = ((current_price - entry) / entry) * 100 * side
         pl_dollar = (current_price - entry) * pos["qty"] * side * pos["leverage"]
         evaluated += 1
+        ta_data = _fetch_ta(sym)
+
+        plan = _paper_exit_plan(pos, current_price, pl_dollar, ta_data)
+        if plan.get("ok") and plan.get("action") == "EXIT":
+            logger.warning(f"[PaperTrading] Risk EXIT {sym}: {plan.get('reason')} | P&L=${pl_dollar:.2f}")
+            log_decision("paper", "EXIT", plan.get("reason", "Max paper loss breached"), symbol=sym, pnl_pct=plpc, price=current_price)
+            close_paper_position(pos["id"], current_price, reason=plan.get("reason", "risk_guard"))
+            closed += 1
+            continue
+        if plan.get("ok") and plan.get("action") == "ADJUST":
+            new_stop = float(plan["stop_loss"])
+            new_target = float(plan["target_price"])
+            if _price_changed_enough(pos["stop_loss"], new_stop) or _price_changed_enough(pos["target_price"], new_target):
+                with get_db() as db:
+                    p = db.query(PaperPosition).filter(PaperPosition.id == pos["id"]).first()
+                    if p:
+                        p.stop_loss = new_stop
+                        p.target_price = new_target
+                pos["stop_loss"] = new_stop
+                pos["target_price"] = new_target
+                adjusted += 1
+                logger.info(f"[PaperTrading] Risk guard {sym}: stop=${new_stop:.6g} target=${new_target:.6g}")
 
         # ── Deterministic hard rules (same as real trading) ────────────────
         tier = _tier(plpc, is_c)
@@ -235,8 +385,11 @@ def _manage_open_positions(prices: dict) -> dict:
             closed += 1
             continue
 
+        if _maybe_scale_out_paper(pos, current_price):
+            adjusted += 1
+            continue
+
         # ── LLM + TA evaluation ────────────────────────────────────────────
-        ta_data = _fetch_ta(sym)
         ta_block = build_ta_prompt_block(sym, ta_data) if ta_data else "TA unavailable"
 
         # Symbol-specific news
@@ -326,7 +479,7 @@ Respond ONLY with valid JSON (no markdown):
             log_decision("paper", "HOLD", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
             held += 1
 
-    return {"evaluated": evaluated, "closed": closed, "held": held}
+    return {"evaluated": evaluated, "closed": closed, "held": held, "adjusted": adjusted}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -469,15 +622,35 @@ def run():
         logger.info(f"[PaperTrading] MTM auto-closed {c['symbol']} via {c['reason']} | P&L=${c.get('pnl', 0):.2f}")
 
     # ── Step 2: AI position management on all open positions ──────────────────
-    mgmt = _manage_open_positions(prices)
+    # Hard stop-loss/take-profit checks above always run. This preference only
+    # controls discretionary AI management and automatic entries.
+    with get_db() as db:
+        pref = db.query(UserPreference).filter(
+            UserPreference.user_id == DEFAULT_USER_ID
+        ).first()
+        auto_trade_enabled = bool(
+            pref.paper_auto_trade_enabled if pref is not None else True
+        )
+
+    mgmt = (
+        _manage_open_positions(prices)
+        if auto_trade_enabled
+        else {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+    )
     logger.info(
         f"[PaperTrading] Position mgmt: evaluated={mgmt['evaluated']} | "
-        f"closed={mgmt['closed']} | held={mgmt['held']}"
+        f"closed={mgmt['closed']} | held={mgmt['held']} | adjusted={mgmt.get('adjusted', 0)}"
     )
 
     # ── Step 3: Evaluate and open new positions ───────────────────────────────
     with get_db() as db:
-        sig_list = _get_pending_signals(db)
+        sig_list = _get_pending_signals(db) if auto_trade_enabled else []
+
+    if not auto_trade_enabled:
+        logger.info(
+            "[PaperTrading] Automatic entries and TA management are disabled; "
+            "hard stop-loss/take-profit checks remain active"
+        )
 
     open_syms = _get_open_paper_symbols()
     sig_list = [s for s in sig_list if s["asset_symbol"] not in open_syms]
@@ -528,7 +701,7 @@ def run():
     port = summary["portfolio"]
     logger.info(
         f"[PaperTrading] Done — new={executed} | ai_rejected={skipped_ai} | no_price={skipped_no_price} | "
-        f"mgmt_closed={mgmt['closed']} | open={len(summary['positions'])} | "
+        f"mgmt_closed={mgmt['closed']} | mgmt_adjusted={mgmt.get('adjusted', 0)} | open={len(summary['positions'])} | "
         f"Equity=${port['equity']:.0f} | Cash=${port['cash']:.0f} | "
         f"Realized=${port['realized_pnl']:.2f} | Win%={port['win_rate']}% | Total={port['total_trades']}"
     )

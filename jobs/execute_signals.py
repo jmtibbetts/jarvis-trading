@@ -25,6 +25,13 @@ def _normalize_held(positions):
 
 def run():
     logger.info("[Execute] Starting execution job...")
+
+    from lib.kill_switch import get_kill_switch_state
+    kill_state = get_kill_switch_state()
+    if not kill_state["live_trading_enabled"]:
+        logger.warning(f"[Execute] Live trading is paused ({kill_state.get('paused_reason')}) — skipping")
+        return {"executed": 0, "reason": "trading_paused", "paused_reason": kill_state.get("paused_reason")}
+
     try:
         account      = get_account()
         equity       = float(account.equity)

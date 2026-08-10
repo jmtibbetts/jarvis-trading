@@ -10,7 +10,7 @@ export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
   { id: "command", label: "Command Center", ready: true },
   { id: "signals", label: "Signals & Scanner", ready: true },
   { id: "positions", label: "Positions & Paper", ready: true },
-  { id: "intelligence", label: "Intelligence", ready: false },
+  { id: "intelligence", label: "Intelligence", ready: true },
   { id: "performance", label: "Performance & Learning", ready: false },
   { id: "ops", label: "Ops", ready: false },
 ];

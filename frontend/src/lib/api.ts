@@ -68,7 +68,26 @@ export type EquityPoint = {
   position_count: number;
 };
 
-export type Regime = { label: string; risk: string; [key: string]: unknown };
+export type Regime = { label: string; risk: string; spy_trend?: string; recommendation?: string; [key: string]: unknown };
+
+export type MarketAsset = {
+  symbol: string;
+  name: string;
+  asset_class: string;
+  price: number;
+  change_percent: number;
+  volume: number;
+};
+
+export type NewsArticle = {
+  id: string;
+  title: string;
+  summary: string;
+  source: string;
+  category: string | null;
+  sentiment: string | null;
+  published_at: string | null;
+};
 
 export type JobStatus = { status: "idle" | "running" | "ok" | "error"; last: string | null; error: string | null };
 export type JobStatusMap = Record<string, JobStatus>;
@@ -179,7 +198,8 @@ export const api = {
   regime: () => get<Regime>(`/regime`),
   jobStatus: () => get<JobStatusMap>(`/jobs/status`),
   performanceAnalytics: (days = 30) => get<PerformanceAnalytics>(`/performance/analytics?days=${days}`),
-  news: (limit = 20) => get<{ title: string; sentiment: string | null; source: string }[]>(`/news?limit=${limit}`),
+  news: (limit = 20) => get<NewsArticle[]>(`/news?limit=${limit}`),
+  marketFull: () => get<{ equities: MarketAsset[]; crypto: MarketAsset[]; count: number }>(`/market/full`),
 
   approveSignal: (id: string) => post<{ ok: boolean }>(`/signals/${id}/approve`),
   rejectSignal: (id: string) => post<{ ok: boolean }>(`/signals/${id}/reject`),

@@ -213,12 +213,12 @@ def _yf_fetch_screener(screener_type: str = "day_gainers", count: int = 50):
     """
     try:
         import yfinance as yf
-        screener = yf.Screener()
-        screener.set_predefined_body(screener_type)
-        screener.set_fields("symbol", "shortName", "regularMarketPrice",
-                            "regularMarketChangePercent", "regularMarketVolume",
-                            "averageDailyVolume3Month")
-        result = screener.response
+        # yfinance replaced the yf.Screener() class with a module-level
+        # yf.screen(query, ...) function (still present as of 1.5.2) — the
+        # old class no longer exists and every call here was throwing
+        # AttributeError, silently caught below and logged as a warning on
+        # every single scan.
+        result = yf.screen(screener_type, count=count)
         if not result or "quotes" not in result:
             return []
         quotes = result["quotes"][:count]
@@ -657,17 +657,27 @@ def _send_telegram_alerts(high_conf_signals: list, scan_mode: str):
     if not high_conf_signals:
         return
     try:
-        from jobs.telegram_bot import send_message
+        from html import escape
+        from jobs.telegram_bot import send, get_cfg
+        token, chat_id = get_cfg()
+        if not token or not chat_id:
+            logger.debug("[Scanner] Telegram alert skipped — no bot token/chat id configured")
+            return
         for sig in high_conf_signals[:5]:  # max 5 alerts per scan
             emoji = "🚀" if sig["direction"] == "Long" else "🔄" if sig["direction"] == "Bounce" else "⚡"
+            # send() defaults to parse_mode="HTML" (matches every other alert in
+            # jobs/telegram_bot.py) — the previous *bold*/_italic_ markdown-style
+            # markup was never rendered under HTML mode; it just printed literal
+            # asterisks/underscores. reasoning is freeform LLM text and must be
+            # escaped so a stray '<' or '&' can't break the HTML parser.
             msg = (
-                f"{emoji} *SCANNER ALERT [{scan_mode}]*\n"
-                f"*{sig['asset_symbol']}* — {sig['direction']}\n"
+                f"{emoji} <b>SCANNER ALERT [{scan_mode}]</b>\n"
+                f"<b>{escape(str(sig['asset_symbol']))}</b> — {escape(str(sig['direction']))}\n"
                 f"Entry: ${sig['entry_price']:,.4f} | Target: ${sig['target_price']:,.4f} | Stop: ${sig['stop_loss']:,.4f}\n"
                 f"Confidence: {sig['confidence']}% | R:R {sig.get('rr_ratio','?')}x\n"
-                f"_{sig.get('reasoning','')[:120]}_"
+                f"<i>{escape(str(sig.get('reasoning',''))[:120])}</i>"
             )
-            send_message(msg)
+            send(token, chat_id, msg)
             time.sleep(0.5)
     except Exception as e:
         logger.warning(f"[Scanner] Telegram alert failed: {e}")

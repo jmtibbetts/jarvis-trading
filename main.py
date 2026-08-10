@@ -140,28 +140,27 @@ from app.ws import websocket_endpoint
 app.websocket("/ws")(websocket_endpoint)
 
 # ── Static / SPA ──────────────────────────────────────────────────────────────
-STATIC_DIR    = Path(__file__).parent / "static"
-TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# New Svelte dashboard rebuild (in progress — see the rebuild plan). Lives at
-# /next during development alongside the existing dashboard at "/" so the two
-# can be compared and the old one keeps working until Phase 7 cutover.
-# The Svelte app uses hash-based routing (#command, #signals, ...), which
-# never reaches the server, so a plain StaticFiles(html=True) mount — serving
-# index.html for any "/next/..." path — is enough; no server-side SPA
-# fallback is needed for the new frontend the way spa_fallback provides one
-# for the old Jinja-based dashboard.
+# The Svelte dashboard (frontend/) is the only dashboard as of the Phase 16
+# cutover — the old Jinja2/vanilla-JS dashboard (templates/index.html,
+# static/js/jarvis.js) has been removed. Its built assets are still served
+# from /next/assets/... (that's the base path baked into static/dist/index.html
+# by the Vite build) even though "/" is now the primary entry point; spa_fallback
+# below serves that same index.html for "/" and any other unmatched path, since
+# the app's routing is hash-based (#command, #signals, ...) and never reaches
+# the server.
 #
 # Registration order matters here, but not the way it looks: Starlette
 # doesn't simply take the first route in registration order that matches —
 # a Mount only returns a FULL match for "/next/..." (sub-path); the bare
 # "/next" (no trailing slash) only PARTIAL-matches the Mount, and Starlette
 # keeps searching for a FULL match, which spa_fallback's catch-all
-# "/{full_path:path}" then provides — so the bare path silently fell through
-# to the OLD dashboard regardless of registration order. The explicit
-# redirect below closes that gap.
+# "/{full_path:path}" then provides — so the bare path would otherwise fall
+# through to spa_fallback. Since spa_fallback now serves the same index.html
+# anyway, that's harmless, but the explicit redirect keeps the URL bar tidy.
 NEXT_DIST_DIR = STATIC_DIR / "dist"
 if NEXT_DIST_DIR.exists():
     app.mount("/next", StaticFiles(directory=str(NEXT_DIST_DIR), html=True), name="next")
@@ -170,15 +169,15 @@ if NEXT_DIST_DIR.exists():
     def next_redirect():
         return RedirectResponse(url="/next/")
 else:
-    logger.warning(f"[Server] {NEXT_DIST_DIR} not found — run `npm run build` in frontend/ to enable /next")
+    logger.warning(f"[Server] {NEXT_DIST_DIR} not found — run `npm run build` in frontend/ to enable the dashboard")
 
 @app.get("/")
 @app.get("/{full_path:path}")
 def spa_fallback(full_path: str = ""):
-    index = TEMPLATES_DIR / "index.html"
+    index = NEXT_DIST_DIR / "index.html"
     if index.exists():
         return FileResponse(str(index))
-    return {"error": "Frontend not found"}
+    return {"error": "Frontend not found — run `npm run build` in frontend/"}
 
 
 # ── Banner ─────────────────────────────────────────────────────────────────────

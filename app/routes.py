@@ -2,13 +2,18 @@
 FastAPI routes v6.7 — all /api/* endpoints.
 Added: /regime, /portfolio/equity, /market/full, /positions/close, /signals/clear/expired
 """
-import logging, uuid
+import json, logging, re, uuid
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
-from app.database import get_db, AiDecision, TradingSignal, ThreatEvent, NewsItem, MarketAsset, Position, PlatformConfig, PortfolioSnapshot
+from app.database import (
+    AiDecision, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
+    NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
+    ThreatEvent, TradingSignal, get_db,
+)
 from lib.learning_engine import get_all_outcomes, get_all_accuracy, get_all_patterns, get_all_regime_stats, get_all_lessons
 from app.scheduler import job_status
 
@@ -19,12 +24,133 @@ router = APIRouter()
 def health():
     return {"status":"ok","time":datetime.now(timezone.utc).isoformat()}
 
+
+class TradingPreferenceRequest(BaseModel):
+    trade_mode: str
+
+
+@router.get("/preferences/trading")
+def get_trading_preference():
+    from lib.trading_preferences import get_user_preference
+    return get_user_preference()
+
+
+@router.put("/preferences/trading")
+def update_trading_preference(body: TradingPreferenceRequest):
+    from lib.trading_preferences import set_trade_mode
+    try:
+        return set_trade_mode(body.trade_mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get("/auto-paper/summary")
+def auto_paper_summary():
+    from lib.auto_simulator import get_auto_sim_summary
+    return get_auto_sim_summary()
+
+
+@router.post("/auto-paper/run")
+def auto_paper_run():
+    from lib.auto_simulator import run_auto_simulator
+    return run_auto_simulator()
+
 @router.get("/signals")
 def get_signals(status: str = None, limit: int = 150):
     with get_db() as db:
         q = db.query(TradingSignal)
-        if status: q = q.filter(TradingSignal.status == status)
+        if status:
+            q = q.filter(TradingSignal.status == status)
+        else:
+            q = q.filter(
+                TradingSignal.status.notin_(["Superseded", "Rejected"])
+            )
         return [_sig_dict(s) for s in q.order_by(TradingSignal.generated_at.desc()).limit(limit).all()]
+
+
+@router.get("/signals/performance")
+def get_signal_performance(asset_class: str = None, direction: str = None,
+                           timeframe: str = None, signal_version: str = None):
+    from lib.signal_evaluation import summarize_evaluations
+    with get_db() as db:
+        query = db.query(SignalEvaluation)
+        if asset_class:
+            query = query.filter(SignalEvaluation.asset_class == asset_class)
+        if direction:
+            query = query.filter(SignalEvaluation.direction == direction)
+        if timeframe:
+            query = query.filter(SignalEvaluation.timeframe == timeframe)
+        if signal_version:
+            query = query.filter(SignalEvaluation.signal_version == signal_version)
+        rows = [_signal_evaluation_dict(row) for row in query.all()]
+
+    grouped = {}
+    for field in ("asset_class", "direction", "timeframe", "signal_version"):
+        values = sorted({row.get(field) or "Unknown" for row in rows})
+        grouped[field] = {
+            value: summarize_evaluations([row for row in rows if (row.get(field) or "Unknown") == value])
+            for value in values
+        }
+    return {"summary": summarize_evaluations(rows), "groups": grouped, "evaluations": rows[-100:]}
+
+
+def _context_terms(signal: dict) -> set[str]:
+    symbol = (signal.get("asset_symbol") or "").upper()
+    base = symbol.replace("-USD", "").split("/")[0].split("=")[0]
+    name = (signal.get("asset_name") or "").upper()
+    terms = {term for term in (symbol, base, name) if len(term) >= 3}
+    return terms
+
+
+def _related_signal_context(db, signal: dict) -> tuple[list[dict], list[dict]]:
+    terms = _context_terms(signal)
+    asset_class = (signal.get("asset_class") or "").lower()
+    news_rows = db.query(NewsItem).order_by(NewsItem.created_date.desc()).limit(250).all()
+    related_news = []
+    for item in news_rows:
+        assets = {part.strip().upper() for part in (item.affected_assets or "").split(",") if part.strip()}
+        haystack = f"{item.title or ''} {item.summary or ''}".upper()
+        direct = bool(terms & assets) or any(re.search(rf"\b{re.escape(term)}\b", haystack) for term in terms)
+        class_relevant = asset_class == "crypto" and (item.category or "").lower() == "crypto"
+        if direct or class_relevant:
+            row = _news_dict(item)
+            row["relevance"] = "symbol" if direct else "crypto-market"
+            related_news.append(row)
+        if len(related_news) >= 15:
+            break
+
+    threat_rows = db.query(ThreatEvent).filter(ThreatEvent.status == "Active").order_by(
+        ThreatEvent.created_date.desc()
+    ).limit(100).all()
+    related_threats = []
+    trigger_id = signal.get("trigger_event_id")
+    for item in threat_rows:
+        haystack = f"{item.title or ''} {item.description or ''}".upper()
+        direct = bool(trigger_id and item.id == trigger_id) or any(re.search(rf"\b{re.escape(term)}\b", haystack) for term in terms)
+        market_wide = (item.severity or "").lower() in ("critical", "high")
+        if direct or market_wide:
+            row = _threat_dict(item)
+            row["relevance"] = "signal-trigger" if trigger_id and item.id == trigger_id else "symbol" if direct else "market-wide"
+            related_threats.append(row)
+        if len(related_threats) >= 10:
+            break
+    return related_news, related_threats
+
+
+@router.get("/signals/{signal_id}/analysis")
+def get_signal_analysis(signal_id: str):
+    with get_db() as db:
+        row = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not row:
+            raise HTTPException(404, "Signal not found")
+        signal = _sig_dict(row)
+        news, threats = _related_signal_context(db, signal)
+    try:
+        from lib.signal_analysis import build_signal_analysis
+        return build_signal_analysis(signal, news, threats)
+    except Exception as exc:
+        logger.exception("[API] Signal analysis failed for %s", signal_id)
+        raise HTTPException(500, str(exc))
 
 @router.delete("/signals/clear/expired")
 def clear_expired():
@@ -48,6 +174,20 @@ def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
     with get_db() as db:
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
         if not sig: raise HTTPException(404)
+        if bool(getattr(sig, "paper_mode", False)):
+            raise HTTPException(400, "Paper-only signal cannot be sent to Alpaca live execution")
+        if getattr(sig, "expires_at", None):
+            try:
+                expiry = datetime.fromisoformat(sig.expires_at.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= datetime.now(timezone.utc):
+                    sig.status = "Expired"
+                    raise HTTPException(409, "Signal expired; refresh analysis before execution")
+            except ValueError:
+                pass
+        if getattr(sig, "data_quality_score", None) is not None and sig.data_quality_score < 35:
+            raise HTTPException(409, "Signal data quality is below the execution threshold")
         try:
             from lib.alpaca_client import submit_bracket_order, normalize_symbol, is_crypto
             sym, crypto = normalize_symbol(sig.asset_symbol)
@@ -67,7 +207,8 @@ def manual_execute(signal_id: str, body: ExecuteRequest = ExecuteRequest()):
                 order_id = result.get("id") or result.get("order_id") if isinstance(result, dict) else getattr(result, "id", None)
                 if order_id:
                     sig.alpaca_order_id = str(order_id)
-            except: pass
+            except Exception as link_err:
+                logger.warning(f"[API] Could not link Alpaca order id for signal {signal_id}: {link_err}")
             return {"ok":True,"order":result,"qty":qty,"crypto":crypto}
         except Exception as e:
             raise HTTPException(500, str(e))
@@ -129,14 +270,93 @@ def save_signal(body: SaveSignalRequest):
     return {"ok": True, "id": sig_id}
 
 @router.get("/threats")
-def get_threats(limit: int = 60):
+def get_threats(limit: int = 60, confirmation: str = None, min_reliability: float = None):
     with get_db() as db:
-        return [_threat_dict(t) for t in db.query(ThreatEvent).filter(ThreatEvent.status=="Active").order_by(ThreatEvent.published_at.desc()).limit(limit).all()]
+        query = db.query(ThreatEvent).filter(ThreatEvent.status == "Active")
+        if confirmation:
+            query = query.filter(ThreatEvent.confirmation_status == confirmation)
+        if min_reliability is not None:
+            query = query.filter(ThreatEvent.reliability_score >= min_reliability)
+        rows = query.order_by(ThreatEvent.created_date.desc()).limit(min(max(limit, 1), 500)).all()
+        return [_threat_dict(t) for t in rows]
 
 @router.get("/news")
-def get_news(limit: int = 80):
+def get_news(limit: int = 80, source: str = None, category: str = None,
+             asset: str = None, confirmation: str = None,
+             min_reliability: float = None, stale: Optional[bool] = None,
+             freshness_hours: int = None):
     with get_db() as db:
-        return [_news_dict(n) for n in db.query(NewsItem).order_by(NewsItem.published_at.desc()).limit(limit).all()]
+        query = db.query(NewsItem)
+        if source:
+            query = query.filter(NewsItem.source == source)
+        if category:
+            query = query.filter(NewsItem.category == category)
+        if asset:
+            query = query.filter(NewsItem.affected_assets.contains(asset.upper()))
+        if confirmation:
+            query = query.filter(NewsItem.confirmation_status == confirmation)
+        if min_reliability is not None:
+            query = query.filter(NewsItem.reliability_score >= min_reliability)
+        # Publication dates were historically stored as both RFC 2822 and ISO strings.
+        # Parse them before sorting/filtering so old RFC rows cannot outrank fresh data.
+        rows = query.order_by(
+            NewsItem.ingested_at.desc(), NewsItem.created_date.desc()
+        ).limit(2500).all()
+        items = [_news_dict(row) for row in rows]
+        if stale is not None:
+            items = [item for item in items if bool(item.get("is_stale")) == stale]
+        if freshness_hours:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, freshness_hours))
+            items = [item for item in items if (
+                _parse_datetime(item.get("published_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ) >= cutoff]
+        items.sort(
+            key=lambda item: _parse_datetime(item.get("published_at"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        return items[:min(max(limit, 1), 500)]
+
+
+@router.get("/intelligence/sources")
+def get_intelligence_sources():
+    with get_db() as db:
+        rows = db.query(IntelligenceSourceHealth).order_by(
+            IntelligenceSourceHealth.consecutive_failures.desc(),
+            IntelligenceSourceHealth.source.asc(),
+        ).all()
+        return [_source_health_dict(row) for row in rows]
+
+
+@router.get("/intelligence/status")
+def get_intelligence_status():
+    with get_db() as db:
+        sources = db.query(IntelligenceSourceHealth).all()
+        latest = db.query(IntelligenceIngestionRun).order_by(
+            IntelligenceIngestionRun.finished_at.desc()
+        ).first()
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent = [
+            row for row in db.query(NewsItem).all()
+            if (_parse_datetime(row.published_at)
+                or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+        ]
+
+        source_rows = [_source_health_dict(row) for row in sources]
+        healthy = sum(1 for row in source_rows if row["status"] == "healthy")
+        failing = sum(1 for row in source_rows if row["status"] == "failing")
+        return {
+            "status": "degraded" if failing else "healthy" if source_rows else "not_run",
+            "source_count": len(source_rows),
+            "healthy_sources": healthy,
+            "failing_sources": failing,
+            "recent_news": len(recent),
+            "corroborated_recent": sum(1 for row in recent if row.confirmation_status == "corroborated"),
+            "social_unconfirmed_recent": sum(1 for row in recent if row.confirmation_status == "unconfirmed_social"),
+            "latest_run": _ingestion_run_dict(latest) if latest else None,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 @router.get("/market")
 def get_market():
@@ -293,7 +513,9 @@ def jobs_status(): return job_status
 def trigger_job(job_name: str):
     job_map={"market":"jobs.fetch_market_data","threats":"jobs.fetch_threat_news",
              "signals":"jobs.generate_signals","execute":"jobs.execute_signals",
-             "positions":"jobs.manage_positions","telegram":"jobs.telegram_bot"}
+             "positions":"jobs.manage_positions","telegram":"jobs.telegram_bot",
+             "autosim":"jobs.auto_simulator",
+             "evaluation":"jobs.evaluate_signals"}
     if job_name not in job_map: raise HTTPException(404)
     import importlib, threading
     from app.scheduler import make_job_runner
@@ -339,6 +561,52 @@ def get_settings():
     with get_db() as db:
         return [_config_dict(c) for c in db.query(PlatformConfig).all()]
 
+
+class TelegramSetupRequest(BaseModel):
+    config_id: Optional[str] = ""
+    bot_token: Optional[str] = ""
+    chat_id: Optional[str] = ""
+
+
+def _telegram_setup_credentials(body: TelegramSetupRequest) -> tuple[str, str]:
+    token = str(body.bot_token or "").strip()
+    chat_id = str(body.chat_id or "").strip()
+    if body.config_id:
+        with get_db() as db:
+            cfg = db.query(PlatformConfig).filter(
+                PlatformConfig.id == body.config_id,
+                PlatformConfig.platform == "telegram",
+            ).first()
+            if not cfg:
+                raise HTTPException(404, "Telegram configuration not found")
+            token = token or str(cfg.api_key or "").strip()
+            chat_id = chat_id or str(cfg.extra_field_1 or "").strip()
+    return token, chat_id
+
+
+@router.post("/settings/telegram/detect-chat")
+def detect_telegram_chat(body: TelegramSetupRequest):
+    from lib.telegram_setup import detect_recent_chat
+    token, _ = _telegram_setup_credentials(body)
+    try:
+        return {"ok": True, **detect_recent_chat(token)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+
+
+@router.post("/settings/telegram/test")
+def test_telegram_setup(body: TelegramSetupRequest):
+    from lib.telegram_setup import verify_bot_connection
+    token, chat_id = _telegram_setup_credentials(body)
+    try:
+        return verify_bot_connection(token, chat_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+
 class ConfigCreate(BaseModel):
     label: str; platform: str; config_type: Optional[str]="api"
     api_key: Optional[str]=""; api_secret: Optional[str]=""; api_url: Optional[str]=""
@@ -363,7 +631,13 @@ def update_setting(cfg_id: str, body: ConfigCreate):
     with get_db() as db:
         cfg = db.query(PlatformConfig).filter(PlatformConfig.id==cfg_id).first()
         if not cfg: raise HTTPException(404)
-        for k,v in body.dict().items():
+        # exclude_unset: only fields the client actually sent should be applied —
+        # otherwise every field's schema default (is_active=True, is_default=False,
+        # notes="") gets written back on every partial update, silently resetting
+        # whatever was previously stored.
+        for k,v in body.dict(exclude_unset=True).items():
+            if k in {"api_key", "api_secret"} and not v:
+                continue
             if hasattr(cfg,k) and v is not None: setattr(cfg,k,v)
         cfg.updated_date=now; return _config_dict(cfg)
 
@@ -419,13 +693,36 @@ def cancel_all_orders():
     except Exception as e:
         raise HTTPException(500, str(e))
 
+def _is_crypto_like_signal(sig) -> bool:
+    cls = (getattr(sig, "asset_class", "") or "").strip().lower()
+    if cls == "crypto":
+        return True
+    sym = (getattr(sig, "asset_symbol", "") or "").upper().strip()
+    if not sym or sym.endswith(("=F", "=X")):
+        return False
+    if "/" in sym or sym.endswith("-USD"):
+        return True
+    return sym.endswith("USD") and sym[:-3] in {
+        "BTC", "ETH", "SOL", "XRP", "BNB", "AVAX", "LINK", "DOGE",
+        "ADA", "AAVE", "DOT", "ATOM", "SUI", "RENDER", "INJ",
+        "NEAR", "OP", "ARB", "MATIC", "UNI", "PEPE", "LTC",
+    }
+
+
+def _is_pending_equity_candidate(sig) -> bool:
+    if bool(getattr(sig, "paper_mode", False)):
+        return False
+    return not _is_crypto_like_signal(sig)
+
+
 @router.get("/signals/pending")
 def get_pending_signals():
-    """Get all signals queued for Monday morning approval."""
+    """Get live non-crypto signals queued for the next equity-market session."""
     with get_db() as db:
-        sigs = db.query(TradingSignal).filter(
+        rows = db.query(TradingSignal).filter(
             TradingSignal.status == "PendingApproval"
         ).order_by(TradingSignal.confidence.desc()).all()
+        sigs = [s for s in rows if _is_pending_equity_candidate(s)]
         return [_sig_dict(s) for s in sigs]
 
 @router.post("/signals/{signal_id}/approve")
@@ -437,28 +734,43 @@ def approve_signal(signal_id: str):
             raise HTTPException(404, "Signal not found")
         if sig.status != "PendingApproval":
             raise HTTPException(400, f"Signal is {sig.status}, not PendingApproval")
-        try:
-            from lib.alpaca_client import submit_bracket_order, normalize_symbol, is_crypto, get_account
-            sym, crypto = normalize_symbol(sig.asset_symbol)
-            entry  = float(sig.entry_price or 0)
-            target = float(sig.target_price or 0)
-            stop   = float(sig.stop_loss or 0)
-            if not entry or not target or not stop:
-                raise ValueError("Signal missing price levels")
-            # Check buying power
-            account = get_account()
-            buying_power = float(account.buying_power)
-            qty = max(1, int(min(1500, buying_power * 0.2) / entry)) if not crypto else round(min(1000, buying_power * 0.1) / entry, 6)
-            if qty <= 0:
-                raise ValueError(f"Insufficient buying power ${buying_power:.0f}")
-            result = submit_bracket_order(symbol=sym, qty=qty, entry_price=entry, take_profit=target, stop_loss=stop)
+        if bool(getattr(sig, "paper_mode", False)):
+            raise HTTPException(400, "Paper-only signal cannot be sent to Alpaca live execution")
+        sym_raw = sig.asset_symbol
+        entry  = float(sig.entry_price or 0)
+        target = float(sig.target_price or 0)
+        stop   = float(sig.stop_loss or 0)
+
+    # The broker call runs outside the session above: raising an HTTPException from
+    # within that `with get_db()` block rolls back the ENTIRE transaction (including
+    # any status write made in the same except block), so a failed submission was
+    # silently leaving the signal stuck at PendingApproval forever. Each status write
+    # below now commits in its own session, independent of whether we raise after it.
+    try:
+        from lib.alpaca_client import submit_bracket_order, normalize_symbol, is_crypto, get_account
+        sym, crypto = normalize_symbol(sym_raw)
+        if not entry or not target or not stop:
+            raise ValueError("Signal missing price levels")
+        account = get_account()
+        buying_power = float(account.buying_power)
+        qty = max(1, int(min(1500, buying_power * 0.2) / entry)) if not crypto else round(min(1000, buying_power * 0.1) / entry, 6)
+        if qty <= 0:
+            raise ValueError(f"Insufficient buying power ${buying_power:.0f}")
+        result = submit_bracket_order(symbol=sym, qty=qty, entry_price=entry, take_profit=target, stop_loss=stop)
+    except Exception as e:
+        with get_db() as db:
+            sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+            if sig:
+                sig.status = "Rejected"
+                sig.updated_date = datetime.now(timezone.utc).isoformat()
+        raise HTTPException(500, str(e))
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if sig:
             sig.status = "Executed"
             sig.updated_date = datetime.now(timezone.utc).isoformat()
-            return {"ok": True, "order": result, "qty": qty, "symbol": sym}
-        except Exception as e:
-            sig.status = "Rejected"
-            sig.updated_date = datetime.now(timezone.utc).isoformat()
-            raise HTTPException(500, str(e))
+    return {"ok": True, "order": result, "qty": qty, "symbol": sym}
 
 @router.post("/signals/{signal_id}/reject")
 def reject_signal(signal_id: str):
@@ -480,7 +792,8 @@ def approve_all_signals():
     now_iso = datetime.now(timezone.utc).isoformat()
     approved = rejected = 0
     with get_db() as db:
-        sigs = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").order_by(TradingSignal.confidence.desc()).all()
+        rows = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").order_by(TradingSignal.confidence.desc()).all()
+        sigs = [s for s in rows if _is_pending_equity_candidate(s)]
         for sig in sigs:
             if buying_power < 100:
                 break
@@ -506,7 +819,8 @@ def reject_all_pending():
     """Reject all pending signals."""
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db() as db:
-        sigs = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").all()
+        rows = db.query(TradingSignal).filter(TradingSignal.status == "PendingApproval").all()
+        sigs = [s for s in rows if _is_pending_equity_candidate(s)]
         for s in sigs:
             s.status = "Rejected"; s.updated_date = now_iso
         return {"ok": True, "rejected": len(sigs)}
@@ -594,6 +908,10 @@ def get_performance(days: int = 30):
     }
 
 def _sig_dict(s):
+    try:
+        score_breakdown = json.loads(getattr(s, "score_breakdown", None) or "{}")
+    except (TypeError, ValueError):
+        score_breakdown = {}
     return {
         "id":            s.id,
         "asset_symbol":  s.asset_symbol,
@@ -614,18 +932,122 @@ def _sig_dict(s):
         "signal_source": getattr(s, "signal_source", "watchlist"),
         "earnings_risk": bool(getattr(s, "earnings_risk", False)),
         "rr_ratio":      getattr(s, "rr_ratio", None),
+        "paper_mode":    bool(getattr(s, "paper_mode", False)),
+        "paper_direction": getattr(s, "paper_direction", None),
+        "trigger_event": getattr(s, "trigger_event", None),
+        "trigger_event_id": getattr(s, "trigger_event_id", None),
+        "calibrated_confidence": getattr(s, "calibrated_confidence", None),
+        "score_breakdown": score_breakdown,
+        "data_quality_score": getattr(s, "data_quality_score", None),
+        "freshness_score": getattr(s, "freshness_score", None),
+        "news_confidence": getattr(s, "news_confidence", None),
+        "setup_type": getattr(s, "setup_type", None),
+        "invalidation": getattr(s, "invalidation", None),
+        "signal_version": getattr(s, "signal_version", None),
+        "market_data_at": getattr(s, "market_data_at", None),
+        "expires_at": getattr(s, "expires_at", None),
+        "trade_horizon": getattr(s, "trade_horizon", None),
     }
 
 def _threat_dict(t):
     return {"id":t.id,"title":t.title,"description":t.description,"event_type":t.event_type,
             "severity":t.severity,"country":t.country,"region":t.region,
-            "source":t.source,"source_url":t.source_url,"status":t.status,"published_at":t.published_at}
+            "source":t.source,"source_url":t.source_url,"status":t.status,
+            "published_at":t.published_at,"created_date":t.created_date,
+            "source_kind":getattr(t,"source_kind",None),
+            "reliability_score":getattr(t,"reliability_score",None),
+            "confirmation_status":getattr(t,"confirmation_status",None),
+            "corroboration_count":getattr(t,"corroboration_count",0) or 0,
+            "claim_confidence":getattr(t,"claim_confidence",None),
+            "cluster_id":getattr(t,"cluster_id",None)}
 
 def _news_dict(n):
+    try:
+        corroborated_sources = json.loads(getattr(n, "corroborated_sources", None) or "[]")
+    except (TypeError, ValueError):
+        corroborated_sources = []
+    try:
+        entities = json.loads(getattr(n, "entities", None) or "{}")
+    except (TypeError, ValueError):
+        entities = {}
+    published_at = _parse_datetime(n.published_at)
+    computed_stale = bool(
+        published_at and published_at < datetime.now(timezone.utc) - timedelta(hours=72)
+    )
     return {"id":n.id,"title":n.title,"summary":n.summary,"source":n.source,"url":n.url,
             "category":n.category,"sentiment":n.sentiment,
             "affected_assets":n.affected_assets.split(",") if n.affected_assets else [],
-            "region":n.region,"published_at":n.published_at}
+            "region":n.region,"published_at":n.published_at,"created_date":n.created_date,
+            "canonical_url":getattr(n,"canonical_url",None),
+            "source_kind":getattr(n,"source_kind",None),"provider":getattr(n,"provider",None),
+            "ingested_at":getattr(n,"ingested_at",None),
+            "reliability_score":getattr(n,"reliability_score",None),
+            "confirmation_status":getattr(n,"confirmation_status",None),
+            "corroboration_count":getattr(n,"corroboration_count",0) or 0,
+            "corroborated_sources":corroborated_sources,
+            "claim_confidence":getattr(n,"claim_confidence",None),
+            "is_stale":bool(getattr(n,"is_stale",False)) or computed_stale,"entities":entities,
+            "cluster_id":getattr(n,"cluster_id",None)}
+
+
+def _source_health_dict(row):
+    if int(row.consecutive_failures or 0) >= 2:
+        status = "failing"
+    elif int(row.consecutive_failures or 0) == 1:
+        status = "degraded"
+    else:
+        status = "healthy"
+    return {
+        "source": row.source, "source_kind": row.source_kind, "provider": row.provider,
+        "url": row.url, "reliability_score": row.reliability_score,
+        "status": status, "success_count": row.success_count or 0,
+        "failure_count": row.failure_count or 0,
+        "consecutive_failures": row.consecutive_failures or 0,
+        "last_success_at": row.last_success_at, "last_failure_at": row.last_failure_at,
+        "last_error": row.last_error, "last_latency_ms": row.last_latency_ms,
+        "last_article_count": row.last_article_count or 0, "updated_at": row.updated_at,
+    }
+
+
+def _ingestion_run_dict(row):
+    return {
+        "id": row.id, "started_at": row.started_at, "finished_at": row.finished_at,
+        "status": row.status, "source_count": row.source_count or 0,
+        "failed_sources": row.failed_sources or 0, "fetched_count": row.fetched_count or 0,
+        "fresh_count": row.fresh_count or 0, "selected_count": row.selected_count or 0,
+        "saved_news": row.saved_news or 0, "saved_threats": row.saved_threats or 0,
+        "error": row.error,
+    }
+
+
+def _parse_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _signal_evaluation_dict(row):
+    return {
+        "signal_id": row.signal_id, "symbol": row.symbol,
+        "asset_class": row.asset_class, "direction": row.direction,
+        "timeframe": row.timeframe, "signal_version": row.signal_version,
+        "generated_at": row.generated_at, "first_bar_at": row.first_bar_at,
+        "last_bar_at": row.last_bar_at, "bars_observed": row.bars_observed or 0,
+        "entry_price": row.entry_price, "target_price": row.target_price,
+        "stop_loss": row.stop_loss, "mfe_pct": row.mfe_pct or 0,
+        "mae_pct": row.mae_pct or 0, "outcome": row.outcome,
+        "target_hit_at": row.target_hit_at, "stop_hit_at": row.stop_hit_at,
+        "data_issue": row.data_issue, "evaluated_at": row.evaluated_at,
+    }
 
 def _asset_dict(a):
     return {"id":a.id,"symbol":a.symbol,"name":a.name,"asset_class":a.asset_class,"price":a.price,
@@ -696,7 +1118,9 @@ def debug_positions_raw():
 
 def _config_dict(c):
     return {"id":c.id,"key":c.key,"label":c.label,"platform":c.platform,"config_type":c.config_type,
-            "api_key":c.api_key,"api_secret":c.api_secret,"api_url":c.api_url,
+            "api_key":"[REDACTED]" if c.api_key else "",
+            "api_secret":"[REDACTED]" if c.api_secret else "","api_url":c.api_url,
+            "has_api_key":bool(c.api_key),"has_api_secret":bool(c.api_secret),
             "extra_field_1":c.extra_field_1,"extra_field_2":c.extra_field_2,
             "is_active":c.is_active,"is_default":c.is_default,"notes":c.notes,
             "created_date":c.created_date,"updated_date":c.updated_date}
@@ -820,10 +1244,16 @@ async def run_scanner(request: Request):
 
 @router.get("/scanner/status")
 def get_scanner_status():
-    """Get scanner job status."""
+    """Get opportunity scanner job status, broken out per scan mode."""
     try:
         from app.scheduler import job_status
-        return {"scanner": job_status.get("scanner", {"status": "unknown"})}
+        modes = {
+            "pre_market": job_status.get("scanner_premarket", {"status": "unknown"}),
+            "intraday":   job_status.get("scanner_intraday", {"status": "unknown"}),
+            "crypto":     job_status.get("scanner_crypto", {"status": "unknown"}),
+            "futures":    job_status.get("scanner_futures", {"status": "unknown"}),
+        }
+        return {"scanner": modes}
     except Exception as e:
         return {"error": str(e)}
 

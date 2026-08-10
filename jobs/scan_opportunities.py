@@ -18,10 +18,19 @@ Signal routing:
   - Leveraged / short / futures / crypto setups → virtual paper engine (paper_mode=True)
   - High-conviction breakouts → Telegram alert immediately
 """
-import logging, uuid, time
+import json, logging, uuid, time, os
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
+from lib.crypto_market_data import (
+    DEFAULT_CRYPTO_UNIVERSE,
+    discover_crypto_universe,
+    fetch_crypto_ohlcv,
+    is_crypto_symbol as is_crypto_data_symbol,
+    normalize_crypto_symbol,
+)
+from lib.signal_identity import signal_identity
+from lib.trading_preferences import get_user_preference, horizon_for_timeframe, timeframe_allowed
 
 # ── Universe definitions ──────────────────────────────────────────────────────
 
@@ -48,12 +57,9 @@ EXTENDED_EQUITY = [
     "RKLB","ASTS","ACHR","JOBY","IONQ","RXRX","AI","SOUN",
 ]
 
-CRYPTO_UNIVERSE = [
-    "BTC-USD","ETH-USD","SOL-USD","XRP-USD","BNB-USD","AVAX-USD",
-    "LINK-USD","DOGE-USD","ADA-USD","AAVE-USD","DOT-USD","ATOM-USD",
-    "SUI20947-USD","RENDER-USD","INJ-USD","NEAR-USD","OP-USD","ARB11841-USD",
-    "LTC-USD","UNI7083-USD","PEPE24478-USD","WIF-USD","BONK-USD","JUP-USD",
-]
+CRYPTO_UNIVERSE = list(DEFAULT_CRYPTO_UNIVERSE)
+CRYPTO_SCAN_LIMIT = int(os.getenv("CRYPTO_SCAN_LIMIT", "150"))
+ALLOW_YFINANCE_CRYPTO_FALLBACK = os.getenv("ALLOW_YFINANCE_CRYPTO_FALLBACK", "false").lower() in ("1", "true", "yes")
 
 FUTURES_UNIVERSE_SCAN = [
     "GC=F",    # Gold
@@ -89,6 +95,99 @@ BREAKOUT_RSI_MIN   = 45    # RSI must be above this for a breakout (not overboug
 BREAKOUT_RSI_MAX   = 72    # RSI must be below this (not already exhausted)
 OVERSOLD_RSI_MAX   = 38    # RSI below this = oversold bounce candidate
 MIN_ATR_PCT        = 0.8   # min ATR% for a trade to be worth taking
+SCALP_TIMEFRAMES   = ("1m", "3m", "5m", "15m", "30m")
+
+
+def _resample_intraday(df_1m):
+    """Build the scalp timeframe ladder from one provider request."""
+    if df_1m is None or df_1m.empty:
+        return {}
+    frames = {"1m": df_1m.tail(240)}
+    rules = {"3m": "3min", "5m": "5min", "15m": "15min", "30m": "30min"}
+    for label, rule in rules.items():
+        frame = df_1m.resample(rule).agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna(subset=["close"])
+        frames[label] = frame.tail(240)
+    return frames
+
+
+def _score_scalp_timeframes(tf_data: dict) -> dict | None:
+    """Score short-term confluence without allowing a lone 1m trigger to win."""
+    weights = {"1m": 0.75, "3m": 1.0, "5m": 1.4, "15m": 1.8, "30m": 2.0}
+    directional_total = 0.0
+    available_weight = 0.0
+    bullish_frames, bearish_frames = [], []
+    volume_surges, crossovers, overbought, oversold = 0, 0, 0, 0
+
+    for tf in SCALP_TIMEFRAMES:
+        data = tf_data.get(tf) or {}
+        if data.get("error") or not data.get("price"):
+            continue
+        weight = weights[tf]
+        score = 0
+        bias = data.get("bias")
+        macd = data.get("macd") or {}
+        vwap = data.get("vwap") or {}
+        emas = data.get("emas") or {}
+        price = (data.get("price") or {}).get("last")
+
+        score += 2 if bias == "bullish" else -2 if bias == "bearish" else 0
+        score += 2 if macd.get("trend") == "bullish" else -2 if macd.get("trend") == "bearish" else 0
+        score += 1 if vwap.get("position") == "above" else -1 if vwap.get("position") == "below" else 0
+        if emas.get("ema9") and emas.get("ema21"):
+            score += 1 if emas["ema9"] > emas["ema21"] else -1
+        if price and emas.get("ema50"):
+            score += 1 if price > emas["ema50"] else -1
+
+        if score > 1:
+            bullish_frames.append(tf)
+        elif score < -1:
+            bearish_frames.append(tf)
+        directional_total += weight * score
+        available_weight += weight * 7
+        volume_surges += int(bool((data.get("volume") or {}).get("surge")))
+        crossovers += int((macd.get("crossover") or "none") != "none")
+        overbought += int((data.get("rsi") or 0) >= 70)
+        oversold += int((data.get("rsi") or 100) <= 30)
+
+    if available_weight == 0 or len(bullish_frames) + len(bearish_frames) < 3:
+        return None
+
+    direction = "Long" if directional_total > 0 else "Short"
+    aligned = bullish_frames if direction == "Long" else bearish_frames
+    if len(aligned) < 3:
+        return None
+
+    strength = min(1.0, abs(directional_total) / available_weight)
+    confidence = 54 + strength * 30 + min(6, len(aligned)) + min(4, volume_surges * 2) + min(2, crossovers)
+    confidence -= (overbought if direction == "Long" else oversold) * 2
+
+    higher_biases = [
+        (tf_data.get(tf) or {}).get("bias") for tf in ("1H", "4H")
+        if (tf_data.get(tf) or {}).get("bias")
+    ]
+    opposing = "bearish" if direction == "Long" else "bullish"
+    if higher_biases.count(opposing) >= 2:
+        confidence -= 10
+    elif opposing in higher_biases:
+        confidence -= 4
+
+    primary_tf = next((tf for tf in ("5m", "15m", "3m", "30m", "1m") if tf in aligned), aligned[0])
+    return {
+        "confidence": round(confidence),
+        "direction": direction,
+        "timeframe": primary_tf,
+        "primary": tf_data[primary_tf],
+        "volume_surges": volume_surges,
+        "reasoning": [
+            f"{direction} alignment on {', '.join(aligned)}",
+            f"short-frame confluence {strength * 100:.0f}%",
+            f"volume surges on {volume_surges} frames",
+            f"higher-timeframe bias {', '.join(higher_biases) or 'unavailable'}",
+        ],
+    }
 
 
 def _yf_fetch_ohlcv(symbol: str, period: str = "5d", interval: str = "1h"):
@@ -142,7 +241,8 @@ def _yf_fetch_screener(screener_type: str = "day_gainers", count: int = 50):
         return []
 
 
-def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | None:
+def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None,
+                 intraday_bars: dict = None) -> dict | None:
     """
     Run TA on the symbol's OHLCV data and produce a scored setup.
     Returns a signal dict if setup quality >= MIN_CONFIDENCE, else None.
@@ -153,7 +253,8 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
 
         # Need at least 1H for intraday, 4H for swing, 1D for regime
         tf_data = {}
-        for label, df in [("1H", df_1h), ("4H", df_4h), ("1D", df_1d)]:
+        all_frames = list((intraday_bars or {}).items()) + [("1H", df_1h), ("4H", df_4h), ("1D", df_1d)]
+        for label, df in all_frames:
             if df is not None and len(df) >= 10:
                 tf_data[label] = compute_timeframe(df, label)
 
@@ -169,16 +270,19 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
         emas       = primary.get("emas", {})
         rsi        = primary.get("rsi")
         macd_data  = primary.get("macd", {})
-        bb         = primary.get("bbands", {})
+        bb         = primary.get("bollinger_bands", {})
         atr_data   = primary.get("atr", {})
         vol_data   = primary.get("volume", {})
+        adx_data   = primary.get("adx", {})
+        vwap_data  = primary.get("vwap", {})
+        stoch_data = primary.get("stochastic", {})
 
         last_price = price.get("last", 0)
         if not last_price or last_price <= 0:
             return None
 
         atr_pct = atr_data.get("pct", 0) if atr_data else 0
-        if atr_pct < MIN_ATR_PCT:
+        if atr_pct < MIN_ATR_PCT and not intraday_bars:
             return None  # too low volatility — not worth trading
 
         ema9  = emas.get("ema9")
@@ -188,7 +292,7 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
         macd_val   = macd_data.get("macd") if macd_data else None
         macd_sig   = macd_data.get("signal") if macd_data else None
         macd_hist  = macd_data.get("histogram") if macd_data else None
-        macd_cross = macd_data.get("cross") if macd_data else None
+        macd_cross = macd_data.get("crossover") if macd_data else None
 
         bb_upper = bb.get("upper") if bb else None
         bb_lower = bb.get("lower") if bb else None
@@ -205,11 +309,14 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
         if meta and meta.get("avg_volume"):
             meta_vol_ratio = meta.get("volume", 0) / max(meta["avg_volume"], 1)
             vol_ratio = max(vol_ratio, meta_vol_ratio)
+        elif meta and meta.get("volume"):
+            vol_ratio = max(vol_ratio, 1.25)
 
         confidence = 50
         direction  = "Long"
         setup_type = "neutral"
         signals_hit = []
+        selected_timeframe = "4H" if "4H" in tf_data else "1H" if "1H" in tf_data else "1D"
 
         # ── BREAKOUT setup ──────────────────────────────────────────────────────
         ema_bull = ema9 and ema21 and ema9 > ema21
@@ -236,6 +343,14 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
             confidence += 5
             signals_hit.append("Above BB mid")
 
+        if vwap_data and vwap_data.get("position") == "above" and direction in ("Long", "Bounce"):
+            confidence += 3
+            signals_hit.append("Above VWAP")
+
+        if adx_data and adx_data.get("strong") and ema_bull:
+            confidence += 4
+            signals_hit.append(f"ADX trend {adx_data.get('value')}")
+
         # ── OVERSOLD BOUNCE setup ───────────────────────────────────────────────
         if rsi and rsi <= OVERSOLD_RSI_MAX:
             confidence += 15
@@ -257,12 +372,83 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
             confidence += 4
             signals_hit.append(f"Daily RSI={daily_rsi:.0f} bullish")
 
+        # Paper-only short/breakdown setup. Save routing forces all short/leverage ideas to paper.
+        ema_bear = ema9 and ema21 and ema9 < ema21
+        if ema50:
+            ema_bear = ema_bear and last_price < ema50
+
+        bearish_points = 0
+        if rsi and 30 <= rsi <= 58 and ema_bear:
+            bearish_points += 12
+            signals_hit.append(f"RSI={rsi:.0f} bearish zone")
+        if macd_hist and macd_hist < 0 and macd_cross == "bearish":
+            bearish_points += 12
+            signals_hit.append("MACD bearish cross")
+        elif macd_hist and macd_hist < 0:
+            bearish_points += 6
+            signals_hit.append("MACD negative")
+        if bb_mid and last_price < bb_mid:
+            bearish_points += 5
+            signals_hit.append("Below BB mid")
+        if vwap_data and vwap_data.get("position") == "below":
+            bearish_points += 4
+            signals_hit.append("Below VWAP")
+        if adx_data and adx_data.get("strong") and ema_bear:
+            bearish_points += 4
+            signals_hit.append(f"ADX downtrend {adx_data.get('value')}")
+        if rsi and rsi >= 70 and bb_upper and last_price >= bb_upper * 0.98 and macd_hist and macd_hist < 0:
+            bearish_points += 15
+            signals_hit.append(f"Overbought reversal RSI={rsi:.0f}")
+        if daily_emas.get("ema50") and last_price < daily_emas["ema50"]:
+            bearish_points += 5
+            signals_hit.append("Below daily EMA50")
+        if daily_rsi and 32 <= daily_rsi <= 50:
+            bearish_points += 4
+            signals_hit.append(f"Daily RSI={daily_rsi:.0f} bearish")
+        if stoch_data and stoch_data.get("signal") == "overbought" and macd_hist and macd_hist < 0:
+            bearish_points += 4
+            signals_hit.append("Stoch overbought fade")
+        if primary.get("obv_trend") == "falling":
+            bearish_points += 3
+            signals_hit.append("OBV falling")
+
+        if bearish_points >= 14 and bearish_points > (confidence - 50):
+            confidence = 50 + bearish_points
+            direction = "Short"
+            setup_type = "breakdown" if ema_bear else "reversal_short"
+
         # ── Penalty factors ─────────────────────────────────────────────────────
-        if rsi and rsi > 75:
+        if rsi and rsi > 75 and direction in ("Long", "Bounce"):
             confidence -= 15
             signals_hit.append(f"⚠ RSI overbought={rsi:.0f}")
         if vol_ratio < 0.7:
             confidence -= 8  # low vol = weak setup
+
+        scalp = _score_scalp_timeframes(tf_data)
+        if scalp and scalp["confidence"] >= MIN_CONFIDENCE and scalp["confidence"] > confidence:
+            confidence = scalp["confidence"]
+            direction = scalp["direction"]
+            setup_type = "scalp_momentum" if direction == "Long" else "scalp_breakdown"
+            selected_timeframe = scalp["timeframe"]
+            primary = scalp["primary"]
+            price = primary.get("price") or price
+            last_price = price.get("last", last_price)
+            atr_data = primary.get("atr") or atr_data
+            atr_pct = (atr_data or {}).get("pct", atr_pct)
+            scalp_volume = primary.get("volume") or {}
+            if scalp_volume.get("surge_ratio"):
+                vol_ratio = max(vol_ratio, scalp_volume["surge_ratio"])
+            signals_hit = scalp["reasoning"]
+
+        if confidence >= 82 and vol_ratio >= 1.8 and 1.2 <= atr_pct <= 8:
+            if direction == "Long":
+                direction = "Long_Leveraged"
+                setup_type = f"{setup_type}_leveraged"
+                signals_hit.append("Paper leverage candidate")
+            elif direction == "Short":
+                direction = "Short_Leveraged"
+                setup_type = f"{setup_type}_leveraged"
+                signals_hit.append("Paper short leverage candidate")
 
         # Clamp
         confidence = max(10, min(98, confidence))
@@ -273,7 +459,8 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
         # ── Price targets ────────────────────────────────────────────────────────
         atr_val = atr_data.get("value", last_price * atr_pct / 100) if atr_data else last_price * 0.02
 
-        if direction in ("Long", "Bounce"):
+        is_long_side = direction.startswith("Long") or direction == "Bounce"
+        if is_long_side:
             stop_loss    = round(last_price - atr_val * 1.5, 6 if last_price < 1 else 2)
             target_price = round(last_price + atr_val * 2.5, 6 if last_price < 1 else 2)
         else:
@@ -282,9 +469,19 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
 
         rr = abs(target_price - last_price) / max(abs(last_price - stop_loss), 0.0001)
 
-        reasoning = f"{setup_type.upper()} | {' | '.join(signals_hit)} | R:R={rr:.1f}x | ATR={atr_pct:.1f}%"
+        tf_snapshot = []
+        for tf in ("1m", "3m", "5m", "15m", "30m", "1H", "4H", "1D"):
+            data = tf_data.get(tf) or {}
+            if data.get("error") or not data:
+                continue
+            macd_trend = ((data.get("macd") or {}).get("trend") or "?")
+            tf_snapshot.append(f"{tf}:{data.get('bias','?')}/RSI {data.get('rsi','?')}/MACD {macd_trend}")
+        reasoning = (
+            f"{setup_type.upper()} ({selected_timeframe}) | {' | '.join(signals_hit)} | "
+            f"R:R={rr:.1f}x | ATR={atr_pct:.1f}% | TA: {'; '.join(tf_snapshot)}"
+        )
 
-        return {
+        signal = {
             "asset_symbol": sym,
             "asset_name":   (meta or {}).get("name", sym),
             "direction":    direction,
@@ -294,12 +491,16 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None) -> dict | Non
             "target_price": target_price,
             "stop_loss":    stop_loss,
             "rr_ratio":     round(rr, 2),
-            "timeframe":    "4H",
-            "momentum":     "Bullish" if direction in ("Long", "Bounce") else "Bearish",
+            "timeframe":    selected_timeframe,
+            "momentum":     "Bullish" if is_long_side else "Bearish",
             "reasoning":    reasoning,
             "key_risks":    f"Vol ratio={vol_ratio:.1f}x | ATR={atr_pct:.1f}%",
             "vol_ratio":    round(vol_ratio, 2),
+            "paper_mode":   direction not in ("Long", "Bounce"),
+            "paper_direction": direction if direction not in ("Long", "Bounce") else None,
         }
+        from lib.signal_scorer import score_signal
+        return score_signal(signal, tf_data, {"risk": "unknown"}, news_confidence=50.0)
     except Exception as e:
         logger.debug(f"[Scanner] Score failed {sym}: {e}")
         return None
@@ -312,12 +513,29 @@ def _classify_symbol(sym: str) -> tuple[str, bool]:
     if sym_up.endswith("=F") or sym_up.endswith("=X") or sym_up.startswith("^"):
         return "Futures", True
     # Crypto
-    if sym_up.endswith("-USD") or "/" in sym_up:
+    if is_crypto_data_symbol(sym_up):
         return "Crypto", False  # live crypto via Alpaca
     # Leveraged ETFs → paper
     if sym_up in {"SOXS","SQQQ","TQQQ","SPXU","UVXY","SVXY","TBT","LABD","LABU","TECL","TECS"}:
         return "Equity", True
     return "Equity", False
+
+
+def _requires_paper_execution(sig: dict, asset_cls: str) -> bool:
+    """Keep unsupported or higher-risk ideas out of live order execution."""
+    direction = (sig.get("direction") or sig.get("paper_direction") or "").upper()
+    if "SHORT" in direction or "LEVER" in direction or "5X" in direction:
+        return True
+    if asset_cls in ("Futures", "Forex"):
+        return True
+    if asset_cls == "Crypto":
+        try:
+            from lib.alpaca_client import is_crypto as is_alpaca_crypto
+            if not is_alpaca_crypto(sig.get("asset_symbol") or ""):
+                return True
+        except Exception:
+            return True
+    return bool(sig.get("paper_mode"))
 
 
 def _save_signals(signals: list, scan_mode: str):
@@ -333,6 +551,7 @@ def _save_signals(signals: list, scan_mode: str):
                    and now_utc.hour < 20)
 
     saved = updated = skipped = 0
+    trade_mode = get_user_preference()["trade_mode"]
 
     with get_db() as db:
         # Fetch existing active signals to avoid duplicates
@@ -342,7 +561,7 @@ def _save_signals(signals: list, scan_mode: str):
         ).all()
         existing = {}
         for rec in live_sigs:
-            k = (rec.asset_symbol, bool(getattr(rec, "paper_mode", False)))
+            k = signal_identity(rec.asset_symbol, rec.direction, getattr(rec, "user_id", "local"))
             existing[k] = rec
 
         for sig in signals:
@@ -352,8 +571,20 @@ def _save_signals(signals: list, scan_mode: str):
 
                 # Normalize crypto symbol for Alpaca (BTC-USD → BTC/USD)
                 if asset_cls == "Crypto":
-                    sym = sym.replace("-USD", "/USD")
+                    sym = normalize_crypto_symbol(sym)
                     sig["asset_symbol"] = sym
+
+                is_paper = bool(is_paper or _requires_paper_execution(sig, asset_cls))
+                if not timeframe_allowed(sig.get("timeframe"), trade_mode):
+                    skipped += 1
+                    continue
+                sig["trade_horizon"] = horizon_for_timeframe(sig.get("timeframe"))
+                from lib.signal_levels import validate_signal_levels
+                levels_ok, level_error = validate_signal_levels(sig)
+                if not levels_ok:
+                    logger.warning(f"[Scanner] Rejected {sym}: {level_error}")
+                    skipped += 1
+                    continue
 
                 # Paper routing overrides
                 if is_paper:
@@ -367,37 +598,33 @@ def _save_signals(signals: list, scan_mode: str):
                     else:
                         target_status = "Active" if market_open else "PendingApproval"
 
-                rec_key = (sym, is_paper)
+                rec_key = signal_identity(sym, sig.get("direction"))
 
-                if rec_key in existing:
-                    rec = existing[rec_key]
-                    if rec.status in ("Executed", "Closed", "Rejected", "PaperExecuted"):
-                        skipped += 1
-                        continue
-                    # Update if new confidence is higher
-                    new_conf = sig.get("confidence", 0)
-                    if new_conf > (rec.confidence or 0):
-                        rec.confidence   = new_conf
-                        rec.entry_price  = sig.get("entry_price", rec.entry_price)
-                        rec.target_price = sig.get("target_price", rec.target_price)
-                        rec.stop_loss    = sig.get("stop_loss", rec.stop_loss)
-                        rec.reasoning    = f"[SCANNER:{scan_mode}] {sig.get('reasoning','')}"
-                        rec.momentum     = sig.get("momentum", rec.momentum)
-                        rec.rr_ratio     = sig.get("rr_ratio", rec.rr_ratio)
-                        rec.updated_date = now_iso
-                        rec.status       = target_status
-                        updated += 1
-                    else:
-                        skipped += 1
-                    continue
+                prior = existing.get(rec_key)
+                if prior and prior.status in ("Active", "PendingApproval"):
+                    prior.status = "Superseded"
+                    prior.updated_date = now_iso
+                    updated += 1
 
-                db.add(TradingSignal(
+                new_record = TradingSignal(
                     id=str(uuid.uuid4()),
                     asset_symbol  = sym,
                     asset_name    = sig.get("asset_name", sym),
                     asset_class   = asset_cls,
                     direction     = sig.get("direction", "Long"),
                     confidence    = sig.get("confidence", 65),
+                    composite_score = sig.get("composite_score"),
+                    calibrated_confidence = sig.get("calibrated_confidence"),
+                    score_breakdown = json.dumps(sig.get("score_breakdown", {}), sort_keys=True),
+                    data_quality_score = sig.get("data_quality_score"),
+                    freshness_score = sig.get("freshness_score"),
+                    news_confidence = sig.get("news_confidence"),
+                    setup_type = sig.get("setup_type"),
+                    invalidation = sig.get("invalidation"),
+                    signal_version = sig.get("signal_version", "v7.2"),
+                    market_data_at = sig.get("market_data_at"),
+                    expires_at = sig.get("expires_at"),
+                    trade_horizon = sig.get("trade_horizon"),
                     timeframe     = sig.get("timeframe", "4H"),
                     entry_price   = sig.get("entry_price"),
                     target_price  = sig.get("target_price"),
@@ -411,8 +638,9 @@ def _save_signals(signals: list, scan_mode: str):
                     paper_mode    = is_paper,
                     paper_direction = sig.get("paper_direction") if is_paper else None,
                     trigger_event = f"SCANNER:{scan_mode}",
-                    asset_class_raw = asset_cls,
-                ))
+                )
+                db.add(new_record)
+                existing[rec_key] = new_record
                 saved += 1
             except Exception as e:
                 logger.error(f"[Scanner] Save failed {sig.get('asset_symbol')}: {e}")
@@ -457,20 +685,48 @@ def _scan_symbols(symbols: list, scan_mode: str, meta_map: dict = None):
 
     def _process(sym):
         try:
-            df_1h = _yf_fetch_ohlcv(sym, period="5d",  interval="1h")
-            df_4h = _yf_fetch_ohlcv(sym, period="30d", interval="4h") if df_1h is not None else None
-            df_1d = _yf_fetch_ohlcv(sym, period="90d", interval="1d") if df_1h is not None else None
-            sig = _score_setup(sym, df_1h, df_4h, df_1d, meta=meta_map.get(sym))
+            scan_sym = normalize_crypto_symbol(sym) if is_crypto_data_symbol(sym) else sym
+            intraday_bars = {}
+            if is_crypto_data_symbol(scan_sym):
+                df_1m = fetch_crypto_ohlcv(scan_sym, "1m", limit=300)
+                intraday_bars = _resample_intraday(df_1m)
+                df_1h = fetch_crypto_ohlcv(scan_sym, "1H", limit=120)
+                if (df_1h is None or df_1h.empty) and ALLOW_YFINANCE_CRYPTO_FALLBACK:
+                    df_1h = _yf_fetch_ohlcv(scan_sym, period="5d", interval="1h")
+                df_4h = fetch_crypto_ohlcv(scan_sym, "4H", limit=120) if df_1h is not None else None
+                df_1d = fetch_crypto_ohlcv(scan_sym, "1D", limit=180) if df_1h is not None else None
+                if (df_4h is None or df_4h.empty) and df_1h is not None and ALLOW_YFINANCE_CRYPTO_FALLBACK:
+                    df_4h = _yf_fetch_ohlcv(scan_sym, period="30d", interval="4h")
+                if (df_1d is None or df_1d.empty) and df_1h is not None and ALLOW_YFINANCE_CRYPTO_FALLBACK:
+                    df_1d = _yf_fetch_ohlcv(scan_sym, period="180d", interval="1d")
+            else:
+                df_1m = _yf_fetch_ohlcv(scan_sym, period="5d", interval="1m")
+                intraday_bars = _resample_intraday(df_1m)
+                df_1h = _yf_fetch_ohlcv(scan_sym, period="5d",  interval="1h")
+                df_4h = _yf_fetch_ohlcv(scan_sym, period="30d", interval="4h") if df_1h is not None else None
+                df_1d = _yf_fetch_ohlcv(scan_sym, period="90d", interval="1d") if df_1h is not None else None
+            sig = _score_setup(
+                scan_sym, df_1h, df_4h, df_1d,
+                meta=meta_map.get(scan_sym) or meta_map.get(sym),
+                intraday_bars=intraday_bars,
+            )
             if sig:
                 with lock:
                     results.append(sig)
         except Exception as e:
             logger.debug(f"[Scanner] {sym} failed: {e}")
 
-    # Limit concurrency to avoid yfinance rate limits
-    with cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="scanner") as pool:
+    # Limit concurrency to avoid yfinance rate limits.
+    # NOTE: deliberately not using the pool as a context manager — `with` calls
+    # shutdown(wait=True) on exit, which blocks until every still-running worker
+    # thread finishes even after cf.wait(..., timeout=...) has already given up,
+    # negating the timeout. Shut down with wait=False so stragglers don't stall us.
+    pool = cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="scanner")
+    try:
         futs = [pool.submit(_process, sym) for sym in symbols]
         cf.wait(futs, timeout=120)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     results.sort(key=lambda x: x["confidence"], reverse=True)
     logger.info(f"[Scanner:{scan_mode}] {len(results)}/{len(symbols)} symbols produced signals")
@@ -553,7 +809,26 @@ def run_crypto():
     Wide crypto universe, routes to live Alpaca paper positions.
     """
     logger.info("[Scanner] 🪙 CRYPTO scan starting...")
-    signals = _scan_symbols(CRYPTO_UNIVERSE, "CRYPTO")
+    meta_map = {}
+    try:
+        for item in discover_crypto_universe(limit=CRYPTO_SCAN_LIMIT):
+            sym = normalize_crypto_symbol(item.get("symbol", ""))
+            meta_map[sym] = {
+                "symbol": sym,
+                "name": item.get("name") or sym,
+                "price": item.get("price", 0),
+                "change_pct": item.get("change_pct", 0),
+                "volume": item.get("volume", 0),
+                "source": item.get("source", "crypto_api"),
+            }
+    except Exception as e:
+        logger.warning(f"[Scanner:CRYPTO] Dynamic crypto discovery failed: {e}")
+
+    dynamic_syms = list(meta_map.keys())
+    all_syms = list(dict.fromkeys(CRYPTO_UNIVERSE + dynamic_syms))
+    logger.info(f"[Scanner:CRYPTO] Scanning {len(all_syms)} symbols ({len(dynamic_syms)} dynamic)")
+
+    signals = _scan_symbols(all_syms, "CRYPTO", meta_map=meta_map)
     saved, updated = _save_signals(signals, "CRYPTO")
 
     high_conf = [s for s in signals if s["confidence"] >= HIGH_CONFIDENCE]

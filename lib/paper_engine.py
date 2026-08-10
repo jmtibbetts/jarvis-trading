@@ -14,6 +14,7 @@ v2.0 Fixes:
 """
 import logging
 from datetime import datetime, timezone
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db, PaperPosition, PaperTrade, PaperPortfolio
 from lib.learning_engine import record_trade_outcome as _record_outcome
 
@@ -223,53 +224,71 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
     else:
         qty = round(notional / entry, 6)
 
-    with get_db() as db:
-        existing = db.query(PaperPosition).filter(
-            PaperPosition.symbol == sym,
-            PaperPosition.status == "Open"
-        ).first()
-        if existing:
-            return {"error": f"Paper position already open for {sym}"}
+    # NOTE on the duplicate-open race: the "already open?" check below and the
+    # INSERT further down happen in the same SQLAlchemy session/transaction,
+    # but that only protects against races *within* this process — a second
+    # process/thread (e.g. a concurrent scheduler cycle vs. a Telegram
+    # callback) using its own session can still pass the SELECT before this
+    # transaction commits. The real guard is the partial unique index
+    # `uq_paper_position_open_symbol` on paper_positions(user_id, symbol)
+    # WHERE status='Open' (see app/database.py:_ensure_paper_position_unique_open_index),
+    # which turns that race into an IntegrityError we catch below instead of
+    # a silent duplicate position. On a pre-existing DB with duplicate open
+    # rows the index creation is skipped (logged at startup) and this
+    # residual race remains until those duplicates are cleaned up.
+    try:
+        with get_db() as db:
+            existing = db.query(PaperPosition).filter(
+                PaperPosition.symbol == sym,
+                PaperPosition.status == "Open"
+            ).first()
+            if existing:
+                return {"error": f"Paper position already open for {sym}"}
 
-        portfolio = _get_portfolio_cash(db)
-        logger.info(f"[Paper] Cash available: ${portfolio.cash:.2f} | margin required: ${margin:.2f}")
-        if portfolio.cash < margin:
-            logger.warning(f"[Paper] Insufficient cash — have ${portfolio.cash:.2f}, need ${margin:.2f}")
-            return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin:.0f}. Use /api/paper/reset to restore $100k."}
+            portfolio = _get_portfolio_cash(db)
+            logger.info(f"[Paper] Cash available: ${portfolio.cash:.2f} | margin required: ${margin:.2f}")
+            if portfolio.cash < margin:
+                logger.warning(f"[Paper] Insufficient cash — have ${portfolio.cash:.2f}, need ${margin:.2f}")
+                return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin:.0f}. Use /api/paper/reset to restore $100k."}
 
-        from app.database import new_id
-        pos = PaperPosition(
-            id            = new_id(),
-            symbol        = sym,
-            asset_class   = asset_class,
-            direction     = dir_key,
-            side          = "long" if side == 1 else "short",
-            leverage      = leverage,
-            qty           = qty,
-            entry_price   = entry,
-            current_price = entry,
-            target_price  = target,
-            stop_loss     = stop,
-            notional      = notional,
-            margin_used   = margin,
-            unrealized_pnl= 0.0,
-            unrealized_pct= 0.0,
-            signal_id     = signal.get("id"),
-            status        = "Open",
-            opened_at     = _now(),
-            updated_at    = _now(),
-        )
-        db.add(pos)
-        portfolio.cash    -= margin
-        portfolio.updated_at = _now()
+            from app.database import new_id
+            pos = PaperPosition(
+                id            = new_id(),
+                symbol        = sym,
+                asset_class   = asset_class,
+                direction     = dir_key,
+                side          = "long" if side == 1 else "short",
+                leverage      = leverage,
+                qty           = qty,
+                entry_price   = entry,
+                current_price = entry,
+                target_price  = target,
+                stop_loss     = stop,
+                notional      = notional,
+                margin_used   = margin,
+                unrealized_pnl= 0.0,
+                unrealized_pct= 0.0,
+                signal_id     = signal.get("id"),
+                status        = "Open",
+                opened_at     = _now(),
+                updated_at    = _now(),
+            )
+            db.add(pos)
+            portfolio.cash    -= margin
+            portfolio.updated_at = _now()
 
-        pos_id   = pos.id
-        pos_data = {
-            "id": pos_id, "symbol": sym, "direction": dir_key,
-            "side": "long" if side == 1 else "short", "leverage": leverage, "qty": qty,
-            "entry_price": entry, "target": target, "stop": stop,
-            "notional": notional, "margin_required": margin, "asset_class": asset_class,
-        }
+            pos_id   = pos.id
+            pos_data = {
+                "id": pos_id, "symbol": sym, "direction": dir_key,
+                "side": "long" if side == 1 else "short", "leverage": leverage, "qty": qty,
+                "entry_price": entry, "target": target, "stop": stop,
+                "notional": notional, "margin_required": margin, "asset_class": asset_class,
+            }
+    except IntegrityError:
+        # Lost the race: another session committed an open position for this
+        # symbol between our SELECT above and this transaction's commit.
+        logger.warning(f"[Paper] Duplicate-open race detected for {sym} — a position was already opened concurrently")
+        return {"error": f"Paper position already open for {sym}"}
 
     logger.info(
         f"[Paper] ✅ Opened {dir_key} on {sym} ({asset_class}) @ ${entry:.4f} | "

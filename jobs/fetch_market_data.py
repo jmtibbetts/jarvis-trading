@@ -6,13 +6,22 @@ v6.8.4: Equity price fetch now wrapped in ThreadPoolExecutor timeout guard
         (same as crypto) to prevent indefinite hang when data.alpaca.markets
         is unreachable. Added yfinance equity fallback for timeout/error cases.
 """
-import logging, uuid, time, socket
+import logging, uuid, time, socket, os
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from app.database import get_db, MarketAsset
 from lib.alpaca_client import get_alpaca_creds, normalize_symbol, is_crypto
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockLatestBarRequest, CryptoLatestBarRequest
+from lib.crypto_market_data import (
+    DEFAULT_CRYPTO_UNIVERSE,
+    discover_crypto_universe,
+    fetch_crypto_ohlcv,
+    fetch_crypto_prices,
+    is_crypto_symbol as is_crypto_data_symbol,
+    normalize_crypto_symbol,
+    to_dash_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +32,10 @@ EQUITY_WATCHLIST = [
     'ANET','INTC','QCOM','SMCI','VRT','CRWV','NBIS','FANG','CEG','USO',
     'UNG','GDXJ','IWM',
 ]
-CRYPTO_WATCHLIST = [
-    'BTC/USD','ETH/USD','SOL/USD','XRP/USD','BNB/USD','AVAX/USD',
-    'LINK/USD','DOGE/USD','ADA/USD','AAVE/USD','DOT/USD','ATOM/USD',
-    'SUI/USD','RENDER/USD','INJ/USD','NEAR/USD','OP/USD','ARB/USD',
-]
+CRYPTO_WATCHLIST = list(dict.fromkeys(DEFAULT_CRYPTO_UNIVERSE))
+CRYPTO_DISCOVERY_LIMIT = int(os.getenv("CRYPTO_DISCOVERY_LIMIT", "150"))
+CRYPTO_CACHE_LIMIT = int(os.getenv("CRYPTO_CACHE_LIMIT", "60"))
+ALLOW_YFINANCE_CRYPTO_FALLBACK = os.getenv("ALLOW_YFINANCE_CRYPTO_FALLBACK", "false").lower() in ("1", "true", "yes")
 ALL_SYMBOLS = list(dict.fromkeys(EQUITY_WATCHLIST + CRYPTO_WATCHLIST))
 
 # Alpaca -> yfinance ticker mapping for crypto fallback
@@ -58,7 +66,7 @@ def _fetch_crypto_via_yfinance(symbols: list) -> dict:
     results = {}
     try:
         import yfinance as yf
-        yf_tickers = [CRYPTO_YF_MAP.get(s, s.replace('/', '-')) for s in symbols]
+        yf_tickers = [CRYPTO_YF_MAP.get(s, to_dash_symbol(s)) for s in symbols]
         tickers = yf.Tickers(' '.join(yf_tickers))
         for alpaca_sym, yf_sym in zip(symbols, yf_tickers):
             try:
@@ -66,17 +74,56 @@ def _fetch_crypto_via_yfinance(symbols: list) -> dict:
                 price = getattr(info, 'last_price', None) or getattr(info, 'regularMarketPrice', None)
                 vol   = getattr(info, 'three_month_average_volume', 0) or 0
                 if price:
-                    results[alpaca_sym] = {
+                    norm_sym = normalize_crypto_symbol(alpaca_sym)
+                    results[norm_sym] = {
                         'price': float(price),
                         'volume': float(vol),
                         'asset_class': 'Crypto',
-                        'name': alpaca_sym,
+                        'name': norm_sym,
+                        'source': 'yfinance',
                     }
             except Exception as ie:
                 logger.debug(f"[Market] yfinance {yf_sym}: {ie}")
         logger.info(f"[Market] yfinance crypto fallback: {len(results)}/{len(symbols)} prices")
     except Exception as e:
         logger.warning(f"[Market] yfinance fallback failed entirely: {e}")
+    return results
+
+
+def _discover_crypto_watchlist() -> tuple[list[str], dict[str, dict]]:
+    """Build a broad crypto universe from exchange volume plus aggregator breadth."""
+    meta = {}
+    try:
+        discovered = discover_crypto_universe(limit=CRYPTO_DISCOVERY_LIMIT)
+        for item in discovered:
+            sym = normalize_crypto_symbol(item.get("symbol", ""))
+            meta[sym] = item
+        symbols = list(dict.fromkeys(CRYPTO_WATCHLIST + list(meta.keys())))
+        logger.info(f"[Market] Crypto universe: {len(symbols)} symbols ({len(meta)} discovered)")
+        return symbols, meta
+    except Exception as e:
+        logger.warning(f"[Market] Crypto discovery failed, using static list: {e}")
+        return CRYPTO_WATCHLIST, {}
+
+
+def _fetch_crypto_multi_provider(symbols: list) -> dict:
+    """Exchange-first crypto prices with aggregator/yfinance fallback."""
+    results = {}
+    try:
+        results.update(fetch_crypto_prices(symbols))
+        logger.info(f"[Market] Multi-provider crypto prices: {len(results)}/{len(symbols)}")
+    except Exception as e:
+        logger.warning(f"[Market] Multi-provider crypto fetch failed: {e}")
+
+    missing = [s for s in symbols if normalize_crypto_symbol(s) not in results]
+    if missing:
+        yf_symbols = [
+            s for s in missing
+            if ALLOW_YFINANCE_CRYPTO_FALLBACK or normalize_crypto_symbol(s) in CRYPTO_YF_MAP
+        ]
+        yf_results = _fetch_crypto_via_yfinance(yf_symbols) if yf_symbols else {}
+        for sym, data in yf_results.items():
+            results.setdefault(normalize_crypto_symbol(sym), data)
     return results
 
 
@@ -116,7 +163,8 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
     from lib.ohlcv import _fetch_alpaca_single, RATE_LIMIT_DELAY
     init_cache_db()
 
-    timeframes = ['1H', '4H', '1D']
+    configured = os.getenv("OHLCV_WARM_TIMEFRAMES", "15m,30m,1H,2H,4H,1D")
+    timeframes = [tf.strip() for tf in configured.split(",") if tf.strip()]
     success = 0
     failed  = 0
 
@@ -138,13 +186,32 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
                         cfg = TF_CONFIG.get(tf, TF_CONFIG['1D'])
                         end = datetime.now(timezone.utc)
                         start = end - timedelta(days=cfg['lookback_days'])
-                        yf_df = _yf_fetch(sym, tf, start, end)
-                        if yf_df is not None and not yf_df.empty:
-                            _store_bars(sym, tf, yf_df, source='yfinance')
-                            success += 1
-                            logger.debug(f"[Market] Cached {sym}/{tf}: {len(yf_df)} bars (yfinance)")
+                        if is_crypto_data_symbol(sym):
+                            crypto_sym = normalize_crypto_symbol(sym)
+                            crypto_df = fetch_crypto_ohlcv(sym, tf, limit=cfg['bar_count'])
+                            if crypto_df is not None and not crypto_df.empty:
+                                source = crypto_df.attrs.get("source", "crypto_api")
+                                _store_bars(crypto_sym, tf, crypto_df, source=source)
+                                success += 1
+                                logger.debug(f"[Market] Cached {crypto_sym}/{tf}: {len(crypto_df)} bars ({source})")
+                            elif ALLOW_YFINANCE_CRYPTO_FALLBACK:
+                                yf_df = _yf_fetch(sym, tf, start, end)
+                                if yf_df is not None and not yf_df.empty:
+                                    _store_bars(crypto_sym, tf, yf_df, source='yfinance')
+                                    success += 1
+                                    logger.debug(f"[Market] Cached {crypto_sym}/{tf}: {len(yf_df)} bars (yfinance)")
+                                else:
+                                    failed += 1
+                            else:
+                                failed += 1
                         else:
-                            failed += 1
+                            yf_df = _yf_fetch(sym, tf, start, end)
+                            if yf_df is not None and not yf_df.empty:
+                                _store_bars(sym, tf, yf_df, source='yfinance')
+                                success += 1
+                                logger.debug(f"[Market] Cached {sym}/{tf}: {len(yf_df)} bars (yfinance)")
+                            else:
+                                failed += 1
                     except Exception as ye:
                         logger.debug(f"[Market] yfinance fallback failed {sym}/{tf}: {ye}")
                         failed += 1
@@ -169,6 +236,7 @@ def run():
     crypto_client = CryptoHistoricalDataClient(api_key=key, secret_key=secret)
     now_iso = datetime.now(timezone.utc).isoformat()
     results = {}
+    crypto_symbols, crypto_meta = _discover_crypto_watchlist()
 
     # -- 1. Latest price snapshot -----------------------------------------------
 
@@ -178,24 +246,31 @@ def run():
         return stock_client.get_stock_latest_bar(req)
 
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_do_equity_fetch)
-            try:
-                bars = future.result(timeout=ALPACA_READ_TIMEOUT)
-                for sym, bar in bars.items():
-                    results[sym] = {
-                        'price': float(bar.close),
-                        'volume': float(bar.volume or 0),
-                        'asset_class': 'Equity',
-                        'name': sym,
-                    }
-                logger.info(f"[Market] Got {len(bars)} equity prices (Alpaca)")
-            except FuturesTimeout:
-                logger.warning(f"[Market] Alpaca equity fetch timed out ({ALPACA_READ_TIMEOUT}s) — falling back to yfinance")
-                results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
-            except Exception as te:
-                logger.warning(f"[Market] Alpaca equity fetch error: {te} — falling back to yfinance")
-                results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+        # NOTE: deliberately not using ThreadPoolExecutor as a context manager here —
+        # `with` calls shutdown(wait=True) on exit, which blocks until the submitted
+        # thread finishes even after future.result(timeout=...) has already given up,
+        # negating the timeout. Shut down with wait=False instead so a stuck thread
+        # doesn't stall the caller.
+        ex = ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(_do_equity_fetch)
+        try:
+            bars = future.result(timeout=ALPACA_READ_TIMEOUT)
+            for sym, bar in bars.items():
+                results[sym] = {
+                    'price': float(bar.close),
+                    'volume': float(bar.volume or 0),
+                    'asset_class': 'Equity',
+                    'name': sym,
+                }
+            logger.info(f"[Market] Got {len(bars)} equity prices (Alpaca)")
+        except FuturesTimeout:
+            logger.warning(f"[Market] Alpaca equity fetch timed out ({ALPACA_READ_TIMEOUT}s) — falling back to yfinance")
+            results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+        except Exception as te:
+            logger.warning(f"[Market] Alpaca equity fetch error: {te} — falling back to yfinance")
+            results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
     except Exception as e:
         logger.error(f"[Market] Equity price error: {e} — trying yfinance")
         results.update(_fetch_equity_via_yfinance(EQUITY_WATCHLIST))
@@ -208,25 +283,41 @@ def run():
                 req = CryptoLatestBarRequest(symbol_or_symbols=CRYPTO_WATCHLIST)
                 return crypto_client.get_crypto_latest_bar(req)
 
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                future = ex.submit(_do_crypto_fetch)
-                try:
-                    bars = future.result(timeout=ALPACA_READ_TIMEOUT)
-                    for sym, bar in bars.items():
-                        results[sym] = {'price': float(bar.close), 'volume': float(bar.volume or 0), 'asset_class': 'Crypto', 'name': sym}
-                    logger.info(f"[Market] Got {len(bars)} crypto prices (Alpaca)")
-                except FuturesTimeout:
-                    logger.warning(f"[Market] Alpaca crypto fetch timed out ({ALPACA_READ_TIMEOUT}s) -- falling back to yfinance")
-                    results.update(_fetch_crypto_via_yfinance(CRYPTO_WATCHLIST))
-                except Exception as te:
-                    logger.warning(f"[Market] Alpaca crypto fetch error: {te} -- falling back to yfinance")
-                    results.update(_fetch_crypto_via_yfinance(CRYPTO_WATCHLIST))
+            # See equity fetch above for why this isn't a `with ThreadPoolExecutor(...)` block.
+            ex = ThreadPoolExecutor(max_workers=1)
+            future = ex.submit(_do_crypto_fetch)
+            try:
+                bars = future.result(timeout=ALPACA_READ_TIMEOUT)
+                for sym, bar in bars.items():
+                    norm_sym = normalize_crypto_symbol(sym)
+                    results[norm_sym] = {
+                        'price': float(bar.close),
+                        'volume': float(bar.volume or 0),
+                        'asset_class': 'Crypto',
+                        'name': norm_sym,
+                        'source': 'alpaca',
+                    }
+                logger.info(f"[Market] Got {len(bars)} crypto prices (Alpaca)")
+            except FuturesTimeout:
+                logger.warning(f"[Market] Alpaca crypto fetch timed out ({ALPACA_READ_TIMEOUT}s) -- using public crypto providers")
+            except Exception as te:
+                logger.warning(f"[Market] Alpaca crypto fetch error: {te} -- using public crypto providers")
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
-            logger.error(f"[Market] Crypto price error: {e} -- trying yfinance")
-            results.update(_fetch_crypto_via_yfinance(CRYPTO_WATCHLIST))
+            logger.error(f"[Market] Crypto price error: {e} -- using public crypto providers")
     else:
-        logger.warning("[Market] Alpaca unreachable -- using yfinance for crypto prices")
-        results.update(_fetch_crypto_via_yfinance(CRYPTO_WATCHLIST))
+        logger.warning("[Market] Alpaca unreachable -- using public crypto providers")
+
+    missing_crypto = [s for s in crypto_symbols if normalize_crypto_symbol(s) not in results]
+    if missing_crypto:
+        results.update(_fetch_crypto_multi_provider(missing_crypto))
+
+    for sym, meta in crypto_meta.items():
+        if sym in results:
+            results[sym]["name"] = meta.get("name") or results[sym].get("name") or sym
+            results[sym]["change_percent"] = meta.get("change_pct", results[sym].get("change_percent"))
+            results[sym]["market_cap"] = meta.get("market_cap", results[sym].get("market_cap"))
 
     # -- 2. Save prices to MarketAsset DB ----------------------------------------
     with get_db() as db:
@@ -235,6 +326,8 @@ def run():
             if existing:
                 existing.price = data['price']
                 existing.volume = data['volume']
+                existing.change_percent = data.get('change_percent', existing.change_percent)
+                existing.market_cap = data.get('market_cap', existing.market_cap)
                 existing.last_updated = now_iso
                 existing.updated_date = now_iso
             else:
@@ -243,6 +336,8 @@ def run():
                     symbol=sym, name=data['name'],
                     asset_class=data['asset_class'],
                     price=data['price'], volume=data['volume'],
+                    change_percent=data.get('change_percent'),
+                    market_cap=data.get('market_cap'),
                     last_updated=now_iso,
                     created_date=now_iso, updated_date=now_iso,
                 ))
@@ -250,7 +345,9 @@ def run():
 
     # -- 3. Warm OHLCV cache (so signal gen doesn't need to fetch live) ----------
     try:
-        cached = _warm_ohlcv_cache(ALL_SYMBOLS, stock_client, crypto_client)
+        cache_crypto_symbols = crypto_symbols[:CRYPTO_CACHE_LIMIT]
+        all_symbols = list(dict.fromkeys(EQUITY_WATCHLIST + cache_crypto_symbols))
+        cached = _warm_ohlcv_cache(all_symbols, stock_client, crypto_client)
     except Exception as e:
         logger.error(f"[Market] OHLCV cache warm-up error: {e}")
         cached = 0

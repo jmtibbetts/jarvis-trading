@@ -17,6 +17,11 @@ from lib.alpaca_client import get_alpaca_creds, is_crypto, normalize_symbol
 logger = logging.getLogger(__name__)
 
 TF_CONFIG = {
+    '1m':  (TimeFrame(1,  TimeFrameUnit.Minute), 240,   1),
+    '3m':  (TimeFrame(3,  TimeFrameUnit.Minute), 240,   2),
+    '5m':  (TimeFrame(5,  TimeFrameUnit.Minute), 240,   3),
+    '15m': (TimeFrame(15, TimeFrameUnit.Minute), 200,   7),
+    '30m': (TimeFrame(30, TimeFrameUnit.Minute), 160,  10),
     '1H':  (TimeFrame(1,  TimeFrameUnit.Hour),  72,   5),
     '2H':  (TimeFrame(2,  TimeFrameUnit.Hour),  60,  10),
     '4H':  (TimeFrame(4,  TimeFrameUnit.Hour),  60,  20),
@@ -77,21 +82,30 @@ def fetch_multi_timeframe(symbol: str, timeframes: list = None) -> Dict[str, Opt
     Returns { '1H': df, '4H': df, '1D': df }
     """
     if timeframes is None:
-        timeframes = ['1H', '4H', '1D']
+        timeframes = ['1m', '3m', '5m', '15m', '30m', '1H', '4H', '1D']
     
     try:
         from lib.ohlcv_cache import fetch_with_cache, init_cache_db
         init_cache_db()
         stock_client, crypto_client = _get_clients()
-        
-        def alpaca_fn(sym, tf):
-            return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
-        
-        return {tf: fetch_with_cache(symbol, tf, alpaca_fetch_fn=alpaca_fn)
-                for tf in timeframes if tf in TF_CONFIG}
     except Exception as e:
-        logger.error(f"[OHLCV] fetch_multi_timeframe({symbol}) error: {e}")
+        logger.error(f"[OHLCV] fetch_multi_timeframe({symbol}) setup error: {e}")
         return {tf: None for tf in timeframes}
+
+    def alpaca_fn(sym, tf):
+        return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
+
+    result = {}
+    for tf in timeframes:
+        if tf not in TF_CONFIG:
+            continue
+        try:
+            result[tf] = fetch_with_cache(symbol, tf, alpaca_fetch_fn=alpaca_fn)
+        except Exception as e:
+            # Don't let one bad timeframe discard the rest of the batch.
+            logger.error(f"[OHLCV] fetch_multi_timeframe({symbol}/{tf}) error: {e}")
+            result[tf] = None
+    return result
 
 
 def fetch_batch(symbols: list, timeframes: list = None) -> dict:
@@ -106,22 +120,26 @@ def fetch_batch(symbols: list, timeframes: list = None) -> dict:
         from lib.ohlcv_cache import fetch_with_cache, init_cache_db
         init_cache_db()
         stock_client, crypto_client = _get_clients()
-        
-        def alpaca_fn(sym, tf):
-            return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
-        
-        result = {}
-        for sym in symbols:
-            sym_bars = {}
-            for tf in timeframes:
-                if tf not in TF_CONFIG:
-                    sym_bars[tf] = None
-                    continue
-                df = fetch_with_cache(sym, tf, alpaca_fetch_fn=alpaca_fn)
-                sym_bars[tf] = df
-                time.sleep(RATE_LIMIT_DELAY)
-            result[sym] = sym_bars
-        return result
     except Exception as e:
-        logger.error(f"[OHLCV] fetch_batch error: {e}")
+        logger.error(f"[OHLCV] fetch_batch setup error: {e}")
         return {s: {tf: None for tf in timeframes} for s in symbols}
+
+    def alpaca_fn(sym, tf):
+        return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
+
+    result = {}
+    for sym in symbols:
+        sym_bars = {}
+        for tf in timeframes:
+            if tf not in TF_CONFIG:
+                sym_bars[tf] = None
+                continue
+            try:
+                sym_bars[tf] = fetch_with_cache(sym, tf, alpaca_fetch_fn=alpaca_fn)
+            except Exception as e:
+                # Don't let one bad symbol/timeframe discard the rest of the batch.
+                logger.error(f"[OHLCV] fetch_batch({sym}/{tf}) error: {e}")
+                sym_bars[tf] = None
+            time.sleep(RATE_LIMIT_DELAY)
+        result[sym] = sym_bars
+    return result

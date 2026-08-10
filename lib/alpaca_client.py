@@ -189,40 +189,67 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         # ── Step 2a: static stop-loss limit-sell ────────────────────────────
         # Alpaca crypto does NOT support trailing stops or bracket orders.
         # We use a plain limit-sell at the stop_loss price instead.
-        if stop_loss and stop_loss > 0:
+        # A filled entry with no SL/TP sits fully unprotected, so we guard
+        # against a zero/negative qty, retry once on failure, and escalate
+        # to logger.error (not just warning) if it still fails.
+        if stop_loss and stop_loss > 0 and protective_qty > 0:
+            sl_req = LimitOrderRequest(
+                symbol=sym,
+                qty=protective_qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                limit_price=round(stop_loss, 8),
+            )
             try:
-                sl_req = LimitOrderRequest(
-                    symbol=sym,
-                    qty=protective_qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC,
-                    limit_price=round(stop_loss, 8),
-                )
                 sl_order = client.submit_order(sl_req)
                 result['sl_order_id'] = str(sl_order.id)
                 logger.info(
                     f"[Alpaca] Crypto SL order placed — {sym} limit-sell x{protective_qty} @ ${stop_loss:.6g} | order_id={sl_order.id}"
                 )
             except Exception as e:
-                logger.warning(f"[Alpaca] Crypto SL order failed for {sym}: {e} — entry still filled, no SL protection")
+                logger.warning(f"[Alpaca] Crypto SL order failed for {sym}: {e} — retrying once")
+                try:
+                    sl_order = client.submit_order(sl_req)
+                    result['sl_order_id'] = str(sl_order.id)
+                    logger.info(
+                        f"[Alpaca] Crypto SL order placed on retry — {sym} limit-sell x{protective_qty} @ ${stop_loss:.6g} | order_id={sl_order.id}"
+                    )
+                except Exception as e2:
+                    logger.error(
+                        f"[Alpaca] UNPROTECTED POSITION — Crypto SL order failed twice for {sym}: {e2} — entry filled with NO stop-loss protection"
+                    )
+        elif stop_loss and stop_loss > 0:
+            logger.error(f"[Alpaca] UNPROTECTED POSITION — {sym} has no positive protective_qty ({protective_qty}); skipping SL order")
 
         # ── Step 2b: take-profit limit-sell ─────────────────────────────────
-        if take_profit and take_profit > 0:
+        if take_profit and take_profit > 0 and protective_qty > 0:
+            tp_req = LimitOrderRequest(
+                symbol=sym,
+                qty=protective_qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                limit_price=round(take_profit, 8),
+            )
             try:
-                tp_req = LimitOrderRequest(
-                    symbol=sym,
-                    qty=protective_qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC,
-                    limit_price=round(take_profit, 8),
-                )
                 tp_order = client.submit_order(tp_req)
                 result['tp_order_id'] = str(tp_order.id)
                 logger.info(
                     f"[Alpaca] Crypto TP order placed — {sym} limit-sell x{protective_qty} @ ${take_profit:.6g} | order_id={tp_order.id}"
                 )
             except Exception as e:
-                logger.warning(f"[Alpaca] Crypto TP order failed for {sym}: {e} — entry still filled, no TP protection")
+                logger.warning(f"[Alpaca] Crypto TP order failed for {sym}: {e} — retrying once")
+                try:
+                    tp_order = client.submit_order(tp_req)
+                    result['tp_order_id'] = str(tp_order.id)
+                    logger.info(
+                        f"[Alpaca] Crypto TP order placed on retry — {sym} limit-sell x{protective_qty} @ ${take_profit:.6g} | order_id={tp_order.id}"
+                    )
+                except Exception as e2:
+                    logger.error(
+                        f"[Alpaca] UNPROTECTED POSITION — Crypto TP order failed twice for {sym}: {e2} — entry filled with NO take-profit protection"
+                    )
+        elif take_profit and take_profit > 0:
+            logger.error(f"[Alpaca] UNPROTECTED POSITION — {sym} has no positive protective_qty ({protective_qty}); skipping TP order")
 
         return result
 

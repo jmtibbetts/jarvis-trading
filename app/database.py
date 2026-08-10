@@ -5,20 +5,27 @@ v6.1: Added earnings_risk column to TradingSignal. Better migration coverage.
 import os, uuid, json
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, Integer, event, text)
+from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, Integer,
+                        UniqueConstraint, event, text)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from contextlib import contextmanager
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "jarvis.db"
+DEFAULT_USER_ID = "local"
 
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, echo=False)
+engine = create_engine(
+    f"sqlite:///{DB_PATH}",
+    connect_args={"check_same_thread": False, "timeout": 30},
+    echo=False,
+)
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(conn, _):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -64,6 +71,19 @@ class TradingSignal(Base):
     rr_ratio         = Column(Float)
     paper_mode       = Column(Boolean, default=False)    # Route to paper engine
     paper_direction  = Column(String)                    # Long_Leveraged | Short | Short_Leveraged
+    calibrated_confidence = Column(Float)
+    score_breakdown  = Column(Text)
+    data_quality_score = Column(Float)
+    freshness_score  = Column(Float)
+    news_confidence  = Column(Float)
+    setup_type       = Column(String)
+    invalidation     = Column(Text)
+    signal_version   = Column(String, default="v7.2")
+    market_data_at   = Column(String)
+    expires_at       = Column(String)
+    trade_horizon    = Column(String, default="all")
+    alpaca_order_id  = Column(String)
+    user_id          = Column(String, default=DEFAULT_USER_ID)
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
 
@@ -82,6 +102,12 @@ class ThreatEvent(Base):
     source_url  = Column(String)
     status      = Column(String, default="Active")
     published_at= Column(String)
+    source_kind = Column(String)
+    reliability_score = Column(Float)
+    confirmation_status = Column(String)
+    corroboration_count = Column(Integer, default=0)
+    claim_confidence = Column(Float)
+    cluster_id = Column(String)
     created_date= Column(String, default=now_iso)
     updated_date= Column(String, default=now_iso)
 
@@ -97,6 +123,18 @@ class NewsItem(Base):
     affected_assets = Column(Text)
     region          = Column(String)
     published_at    = Column(String)
+    canonical_url   = Column(String)
+    source_kind     = Column(String)
+    provider        = Column(String)
+    ingested_at     = Column(String)
+    reliability_score = Column(Float)
+    confirmation_status = Column(String)
+    corroboration_count = Column(Integer, default=0)
+    corroborated_sources = Column(Text)
+    claim_confidence = Column(Float)
+    is_stale        = Column(Boolean, default=False)
+    entities        = Column(Text)
+    cluster_id      = Column(String)
     created_date    = Column(String, default=now_iso)
     updated_date    = Column(String, default=now_iso)
 
@@ -133,6 +171,7 @@ class PlatformConfig(Base):
     notes        = Column(Text)
     created_date = Column(String, default=now_iso)
     updated_date = Column(String, default=now_iso)
+    user_id      = Column(String, default=DEFAULT_USER_ID)
 
 class Position(Base):
     __tablename__ = "positions_cache"
@@ -200,13 +239,352 @@ class SignalAccuracy(Base):
     worst_pnl_pct    = Column(Float, default=0.0)
     last_updated     = Column(String, default=now_iso)
 
+
+class IntelligenceSourceHealth(Base):
+    __tablename__ = "intelligence_source_health"
+    source               = Column(String, primary_key=True)
+    source_kind          = Column(String)
+    provider             = Column(String)
+    url                  = Column(String)
+    reliability_score    = Column(Float, default=0.5)
+    success_count        = Column(Integer, default=0)
+    failure_count        = Column(Integer, default=0)
+    consecutive_failures = Column(Integer, default=0)
+    last_success_at      = Column(String)
+    last_failure_at      = Column(String)
+    last_error           = Column(Text)
+    last_latency_ms      = Column(Float)
+    last_article_count   = Column(Integer, default=0)
+    updated_at           = Column(String, default=now_iso)
+
+
+class IntelligenceIngestionRun(Base):
+    __tablename__ = "intelligence_ingestion_runs"
+    id                = Column(String, primary_key=True, default=new_id)
+    started_at        = Column(String)
+    finished_at       = Column(String)
+    status            = Column(String)
+    source_count      = Column(Integer, default=0)
+    failed_sources    = Column(Integer, default=0)
+    fetched_count     = Column(Integer, default=0)
+    fresh_count       = Column(Integer, default=0)
+    selected_count    = Column(Integer, default=0)
+    saved_news        = Column(Integer, default=0)
+    saved_threats     = Column(Integer, default=0)
+    error             = Column(Text)
+
+
+class SignalEvaluation(Base):
+    """Forward-only paper evaluation of a generated signal against later bars."""
+    __tablename__ = "signal_evaluations"
+    signal_id          = Column(String, primary_key=True)
+    symbol             = Column(String)
+    asset_class        = Column(String)
+    direction          = Column(String)
+    timeframe          = Column(String)
+    signal_version     = Column(String)
+    generated_at       = Column(String)
+    first_bar_at       = Column(String)
+    last_bar_at        = Column(String)
+    bars_observed      = Column(Integer, default=0)
+    entry_price        = Column(Float)
+    target_price       = Column(Float)
+    stop_loss          = Column(Float)
+    mfe_pct            = Column(Float, default=0.0)
+    mae_pct            = Column(Float, default=0.0)
+    outcome            = Column(String, default="OPEN")
+    data_issue         = Column(Text)
+    target_hit_at      = Column(String)
+    stop_hit_at        = Column(String)
+    evaluated_at       = Column(String, default=now_iso)
+
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+    id           = Column(String, primary_key=True, default=new_id)
+    email        = Column(String, unique=True)
+    display_name = Column(String)
+    is_active    = Column(Boolean, default=True)
+    created_at   = Column(String, default=now_iso)
+    updated_at   = Column(String, default=now_iso)
+
+
+class UserPreference(Base):
+    __tablename__ = "user_preferences"
+    user_id             = Column(String, primary_key=True)
+    trade_mode          = Column(String, default="all")  # scalp | longer | all
+    min_confidence      = Column(Float, default=60.0)
+    asset_classes       = Column(Text, default="[]")
+    directions          = Column(Text, default="[]")
+    telegram_enabled    = Column(Boolean, default=False)
+    auto_sim_enabled    = Column(Boolean, default=True)
+    paper_auto_trade_enabled = Column(Boolean, default=True)
+    updated_at          = Column(String, default=now_iso)
+
+
+class TelegramLinkToken(Base):
+    __tablename__ = "telegram_link_tokens"
+    id           = Column(String, primary_key=True, default=new_id)
+    user_id      = Column(String, nullable=False)
+    token_hash   = Column(String, unique=True, nullable=False)
+    expires_at   = Column(String, nullable=False)
+    used_at      = Column(String)
+    created_at   = Column(String, default=now_iso)
+
+
+class UserTelegramLink(Base):
+    __tablename__ = "user_telegram_links"
+    id           = Column(String, primary_key=True, default=new_id)
+    user_id      = Column(String, unique=True, nullable=False)
+    chat_id      = Column(String, unique=True, nullable=False)
+    is_active    = Column(Boolean, default=True)
+    linked_at    = Column(String, default=now_iso)
+
+
+class TelegramDelivery(Base):
+    __tablename__ = "telegram_deliveries"
+    id           = Column(String, primary_key=True, default=new_id)
+    user_id      = Column(String, nullable=False)
+    chat_id      = Column(String, nullable=False)
+    signal_id    = Column(String, nullable=False)
+    setup_key    = Column(String)
+    setup_state  = Column(Text)
+    message_id   = Column(String)
+    delivered_at = Column(String, default=now_iso)
+    updated_at   = Column(String, default=now_iso)
+    status       = Column(String, default="sent")
+
+
+class TelegramCallback(Base):
+    __tablename__ = "telegram_callbacks"
+    callback_id  = Column(String, primary_key=True)
+    user_id      = Column(String, nullable=False)
+    chat_id      = Column(String, nullable=False)
+    signal_id    = Column(String, nullable=False)
+    action       = Column(String, nullable=False)
+    processed_at = Column(String, default=now_iso)
+
+
+class AutoSimPosition(Base):
+    __tablename__ = "auto_sim_positions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "signal_id", name="uq_auto_sim_position_user_signal"),
+    )
+    id                = Column(String, primary_key=True, default=new_id)
+    user_id           = Column(String, default=DEFAULT_USER_ID)
+    signal_id         = Column(String, nullable=False)
+    symbol            = Column(String, nullable=False)
+    asset_class       = Column(String)
+    direction         = Column(String)
+    side              = Column(String)
+    leverage          = Column(Float, default=1.0)
+    qty               = Column(Float)
+    entry_price       = Column(Float)
+    current_price     = Column(Float)
+    target_price      = Column(Float)
+    stop_loss         = Column(Float)
+    margin_used       = Column(Float, default=1000.0)
+    unrealized_pnl    = Column(Float, default=0.0)
+    status            = Column(String, default="Open")
+    signal_updated_at = Column(String)
+    opened_at         = Column(String, default=now_iso)
+    updated_at        = Column(String, default=now_iso)
+
+
+class AutoSimTrade(Base):
+    __tablename__ = "auto_sim_trades"
+    id           = Column(String, primary_key=True, default=new_id)
+    user_id      = Column(String, default=DEFAULT_USER_ID)
+    signal_id    = Column(String)
+    symbol       = Column(String)
+    asset_class  = Column(String)
+    direction    = Column(String)
+    side         = Column(String)
+    leverage     = Column(Float, default=1.0)
+    qty          = Column(Float)
+    entry_price  = Column(Float)
+    exit_price   = Column(Float)
+    realized_pnl = Column(Float, default=0.0)
+    pnl_pct      = Column(Float, default=0.0)
+    close_reason = Column(String)
+    opened_at    = Column(String)
+    closed_at    = Column(String, default=now_iso)
+
+
+class AutoSimPortfolio(Base):
+    __tablename__ = "auto_sim_portfolios"
+    user_id      = Column(String, primary_key=True, default=DEFAULT_USER_ID)
+    starting_cash= Column(Float, default=100000.0)
+    realized_pnl = Column(Float, default=0.0)
+    total_trades = Column(Integer, default=0)
+    wins         = Column(Integer, default=0)
+    losses       = Column(Integer, default=0)
+    updated_at   = Column(String, default=now_iso)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     # Run migrations for any missing columns
     _migrate_columns()
+    _seed_local_account()
     # Seed paper portfolio if missing
     _seed_paper_portfolio()
     print("[DB] Schema initialized")
+
+
+def _seed_local_account():
+    """Backwards-compatible owner for data created before account support."""
+    now = now_iso()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT OR IGNORE INTO app_users
+                    (id, email, display_name, is_active, created_at, updated_at)
+                VALUES ('local', NULL, 'Local User', 1, :now, :now)
+            """), {"now": now})
+            conn.execute(text("""
+                INSERT OR IGNORE INTO user_preferences
+                    (user_id, trade_mode, min_confidence, asset_classes, directions,
+                     telegram_enabled, auto_sim_enabled, updated_at)
+                VALUES ('local', 'all', 60.0, '[]', '[]', 0, 1, :now)
+            """), {"now": now})
+            conn.execute(text("""
+                INSERT OR IGNORE INTO auto_sim_portfolios
+                    (user_id, starting_cash, realized_pnl, total_trades, wins, losses, updated_at)
+                VALUES ('local', 100000.0, 0.0, 0, 0, 0, :now)
+            """), {"now": now})
+            backfill_legacy_user_ids(conn)
+    except Exception as exc:
+        print(f"[DB] Local account seed warning: {exc}")
+
+
+def backfill_legacy_user_ids(conn, tables=None, user_id: str = DEFAULT_USER_ID):
+    """Assign pre-account rows to the backward-compatible local owner."""
+    tables = tables or ("trading_signals", "platform_configs", "paper_positions", "paper_trades", "paper_portfolio")
+    existing_tables = {
+        row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+    }
+    for table in tables:
+        if table not in existing_tables:
+            continue
+        columns = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+        if "user_id" in columns:
+            conn.execute(
+                text(f"UPDATE {table} SET user_id=:user_id WHERE user_id IS NULL OR user_id=''"),
+                {"user_id": user_id},
+            )
+
+def _repair_auto_sim_history():
+    """Remove replayed signal rows created before Auto Sim runs were serialized."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE auto_sim_positions SET user_id=:user_id "
+                "WHERE user_id IS NULL OR user_id=''"
+            ), {"user_id": DEFAULT_USER_ID})
+            conn.execute(text(
+                "UPDATE auto_sim_trades SET user_id=:user_id "
+                "WHERE user_id IS NULL OR user_id=''"
+            ), {"user_id": DEFAULT_USER_ID})
+
+            duplicate_positions = conn.execute(text("""
+                DELETE FROM auto_sim_positions
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY user_id, signal_id
+                                   ORDER BY COALESCE(opened_at, ''), id
+                               ) AS replay_number
+                        FROM auto_sim_positions
+                        WHERE signal_id IS NOT NULL
+                    ) replays
+                    WHERE replay_number > 1
+                )
+            """)).rowcount
+            duplicate_trades = conn.execute(text("""
+                DELETE FROM auto_sim_trades
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY user_id, signal_id
+                                   ORDER BY COALESCE(closed_at, ''), id
+                               ) AS replay_number
+                        FROM auto_sim_trades
+                        WHERE signal_id IS NOT NULL
+                    ) replays
+                    WHERE replay_number > 1
+                )
+            """)).rowcount
+
+            conn.execute(text("""
+                UPDATE auto_sim_portfolios
+                SET realized_pnl = COALESCE((
+                        SELECT SUM(t.realized_pnl)
+                        FROM auto_sim_trades t
+                        WHERE t.user_id = auto_sim_portfolios.user_id
+                    ), 0),
+                    total_trades = (
+                        SELECT COUNT(*) FROM auto_sim_trades t
+                        WHERE t.user_id = auto_sim_portfolios.user_id
+                    ),
+                    wins = (
+                        SELECT COUNT(*) FROM auto_sim_trades t
+                        WHERE t.user_id = auto_sim_portfolios.user_id
+                          AND t.realized_pnl > 0
+                    ),
+                    losses = (
+                        SELECT COUNT(*) FROM auto_sim_trades t
+                        WHERE t.user_id = auto_sim_portfolios.user_id
+                          AND t.realized_pnl < 0
+                    ),
+                    updated_at = :updated_at
+            """), {"updated_at": now_iso()})
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_auto_sim_position_user_signal
+                ON auto_sim_positions (user_id, signal_id)
+            """))
+
+        if duplicate_positions or duplicate_trades:
+            print(
+                "[DB] Auto Sim repair: removed "
+                f"{duplicate_positions} replayed positions and {duplicate_trades} replayed trades"
+            )
+    except Exception as exc:
+        print(f"[DB] Auto Sim repair warning: {exc}")
+
+
+def _ensure_paper_position_unique_open_index():
+    """
+    Guard against duplicate open paper positions for the same (user, symbol).
+
+    open_paper_position() does a non-atomic check-then-insert (SELECT then
+    INSERT in separate statements), so a concurrent scheduler cycle and a
+    Telegram callback could both pass the "already open?" check and insert
+    duplicate open positions before either commits. A partial unique index
+    (SQLite supports WHERE-qualified indexes) makes the second INSERT raise
+    an IntegrityError instead of silently succeeding; open_paper_position()
+    catches that and returns the same "already open" error it would have
+    returned had the check caught the race.
+
+    This is created best-effort: if duplicate open rows already exist on an
+    existing DB, CREATE UNIQUE INDEX will fail — that's logged and skipped
+    rather than crashing startup. Run a manual cleanup + retry if it warns.
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_position_open_symbol
+                ON paper_positions (user_id, symbol)
+                WHERE status = 'Open'
+            """))
+            conn.commit()
+    except Exception as exc:
+        print(
+            "[DB] paper_positions unique-open-symbol index not created "
+            f"(likely pre-existing duplicate open rows): {exc}"
+        )
+
 
 def _migrate_columns():
     """Add any missing columns to existing tables without data loss."""
@@ -220,8 +598,52 @@ def _migrate_columns():
             ("key_risks",        "TEXT"),
             ("paper_mode",       "INTEGER DEFAULT 0"),
             ("paper_direction",  "TEXT"),
+            ("calibrated_confidence", "REAL"),
+            ("score_breakdown", "TEXT"),
+            ("data_quality_score", "REAL"),
+            ("freshness_score", "REAL"),
+            ("news_confidence", "REAL"),
+            ("setup_type", "TEXT"),
+            ("invalidation", "TEXT"),
+            ("signal_version", "TEXT DEFAULT 'v7.2'"),
+            ("market_data_at", "TEXT"),
+            ("expires_at", "TEXT"),
+            ("trade_horizon", "TEXT DEFAULT 'all'"),
+            ("user_id", "TEXT DEFAULT 'local'"),
+            ("trigger_event", "TEXT"),
+            ("trigger_event_id", "TEXT"),
+            ("alpaca_order_id", "TEXT"),
+        ],
+        "news_items": [
+            ("canonical_url", "TEXT"),
+            ("source_kind", "TEXT"),
+            ("provider", "TEXT"),
+            ("ingested_at", "TEXT"),
+            ("reliability_score", "REAL"),
+            ("confirmation_status", "TEXT"),
+            ("corroboration_count", "INTEGER DEFAULT 0"),
+            ("corroborated_sources", "TEXT"),
+            ("claim_confidence", "REAL"),
+            ("is_stale", "INTEGER DEFAULT 0"),
+            ("entities", "TEXT"),
+            ("cluster_id", "TEXT"),
+        ],
+        "threat_events": [
+            ("source_kind", "TEXT"),
+            ("reliability_score", "REAL"),
+            ("confirmation_status", "TEXT"),
+            ("corroboration_count", "INTEGER DEFAULT 0"),
+            ("claim_confidence", "REAL"),
+            ("cluster_id", "TEXT"),
+        ],
+        "signal_evaluations": [
+            ("data_issue", "TEXT"),
+        ],
+        "platform_configs": [
+            ("user_id", "TEXT DEFAULT 'local'"),
         ],
         "paper_positions": [
+            ("user_id",          "TEXT DEFAULT 'local'"),
             ("asset_class",     "TEXT"),
             ("direction",       "TEXT"),
             ("side",            "TEXT"),
@@ -233,6 +655,7 @@ def _migrate_columns():
             ("signal_id",       "TEXT"),
         ],
         "paper_trades": [
+            ("user_id",          "TEXT DEFAULT 'local'"),
             ("asset_class",     "TEXT"),
             ("direction",       "TEXT"),
             ("side",            "TEXT"),
@@ -240,6 +663,18 @@ def _migrate_columns():
             ("notional",        "REAL"),
             ("signal_id",       "TEXT"),
             ("position_id",     "TEXT"),
+        ],
+        "paper_portfolio": [
+            ("user_id",          "TEXT DEFAULT 'local'"),
+        ],
+        "telegram_deliveries": [
+            ("setup_key", "TEXT"),
+            ("setup_state", "TEXT"),
+            ("message_id", "TEXT"),
+            ("updated_at", "TEXT"),
+        ],
+        "user_preferences": [
+            ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),
         ],
     }
     try:
@@ -253,6 +688,23 @@ def _migrate_columns():
                         print(f"[DB] Migrated: added {table}.{col_name}")
             # Ensure ai_decisions table exists (may be missing on older DBs)
             tables = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+            if "telegram_deliveries" in tables:
+                conn.execute(text("""
+                    UPDATE telegram_deliveries
+                    SET setup_key = (
+                        SELECT UPPER(s.asset_symbol) || ':' ||
+                               CASE WHEN LOWER(COALESCE(s.direction, '')) LIKE '%short%'
+                                    THEN 'short' ELSE 'long' END
+                        FROM trading_signals s
+                        WHERE s.id = telegram_deliveries.signal_id
+                    )
+                    WHERE setup_key IS NULL OR setup_key = ''
+                """))
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS ix_telegram_delivery_setup
+                    ON telegram_deliveries (user_id, chat_id, setup_key)
+                """))
+                conn.commit()
             if "ai_decisions" not in tables:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS ai_decisions (
@@ -271,6 +723,9 @@ def _migrate_columns():
                 print("[DB] Migrated: created ai_decisions table")
     except Exception as e:
         print(f"[DB] Migration warning: {e}")
+
+    _repair_auto_sim_history()
+    _ensure_paper_position_unique_open_index()
 
     # ── Learning engine tables (Tiers 1-5) ─────────────────────────────────
     # Safe to run on every startup — CREATE TABLE IF NOT EXISTS is idempotent
@@ -383,6 +838,7 @@ class PaperPosition(Base):
     """Open or closed virtual positions for the paper trading engine."""
     __tablename__ = "paper_positions"
     id            = Column(String, primary_key=True, default=new_id)
+    user_id       = Column(String, default=DEFAULT_USER_ID)
     symbol        = Column(String, nullable=False)
     asset_class   = Column(String)          # Equity | Crypto
     direction     = Column(String)          # Long | Long_Leveraged | Short | Short_Leveraged
@@ -407,6 +863,7 @@ class PaperTrade(Base):
     """Completed paper trades — the historical ledger."""
     __tablename__ = "paper_trades"
     id            = Column(String, primary_key=True, default=new_id)
+    user_id       = Column(String, default=DEFAULT_USER_ID)
     position_id   = Column(String)          # FK to paper_positions.id
     symbol        = Column(String)
     asset_class   = Column(String)
@@ -429,6 +886,7 @@ class PaperPortfolio(Base):
     """Single-row virtual account state."""
     __tablename__ = "paper_portfolio"
     id             = Column(String, primary_key=True, default=new_id)
+    user_id        = Column(String, default=DEFAULT_USER_ID)
     cash           = Column(Float, default=100000.0)
     total_trades   = Column(Float, default=0)
     winning_trades = Column(Float, default=0)

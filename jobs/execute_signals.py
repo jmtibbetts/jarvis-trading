@@ -5,10 +5,11 @@ Job: Execute Signals v6.5
 - Once status=Active, execute fires immediately — no manual approval needed
 - No more duplicate PendingApproval writes from execute job
 """
-import logging
+import logging, os
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal
 from lib.alpaca_client import get_account, get_positions, submit_bracket_order, normalize_symbol, is_crypto
+from sqlalchemy import or_, func
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +81,16 @@ def run():
     logger.info(f"[Execute] Market: {'OPEN' if market_open else 'CLOSED'}")
 
     # Pull Active signals + PendingApproval equities (promote them when market opens)
+    # Gate/order by the composite evidence score (10-factor, includes earnings/staleness/
+    # conflict penalties) rather than raw LLM confidence — falls back to confidence only
+    # when composite_score hasn't been computed for a signal yet.
+    score_expr = func.coalesce(TradingSignal.composite_score, TradingSignal.confidence)
     with get_db() as db:
         sigs = db.query(TradingSignal).filter(
             TradingSignal.status.in_(["Active", "PendingApproval"]),
-            TradingSignal.confidence >= min_conf
-        ).order_by(TradingSignal.confidence.desc()).limit(100).all()
+            or_(TradingSignal.paper_mode == False, TradingSignal.paper_mode.is_(None)),
+            score_expr >= min_conf
+        ).order_by(score_expr.desc()).limit(100).all()
 
         # Promote equity PendingApproval → Active when market opens
         # Crypto is ALWAYS Active — should never be PendingApproval, but guard anyway
@@ -112,6 +118,28 @@ def run():
 
         sig_dicts = []
         for s in sigs:
+            expires_at = None
+            if getattr(s, "expires_at", None):
+                try:
+                    expires_at = datetime.fromisoformat(s.expires_at.replace("Z", "+00:00"))
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    expires_at = None
+            if expires_at and expires_at <= now_utc:
+                s.status = "Expired"
+                s.updated_date = now_utc.isoformat()
+                logger.info("[Execute] Expired %s at its setup-specific deadline", s.asset_symbol)
+                continue
+
+            min_data_quality = float(os.getenv("MIN_SIGNAL_DATA_QUALITY", "35"))
+            min_freshness = float(os.getenv("MIN_SIGNAL_FRESHNESS", "20"))
+            if getattr(s, "data_quality_score", None) is not None and s.data_quality_score < min_data_quality:
+                logger.info("[Execute] Skip %s - data quality %.1f < %.1f", s.asset_symbol, s.data_quality_score, min_data_quality)
+                continue
+            if getattr(s, "freshness_score", None) is not None and s.freshness_score < min_freshness:
+                logger.info("[Execute] Skip %s - freshness %.1f < %.1f", s.asset_symbol, s.freshness_score, min_freshness)
+                continue
             # Resolve generated_at — fall back to created_date, then treat as ageless
             gen_str = s.generated_at or s.created_date or None
             if gen_str:
@@ -143,6 +171,9 @@ def run():
                 "target_price": s.target_price,
                 "stop_loss":    s.stop_loss,
                 "generated_at": gen_str or "",
+                "expires_at": getattr(s, "expires_at", None),
+                "data_quality_score": getattr(s, "data_quality_score", None),
+                "freshness_score": getattr(s, "freshness_score", None),
             })
 
     logger.info(f"[Execute] {len(sig_dicts)} active signals qualify (conf>={min_conf})")
@@ -221,7 +252,21 @@ def run():
                     logger.warning(f"[Execute] Skip {sym} — qty too small ({qty})")
                     continue
             else:
-                qty = max(1, int(per_trade_cap / entry))
+                raw_qty = per_trade_cap / entry
+                if raw_qty < 1:
+                    # Forcing a minimum of 1 share can blow well past the risk-sized
+                    # allocation for expensive stocks — only round up to 1 when the
+                    # overshoot is minor; otherwise the entry price is simply too high
+                    # for this trade's risk budget and it should be skipped.
+                    if entry > trade_budget * 1.25:
+                        logger.warning(
+                            f"[Execute] Skip {sym} — entry ${entry:.2f} exceeds risk-sized "
+                            f"budget ${trade_budget:.0f} for even 1 share"
+                        )
+                        continue
+                    qty = 1
+                else:
+                    qty = int(raw_qty)
                 cost = qty * entry
                 if cost > budget:
                     logger.warning(f"[Execute] Skip {sym} — cost ${cost:.0f} > budget ${budget:.0f}")

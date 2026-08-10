@@ -14,16 +14,17 @@ Cache rules:
   - Fill missing trading days from yfinance on first access
   - Background backfill job can be triggered manually or on startup
 """
-import logging, time, json
+import logging, time, json, os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict
 import pandas as pd
-from sqlalchemy import create_engine, Column, String, Float, Text, event, text
+from sqlalchemy import create_engine, Column, String, Float, Text, event, text, func
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+ALLOW_YFINANCE_CRYPTO_FALLBACK = os.getenv("ALLOW_YFINANCE_CRYPTO_FALLBACK", "false").lower() in ("1", "true", "yes")
 
 # ── Cache DB (separate from main DB — can grow large) ─────────────────────────
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -89,6 +90,11 @@ def init_cache_db():
 
 # ── Cache TTL per timeframe ────────────────────────────────────────────────────
 CACHE_KEEP_DAYS = {
+    '1m':  7,
+    '3m':  14,
+    '5m':  30,
+    '15m': 45,
+    '30m': 60,
     '1H':  90,
     '2H':  90,
     '4H':  180,
@@ -106,6 +112,11 @@ def to_yf_symbol(symbol: str) -> str:
 
 # ── yfinance timeframe mapping ─────────────────────────────────────────────────
 YF_INTERVALS = {
+    '1m': '1m',
+    '3m': '1m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
     '1H': '1h',
     '2H': '2h',
     '4H': '1h',   # yfinance has no 4H — we'll resample from 1H
@@ -139,8 +150,9 @@ def _yf_fetch(symbol: str, tf: str, start: datetime, end: datetime) -> Optional[
         df = df.dropna(subset=['close'])
         
         # Resample 1H → 4H if needed
-        if tf == '4H':
-            df = df.resample('4h').agg({
+        if tf in ('3m', '4H'):
+            rule = '3min' if tf == '3m' else '4h'
+            df = df.resample(rule).agg({
                 'open': 'first', 'high': 'max', 'low': 'min',
                 'close': 'last', 'volume': 'sum'
             }).dropna(subset=['close'])
@@ -149,6 +161,35 @@ def _yf_fetch(symbol: str, tf: str, start: datetime, end: datetime) -> Optional[
     except Exception as e:
         logger.debug(f"[yfinance] {symbol}/{tf} error: {e}")
         return None
+
+
+# ── Source priority (protects higher-quality bars from being overwritten) ─────
+# Higher number = more trustworthy. Used by _store_bars() to decide whether an
+# incoming fetch is allowed to overwrite an already-cached bar for the same
+# symbol/timeframe/timestamp (e.g. a later yfinance fallback should never
+# clobber a bar we already got from Alpaca).
+_ALPACA_SOURCE_PRIORITY = 1000
+_YFINANCE_SOURCE_PRIORITY = 10
+_DEFAULT_SOURCE_PRIORITY = 0
+
+def _source_priority(source: Optional[str]) -> int:
+    """Return the trust-priority for a bar `source` value. Reuses
+    lib.crypto_market_data.SOURCE_PRIORITY for exchange/aggregator crypto
+    sources so 'binance' etc. rank above 'yfinance' but below 'alpaca'."""
+    if not source:
+        return _DEFAULT_SOURCE_PRIORITY
+    s = source.lower()
+    if s == 'alpaca':
+        return _ALPACA_SOURCE_PRIORITY
+    if s == 'yfinance':
+        return _YFINANCE_SOURCE_PRIORITY
+    try:
+        from lib.crypto_market_data import SOURCE_PRIORITY as _CRYPTO_SOURCE_PRIORITY
+        if s in _CRYPTO_SOURCE_PRIORITY:
+            return _CRYPTO_SOURCE_PRIORITY[s]
+    except Exception:
+        pass
+    return _DEFAULT_SOURCE_PRIORITY
 
 
 def _cache_to_df(rows: list) -> Optional[pd.DataFrame]:
@@ -177,8 +218,10 @@ def _store_bars(symbol: str, tf: str, df: pd.DataFrame, source: str = 'alpaca'):
                 symbol=symbol, timeframe=tf, ts=ts_str
             ).first()
             if existing:
-                # Update with better source data
-                if source in ('alpaca', 'yfinance') or existing.source == 'cache':
+                # Only overwrite if the incoming source is at least as trustworthy
+                # as what's already cached (e.g. don't let a yfinance fallback
+                # clobber a bar we already have from alpaca).
+                if _source_priority(source) >= _source_priority(existing.source):
                     existing.open   = float(row.get('open', 0) or 0)
                     existing.high   = float(row.get('high', 0) or 0)
                     existing.low    = float(row.get('low', 0) or 0)
@@ -239,6 +282,11 @@ def _get_bar_count(symbol: str, tf: str) -> int:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 TF_CONFIG = {
+    '1m':  {'bar_count': 240, 'lookback_days': 1,   'hist_days': 7},
+    '3m':  {'bar_count': 240, 'lookback_days': 2,   'hist_days': 14},
+    '5m':  {'bar_count': 240, 'lookback_days': 3,   'hist_days': 30},
+    '15m': {'bar_count': 200, 'lookback_days': 7,   'hist_days': 45},
+    '30m': {'bar_count': 160, 'lookback_days': 10,  'hist_days': 60},
     '1H':  {'bar_count': 72,  'lookback_days': 5,   'hist_days': 90},
     '2H':  {'bar_count': 60,  'lookback_days': 10,  'hist_days': 90},
     '4H':  {'bar_count': 60,  'lookback_days': 20,  'hist_days': 180},
@@ -246,7 +294,8 @@ TF_CONFIG = {
 }
 
 def fetch_with_cache(symbol: str, tf: str,
-                     alpaca_fetch_fn=None) -> Optional[pd.DataFrame]:
+                     alpaca_fetch_fn=None,
+                     asset_class: str | None = None) -> Optional[pd.DataFrame]:
     """
     Fetch OHLCV bars for symbol/tf using:
     1. Alpaca (primary) → store to cache
@@ -259,6 +308,18 @@ def fetch_with_cache(symbol: str, tf: str,
     end   = datetime.now(timezone.utc)
     start = end - timedelta(days=cfg['lookback_days'])
     bar_count = cfg['bar_count']
+    crypto_symbol = False
+    cache_symbol = symbol
+    try:
+        from lib.crypto_market_data import is_crypto_symbol, normalize_crypto_symbol
+        crypto_symbol = (
+            is_crypto_symbol(symbol) if asset_class is None
+            else str(asset_class).lower() == "crypto"
+        )
+        if crypto_symbol:
+            cache_symbol = normalize_crypto_symbol(symbol)
+    except Exception:
+        crypto_symbol = str(asset_class).lower() == "crypto" if asset_class is not None else False
 
     # ── 1. Try Alpaca ──────────────────────────────────────────────────────────
     alpaca_df = None
@@ -266,13 +327,13 @@ def fetch_with_cache(symbol: str, tf: str,
         try:
             alpaca_df = alpaca_fetch_fn(symbol, tf)
             if alpaca_df is not None and not alpaca_df.empty:
-                _store_bars(symbol, tf, alpaca_df, source='alpaca')
+                _store_bars(cache_symbol, tf, alpaca_df, source='alpaca')
                 logger.info(f"[Cache] Stored {symbol}/{tf} → {len(alpaca_df)} bars (alpaca)")
         except Exception as e:
             logger.debug(f"[Cache] Alpaca fetch failed for {symbol}/{tf}: {e}")
 
     # ── 2. Load from cache ─────────────────────────────────────────────────────
-    cached_df = _get_cached_bars(symbol, tf, start, end)
+    cached_df = _get_cached_bars(cache_symbol, tf, start, end)
 
     # ── 3. yfinance fallback if cache is thin ─────────────────────────────────
     use_yf = (
@@ -282,15 +343,31 @@ def fetch_with_cache(symbol: str, tf: str,
     )
     
     yf_df = None
+    crypto_df = None
     if use_yf:
-        logger.info(f"[Cache] {symbol}/{tf} → falling back to yfinance")
-        yf_df = _yf_fetch(symbol, tf, start, end)
-        if yf_df is not None and not yf_df.empty:
-            _store_bars(symbol, tf, yf_df, source='yfinance')
-            logger.info(f"[Cache] {symbol}/{tf} → {len(yf_df)} bars from yfinance")
+        if crypto_symbol:
+            try:
+                from lib.crypto_market_data import fetch_crypto_ohlcv
+                logger.info(f"[Cache] {symbol}/{tf} → falling back to public crypto APIs")
+                crypto_df = fetch_crypto_ohlcv(symbol, tf, limit=bar_count)
+                if crypto_df is not None and not crypto_df.empty:
+                    source = crypto_df.attrs.get("source", "crypto_api")
+                    _store_bars(cache_symbol, tf, crypto_df, source=source)
+                    logger.info(f"[Cache] {symbol}/{tf} → {len(crypto_df)} bars from {source}")
+            except Exception as e:
+                logger.debug(f"[Cache] Crypto API fallback failed for {symbol}/{tf}: {e}")
+
+        if crypto_symbol and not ALLOW_YFINANCE_CRYPTO_FALLBACK:
+            logger.debug(f"[Cache] {symbol}/{tf} → no exchange crypto bars; skipping yfinance crypto fallback")
+        elif crypto_df is None or crypto_df.empty:
+            logger.info(f"[Cache] {symbol}/{tf} → falling back to yfinance")
+            yf_df = _yf_fetch(symbol, tf, start, end)
+            if yf_df is not None and not yf_df.empty:
+                _store_bars(cache_symbol, tf, yf_df, source='yfinance')
+                logger.info(f"[Cache] {symbol}/{tf} → {len(yf_df)} bars from yfinance")
 
     # ── 4. Merge all sources ──────────────────────────────────────────────────
-    frames = [df for df in [cached_df, alpaca_df, yf_df] if df is not None and not df.empty]
+    frames = [df for df in [cached_df, alpaca_df, crypto_df, yf_df] if df is not None and not df.empty]
     if not frames:
         return None
     
@@ -387,16 +464,44 @@ def get_cache_stats() -> dict:
 
 
 def evict_old_bars():
-    """Delete bars older than CACHE_KEEP_DAYS cutoff per timeframe."""
+    """Delete bars older than CACHE_KEEP_DAYS cutoff per timeframe.
+
+    After deleting, resync BackfillStatus.bar_count/earliest_ts for every
+    symbol/timeframe touched — otherwise backfill_symbol()'s skip-check
+    (which trusts BackfillStatus.bar_count) can wrongly skip re-backfilling
+    a symbol that now has far fewer cached rows than it thinks.
+    """
     evicted = 0
     with get_cache_db() as db:
         for tf, keep_days in CACHE_KEEP_DAYS.items():
             cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+            affected_symbols = [
+                row[0] for row in db.query(OHLCVBar.symbol).filter(
+                    OHLCVBar.timeframe == tf,
+                    OHLCVBar.ts < cutoff
+                ).distinct().all()
+            ]
             n = db.query(OHLCVBar).filter(
                 OHLCVBar.timeframe == tf,
                 OHLCVBar.ts < cutoff
             ).delete()
             evicted += n
+
+            for symbol in affected_symbols:
+                status = db.query(BackfillStatus).filter_by(symbol=symbol, timeframe=tf).first()
+                remaining = db.query(OHLCVBar).filter_by(symbol=symbol, timeframe=tf).count()
+                if remaining == 0:
+                    # Nothing left — drop the status row so backfill_symbol() re-checks from scratch.
+                    if status:
+                        db.delete(status)
+                    continue
+                earliest = db.query(func.min(OHLCVBar.ts)).filter_by(symbol=symbol, timeframe=tf).scalar()
+                latest   = db.query(func.max(OHLCVBar.ts)).filter_by(symbol=symbol, timeframe=tf).scalar()
+                if status:
+                    status.bar_count    = remaining
+                    status.earliest_ts  = earliest
+                    status.latest_ts    = latest
+                    status.last_updated = datetime.now(timezone.utc).isoformat()
     if evicted:
         logger.info(f"[Cache] Evicted {evicted} stale bars")
     return evicted

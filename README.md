@@ -96,12 +96,107 @@ LM_STUDIO_MODEL=local-model
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
+# News and threat intelligence
+NEWS_MAX_ARTICLES=120
+NEWS_ITEMS_PER_SOURCE=8
+NEWS_DEDUP_DAYS=7
+NEWS_MAX_AGE_HOURS=72
+NEWS_AGGREGATOR_MODE=fallback
+X_BEARER_TOKEN=
+X_USERNAMES=realDonaldTrump,POTUS,WhiteHouse
+TRUTH_API_URL=
+TRUTH_API_TOKEN=
+TRUTH_API_ACCOUNTS=realDonaldTrump,WhiteHouse
+OHLCV_WARM_TIMEFRAMES=15m,30m,1H,2H,4H,1D
+MIN_SIGNAL_DATA_QUALITY=35
+MIN_SIGNAL_FRESHNESS=20
+
+# Crypto market data (optional; public providers work keyless where allowed)
+CRYPTO_DISCOVERY_LIMIT=150
+CRYPTO_CACHE_LIMIT=60
+CRYPTO_SCAN_LIMIT=150
+CRYPTO_API_TIMEOUT=8
+CRYPTO_TICKER_CACHE_SECONDS=30
+ALLOW_YFINANCE_CRYPTO_FALLBACK=false
+ALLOW_AGGREGATOR_SYMBOL_FALLBACKS=false
+COINGECKO_API_KEY=
+COINMARKETCAP_API_KEY=
+CRYPTOCOMPARE_API_KEY=
+
+# Trade management guardrails
+MAX_LOSS_PER_TRADE_USD=15
+PROFIT_LOCK_USD=10
+MIN_DYNAMIC_TRAIL_PCT=0.75
+TARGET_REWARD_MULTIPLIER=2.8
+EXIT_ORDER_REPRICE_PCT=0.25
+ALLOW_STANDALONE_TAKE_PROFIT=false
+
 # App
 PORT=3000
 LOG_LEVEL=INFO
 ```
 
 All settings can also be managed in the **Settings** tab in the dashboard UI — including multiple LLM providers, crypto exchanges, and brokerage configurations.
+
+### News and threat intelligence
+
+The 15-minute intelligence job ingests direct RSS feeds from global newspapers and television networks plus specialist coverage of crypto, defense, AI infrastructure, chips, data centers, utilities, energy, freight, and supply chains. Direct publishers are preferred. GDELT is used as a broad aggregator only when direct-source volume falls below `NEWS_AGGREGATOR_FALLBACK_THRESHOLD`; set `NEWS_AGGREGATOR_MODE=always` to query it every run or `off` to disable it.
+
+X ingestion uses the official read-only API. Create an X developer app, place its bearer token in `X_BEARER_TOKEN`, and list accounts in `X_USERNAMES`. No browser scraping is used.
+
+Truth Social's public site is not scraped. For commercial use, enter the endpoint and token supplied by TMTG's licensed Truth API or an authorized data vendor in `TRUTH_API_URL` and `TRUTH_API_TOKEN`. The adapter accepts common `data`, `posts`, and `statuses` response shapes; confirm the exact vendor response during onboarding.
+
+Every fresh curated article is retained in News even when LM Studio is offline. Deterministic rules provide baseline sentiment, entity/ticker extraction, asset tags, and threat detection; the LLM enriches those fields when available. URL/title deduplication spans seven days by default, and category balancing prevents broad headline feeds from crowding out specialist AI and supply-chain coverage.
+
+Each article now records canonical provenance, source type, publication and ingestion times, reliability, staleness, related entities, and corroboration. Social posts remain `unconfirmed_social` until an independent publisher reports the same event. `/api/intelligence/status` and `/api/intelligence/sources` expose ingestion and source health.
+
+### Signal evidence and evaluation
+
+Signals use a versioned evidence score rather than presenting LLM confidence as a standalone probability. The score includes calibrated historical confidence, multi-timeframe agreement, risk/reward, volume, regime, data quality, freshness, liquidity, volatility, news confidence, and explicit conflict penalties. Scanner and generated signals store the component breakdown, invalidation condition, market-data timestamp, and setup-specific expiration.
+
+The forward evaluator runs every 15 minutes against cached bars strictly after each signal timestamp. It records target/stop outcomes, maximum favorable excursion, and maximum adverse excursion without using pre-signal bars. Bars that touch both target and stop remain `AMBIGUOUS`. Aggregate results are available at `/api/signals/performance`; these measurements describe historical simulation and do not guarantee fills or future returns.
+
+### Trading horizon and automatic simulation
+
+The Signals tab has `Scalp`, `Longer`, and `Both` modes. Scalp mode accepts 1m/3m/5m/15m setups; Longer accepts 30m/1H/2H/4H/1D; Both accepts the full ladder. The selected mode is stored in `user_preferences` and is enforced both in LLM prompting and again before generated/scanner signals are saved.
+
+Fresh same-symbol, same-direction setups supersede only active or pending setups. Executed and closed history is never rewritten. A simultaneous long and short remain separate so hedged or conflicting theses stay visible.
+
+The Auto Sim tab is a separate paper-only ledger that follows every eligible signal with `$1,000` virtual margin per setup. It tracks open and realized P/L, equity, gross profit/loss, wins, losses, and win rate. It has no broker client dependency and cannot place Alpaca orders. The API is `/api/auto-paper/summary`; `/api/auto-paper/run` performs an immediate virtual mark-to-market/open pass.
+
+### Account and Telegram security foundation
+
+Existing data is assigned to the backward-compatible `local` user during migration. Account preferences, hashed expiring Telegram link tokens, linked chats, deliveries, and callback receipts have a schema for separate ownership-scoped tables, and `lib/account_security.py` implements one-time token use, callback ownership, duplicate callback rejection, preference routing, and paper-only short/leverage actions with test coverage in `tests/test_account_security.py`. **This module is not yet wired into the running bot** — `jobs/telegram_bot.py` currently authorizes with a simpler single-tenant check (the incoming chat id must match the one configured chat id). Provider secrets are redacted from Settings API responses and blank edits preserve stored credentials.
+
+Per-user outbound Telegram delivery is intentionally not enabled until authenticated web account ownership is added, and `lib/account_security.py` is connected in its place. The schema and authorization tests are ready, but enabling delivery before login/session enforcement would allow an unauthenticated browser session to choose another user's destination.
+
+Telegram trade setup alerts use persistent inline controls. `Execute Paper` opens the signal only in Jarvis's virtual paper portfolio, while `Deny` rejects it. The `/paper` command lists each open paper position with `Take Profit`, `Close`, and `Auto Trading` controls. `Take Profit` refuses losing positions so a loss cannot be mislabeled as profit; `Close` is the explicit exit at either a gain or loss. Callback receipts (a DB-level unique constraint, not just an in-memory check) prevent a retried Telegram update from executing twice. Turning Auto Trading off disables automatic paper entries and discretionary TA/LLM management, but hard stop-loss and take-profit enforcement remains active.
+
+### Crypto data providers
+
+Jarvis uses exchange APIs first for tradable spot markets, then aggregator APIs for breadth and fallback:
+
+| Provider | Role | Key |
+|---|---|---|
+| Binance | Prices, volume discovery, OHLCV | None |
+| OKX | Prices, volume discovery, OHLCV | None |
+| Bybit | Prices, volume discovery, OHLCV | None |
+| Coinbase Exchange | Price/OHLCV fallback | None |
+| Kraken | Price/OHLCV fallback | None |
+| KuCoin | Prices, volume discovery, OHLCV | None |
+| MEXC | Prices, volume discovery, OHLCV | None |
+| CoinGecko | Aggregator discovery/OHLCV fallback | Optional |
+| CoinPaprika | Aggregator discovery fallback | None |
+| CryptoCompare | Aggregator discovery/prices/OHLCV fallback | Optional |
+| CoinMarketCap | Aggregator discovery fallback | Optional/keyless public |
+
+`CRYPTO_SCAN_LIMIT` controls how many discovered crypto symbols the 24/7 scanner evaluates each run. `CRYPTO_CACHE_LIMIT` controls how many of those symbols are warmed into the 15-minute OHLCV cache. `CRYPTO_TICKER_CACHE_SECONDS` limits how long batch ticker snapshots are reused. Short and leveraged scanner ideas are routed to the paper engine; live crypto remains spot-style long/bounce only.
+
+Crypto symbols can collide across providers. For example, `BANK` or `BEAT` may refer to different tokens depending on the exchange or aggregator. Jarvis now uses exact exchange pairs first and keeps Yahoo/ambiguous aggregator symbol fallbacks disabled by default. Turn on `ALLOW_YFINANCE_CRYPTO_FALLBACK` or `ALLOW_AGGREGATOR_SYMBOL_FALLBACKS` only if you accept that symbol-only matches can map to the wrong token.
+
+### Trade management guardrails
+
+Approved/executed positions are checked by the position managers every cycle. `MAX_LOSS_PER_TRADE_USD` defaults to `$15` and is clamped to the `$10-$20` band. Stops ratchet tighter as price improves, paper positions update their stored stop/target directly, and live Alpaca positions try to replace existing stop/take-profit orders when available. This reduces loss exposure, but exact fills still depend on market gaps, liquidity, slippage, broker support, and API availability.
 
 ---
 
@@ -126,6 +221,7 @@ lib/
   ta_engine.py              — TA-Lib multi-timeframe analysis (1H/2H/4H/1D)
   ohlcv.py                  — Multi-timeframe OHLCV fetcher (Alpaca IEX + crypto)
   ohlcv_cache.py            — SQLite OHLCV cache with yfinance fallback
+  crypto_market_data.py     — Free exchange/aggregator crypto prices + OHLCV
   lmstudio.py               — LM Studio LLM client + sequential lock
   market_regime.py          — SPY-based market regime detection
   risk_manager.py           — Kelly criterion + regime-adjusted position sizing
@@ -164,19 +260,22 @@ Routed to the internal paper engine. Full virtual P&L tracking with mark-to-mark
 
 ### Composite Signal Scoring (0–100)
 
-Every signal is scored across 7 factors before execution:
+Every signal is scored across 10 factors before execution (`lib/signal_scorer.py`, v7.2):
 
 | Factor | Weight |
 |---|---|
-| LLM Confidence | 30% |
+| Calibrated LLM Confidence | 18% |
 | TA Confluence (multi-timeframe agreement) | 20% |
-| Risk:Reward Ratio | 20% |
-| Volume Confirmation | 10% |
-| Market Regime Alignment | 15% |
-| Signal Freshness | 5% |
-| Earnings Risk Penalty | −25 pts |
+| Risk:Reward Ratio | 15% |
+| Data Quality | 10% |
+| Volume Confirmation | 8% |
+| Market Regime Alignment | 8% |
+| Signal Freshness | 7% |
+| News Confidence | 5% |
+| Liquidity | 5% |
+| Volatility | 4% |
 
-Signals below the composite threshold are automatically rejected.
+Earnings risk, staleness, and conflicting-signal penalties are applied on top of the weighted sum. Signals below the composite threshold — or below `MIN_SIGNAL_DATA_QUALITY` / `MIN_SIGNAL_FRESHNESS` — are automatically rejected before live execution.
 
 ---
 
@@ -212,13 +311,16 @@ Supports long, short, and leveraged virtual positions independent of broker supp
 
 | Direction | Side | Leverage |
 |---|---|---|
-| Long | Long | 1× |
+| Long / Bounce | Long | 1× |
 | Long_Leveraged | Long | 2× |
+| Long_5x / Long_10x / Long_20x | Long | 5× / 10× / 20× |
 | Short | Short | 1× |
 | Short_Leveraged | Short | 2× |
+| Short_5x / Short_10x / Short_20x | Short | 5× / 10× / 20× |
 
 - **$100k virtual starting capital**
-- Max 3× leverage, $3k margin per position
+- Up to 20× leverage on the highest tiers (`lib/paper_engine.py:MAX_LEVERAGE`) — at 20×, roughly a 4.25% adverse move against the position wipes out enough of the margin to trigger the liquidation threshold below, so treat the 5x/10x/20x tiers as high-risk even though this is paper money
+- Margin per position is asset-class-based, not a flat amount: $3,000 equity / $2,000 crypto / $1,500 futures / $1,000 forex (`lib/paper_engine.py:ASSET_CLASS_MARGIN`)
 - Margin call liquidation at < 15% equity loss on margin
 - Automatic mark-to-market every job cycle
 - Signal context (TA, LLM reasoning, key risks, trigger events) linked to every position

@@ -43,8 +43,24 @@ job_status = {
     'telegram':  {'status': 'idle', 'last': None, 'error': None},
     'guardian':  {'status': 'idle', 'last': None, 'error': None},
     'paper':     {'status': 'idle', 'last': None, 'error': None},
-    'scanner':   {'status': 'idle', 'last': None, 'error': None},
+    # Each scanner mode gets its own key — they run on independent schedules
+    # (cron for pre_market/intraday, interval for crypto/futures) and can
+    # legitimately overlap; sharing one 'scanner' key let one mode's "running"
+    # status mask another's and silently drop its run via the runner's
+    # already-running guard.
+    'scanner_premarket': {'status': 'idle', 'last': None, 'error': None},
+    'scanner_intraday':  {'status': 'idle', 'last': None, 'error': None},
+    'scanner_crypto':    {'status': 'idle', 'last': None, 'error': None},
+    'scanner_futures':   {'status': 'idle', 'last': None, 'error': None},
+    'evaluation':{'status': 'idle', 'last': None, 'error': None},
+    'autosim':   {'status': 'idle', 'last': None, 'error': None},
 }
+
+# Guards the check-then-set on job_status[name]['status'] below so two threads
+# racing to start the same job (e.g. the 30-min execute interval and the
+# event-driven Timer-delayed execute call) can't both observe 'idle' and both
+# proceed to run.
+_job_status_lock = threading.Lock()
 
 # ── Event bus: news/threat jobs signal here when new items arrive ──────────────
 _event_lock   = threading.Lock()
@@ -61,11 +77,12 @@ def notify_new_intelligence():
 
 def make_job_runner(name: str, fn):
     def runner():
-        if job_status[name]['status'] == 'running':
-            logger.info(f"[Scheduler] {name} already running — skipping")
-            return
-        job_status[name]['status'] = 'running'
-        job_status[name]['error'] = None
+        with _job_status_lock:
+            if job_status[name]['status'] == 'running':
+                logger.info(f"[Scheduler] {name} already running — skipping")
+                return
+            job_status[name]['status'] = 'running'
+            job_status[name]['error'] = None
         try:
             fn()
             job_status[name]['last'] = datetime.now(timezone.utc).isoformat()
@@ -104,10 +121,14 @@ def event_driven_signals():
     from jobs.generate_signals import run as signals_run
     make_job_runner('signals', signals_run)()
 
-    # Also fire execute right after to catch any new signals
+    # Also fire execute right after to catch any new signals.
+    # This is a best-effort early check — make_job_runner's lock is the
+    # authoritative guard against racing the regular 30-min execute interval.
     if job_status['execute']['status'] != 'running':
         from jobs.execute_signals import run as execute_run
-        threading.Timer(15.0, make_job_runner('execute', execute_run)).start()
+        timer = threading.Timer(15.0, make_job_runner('execute', execute_run))
+        timer.daemon = True
+        timer.start()
 
 
 def portfolio_guardian():
@@ -367,6 +388,8 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.telegram_bot      import run as telegram_run
     from jobs.paper_trading     import run as paper_run
     from jobs.scan_opportunities import run as scanner_run
+    from jobs.evaluate_signals import run as evaluation_run
+    from jobs.auto_simulator import run as autosim_run
 
     now = datetime.now(timezone.utc)
 
@@ -426,29 +449,43 @@ def create_scheduler() -> BackgroundScheduler:
                   next_run_time=now + timedelta(minutes=5),
                   replace_existing=True, max_instances=1, misfire_grace_time=180)
 
+    # Forward-only signal evaluation reads cached bars and never places orders.
+    sched.add_job(make_job_runner('evaluation', evaluation_run),
+                  'interval', minutes=15, id='signal_evaluation',
+                  next_run_time=now + timedelta(minutes=6),
+                  replace_existing=True, max_instances=1)
+
+    # Separate paper-only ledger: follows every eligible signal, never a broker.
+    sched.add_job(make_job_runner('autosim', autosim_run),
+                  'interval', minutes=1, id='auto_simulator',
+                  next_run_time=now + timedelta(seconds=10),
+                  replace_existing=True, max_instances=1)
+
     # Telegram every 1 min — fires immediately (no LLM, just polls)
     sched.add_job(make_job_runner('telegram', telegram_run),
                   'interval', minutes=1, id='telegram', next_run_time=now)
 
 
     # ── OPPORTUNITY SCANNER ────────────────────────────────────────────────────
+    # Each mode uses its own job_status key (see job_status dict above) since
+    # these schedules can legitimately overlap.
     # Pre-market scan at 6:30 AM PT (13:30 UTC) every weekday
-    sched.add_job(make_job_runner('scanner', lambda: scanner_run('pre_market')),
+    sched.add_job(make_job_runner('scanner_premarket', lambda: scanner_run('pre_market')),
                   'cron', day_of_week='mon-fri', hour=13, minute=30,
                   id='scanner_premarket', timezone='UTC')
 
-    # Intraday scan every 30 min during market hours (Mon-Fri 13:30-20:00 UTC)
-    sched.add_job(make_job_runner('scanner', lambda: scanner_run('intraday')),
-                  'cron', day_of_week='mon-fri', hour='13-19', minute='0,30',
+    # Intraday scalp scan every 15 min during market hours (Mon-Fri 13:30-20:00 UTC)
+    sched.add_job(make_job_runner('scanner_intraday', lambda: scanner_run('intraday')),
+                  'cron', day_of_week='mon-fri', hour='13-19', minute='0,15,30,45',
                   id='scanner_intraday', timezone='UTC')
 
-    # Crypto scan every 60 min, 24/7
-    sched.add_job(make_job_runner('scanner', lambda: scanner_run('crypto')),
-                  'interval', minutes=60, id='scanner_crypto',
+    # Crypto scalp scan every 15 min, 24/7
+    sched.add_job(make_job_runner('scanner_crypto', lambda: scanner_run('crypto')),
+                  'interval', minutes=15, id='scanner_crypto',
                   next_run_time=now + timedelta(minutes=8))
 
     # Futures/forex scan every 4 hours, 24/7
-    sched.add_job(make_job_runner('scanner', lambda: scanner_run('futures')),
+    sched.add_job(make_job_runner('scanner_futures', lambda: scanner_run('futures')),
                   'interval', hours=4, id='scanner_futures',
                   next_run_time=now + timedelta(minutes=10))
 

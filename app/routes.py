@@ -1102,6 +1102,7 @@ def _sig_dict(s):
 def _threat_dict(t):
     return {"id":t.id,"title":t.title,"description":t.description,"event_type":t.event_type,
             "severity":t.severity,"country":t.country,"region":t.region,
+            "latitude":getattr(t,"latitude",None),"longitude":getattr(t,"longitude",None),
             "source":t.source,"source_url":t.source_url,"status":t.status,
             "published_at":t.published_at,"created_date":t.created_date,
             "source_kind":getattr(t,"source_kind",None),
@@ -1238,7 +1239,11 @@ def _position_dict(p):
         "market_value":    float(p.market_value or 0),
         "unrealized_pl":   float(p.unrealized_pl or 0),
         "unrealized_plpc": round(plpc, 4),
-        "side":            str(p.side),
+        # Alpaca SDK's PositionSide is a plain Enum — str() on it yields the
+        # repr "PositionSide.LONG", not the clean value. Same defensive
+        # lower().split(".")[-1] pattern already used for order/side enums
+        # elsewhere in this codebase (e.g. jobs/manage_positions.py).
+        "side":            str(p.side).lower().split(".")[-1],
         "asset_class":     asset_class,
         "current_price":   float(p.current_price or 0),
     }
@@ -1260,7 +1265,7 @@ def debug_positions_raw():
                 "raw_asset_class": raw_class,
                 "resolved_class":  _position_dict(p)["asset_class"],
                 "market_value":    float(p.market_value or 0),
-                "side":            str(p.side),
+                "side":            str(p.side).lower().split(".")[-1],
             })
         return {"count": len(out), "positions": out}
     except Exception as e:

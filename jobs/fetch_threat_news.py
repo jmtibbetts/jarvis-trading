@@ -18,6 +18,7 @@ import httpx
 from app.database import (
     IntelligenceIngestionRun, IntelligenceSourceHealth, NewsItem, ThreatEvent, get_db,
 )
+from lib.geo_lookup import resolve_coords
 
 
 def _coerce_scalar_str(value, default: str = "") -> str:
@@ -635,13 +636,16 @@ def run():
             assets_text = ",".join(assets) if isinstance(assets, list) else str(assets or "")
             published = item.get("published") or now_iso
             if item.get("is_threat"):
+                country = _coerce_scalar_str(item.get("country"))
+                region = _coerce_scalar_str(item.get("region")) or "Global"
+                lat, lon = resolve_coords(country, region)
                 db.add(ThreatEvent(
                     id=str(uuid.uuid4()), title=item["title"],
                     description=item.get("description", ""),
                     event_type=item.get("event_type", "market_event"),
                     severity=item.get("severity", "Medium"),
-                    country=_coerce_scalar_str(item.get("country")),
-                    region=_coerce_scalar_str(item.get("region")) or "Global",
+                    country=country, region=region,
+                    latitude=lat, longitude=lon,
                     source=item.get("source", ""), source_url=item.get("source_url", ""),
                     status="Active", published_at=published,
                     source_kind=item.get("source_kind", ""),

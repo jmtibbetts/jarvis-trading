@@ -75,6 +75,18 @@ def notify_new_intelligence():
     logger.info("[Scheduler] 📡 New intelligence event — signal generation queued")
 
 
+def _broadcast_job_status(name: str):
+    """Push the current job_status snapshot to any connected /next dashboard
+    clients. Best-effort — the new frontend also polls on load, so a missed
+    broadcast (no clients connected, or called before the loop is bound) just
+    means that one update arrives on the next poll instead of instantly."""
+    try:
+        from app.ws import manager
+        manager.broadcast_from_thread("job_status", {name: job_status[name]})
+    except Exception:
+        pass
+
+
 def make_job_runner(name: str, fn):
     def runner():
         with _job_status_lock:
@@ -83,6 +95,7 @@ def make_job_runner(name: str, fn):
                 return
             job_status[name]['status'] = 'running'
             job_status[name]['error'] = None
+        _broadcast_job_status(name)
         try:
             fn()
             job_status[name]['last'] = datetime.now(timezone.utc).isoformat()
@@ -91,6 +104,7 @@ def make_job_runner(name: str, fn):
             logger.error(f"[Scheduler] {name} error: {e}", exc_info=True)
             job_status[name]['status'] = 'error'
             job_status[name]['error'] = str(e)
+        _broadcast_job_status(name)
     return runner
 
 

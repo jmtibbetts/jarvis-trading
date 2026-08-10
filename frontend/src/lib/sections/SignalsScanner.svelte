@@ -2,8 +2,31 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import RadialScore from "../components/RadialScore.svelte";
-  import { api, type Signal, type AnalyzeResult, type ScannerStatus } from "../api";
+  import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
+  import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference } from "../api";
   import { toastStore } from "../stores/toast.svelte";
+
+  // ── trade horizon preference ────────────────────────────────────────
+  const HORIZON_MODES: ["scalp" | "longer" | "all", string][] = [
+    ["scalp", "Scalp"],
+    ["longer", "Longer"],
+    ["all", "Both"],
+  ];
+  let preference = $state<TradingPreference | null>(null);
+  async function loadPreference() {
+    preference = await api.tradingPreference().catch(() => null);
+  }
+  async function setTradeMode(mode: "scalp" | "longer" | "all") {
+    try {
+      preference = await api.setTradeMode(mode);
+      toastStore.ok(`Trade horizon set to ${mode}`);
+    } catch (e) {
+      toastStore.err(`Failed to update trade horizon: ${e}`);
+    }
+  }
+
+  // ── signal analysis modal ───────────────────────────────────────────
+  let analysisSignalId = $state<string | null>(null);
 
   // ── signal list ──────────────────────────────────────────────────────
   let signals = $state<Signal[]>([]);
@@ -22,6 +45,10 @@
   $effect(() => {
     statusFilter;
     loadSignals();
+  });
+
+  $effect(() => {
+    loadPreference();
   });
 
   const filteredSignals = $derived(
@@ -136,9 +163,20 @@
 </script>
 
 <div class="page-head">
-  <h1>Signals &amp; Scanner</h1>
-  <div class="sub">Signal review, manual analysis, and the opportunity scanner in one workspace</div>
+  <div>
+    <h1>Signals &amp; Scanner</h1>
+    <div class="sub">Signal review, manual analysis, and the opportunity scanner in one workspace</div>
+  </div>
+  <div class="horizon-toggle" title="Which timeframes the LLM is allowed to propose signals for">
+    {#each HORIZON_MODES as [mode, label] (mode)}
+      <button class="h-btn" class:on={preference?.trade_mode === mode} onclick={() => setTradeMode(mode)}>{label}</button>
+    {/each}
+  </div>
 </div>
+
+{#if analysisSignalId}
+  <SignalAnalysisModal signalId={analysisSignalId} onClose={() => (analysisSignalId = null)} />
+{/if}
 
 <div class="grid">
   <div class="span-4">
@@ -243,7 +281,13 @@
 
         <div class="sig-table">
           {#each filteredSignals as sig (sig.id)}
-            <div class="sig-row">
+            <div
+              class="sig-row clickable"
+              onclick={() => (analysisSignalId = sig.id)}
+              onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
+              role="button"
+              tabindex="0"
+            >
               <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={34} />
               <div class="sr-main">
                 <div class="sr-sym">
@@ -257,17 +301,17 @@
                   &middot; {sig.signal_source}
                 </div>
               </div>
-              <div class="sr-actions">
+              <div class="sr-actions" role="group" aria-label="Signal actions">
                 {#if isPending(sig) && !sig.paper_mode}
-                  <button class="btn tiny good" disabled={busyIds.has(sig.id)} onclick={() => doAction(sig, "approve")}>Approve</button>
-                  <button class="btn tiny bad" disabled={busyIds.has(sig.id)} onclick={() => doAction(sig, "reject")}>Deny</button>
+                  <button class="btn tiny good" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "approve"); }}>Approve</button>
+                  <button class="btn tiny bad" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "reject"); }}>Deny</button>
                 {:else if sig.status === "Active" && !sig.paper_mode}
-                  <button class="btn tiny" disabled={busyIds.has(sig.id)} onclick={() => doAction(sig, "execute")}>Execute</button>
+                  <button class="btn tiny" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "execute"); }}>Execute</button>
                 {/if}
                 {#if sig.paper_mode && (sig.status === "Active" || sig.status === "PendingApproval")}
-                  <button class="btn tiny outline" disabled={busyIds.has(sig.id)} onclick={() => doAction(sig, "paper")}>Paper Trade</button>
+                  <button class="btn tiny outline" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "paper"); }}>Paper Trade</button>
                 {/if}
-                <button class="btn tiny ghost" disabled={busyIds.has(sig.id)} onclick={() => doAction(sig, "delete")}>✕</button>
+                <button class="btn tiny ghost" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "delete"); }}>✕</button>
               </div>
             </div>
           {:else}
@@ -281,12 +325,38 @@
 
 <style>
   .page-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
     margin-bottom: 16px;
   }
   .page-head h1 {
     font-size: 19px;
     margin: 0 0 4px;
     font-weight: 650;
+  }
+  .horizon-toggle {
+    display: flex;
+    gap: 4px;
+    border: 1px solid var(--line-bright);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .h-btn {
+    background: none;
+    border: none;
+    color: var(--ink-faint);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .h-btn.on {
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
   }
   .sub {
     font-size: 12px;
@@ -503,6 +573,15 @@
   }
   .sig-row:last-child {
     border-bottom: none;
+  }
+  .sig-row.clickable {
+    cursor: pointer;
+    border-radius: 6px;
+    margin: 0 -8px;
+    padding: 10px 8px;
+  }
+  .sig-row.clickable:hover {
+    background: rgba(124, 154, 255, 0.05);
   }
   .sr-sym {
     display: flex;

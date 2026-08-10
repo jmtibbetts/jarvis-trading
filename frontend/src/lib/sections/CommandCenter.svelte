@@ -5,9 +5,11 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
+  import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
   import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime } from "../api";
   import { wsStore } from "../stores/ws.svelte";
 
+  let analysisSignalId = $state<string | null>(null);
   let signals = $state<Signal[]>([]);
   let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
@@ -76,6 +78,10 @@
   };
 </script>
 
+{#if analysisSignalId}
+  <SignalAnalysisModal signalId={analysisSignalId} onClose={() => (analysisSignalId = null)} />
+{/if}
+
 <div class="page-head">
   <div>
     <h1>Command Center</h1>
@@ -129,7 +135,13 @@
     <Panel title="Active Signals" meta="top {signals.length} by score">
       <div class="sig-list">
         {#each signals as sig (sig.id)}
-          <div class="sig">
+          <div
+            class="sig"
+            onclick={() => (analysisSignalId = sig.id)}
+            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
+            role="button"
+            tabindex="0"
+          >
             <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} />
             <div>
               <div class="sig-sym">
@@ -283,6 +295,10 @@
     align-items: center;
     padding: 10px 14px;
     border-bottom: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .sig:hover {
+    background: rgba(124, 154, 255, 0.05);
   }
   .sig:last-child {
     border-bottom: none;

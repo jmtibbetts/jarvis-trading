@@ -102,6 +102,50 @@ export type PerformanceAnalytics = {
 
 export type ScannerStatus = { scanner: Record<string, JobStatus> };
 
+export type Candle = { time: string; open: number; high: number; low: number; close: number; volume: number };
+
+export type TfAnalysis = {
+  bias?: string;
+  rsi?: number;
+  atr?: { pct?: number; value?: number };
+  emas?: Record<string, number | null>;
+  macd?: { macd?: number; signal?: number; histogram?: number; trend?: string; crossover?: string };
+  bollinger_bands?: { upper?: number; mid?: number; lower?: number; position?: string };
+  volume?: { surge?: boolean; dry?: boolean; surge_ratio?: number };
+  price?: { last?: number };
+  adx?: { value?: number; strong?: boolean };
+  error?: string;
+};
+
+export type SignalAnalysis = {
+  signal: Signal & Record<string, unknown>;
+  analysis_generated_at: string;
+  timeframes: string[];
+  ta: Record<string, TfAnalysis>;
+  candles: Record<string, Candle[]>;
+  sources: Record<string, string | null>;
+  confluence: {
+    expected_bias: string;
+    score: number;
+    label: string;
+    bullish_timeframes: string[];
+    bearish_timeframes: string[];
+    neutral_timeframes: string[];
+    risk_flags: string[];
+  };
+  news: { id: string; title: string; sentiment: string | null; relevance?: string }[];
+  threats: { id: string; title: string; severity: string; relevance?: string }[];
+};
+
+export type TradingPreference = {
+  user_id: string;
+  trade_mode: "scalp" | "longer" | "all";
+  min_confidence: number;
+  telegram_enabled: boolean;
+  auto_sim_enabled: boolean;
+  paper_auto_trade_enabled: boolean;
+};
+
 export type PaperPosition = {
   id: string;
   symbol: string;
@@ -294,6 +338,21 @@ export const api = {
 
   analyze: (symbol: string, timeframes: string[], generate_signal: boolean) =>
     post<AnalyzeResult>(`/analyze`, { symbol, timeframes, generate_signal }),
+
+  signalAnalysis: (id: string) => get<SignalAnalysis>(`/signals/${id}/analysis`),
+  saveSignal: (body: Record<string, unknown>) => post<Signal>(`/signals/save`, body),
+
+  tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
+  setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>
+    fetch(`/api/preferences/trading`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trade_mode }) }).then(
+      (r) => r.json() as Promise<TradingPreference>,
+    ),
+
+  approveAllSignals: () => post<{ ok: boolean; approved?: number }>(`/signals/approve-all`),
+  rejectAllSignals: () => post<{ ok: boolean; rejected?: number }>(`/signals/reject-all`),
+  cancelAllOrders: () => del<{ ok: boolean }>(`/alpaca/orders`),
+  alpacaOrders: () => get<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>(`/alpaca/orders`),
+  cancelOrder: (id: string) => del<{ ok: boolean }>(`/alpaca/orders/${id}`),
 
   closeLivePosition: (symbol: string) => post<{ ok: boolean }>(`/positions/${symbol}/close`),
 

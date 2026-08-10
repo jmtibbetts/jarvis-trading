@@ -251,9 +251,25 @@ lib/
   earnings_calendar.py      — Yahoo Finance earnings calendar (IV crush guard)
   kill_switch.py            — Global live-trading pause, independent of per-user settings
   performance_analytics.py  — Sharpe ratio, max drawdown, per-signal-source win rate
-static/                     — CSS + JS frontend assets
-templates/index.html        — Single-page dashboard
+static/                     — CSS + JS frontend assets (current dashboard, served at "/")
+templates/index.html        — Current single-page dashboard (Jinja2 + vanilla JS)
+frontend/                   — New Svelte dashboard rebuild, in progress — served at "/next"
+app/ws.py                   — WebSocket push channel for frontend/ (job events, live updates)
 ```
+
+### Dashboard rebuild (`frontend/`)
+
+A ground-up Svelte + TypeScript rebuild of the dashboard is underway, served at `/next` alongside the current one at `/` — both work independently until the new one reaches feature parity. See the design plan for the full information architecture and visual direction.
+
+```bash
+cd frontend
+npm install        # first time only
+npm run dev        # local dev server on :5173, proxies /api and /ws to :3000
+npm run build       # outputs to static/dist/, served by FastAPI at /next
+npm run check       # type-check
+```
+
+`npm run build` output isn't committed (`static/dist/` is gitignored) — run it after pulling changes to `frontend/` to refresh what `/next` serves. Building requires Node.js; nothing at runtime does — the production app still starts with `start.bat`/`start.ps1` exactly as before, no Node process involved.
 
 ---
 

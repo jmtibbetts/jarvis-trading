@@ -8,3 +8,7 @@ venv/
 *.egg-info/
 .pytest_cache/
 *.log
+
+# frontend/ (Vite+Svelte dashboard rebuild)
+frontend/node_modules/
+static/dist/

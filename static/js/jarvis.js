@@ -824,7 +824,7 @@ async function runScan() {
     '</div>';
 
     // TA per timeframe
-    const tfOrder = ['1H','4H','1D','1W'];
+    const tfOrder = ['1m','3m','5m','15m','30m','1H','2H','4H','1D','1W'];
     const taSorted = tfOrder.filter(function(k){return ta[k];}).concat(Object.keys(ta).filter(function(k){return tfOrder.indexOf(k)===-1&&ta[k];}));
     taSorted.forEach(function(tf){
       const td = ta[tf];

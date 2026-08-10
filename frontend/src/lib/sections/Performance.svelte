@@ -5,6 +5,7 @@
   import LearningPanel from "../components/LearningPanel.svelte";
   import { api, type PerformanceAnalytics, type Decision, type BacktestRun, type RMultipleSummary } from "../api";
   import { toastStore } from "../stores/toast.svelte";
+  import { downloadCsv } from "../csv";
 
   let perf = $state<PerformanceAnalytics | null>(null);
   let decisions = $state<Decision[]>([]);
@@ -47,6 +48,23 @@
     for (const d of decisions) counts[d.action] = (counts[d.action] ?? 0) + 1;
     return counts;
   });
+
+  function exportDecisionsCsv() {
+    downloadCsv(
+      "ai_decision_log",
+      ["timestamp", "source", "action", "symbol", "reasoning"],
+      filteredDecisions.map((d) => [d.created_at, d.source, d.action, d.symbol ?? "", d.reasoning ?? ""]),
+    );
+  }
+
+  function exportRMultiplesCsv() {
+    if (!rmult) return;
+    downloadCsv(
+      "r_multiples",
+      ["symbol", "direction", "entry_price", "stop_loss", "exit_price", "qty", "realized_pnl", "pnl_pct", "r_multiple", "close_reason", "closed_at"],
+      rmult.trades.map((t) => [t.symbol, t.direction, t.entry_price, t.stop_loss, t.exit_price, t.qty, t.realized_pnl, t.pnl_pct, t.r_multiple, t.close_reason, t.closed_at]),
+    );
+  }
 
   async function clearDecisions() {
     if (!confirm("Clear the entire AI decision log? This cannot be undone.")) return;
@@ -163,6 +181,7 @@
               <option value="APPROVED">APPROVED</option>
               <option value="REJECTED">REJECTED</option>
             </select>
+            <button class="btn tiny outline" onclick={exportDecisionsCsv}>Export CSV</button>
             <button class="btn tiny outline" onclick={clearDecisions}>Clear</button>
           </div>
         </div>
@@ -207,6 +226,7 @@
     <Panel title="R-Multiple Distribution" meta="{rmult?.count ?? 0} closed trades with a stop on record">
       {#snippet children()}
         {#if rmult && rmult.count}
+          <button class="btn tiny outline r-export" onclick={exportRMultiplesCsv}>Export CSV</button>
           <div class="stat-list r-kpis">
             <div class="stat"><span>Avg R</span><b class="num {rmult.avg_r != null && rmult.avg_r >= 0 ? 'pl-up' : 'pl-down'}">{rmult.avg_r?.toFixed(2) ?? "—"}</b></div>
             <div class="stat"><span>Win Rate</span><b class="num">{rmult.win_rate_pct?.toFixed(1) ?? "—"}%</b></div>
@@ -581,6 +601,10 @@
     color: var(--bad);
   }
 
+  .r-export {
+    float: right;
+    margin-bottom: 10px;
+  }
   .r-kpis {
     display: grid;
     grid-template-columns: repeat(6, 1fr);

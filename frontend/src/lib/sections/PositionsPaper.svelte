@@ -4,6 +4,7 @@
   import Pill from "../components/Pill.svelte";
   import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist } from "../api";
   import { toastStore } from "../stores/toast.svelte";
+  import { downloadCsv } from "../csv";
 
   type Account = "live" | "paper" | "autosim";
   let account = $state<Account>("live");
@@ -162,6 +163,15 @@
     } finally {
       setBusy(id, false);
     }
+  }
+
+  function exportPaperTradesCsv() {
+    if (!paper) return;
+    downloadCsv(
+      "paper_trades",
+      ["symbol", "direction", "realized_pnl", "pnl_pct", "close_reason", "closed_at"],
+      paper.trades.map((t) => [t.symbol, t.direction, t.realized_pnl, t.pnl_pct, t.close_reason, t.closed_at]),
+    );
   }
 
   async function resetPaper() {
@@ -404,6 +414,7 @@
   </Panel>
   <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}">
     {#if paper && paper.trades.length}
+      <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
       <table class="tbl">
         <thead><tr><th>Symbol</th><th>Direction</th><th>P&amp;L</th><th>Reason</th><th>Closed</th></tr></thead>
         <tbody>
@@ -585,6 +596,10 @@
   .btn.tiny {
     padding: 4px 9px;
     font-size: 11px;
+  }
+  .export-btn {
+    float: right;
+    margin-bottom: 10px;
   }
   .btn.tiny.bad {
     border-color: var(--bad);

@@ -948,5 +948,11 @@ def run():
     log_decision("signals", "GENERATED",
                  f"v7.0 batch run: {total} signals ({saved} new + {updated} updated) | regime={regime.get('label')} | batches={len(all_batches)}",
                  score=total, thinking=False)
+    if saved:
+        try:
+            from app.ws import manager as ws_manager
+            ws_manager.broadcast_from_thread("new_signals", {"count": saved, "regime": regime.get("label")})
+        except Exception:
+            pass
     return {"saved": saved, "updated": updated, "skipped": skipped,
             "regime": regime.get("label"), "batches": len(all_batches)}

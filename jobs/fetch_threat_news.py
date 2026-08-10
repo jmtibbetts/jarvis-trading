@@ -629,6 +629,7 @@ def run():
         analyzed.extend(results)
 
     threat_count = 0
+    new_critical_threats = []
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db() as db:
         for item in analyzed:
@@ -657,6 +658,8 @@ def run():
                     created_date=now_iso, updated_date=now_iso,
                 ))
                 threat_count += 1
+                if item.get("severity") == "Critical":
+                    new_critical_threats.append(item["title"])
 
             db.add(NewsItem(
                 id=str(uuid.uuid4()), title=item["title"],
@@ -679,6 +682,12 @@ def run():
         db.commit()
 
     logger.info("[News] Saved %d threats and %d news items", threat_count, len(analyzed))
+    if new_critical_threats:
+        try:
+            from app.ws import manager as ws_manager
+            ws_manager.broadcast_from_thread("critical_threat", {"titles": new_critical_threats[:5], "count": len(new_critical_threats)})
+        except Exception:
+            pass
     finished_at = datetime.now(timezone.utc).isoformat()
     _record_ingestion_run(
         started_at, finished_at, "ok", health, len(all_articles), len(fresh),

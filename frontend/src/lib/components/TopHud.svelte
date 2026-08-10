@@ -1,6 +1,7 @@
 <script lang="ts">
   import { killSwitchStore } from "../stores/kill.svelte";
   import { wsStore } from "../stores/ws.svelte";
+  import NotificationCenter from "./NotificationCenter.svelte";
 
   let clock = $state(new Date().toTimeString().slice(0, 8));
   $effect(() => {
@@ -34,6 +35,8 @@
       <i></i>
       {wsStore.connected ? "LIVE" : "RECONNECTING"}
     </div>
+
+    <NotificationCenter />
 
     <button
       class="kill"

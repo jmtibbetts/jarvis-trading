@@ -5,6 +5,7 @@
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
   import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference } from "../api";
   import { toastStore } from "../stores/toast.svelte";
+  import { downloadCsv } from "../csv";
 
   // ── trade horizon preference ────────────────────────────────────────
   const HORIZON_MODES: ["scalp" | "longer" | "all", string][] = [
@@ -54,6 +55,38 @@
   const filteredSignals = $derived(
     classFilter ? signals.filter((s) => (s.asset_class ?? "").toLowerCase() === classFilter.toLowerCase()) : signals,
   );
+
+  // ── saved filter presets (localStorage — this is view state, not data the
+  // backend needs to know about) ──────────────────────────────────────────
+  type FilterPreset = { name: string; status: string; klass: string };
+  const PRESETS_KEY = "jarvis.signalFilterPresets";
+  let presets = $state<FilterPreset[]>(JSON.parse(localStorage.getItem(PRESETS_KEY) || "[]"));
+
+  function savePreset() {
+    const name = window.prompt("Name this filter preset:", `${statusFilter || "All"} / ${classFilter || "All"}`);
+    if (!name) return;
+    presets = [...presets.filter((p) => p.name !== name), { name, status: statusFilter, klass: classFilter }];
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+    toastStore.ok(`Preset "${name}" saved`);
+  }
+
+  function applyPreset(p: FilterPreset) {
+    statusFilter = p.status;
+    classFilter = p.klass;
+  }
+
+  function deletePreset(name: string) {
+    presets = presets.filter((p) => p.name !== name);
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  }
+
+  function exportSignalsCsv() {
+    downloadCsv(
+      "signals",
+      ["symbol", "direction", "status", "asset_class", "entry", "target", "stop", "confidence", "rr_ratio", "signal_source", "generated_at"],
+      filteredSignals.map((s) => [s.asset_symbol, s.direction, s.status, s.asset_class ?? "", s.entry_price, s.target_price, s.stop_loss, s.confidence, s.rr_ratio, s.signal_source, s.generated_at]),
+    );
+  }
 
   function setBusy(id: string, busy: boolean) {
     const next = new Set(busyIds);
@@ -324,7 +357,20 @@
             <option value="Futures">Futures</option>
           </select>
           <button class="btn small outline" onclick={clearExpired}>Clear Expired</button>
+          <button class="btn small outline" onclick={savePreset}>Save Preset</button>
+          <button class="btn small outline" onclick={exportSignalsCsv}>Export CSV</button>
         </div>
+
+        {#if presets.length}
+          <div class="presets">
+            {#each presets as p (p.name)}
+              <span class="preset-chip">
+                <button class="preset-apply" onclick={() => applyPreset(p)}>{p.name}</button>
+                <button class="preset-del" onclick={() => deletePreset(p.name)}>✕</button>
+              </span>
+            {/each}
+          </div>
+        {/if}
 
         {#if statusFilter === "PendingApproval"}
           <div class="pending-banner">
@@ -642,6 +688,41 @@
   }
   .filters select {
     width: auto;
+  }
+
+  .presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .preset-chip {
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface-raised);
+    border: 1px solid var(--line-bright);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .preset-apply {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    padding: 5px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .preset-apply:hover {
+    color: var(--accent);
+  }
+  .preset-del {
+    background: none;
+    border: none;
+    border-left: 1px solid var(--line);
+    color: var(--ink-faint);
+    padding: 5px 7px;
+    font-size: 10px;
+    cursor: pointer;
   }
 
   .sig-table {

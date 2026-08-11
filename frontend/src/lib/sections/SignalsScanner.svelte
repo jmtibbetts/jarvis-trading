@@ -6,6 +6,7 @@
   import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
+  import { linkStore } from "../stores/link.svelte";
 
   // ── trade horizon preference ────────────────────────────────────────
   const HORIZON_MODES: ["scalp" | "longer" | "all", string][] = [
@@ -52,9 +53,41 @@
     loadPreference();
   });
 
-  const filteredSignals = $derived(
-    classFilter ? signals.filter((s) => (s.asset_class ?? "").toLowerCase() === classFilter.toLowerCase()) : signals,
-  );
+  // Sort options for the card grid. "newest" uses generated_at; score falls
+  // back to confidence for signals generated before composite scoring existed.
+  type SortKey = "newest" | "oldest" | "confidence" | "score" | "rr" | "symbol";
+  let sortBy = $state<SortKey>("newest");
+  const SORTS: [SortKey, string][] = [
+    ["newest", "Newest first"], ["oldest", "Oldest first"],
+    ["confidence", "Confidence %"], ["score", "Composite score"],
+    ["rr", "R:R ratio"], ["symbol", "Symbol A-Z"],
+  ];
+
+  const filteredSignals = $derived.by(() => {
+    let list = classFilter
+      ? signals.filter((s) => (s.asset_class ?? "").toLowerCase() === classFilter.toLowerCase())
+      : signals;
+    if (linkStore.symbol) {
+      list = list.filter((s) => s.asset_symbol === linkStore.symbol);
+    }
+    const by: Record<SortKey, (a: Signal, b: Signal) => number> = {
+      newest: (a, b) => (b.generated_at ?? "").localeCompare(a.generated_at ?? ""),
+      oldest: (a, b) => (a.generated_at ?? "").localeCompare(b.generated_at ?? ""),
+      confidence: (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0),
+      score: (a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0),
+      rr: (a, b) => (b.rr_ratio ?? 0) - (a.rr_ratio ?? 0),
+      symbol: (a, b) => (a.asset_symbol ?? "").localeCompare(b.asset_symbol ?? ""),
+    };
+    return [...list].sort(by[sortBy]);
+  });
+
+  const fmtAge = (iso: string | null | undefined) => {
+    if (!iso) return "—";
+    const sec = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (sec < 3600) return `${Math.max(1, Math.floor(sec / 60))}m`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+    return `${Math.floor(sec / 86400)}d`;
+  };
 
   // ── saved filter presets (localStorage — this is view state, not data the
   // backend needs to know about) ──────────────────────────────────────────
@@ -356,9 +389,20 @@
             <option value="Crypto">Crypto</option>
             <option value="Futures">Futures</option>
           </select>
+          <select bind:value={sortBy} title="Sort cards">
+            {#each SORTS as [key, label] (key)}
+              <option value={key}>{label}</option>
+            {/each}
+          </select>
           <button class="btn small outline" onclick={clearExpired}>Clear Expired</button>
           <button class="btn small outline" onclick={savePreset}>Save Preset</button>
           <button class="btn small outline" onclick={exportSignalsCsv}>Export CSV</button>
+          {#if linkStore.symbol}
+            <span class="link-chip" title="Linked symbol filter — set by clicking a symbol in any window">
+              🔗 {linkStore.symbol}
+              <button class="link-clear" onclick={() => linkStore.clear()}>✕</button>
+            </span>
+          {/if}
         </div>
 
         {#if presets.length}
@@ -383,29 +427,44 @@
           </div>
         {/if}
 
-        <div class="sig-table">
+        <div class="sig-cards">
           {#each filteredSignals as sig (sig.id)}
             <div
-              class="sig-row clickable"
+              class="sig-card"
+              class:short={sig.direction.toLowerCase().includes("short")}
               onclick={() => (analysisSignalId = sig.id)}
               onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
               role="button"
               tabindex="0"
             >
-              <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={34} />
-              <div class="sr-main">
-                <div class="sr-sym">
-                  {sig.asset_symbol}
-                  <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
-                  {#if sig.paper_mode}<Pill label="paper" tone="warm" />{/if}
-                  <Pill label={sig.status} tone="neutral" />
-                </div>
-                <div class="sr-meta num">
-                  entry {sig.entry_price ?? "—"} → {sig.target_price ?? "—"} / stop {sig.stop_loss ?? "—"} &middot; {sig.timeframe ?? "—"}
-                  &middot; {sig.signal_source}
+              <div class="sc-head">
+                <button
+                  class="sc-sym"
+                  title="Link {sig.asset_symbol} across windows"
+                  onclick={(e) => { e.stopPropagation(); linkStore.link(sig.asset_symbol); }}
+                >{sig.asset_symbol}</button>
+                <span class="sc-age num" title={sig.generated_at}>{fmtAge(sig.generated_at)}</span>
+              </div>
+              <div class="sc-pills">
+                <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
+                {#if sig.paper_mode}<Pill label="paper" tone="warm" />{/if}
+                <Pill label={sig.status} tone="neutral" />
+              </div>
+              <div class="sc-score">
+                <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={46} />
+                <div class="sc-score-meta">
+                  <div class="num"><span class="dim">conf</span> {Math.round(sig.confidence ?? 0)}%</div>
+                  <div class="num"><span class="dim">R:R</span> {sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</div>
+                  <div class="num"><span class="dim">tf</span> {sig.timeframe ?? "—"}</div>
                 </div>
               </div>
-              <div class="sr-actions" role="group" aria-label="Signal actions">
+              <div class="sc-levels num">
+                <div><span class="dim">entry</span> {sig.entry_price ?? "—"}</div>
+                <div><span class="dim">target</span> {sig.target_price ?? "—"}</div>
+                <div><span class="dim">stop</span> {sig.stop_loss ?? "—"}</div>
+              </div>
+              <div class="sc-src dim">{sig.signal_source}</div>
+              <div class="sc-actions" role="group" aria-label="Signal actions">
                 {#if isPending(sig) && !sig.paper_mode}
                   <button class="btn tiny good" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "approve"); }}>Approve</button>
                   <button class="btn tiny bad" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "reject"); }}>Deny</button>
@@ -413,7 +472,7 @@
                   <button class="btn tiny" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "execute"); }}>Execute</button>
                 {/if}
                 {#if sig.paper_mode && (sig.status === "Active" || sig.status === "PendingApproval")}
-                  <button class="btn tiny outline" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "paper"); }}>Paper Trade</button>
+                  <button class="btn tiny outline" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "paper"); }}>Paper</button>
                 {/if}
                 <button class="btn tiny ghost" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "delete"); }}>✕</button>
               </div>
@@ -681,6 +740,113 @@
     box-shadow: 0 0 6px var(--warm);
   }
 
+  .link-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    padding: 4px 9px;
+    border: 1px solid var(--accent-dim);
+    border-radius: var(--radius-sm);
+    background: rgba(124, 154, 255, 0.1);
+    color: var(--accent);
+  }
+  .link-clear {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+  }
+  .sig-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    gap: var(--space-sm);
+  }
+  .sig-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: var(--space-md);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    cursor: pointer;
+    border-top: 2px solid var(--good);
+  }
+  .sig-card.short {
+    border-top-color: var(--bad);
+  }
+  .sig-card:hover {
+    border-color: var(--line-bright);
+    border-top-color: inherit;
+  }
+  .sig-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .sc-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .sc-sym {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-weight: 700;
+    font-size: 14.5px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .sc-sym:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .sc-age {
+    font-size: 10px;
+    color: var(--ink-faint);
+  }
+  .sc-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .sc-score {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .sc-score-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 10.5px;
+  }
+  .sc-levels {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+    border-top: 1px dashed var(--line);
+    padding-top: 7px;
+  }
+  .sc-src {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .sc-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: auto;
+  }
+  .dim {
+    color: var(--ink-faint);
+  }
   .filters {
     display: flex;
     gap: 10px;
@@ -725,48 +891,8 @@
     cursor: pointer;
   }
 
-  .sig-table {
-    display: flex;
-    flex-direction: column;
-  }
-  .sig-row {
-    display: grid;
-    grid-template-columns: 34px 1fr auto;
-    gap: 12px;
-    align-items: center;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--line);
-  }
   .sig-row:last-child {
     border-bottom: none;
-  }
-  .sig-row.clickable {
-    cursor: pointer;
-    border-radius: 6px;
-    margin: 0 -8px;
-    padding: 10px 8px;
-  }
-  .sig-row.clickable:hover {
-    background: rgba(124, 154, 255, 0.05);
-  }
-  .sr-sym {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-weight: 650;
-    font-size: 13px;
-    flex-wrap: wrap;
-  }
-  .sr-meta {
-    font-size: 10.5px;
-    color: var(--ink-faint);
-    margin-top: 3px;
-  }
-  .sr-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
   }
   .empty {
     padding: 24px 0;

@@ -8,6 +8,8 @@
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
   import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer } from "../api";
   import { wsStore } from "../stores/ws.svelte";
+  import { linkStore } from "../stores/link.svelte";
+  import { sectionStore } from "../stores/section.svelte";
 
   let analysisSignalId = $state<string | null>(null);
   let signals = $state<Signal[]>([]);
@@ -213,7 +215,13 @@
             <tbody>
               {#each watchlist.rows as r (r.symbol)}
                 <tr>
-                  <td class="sym">{r.symbol}</td>
+                  <td class="sym">
+                    <button
+                      class="wl-sym"
+                      title="Link {r.symbol} across windows and open Signals"
+                      onclick={() => { linkStore.link(r.symbol); sectionStore.go("signals"); }}
+                    >{r.symbol}</button>
+                  </td>
                   <td class="num">{r.price != null ? (r.price > 1000 ? r.price.toLocaleString(undefined, { maximumFractionDigits: 0 }) : r.price.toFixed(2)) : "—"}</td>
                   <td class="num {r.change_percent == null ? '' : r.change_percent >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(r.change_percent)}</td>
                   <td class="num">
@@ -539,6 +547,19 @@
   }
   table.wl tr:last-child td {
     border-bottom: none;
+  }
+  .wl-sym {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-weight: 650;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .wl-sym:hover {
+    color: var(--accent);
+    text-decoration: underline;
   }
   .wl-note {
     margin-top: 8px;

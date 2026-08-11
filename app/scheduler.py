@@ -93,6 +93,45 @@ def _broadcast_job_status(name: str):
         pass
 
 
+def _persist_job_status(name: str):
+    """Persist this job's last run to the api_cache table. The in-memory
+    job_status dict resets to 'never' on every restart, which made the Ops
+    page look like automation was dead (user restarts frequently and asked
+    why jobs 'never run'). One merged row keyed per job survives restarts."""
+    try:
+        from lib.api_cache import put_cached
+        put_cached(f"jobstatus:{name}", {
+            "last": job_status[name].get("last"),
+            "status": job_status[name].get("status"),
+            "error": job_status[name].get("error"),
+        })
+    except Exception as e:
+        logger.debug(f"[Scheduler] status persist failed for {name}: {e}")
+
+
+def load_persisted_job_status():
+    """Seed the in-memory job_status with last-run history from previous
+    server lifetimes, so 'last=never' means genuinely never — not 'since
+    the last restart'."""
+    try:
+        from app.database import get_db, ApiCacheEntry
+        import json as _json
+        with get_db() as db:
+            rows = db.query(ApiCacheEntry).filter(ApiCacheEntry.key.like("jobstatus:%")).all()
+            for row in rows:
+                name = row.key.split(":", 1)[1]
+                if name in job_status:
+                    saved = _json.loads(row.payload)
+                    if saved.get("last"):
+                        job_status[name]["last"] = saved["last"]
+                    # a run 'in flight' when the old process died is not running now
+                    if saved.get("status") and saved["status"] != "running":
+                        job_status[name]["status"] = saved["status"]
+                        job_status[name]["error"] = saved.get("error")
+    except Exception as e:
+        logger.debug(f"[Scheduler] status restore failed: {e}")
+
+
 def make_job_runner(name: str, fn):
     def runner():
         with _job_status_lock:
@@ -111,6 +150,7 @@ def make_job_runner(name: str, fn):
             job_status[name]['status'] = 'error'
             job_status[name]['error'] = str(e)
         _broadcast_job_status(name)
+        _persist_job_status(name)
     return runner
 
 
@@ -397,6 +437,7 @@ Respond ONLY with valid JSON:
 
 
 def create_scheduler() -> BackgroundScheduler:
+    load_persisted_job_status()  # 'last run' survives restarts — see docstring
     executors = {'default': _DaemonThreadPoolExecutor(max_workers=10)}
     # job_defaults are the fix for "jobs only run when triggered manually":
     # APScheduler's DEFAULT misfire_grace_time is 1 second — if a job's fire

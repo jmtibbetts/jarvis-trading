@@ -210,6 +210,22 @@ def run():
                 logger.info(f"[Execute] Skip {sym} — already held")
                 continue
 
+            # Crypto the signal pipeline covers but Alpaca doesn't list can
+            # never fill — submitting anyway produced a day of repeated
+            # 'asset not found' APIErrors (INJ/OP/SUI/BNB/ATOM). Mark such
+            # signals paper-only so the candidate filter excludes them from
+            # live execution permanently while the paper engine keeps them.
+            if crypto:
+                from lib.alpaca_client import get_tradable_crypto_symbols
+                tradable = get_tradable_crypto_symbols()
+                if tradable is not None and sym not in tradable:
+                    row = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
+                    if row:
+                        row.paper_mode = True
+                        row.updated_date = now_utc.isoformat()
+                    logger.info(f"[Execute] {sym} not tradable on Alpaca — routed to paper only")
+                    continue
+
             # Market-hours gate is enforced by generate_signals (status=PendingApproval when closed).
             # By the time a signal reaches here with status=Active, it is safe to execute.
             # Extra guard: if somehow an equity Active signal exists but market is NOW closed, skip it.

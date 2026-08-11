@@ -46,7 +46,13 @@ class ConnectionManager:
             "data": data,
         }, default=str)
         dead = []
-        for ws in self._connections:
+        # Iterate a SNAPSHOT: send_text awaits, and during that await another
+        # coroutine on the same loop can connect/disconnect a client, mutating
+        # the live set mid-iteration. Hit 53 times in production logs as
+        # "RuntimeError: Set changed size during iteration", which the
+        # orderbook streams' reconnect handler then misread as a connection
+        # failure — churning all four exchange WebSockets simultaneously.
+        for ws in list(self._connections):
             try:
                 await ws.send_text(envelope)
             except Exception:

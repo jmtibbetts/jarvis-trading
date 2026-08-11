@@ -34,6 +34,42 @@ def is_crypto(symbol: str) -> bool:
         return s[:-3] in CRYPTO_BASES
     return s in CRYPTO_BASES
 
+_tradable_crypto_cache: set | None = None
+
+
+def get_tradable_crypto_symbols() -> set | None:
+    """Symbols of crypto assets Alpaca actually lists for trading (e.g.
+    "BTC/USD"), cached in-process — the listing changes rarely.
+
+    Why this exists: the signal pipeline covers the full multi-exchange
+    crypto universe, but Alpaca lists only a subset. Live execution was
+    submitting orders for INJ/OP/SUI/BNB/ATOM and collecting 29 APIErrors
+    ('asset not found') in one day's log, retrying the same dead symbols
+    every cycle.
+
+    Returns None when the listing can't be fetched AND no cached copy
+    exists — callers must treat None as "unknown, don't filter" (today's
+    behavior) rather than blocking all crypto on an API hiccup."""
+    global _tradable_crypto_cache
+    if _tradable_crypto_cache is not None:
+        return _tradable_crypto_cache
+    try:
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        client = get_trading_client()
+        assets = client.get_all_assets(GetAssetsRequest(
+            asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE,
+        ))
+        symbols = {a.symbol for a in assets if getattr(a, "tradable", False)}
+        if symbols:
+            _tradable_crypto_cache = symbols
+        return _tradable_crypto_cache
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Alpaca] Tradable-crypto listing fetch failed: {e}")
+        return _tradable_crypto_cache
+
+
 def normalize_symbol(symbol: str) -> tuple[str, bool]:
     """Returns (alpaca_symbol, is_crypto)"""
     s = symbol.upper().strip()

@@ -401,11 +401,22 @@
                   {#each opp.anomaly?.flags ?? [] as f (f.flag)}
                     <div class="anomaly-line">⚠ {f.detail}</div>
                   {/each}
+                  <div class="opp-actions">
+                    <button
+                      class="btn tiny"
+                      onclick={(e) => { e.stopPropagation(); analysisSignalId = opp.signal_id; }}
+                    >Full Analysis</button>
+                    <button
+                      class="btn tiny outline"
+                      title="Open on the Signals tab — approve, execute, verify, or paper-trade it there"
+                      onclick={(e) => { e.stopPropagation(); linkStore.link(opp.symbol); sectionStore.go("signals"); }}
+                    >Trade →</button>
+                  </div>
                 </div>
               {/if}
             </div>
             <div class="sig-rr">
-              <div class="lbl">Opportunity</div>
+              <div class="lbl">Opportunity <span class="caret">{expandedOpp === opp.signal_id ? "▾" : "▸"}</span></div>
               <span class="num">{opp.opportunity_score.toFixed(1)}</span>
             </div>
           </div>
@@ -665,6 +676,34 @@
   .wl-add input:focus {
     outline: none;
     border-color: var(--accent);
+  }
+  .opp-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .btn {
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--accent);
+    background: rgba(124, 154, 255, 0.14);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .btn.outline {
+    background: none;
+    border-color: var(--line-bright);
+    color: var(--ink-dim);
+  }
+  .btn:hover {
+    filter: brightness(1.2);
+  }
+  .caret {
+    color: var(--ink-faint);
+    font-size: 9px;
   }
   .opp-why {
     font-size: 10px;

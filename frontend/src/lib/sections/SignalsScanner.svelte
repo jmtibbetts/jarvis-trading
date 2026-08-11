@@ -540,14 +540,34 @@
                 <Pill label={sig.status} tone="neutral" />
                 {#if verifyResults[sig.id]}
                   <Pill label={verifyResults[sig.id].verdict.replaceAll("_", " ").toLowerCase()} tone={verdictTone(verifyResults[sig.id].verdict)} />
-                  {#if verifyResults[sig.id].llm_assessment && verifyResults[sig.id].llm_assessment!.assessment !== "UNAVAILABLE"}
-                    <div class="ai-opinion dim" title={verifyResults[sig.id].llm_assessment!.reasoning ?? ""}>
-                      AI: {verifyResults[sig.id].llm_assessment!.assessment}
-                      {#if verifyResults[sig.id].llm_assessment!.key_change}· {verifyResults[sig.id].llm_assessment!.key_change}{/if}
-                    </div>
-                  {/if}
                 {/if}
               </div>
+              {#if verifyResults[sig.id]}
+                {@const vr = verifyResults[sig.id]}
+                <div class="verify-box">
+                  <div class="vb-head">
+                    <b>{vr.verdict.replaceAll("_", " ")}</b>
+                    <span class="num dim">checked @ {vr.current_price ?? "—"} ({vr.price_asof ?? "?"}){vr.drift_pct != null ? ` · ${vr.drift_pct}% from entry` : ""}</span>
+                  </div>
+                  {#if vr.llm_assessment}
+                    {@const a = vr.llm_assessment}
+                    {#if a.assessment !== "UNAVAILABLE"}
+                      <div class="vb-ai {a.assessment === "AGREE" ? 'vb-good' : a.assessment === "DISAGREE" ? 'vb-bad' : ''}">
+                        AI second opinion: <b>{a.assessment}</b>{a.confidence != null ? ` (${a.confidence}%)` : ""}
+                      </div>
+                      {#if a.reasoning}<div class="vb-reason dim">{a.reasoning}</div>{/if}
+                      {#if a.key_change && a.key_change !== "nothing material"}<div class="vb-reason">Changed: {a.key_change}</div>{/if}
+                      {#if a.context_used}
+                        <div class="vb-ctx dim">
+                          context: {Object.entries(a.context_used).filter(([, v]) => v).map(([k]) => k.replaceAll("_", " ")).join(", ") || "none"}
+                        </div>
+                      {/if}
+                    {:else}
+                      <div class="vb-reason dim">{a.reasoning}</div>
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
               <div class="sc-score">
                 <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={46} />
                 <div class="sc-score-meta">
@@ -888,6 +908,40 @@
     cursor: pointer;
     font-size: 10px;
     padding: 0;
+  }
+  .verify-box {
+    grid-column: 1 / -1;
+    border: 1px solid var(--line-bright);
+    border-radius: var(--radius-sm);
+    background: rgba(124, 154, 255, 0.05);
+    padding: 8px 10px;
+    margin-top: 8px;
+    font-size: 11px;
+  }
+  .vb-head {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .vb-ai {
+    margin-top: 4px;
+  }
+  .vb-good {
+    color: var(--good);
+  }
+  .vb-bad {
+    color: var(--bad);
+  }
+  .vb-reason {
+    margin-top: 3px;
+    line-height: 1.45;
+    font-size: 10.5px;
+  }
+  .vb-ctx {
+    margin-top: 4px;
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
   }
   .ai-opinion {
     font-size: 10px;

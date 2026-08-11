@@ -130,17 +130,23 @@ def _auto_trade_enabled():
         return bool(pref.paper_auto_trade_enabled if pref is not None else True)
 
 
-def _signal_keyboard(signal_id, auto_enabled=None):
-    return {"inline_keyboard": [
-        [
-            {"text": "Execute Paper", "callback_data": f"sig:paper:{signal_id}"},
-            {"text": "Deny", "callback_data": f"sig:deny:{signal_id}"},
-        ],
-        [
-            {"text": "Auto On", "callback_data": "auto:on"},
-            {"text": "Auto Off", "callback_data": "auto:off"},
-        ],
-    ]}
+def _signal_keyboard(signal_id, auto_enabled=None, live_eligible=False):
+    """live_eligible: show the Approve LIVE button only for signals that can
+    actually reach live execution (PendingApproval, not paper-gated). The
+    button routes through the same approve_signal logic as the dashboard —
+    kill switch and paper-mode guards included — so eligibility shown here is
+    a convenience, not the enforcement."""
+    rows = [[
+        {"text": "Execute Paper", "callback_data": f"sig:paper:{signal_id}"},
+        {"text": "Deny", "callback_data": f"sig:deny:{signal_id}"},
+    ]]
+    if live_eligible:
+        rows.insert(0, [{"text": "🔴 Approve LIVE Trade", "callback_data": f"sig:live:{signal_id}"}])
+    rows.append([
+        {"text": "Auto On", "callback_data": "auto:on"},
+        {"text": "Auto Off", "callback_data": "auto:off"},
+    ])
+    return {"inline_keyboard": rows}
 
 
 def _position_keyboard(position_id, auto_enabled=None):
@@ -205,6 +211,56 @@ def _price(value):
     return f"${value:,.2f}"
 
 
+def _price_levels(entry, stop, target):
+    """Format the three levels with SHARED adaptive precision so they are
+    always visually distinguishable.
+
+    Fixes a real user-reported bug: fixed 2-decimal formatting collapsed a
+    tight setup on a ~$1 asset into "short from $1.00 to $1.00 stop loss
+    $1.00" — entry, target, and stop all rendered identically because the
+    level spacing was smaller than a cent. Precision is chosen from the
+    smallest pairwise distance between the levels (2 significant digits of
+    that distance), so the numbers that define the trade always differ on
+    screen. Capped at 8 decimals."""
+    import math
+    values = [float(entry or 0), float(stop or 0), float(target or 0)]
+    deltas = [abs(a - b) for i, a in enumerate(values) for b in values[i + 1:] if abs(a - b) > 0]
+    decimals = 2
+    if deltas:
+        smallest = min(deltas)
+        if smallest < 0.01:
+            decimals = min(8, max(2, -int(math.floor(math.log10(smallest))) + 1))
+    elif values and max(values) < 1:
+        decimals = 6
+    return tuple(f"${v:,.{decimals}f}" for v in values)
+
+
+# Horizon labels mirror lib/signal_scorer._setup_type's timeframe mapping —
+# the user-facing answer to "is this a scalp or a swing?"
+_HORIZON_BY_TF = {
+    "1m": "SCALP", "3m": "SCALP", "5m": "SCALP",
+    "15m": "INTRADAY", "30m": "INTRADAY", "1H": "INTRADAY",
+    "2H": "SWING", "4H": "SWING",
+    "1D": "POSITION",
+}
+
+
+def _horizon(signal) -> str:
+    setup = str(getattr(signal, "setup_type", "") or "").strip()
+    if setup:
+        return setup.upper()
+    return _HORIZON_BY_TF.get(str(getattr(signal, "timeframe", "") or ""), "POSITION")
+
+
+def _asset_name(symbol: str) -> str | None:
+    try:
+        with get_db() as db:
+            row = db.query(MarketAsset.name).filter(MarketAsset.symbol == symbol).first()
+            return row[0] if row and row[0] and row[0] != symbol else None
+    except Exception:
+        return None
+
+
 def _format_trade_setup(signal, updated=False):
     is_short = "short" in str(signal.direction or "").lower()
     side = "SHORT" if is_short else "LONG"
@@ -214,19 +270,30 @@ def _format_trade_setup(signal, updated=False):
     risk = (stop - entry) if is_short else (entry - stop)
     reward = (entry - target) if is_short else (target - entry)
     rr = reward / risk if risk > 0 else 0
+    risk_pct = abs(entry - stop) / entry * 100 if entry else 0
+    reward_pct = abs(target - entry) / entry * 100 if entry else 0
     title = "TRADE SETUP UPDATED" if updated else "NEW TRADE SETUP"
     mode = "Paper only" if is_short or "lever" in str(signal.direction or "").lower() else "Pending approval"
     symbol = escape(str(signal.asset_symbol or ""))
+    name = _asset_name(str(signal.asset_symbol or ""))
+    name_line = f" — {escape(name)}" if name else ""
+    horizon = escape(_horizon(signal))
     timeframe = escape(str(getattr(signal, "timeframe", "") or "N/A"))
+    source = escape(str(getattr(signal, "signal_source", "") or "watchlist"))
+    score = getattr(signal, "composite_score", None)
+    score_txt = f"{float(score):.0f}" if score is not None else "—"
     reasoning = escape(str(signal.reasoning or "")[:240])
+    entry_s, stop_s, target_s = _price_levels(entry, stop, target)
+    earnings_line = "\n⚠ Earnings within days — elevated gap risk" if getattr(signal, "earnings_risk", False) else ""
     return (
         f"<b>{title}</b>\n\n"
-        f"<b>{symbol}</b> | <b>{side}</b>\n"
-        f"Entry: <b>{_price(entry)}</b>\n"
-        f"Stop Loss: <b>{_price(stop)}</b>\n"
-        f"Take Profit: <b>{_price(target)}</b>\n"
-        f"Timeframe: {timeframe} | R:R {rr:.2f}\n"
-        f"Confidence: {float(signal.confidence or 0):.0f}% | {mode}\n\n"
+        f"<b>{symbol}</b>{name_line}\n"
+        f"<b>{side}</b> | <b>{horizon}</b> ({timeframe} chart)\n\n"
+        f"Entry: <b>{entry_s}</b>\n"
+        f"Stop Loss: <b>{stop_s}</b> ({risk_pct:.2f}% risk)\n"
+        f"Take Profit: <b>{target_s}</b> ({reward_pct:.2f}% target)\n"
+        f"R:R <b>{rr:.2f}</b> | Score <b>{score_txt}</b> | Conf {float(signal.confidence or 0):.0f}%\n"
+        f"Source: {source} | {mode}{earnings_line}\n\n"
         f"{reasoning}"
     )
 
@@ -265,6 +332,9 @@ def alert_new_signals(token, chat_id):
                 reasoning=s.reasoning or "",
                 signal_source=s.signal_source or "watchlist",
                 earnings_risk=bool(s.earnings_risk),
+                setup_type=getattr(s, "setup_type", None),
+                status=s.status,
+                paper_mode=bool(getattr(s, "paper_mode", False)),
             )
             for s in db.query(TradingSignal).filter(
                 TradingSignal.status.in_(["Active", "PendingApproval"]),
@@ -285,7 +355,11 @@ def alert_new_signals(token, chat_id):
         for key, signal in setups.items():
             state = _setup_state(signal)
             state_json = json.dumps(state, sort_keys=True, separators=(",", ":"))
-            keyboard = _signal_keyboard(signal.id, auto_enabled)
+            live_eligible = (
+                signal.status == "PendingApproval" and not signal.paper_mode
+                and "short" not in str(signal.direction or "").lower()
+            )
+            keyboard = _signal_keyboard(signal.id, auto_enabled, live_eligible=live_eligible)
             delivery = db.query(TelegramDelivery).filter(
                 TelegramDelivery.user_id == signal.user_id,
                 TelegramDelivery.chat_id == str(chat_id),
@@ -300,7 +374,7 @@ def alert_new_signals(token, chat_id):
                     delivery.signal_id = signal.id
                     delivery.updated_at = now_iso()
                 material_change = _material_setup_change(delivery.setup_state, state)
-                needs_controls = delivery.status != "interactive_v2"
+                needs_controls = delivery.status != "interactive_v3"
                 if not material_change and not needs_controls:
                     delivery.signal_id = signal.id
                     delivery.updated_at = now_iso()
@@ -320,7 +394,7 @@ def alert_new_signals(token, chat_id):
                 delivery.setup_state = state_json
                 delivery.message_id = str(result.get("message_id") or delivery.message_id or "")
                 delivery.updated_at = now_iso()
-                delivery.status = "interactive_v2"
+                delivery.status = "interactive_v3"
                 updated += 1
                 continue
 
@@ -337,7 +411,7 @@ def alert_new_signals(token, chat_id):
                 message_id=str(result.get("message_id") or ""),
                 delivered_at=now_iso(),
                 updated_at=now_iso(),
-                status="interactive_v2",
+                status="interactive_v3",
             ))
             sent += 1
 
@@ -481,7 +555,14 @@ def _claim_callback(callback, configured_chat_id, entity_id, action, require_del
     chat_id = str((message.get("chat") or {}).get("id") or "")
     if not callback_id or not chat_id:
         return False, chat_id, "Invalid callback"
-    if configured_chat_id and chat_id != str(configured_chat_id):
+    # Fail closed: if no chat id has been configured yet, no one is authorized to
+    # trigger a state-changing action (open/close a paper position, deny a signal,
+    # toggle auto-trading) — previously an unset TELEGRAM_CHAT_ID let ANY chat that
+    # messaged the bot control it during the window before setup completes.
+    if not configured_chat_id:
+        logger.warning("[Telegram] Ignored callback — no chat id configured yet (complete Telegram setup)")
+        return False, chat_id, "Telegram setup is not complete yet — link a chat in Settings first"
+    if chat_id != str(configured_chat_id):
         logger.warning("[Telegram] Ignored callback from unauthorized chat %s", chat_id)
         return False, chat_id, "This chat is not authorized"
 
@@ -609,7 +690,7 @@ def handle_callback(callback, configured_chat_id, token):
             answer_callback(token, callback_id, "Unknown action", show_alert=True)
             return
         kind, action, entity_id = parts
-        allowed = {"paper", "deny"} if kind == "sig" else {"tp", "close"}
+        allowed = {"paper", "deny", "live"} if kind == "sig" else {"tp", "close"}
         if action not in allowed:
             answer_callback(token, callback_id, "Unknown action", show_alert=True)
             return
@@ -620,6 +701,26 @@ def handle_callback(callback, configured_chat_id, token):
         )
         if not ok:
             answer_callback(token, callback_id, error, show_alert=True)
+            return
+
+        if kind == "sig" and action == "live":
+            # Reuses the dashboard's approve_signal end-to-end: kill-switch
+            # check, PendingApproval-only, paper-mode guard, bracket-order
+            # submission, and stuck-status handling all live there. The
+            # Telegram button is another door to the same room, not new logic.
+            try:
+                from app.routes import approve_signal
+                result = approve_signal(entity_id)
+                filled = result.get("qty") if isinstance(result, dict) else None
+                answer_callback(
+                    token, callback_id,
+                    f"LIVE order submitted{f' (qty {filled})' if filled else ''}.",
+                    show_alert=True,
+                )
+                edit_keyboard(token, chat_id, message_id, {"inline_keyboard": []})
+            except Exception as approve_err:
+                detail = getattr(approve_err, "detail", None) or str(approve_err)
+                answer_callback(token, callback_id, f"Live approval failed: {detail}"[:190], show_alert=True)
             return
 
         if kind == "sig" and action == "deny":
@@ -942,8 +1043,17 @@ def run():
         text = msg.get("text", "")
         cid = str(msg.get("chat", {}).get("id", ""))
         if text.startswith("/"):
-            if chat_id and cid and cid != str(chat_id):
-                logger.warning(f"[Telegram] Ignored command from unauthorized chat {cid}")
+            base_cmd = text.strip().lower().split()[0] if text.strip() else ""
+            if chat_id:
+                if cid and cid != str(chat_id):
+                    logger.warning(f"[Telegram] Ignored command from unauthorized chat {cid}")
+                    continue
+            elif base_cmd != "/chatid":
+                # No chat id configured yet: only allow the read-only /chatid
+                # bootstrap command (needed to discover the id to configure) —
+                # every other command is state-changing or exposes account data
+                # and must wait until setup links a specific chat.
+                logger.warning(f"[Telegram] Ignored '{base_cmd}' from {cid} — no chat id configured yet")
                 continue
             handle(text, cid or chat_id, token)
 

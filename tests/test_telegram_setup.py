@@ -167,7 +167,7 @@ class TelegramSetupTests(unittest.TestCase):
                 delivery = session.query(TelegramDelivery).one()
                 self.assertEqual(delivery.signal_id, "setup-v3")
                 self.assertEqual(delivery.message_id, "101")
-                self.assertEqual(delivery.status, "interactive_v2")
+                self.assertEqual(delivery.status, "interactive_v3")
         finally:
             engine.dispose()
 

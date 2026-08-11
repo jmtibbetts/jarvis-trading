@@ -885,10 +885,13 @@ def ask_analyst(body: dict):
                 # hyphenated (tavily-search/-extract), a detail that would
                 # 404 as underscores the moment a key connects it.
                 routes_by_intent: dict[str, list] = {
+                    # exa/firecrawl first — both hosted MCPs work keyless
+                    # (verified live); tavily's 401s without an API key, so it
+                    # sits last as an option that activates if a key is added.
                     "news": [
-                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
+                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
                     ],
                     "research": [
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),

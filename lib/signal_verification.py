@@ -172,18 +172,17 @@ def _fresh_ta_block(symbol: str) -> tuple[str | None, dict | None]:
 
 
 def _mcp_news_block(symbol: str) -> str | None:
-    """One tavily-search call for fresh symbol news (best-effort, honest label)."""
+    """One exa web search for fresh symbol news (keyless hosted MCP, verified
+    live; tavily's hosted MCP 401s without a key so it is not used here)."""
     try:
-        from lib.mcp_client import call_tool, available_servers
-        if "tavily" not in available_servers():
-            return None
-        raw = call_tool("tavily", "tavily-search", {
-            "query": f"{symbol} stock price news today",
-            "max_results": 5, "topic": "news",
+        from lib.mcp_client import call_tool
+        raw = call_tool("exa", "web_search_exa", {
+            "query": f"{symbol} price news today",
+            "numResults": 5,
         })
         if not raw:
             return None
-        return f"FRESH NEWS (tavily web search — unverified):\n{str(raw)[:1800]}"
+        return f"FRESH NEWS (exa web search — unverified):\n{str(raw)[:1800]}"
     except Exception as e:
         logger.debug(f"[DeepVerify] MCP news failed for {symbol}: {e}")
         return None

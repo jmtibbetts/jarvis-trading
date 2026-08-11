@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import Optional, Union
 from app.database import (
-    AiDecision, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
+    AiDecision, InsiderTransaction, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
     NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
     ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
@@ -399,6 +399,53 @@ def get_intelligence_status():
             "latest_run": _ingestion_run_dict(latest) if latest else None,
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
+
+def _insider_tx_dict(row):
+    return {
+        "id": row.id, "accession_number": row.accession_number,
+        "issuer_cik": row.issuer_cik, "issuer_name": row.issuer_name, "ticker": row.ticker,
+        "owner_cik": row.owner_cik, "owner_name": row.owner_name, "owner_title": row.owner_title,
+        "is_director": bool(row.is_director), "is_officer": bool(row.is_officer),
+        "is_ten_pct_owner": bool(row.is_ten_pct_owner),
+        "security_title": row.security_title, "table": row.table,
+        "transaction_date": row.transaction_date, "transaction_code": row.transaction_code,
+        "transaction_label": row.transaction_label, "acquired_disposed": row.acquired_disposed,
+        "shares": row.shares, "price_per_share": row.price_per_share,
+        "total_value": row.total_value, "shares_owned_after": row.shares_owned_after,
+        "filing_url": row.filing_url, "filed_at": row.filed_at,
+    }
+
+
+@router.get("/insider/activity")
+def get_insider_activity(ticker: str = None, days: int = 30, limit: int = 200):
+    """Recent SEC Form 4 insider transactions — free EDGAR data, no vendor.
+    Every transaction code is included (not just buys/sells) so a caller can
+    see the full picture; see /insider/clusters for the P/S-only signal view."""
+    with get_db() as db:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).date().isoformat()
+        query = db.query(InsiderTransaction).filter(InsiderTransaction.transaction_date >= cutoff)
+        if ticker:
+            query = query.filter(InsiderTransaction.ticker == ticker.upper())
+        rows = query.order_by(InsiderTransaction.transaction_date.desc()).limit(min(max(limit, 1), 500)).all()
+        return [_insider_tx_dict(r) for r in rows]
+
+
+@router.get("/insider/clusters")
+def get_insider_clusters(days: int = 14):
+    """Tickers where multiple insiders bought/sold, an officer bought, or
+    activity was one-directional within the window — computed from real Form 4
+    data via lib/insider_analytics.rank_clusters. Flags are descriptive only;
+    this never asserts wrongdoing or predicts price direction."""
+    from lib.insider_analytics import rank_clusters
+    with get_db() as db:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).date().isoformat()
+        rows = db.query(InsiderTransaction).filter(
+            InsiderTransaction.transaction_date >= cutoff,
+            InsiderTransaction.transaction_code.in_(["P", "S"]),
+        ).all()
+        txs = [_insider_tx_dict(r) for r in rows]
+    return {"window_days": days, "transactions_analyzed": len(txs), "clusters": rank_clusters(txs)}
+
 
 @router.get("/market")
 def get_market():

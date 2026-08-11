@@ -319,6 +319,47 @@ export type ErrorRateSummary = {
   logged_since: number | null;
 };
 
+export type InsiderTransaction = {
+  id: string;
+  accession_number: string;
+  issuer_cik: string | null;
+  issuer_name: string | null;
+  ticker: string | null;
+  owner_cik: string | null;
+  owner_name: string | null;
+  owner_title: string | null;
+  is_director: boolean;
+  is_officer: boolean;
+  is_ten_pct_owner: boolean;
+  security_title: string | null;
+  table: "non_derivative" | "derivative";
+  transaction_date: string | null;
+  transaction_code: string | null;
+  transaction_label: string | null;
+  acquired_disposed: "A" | "D" | null;
+  shares: number | null;
+  price_per_share: number | null;
+  total_value: number | null;
+  shares_owned_after: number | null;
+  filing_url: string | null;
+  filed_at: string | null;
+};
+
+export type InsiderCluster = {
+  ticker: string;
+  buy_count: number;
+  sell_count: number;
+  distinct_buyers: number;
+  distinct_sellers: number;
+  officer_buyers: string[];
+  buy_value: number;
+  sell_value: number;
+  net_value: number;
+  flags: string[];
+};
+
+export type InsiderClustersResponse = { window_days: number; transactions_analyzed: number; clusters: InsiderCluster[] };
+
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
 export type CacheStats = {
   total_bars: number;
@@ -578,6 +619,13 @@ export const api = {
   earningsWatchlist: () => get<EarningsWatchlist>(`/earnings/watchlist`),
   threatExposure: () => get<ThreatExposure>(`/positions/threat-exposure`),
   errorRate: (windowMinutes = 15) => get<ErrorRateSummary>(`/ops/error-rate?window_minutes=${windowMinutes}`),
+
+  insiderActivity: (ticker?: string, days = 30, limit = 200) => {
+    const p = new URLSearchParams({ days: String(days), limit: String(limit) });
+    if (ticker) p.set("ticker", ticker);
+    return get<InsiderTransaction[]>(`/insider/activity?${p.toString()}`);
+  },
+  insiderClusters: (days = 14) => get<InsiderClustersResponse>(`/insider/clusters?days=${days}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

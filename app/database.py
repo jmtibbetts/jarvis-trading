@@ -117,6 +117,38 @@ class ThreatEvent(Base):
     created_date= Column(String, default=now_iso)
     updated_date= Column(String, default=now_iso)
 
+class InsiderTransaction(Base):
+    """SEC Form 4 insider (officer/director/10%-owner) transactions — ingested
+    from the free, unauthenticated data.sec.gov / EDGAR Archives APIs, no
+    paid vendor. accession_number is the dedup key: SEC assigns exactly one
+    per filing, and one filing can contain several transactions."""
+    __tablename__ = "insider_transactions"
+    id                = Column(String, primary_key=True, default=new_id)
+    accession_number  = Column(String, nullable=False, index=True)
+    issuer_cik        = Column(String)
+    issuer_name       = Column(String)
+    ticker            = Column(String, index=True)
+    owner_cik         = Column(String)
+    owner_name        = Column(String)
+    owner_title       = Column(String)
+    is_director       = Column(Boolean, default=False)
+    is_officer        = Column(Boolean, default=False)
+    is_ten_pct_owner  = Column(Boolean, default=False)
+    security_title    = Column(String)
+    table             = Column(String)          # "non_derivative" | "derivative"
+    transaction_date  = Column(String)
+    transaction_code  = Column(String)           # raw SEC code: P, S, A, M, G, F, ...
+    transaction_label = Column(String)           # human label derived from the code
+    acquired_disposed = Column(String)           # "A" | "D"
+    shares            = Column(Float)
+    price_per_share   = Column(Float)
+    total_value       = Column(Float)
+    shares_owned_after= Column(Float)
+    filing_url        = Column(String)
+    filed_at          = Column(String)
+    created_date      = Column(String, default=now_iso)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
     id              = Column(String, primary_key=True, default=new_id)

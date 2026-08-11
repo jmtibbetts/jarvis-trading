@@ -54,6 +54,7 @@ job_status = {
     'scanner_futures':   {'status': 'idle', 'last': None, 'error': None},
     'evaluation':{'status': 'idle', 'last': None, 'error': None},
     'autosim':   {'status': 'idle', 'last': None, 'error': None},
+    'insider':   {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -404,6 +405,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.scan_opportunities import run as scanner_run
     from jobs.evaluate_signals import run as evaluation_run
     from jobs.auto_simulator import run as autosim_run
+    from jobs.fetch_insider_activity import run as insider_run
 
     now = datetime.now(timezone.utc)
 
@@ -478,6 +480,14 @@ def create_scheduler() -> BackgroundScheduler:
     # Telegram every 1 min — fires immediately (no LLM, just polls)
     sched.add_job(make_job_runner('telegram', telegram_run),
                   'interval', minutes=1, id='telegram', next_run_time=now)
+
+    # SEC Form 4 insider activity every 30 min — free EDGAR API, no LLM.
+    # Filings must be submitted within 2 business days of the transaction, so
+    # this cadence is plenty fresh without leaning on SEC's fair-access limits.
+    sched.add_job(make_job_runner('insider', insider_run),
+                  'interval', minutes=30, id='insider',
+                  next_run_time=now + timedelta(minutes=2),
+                  replace_existing=True, max_instances=1)
 
 
     # ── OPPORTUNITY SCANNER ────────────────────────────────────────────────────

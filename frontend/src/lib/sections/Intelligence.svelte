@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -22,6 +22,7 @@
   let expandedNews = $state<string | null>(null);
   let showSources = $state(false);
   let exposure = $state<ThreatExposure | null>(null);
+  let insiderClusters = $state<InsiderClustersResponse | null>(null);
 
   const threatTrend = $derived.by(() => {
     const days: { date: string; critical: number; high: number; other: number; total: number }[] = [];
@@ -60,7 +61,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -68,6 +69,7 @@
       api.intelligenceSources().catch(() => []),
       api.intelligenceStatus().catch(() => null),
       api.threatExposure().catch(() => null),
+      api.insiderClusters(14).catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -77,6 +79,7 @@
     sources = s;
     intelStatus = st;
     exposure = ex;
+    insiderClusters = ic;
   }
 
   $effect(() => {
@@ -250,6 +253,39 @@
           <div class="empty">No open position is directly named in an active threat</div>
         {:else}
           <div class="empty">Exposure check unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d` : "—"}>
+      {#snippet children()}
+        {#if insiderClusters && insiderClusters.clusters.length}
+          <div class="insider-list">
+            {#each insiderClusters.clusters as c (c.ticker)}
+              <div class="insider-row">
+                <div class="insider-sym">{c.ticker}</div>
+                <div class="insider-flags">
+                  {#each c.flags as flag (flag)}
+                    <Pill label={flag.replaceAll("_", " ")} tone={flag.includes("SELL") ? "bad" : flag.includes("BUY") || flag.includes("OFFICER") ? "good" : "neutral"} />
+                  {/each}
+                </div>
+                <div class="insider-stats">
+                  <span>{c.distinct_buyers} buyer{c.distinct_buyers === 1 ? "" : "s"} / {c.distinct_sellers} seller{c.distinct_sellers === 1 ? "" : "s"}</span>
+                  <span class="num {c.net_value >= 0 ? 'pl-up' : 'pl-down'}">net {c.net_value >= 0 ? "+" : ""}${Math.round(c.net_value).toLocaleString()}</span>
+                </div>
+                {#if c.officer_buyers.length}
+                  <div class="insider-officers">Officer buying: {c.officer_buyers.join(", ")}</div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+          <p class="insider-note">Sourced from SEC Form 4 filings (free EDGAR API). Only open-market buys/sells (codes P/S) are analyzed — grants, option exercises, and tax withholding are excluded. This does not imply wrongdoing or predict price direction.</p>
+        {:else if insiderClusters}
+          <div class="empty">No notable insider buy/sell clusters in the last {insiderClusters.window_days} days</div>
+        {:else}
+          <div class="empty">Insider activity unavailable</div>
         {/if}
       {/snippet}
     </Panel>
@@ -722,6 +758,54 @@
   }
   .trend-legend .dot.other {
     background: var(--accent);
+  }
+
+  .insider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .insider-row {
+    display: grid;
+    grid-template-columns: 70px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .insider-row:last-child {
+    border-bottom: none;
+  }
+  .insider-sym {
+    font-weight: 650;
+    font-size: 13px;
+  }
+  .insider-flags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .insider-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+  .insider-officers {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: var(--ink-dim);
+    margin-top: -2px;
+  }
+  .insider-note {
+    margin: 14px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    line-height: 1.5;
   }
 
   @media (max-width: 1180px) {

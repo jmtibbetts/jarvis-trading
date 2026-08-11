@@ -416,6 +416,21 @@ def _insider_tx_dict(row):
     }
 
 
+@router.get("/orderbook/{symbol}")
+def get_orderbook(symbol: str):
+    """Latest in-memory Level 2 snapshot for a symbol from both exchanges
+    (Binance + Coinbase) — populated by the long-lived WS streams started in
+    main.py's lifespan. Used for initial page load; live updates arrive over
+    the app's own /ws WebSocket as "orderbook" messages."""
+    from lib.orderbook_stream import get_latest_snapshot
+    symbol = symbol.upper()
+    binance = get_latest_snapshot("binance", symbol)
+    coinbase = get_latest_snapshot("coinbase", symbol)
+    if not binance and not coinbase:
+        raise HTTPException(503, f"No order book data yet for {symbol} — streams may still be connecting")
+    return {"symbol": symbol, "binance": binance, "coinbase": coinbase}
+
+
 @router.get("/darkpool/top")
 def get_darkpool_top(tier: str = "T1", limit: int = 25):
     """Top symbols by off-exchange (ATS/dark pool) share volume for the

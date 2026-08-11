@@ -89,10 +89,27 @@ async def lifespan(app_: FastAPI):
     scheduler.start()
     logger.info("[Server] APScheduler started — jobs firing immediately")
 
+    # Crypto L2 order book streams (Binance + Coinbase, free public WS feeds).
+    # Unlike APScheduler jobs these are long-lived connections, so they're
+    # started here as asyncio tasks on the SAME loop uvicorn serves requests
+    # on — broadcast_from_thread() exists specifically to bridge INTO this
+    # loop from a different thread (APScheduler's pool); these tasks are
+    # already on it, so they call manager.broadcast() directly.
+    from lib.orderbook_stream import start_orderbook_streams
+
+    async def _broadcast_orderbook_update(snapshot: dict):
+        await ws_manager.broadcast("orderbook", snapshot)
+
+    orderbook_tasks = start_orderbook_streams(on_update=_broadcast_orderbook_update)
+    logger.info(f"[Server] Order book streams started — {len(orderbook_tasks)} connections (Binance + Coinbase)")
+
     yield  # ← App runs here
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("[Server] Shutdown initiated...")
+
+    for task in orderbook_tasks:
+        task.cancel()
 
     # Signal any in-flight LLM calls to abort
     try:

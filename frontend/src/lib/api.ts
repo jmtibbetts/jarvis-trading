@@ -378,6 +378,23 @@ export type YieldCurveSnapshot = {
 
 export type MacroReading = { date: string; value: number; compared_to: string | null; unit: string; series_id: string } | null;
 
+export type OrderBookSnapshot = {
+  exchange: "binance" | "coinbase";
+  symbol: string;
+  bids: [number, number][];
+  asks: [number, number][];
+  best_bid: number | null;
+  best_ask: number | null;
+  spread: number | null;
+  spread_bps: number | null;
+  bid_depth: number;
+  ask_depth: number;
+  imbalance: number | null;
+  ts: number;
+};
+
+export type OrderBookResponse = { symbol: string; binance: OrderBookSnapshot | null; coinbase: OrderBookSnapshot | null };
+
 export type DarkPoolSymbol = {
   symbol: string;
   issuer_name: string | null;
@@ -681,6 +698,7 @@ export const api = {
   macroFred: () => get<MacroSnapshot>(`/macro/fred`),
   darkPoolTop: (tier = "T1", limit = 25) => get<DarkPoolTopActivity>(`/darkpool/top?tier=${tier}&limit=${limit}`),
   darkPoolVenues: (symbol: string, weekStart: string) => get<DarkPoolVenues>(`/darkpool/${symbol}/venues?week_start=${weekStart}`),
+  orderbook: (symbol: string) => get<OrderBookResponse>(`/orderbook/${symbol}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

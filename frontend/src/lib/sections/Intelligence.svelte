@@ -2,6 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
+  import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues } from "../api";
 
   let regime = $state<Regime | null>(null);
@@ -462,6 +463,12 @@
           <div class="empty">Dark pool / ATS data unavailable</div>
         {/if}
       {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Crypto Order Book (Level 2)" meta="Binance + Coinbase · live">
+      <OrderBookPanel />
     </Panel>
   </div>
 

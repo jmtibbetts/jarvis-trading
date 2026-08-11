@@ -416,6 +416,18 @@ def _insider_tx_dict(row):
     }
 
 
+@router.get("/macro/yield-curve")
+def get_yield_curve():
+    """US Treasury daily yield curve — free, unauthenticated Treasury.gov
+    data (lib/treasury_yields.py), no vendor. Includes the 2s10s and 3m10y
+    inversion spreads, the two classic yield-curve recession indicators."""
+    from lib.treasury_yields import get_yield_curve_snapshot
+    snapshot = get_yield_curve_snapshot()
+    if not snapshot:
+        raise HTTPException(503, "Treasury yield curve data unavailable")
+    return snapshot
+
+
 @router.get("/insider/activity")
 def get_insider_activity(ticker: str = None, days: int = 30, limit: int = 200):
     """Recent SEC Form 4 insider transactions — free EDGAR data, no vendor.

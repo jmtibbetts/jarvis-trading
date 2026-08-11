@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -23,6 +23,7 @@
   let showSources = $state(false);
   let exposure = $state<ThreatExposure | null>(null);
   let insiderClusters = $state<InsiderClustersResponse | null>(null);
+  let yieldCurve = $state<YieldCurveSnapshot | null>(null);
 
   const threatTrend = $derived.by(() => {
     const days: { date: string; critical: number; high: number; other: number; total: number }[] = [];
@@ -61,7 +62,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -70,6 +71,7 @@
       api.intelligenceStatus().catch(() => null),
       api.threatExposure().catch(() => null),
       api.insiderClusters(14).catch(() => null),
+      api.yieldCurve().catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -80,6 +82,7 @@
     intelStatus = st;
     exposure = ex;
     insiderClusters = ic;
+    yieldCurve = yc;
   }
 
   $effect(() => {
@@ -135,6 +138,50 @@
   <div class="span-8">
     <Panel title="Threat Map" dotColor="var(--critical)" meta="{threats.length} active" noPad>
       <ThreatMap {threats} />
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Treasury Yield Curve" meta={yieldCurve ? `as of ${yieldCurve.latest.date}` : "—"}>
+      {#snippet children()}
+        {#if yieldCurve}
+          <div class="ih-strip">
+            <div class="ih-stat">
+              <span class="ih-label">2yr</span>
+              <span class="ih-val">{yieldCurve.latest["2yr"]?.toFixed(2) ?? "—"}%</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">10yr</span>
+              <span class="ih-val">{yieldCurve.latest["10yr"]?.toFixed(2) ?? "—"}%</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">30yr</span>
+              <span class="ih-val">{(yieldCurve.latest as any)["30yr"]?.toFixed(2) ?? "—"}%</span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">2s10s spread</span>
+              <span class="ih-val {yieldCurve.latest["2s10s_inverted"] ? 'bad' : 'good'}">
+                {yieldCurve.latest.spread_2s10s != null ? `${yieldCurve.latest.spread_2s10s >= 0 ? "+" : ""}${yieldCurve.latest.spread_2s10s.toFixed(2)}` : "—"}
+              </span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">3m10y spread</span>
+              <span class="ih-val {yieldCurve.latest["3m10y_inverted"] ? 'bad' : 'good'}">
+                {yieldCurve.latest.spread_3m10y != null ? `${yieldCurve.latest.spread_3m10y >= 0 ? "+" : ""}${yieldCurve.latest.spread_3m10y.toFixed(2)}` : "—"}
+              </span>
+            </div>
+            <div class="ih-stat">
+              <span class="ih-label">Curve state</span>
+              <span class="ih-val small {yieldCurve.latest["2s10s_inverted"] || yieldCurve.latest["3m10y_inverted"] ? 'bad' : 'good'}">
+                {yieldCurve.latest["2s10s_inverted"] || yieldCurve.latest["3m10y_inverted"] ? "Inverted" : "Normal"}
+              </span>
+            </div>
+          </div>
+          <p class="insider-note">US Treasury daily yield curve (free, official Treasury.gov data). An inverted curve — short-term yields above long-term — has historically preceded recessions, though timing and lead time vary widely.</p>
+        {:else}
+          <div class="empty">Yield curve data unavailable</div>
+        {/if}
+      {/snippet}
     </Panel>
   </div>
 

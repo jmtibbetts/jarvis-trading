@@ -360,6 +360,22 @@ export type InsiderCluster = {
 
 export type InsiderClustersResponse = { window_days: number; transactions_analyzed: number; clusters: InsiderCluster[] };
 
+export type YieldCurvePoint = {
+  date: string;
+  "2yr"?: number | null;
+  "10yr"?: number | null;
+  spread_2s10s: number | null;
+  spread_3m10y: number | null;
+  "2s10s_inverted": boolean;
+  "3m10y_inverted": boolean;
+};
+
+export type YieldCurveSnapshot = {
+  latest: YieldCurvePoint & Record<string, number | string | boolean | null>;
+  trend: YieldCurvePoint[];
+  fetched_at: string;
+};
+
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
 export type CacheStats = {
   total_bars: number;
@@ -626,6 +642,7 @@ export const api = {
     return get<InsiderTransaction[]>(`/insider/activity?${p.toString()}`);
   },
   insiderClusters: (days = 14) => get<InsiderClustersResponse>(`/insider/clusters?days=${days}`),
+  yieldCurve: () => get<YieldCurveSnapshot>(`/macro/yield-curve`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

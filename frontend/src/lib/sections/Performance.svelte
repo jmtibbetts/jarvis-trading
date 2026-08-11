@@ -254,10 +254,6 @@
     </Panel>
   </div>
 
-  <div class="span-12">
-    <div class="section-divider">Learning Engine</div>
-    <LearningPanel />
-  </div>
 
   <div class="span-6">
     <Panel title="Backtester" meta="deterministic TA-fallback pipeline, no LLM">
@@ -332,6 +328,11 @@
       {/snippet}
     </Panel>
   </div>
+
+  <div class="span-12">
+    <div class="section-divider">Learning Engine</div>
+    <LearningPanel />
+  </div>
 </div>
 
 <style>
@@ -355,6 +356,12 @@
   }
   .span-4 {
     grid-column: span 4;
+  }
+  .span-6 {
+    grid-column: span 6;
+  }
+  .span-8 {
+    grid-column: span 8;
   }
   .span-12 {
     grid-column: span 12;
@@ -663,7 +670,9 @@
   }
 
   @media (max-width: 1180px) {
-    .span-4 {
+    .span-4,
+    .span-6,
+    .span-8 {
       grid-column: span 12;
     }
     .bt-form {

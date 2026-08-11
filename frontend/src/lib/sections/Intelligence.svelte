@@ -6,6 +6,10 @@
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse } from "../api";
 
+  let {
+    view = "world",
+  }: { view?: "world" | "smartmoney" | "macro" | "cryptodesk" } = $props();
+
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
   let news = $state<NewsArticle[]>([]);
@@ -97,24 +101,30 @@
   }
 
   async function loadAll() {
+    // Each view fetches only its own data — the skipped entries resolve to
+    // null/[] instantly. squeezeTop alone is 12 paginated FINRA requests, so
+    // the world/macro/crypto views not paying for it matters, and a popout
+    // window polling every 30s only polls its own tab's endpoints.
+    const W = view === "world", SM = view === "smartmoney", MA = view === "macro";
+    const none = <T,>(v: T) => Promise.resolve(v);
     const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy, ipoRes] = await Promise.all([
-      api.regime().catch(() => null),
-      api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
-      api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
-      api.marketFull().catch(() => ({ equities: [], crypto: [], count: 0 })),
-      api.intelligenceSources().catch(() => []),
-      api.intelligenceStatus().catch(() => null),
-      api.threatExposure().catch(() => null),
-      api.insiderClusters(14).catch(() => null),
-      api.yieldCurve().catch(() => null),
-      api.macroFred().catch(() => null),
-      api.darkPoolTop("T1", 20).catch(() => null),
-      api.squeezeTop(20, 3).catch(() => null),
-      api.institutionalAccumulation(20).catch(() => null),
-      api.congressTrades(25).catch(() => null),
-      api.congressActivity(12).catch(() => null),
-      api.psychology().catch(() => null),
-      api.ipoPipeline(30).catch(() => null),
+      W ? api.regime().catch(() => null) : none(null),
+      W ? api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }) : none([]),
+      W ? api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }) : none([]),
+      W ? api.marketFull().catch(() => ({ equities: [], crypto: [], count: 0 })) : none({ equities: [], crypto: [], count: 0 }),
+      W ? api.intelligenceSources().catch(() => []) : none([]),
+      W ? api.intelligenceStatus().catch(() => null) : none(null),
+      W ? api.threatExposure().catch(() => null) : none(null),
+      SM ? api.insiderClusters(14).catch(() => null) : none(null),
+      MA ? api.yieldCurve().catch(() => null) : none(null),
+      MA ? api.macroFred().catch(() => null) : none(null),
+      SM ? api.darkPoolTop("T1", 20).catch(() => null) : none(null),
+      SM ? api.squeezeTop(20, 3).catch(() => null) : none(null),
+      SM ? api.institutionalAccumulation(20).catch(() => null) : none(null),
+      SM ? api.congressTrades(25).catch(() => null) : none(null),
+      SM ? api.congressActivity(12).catch(() => null) : none(null),
+      MA ? api.psychology().catch(() => null) : none(null),
+      SM ? api.ipoPipeline(30).catch(() => null) : none(null),
     ]);
     regime = r;
     threats = t;
@@ -172,11 +182,20 @@
 </script>
 
 <div class="page-head">
-  <h1>Intelligence</h1>
-  <div class="sub">Market regime, geopolitical threats, and news — the world-awareness layer</div>
+  <h1>{view === "world" ? "Intelligence" : view === "smartmoney" ? "Smart Money" : view === "macro" ? "Macro Desk" : "Crypto Desk"}</h1>
+  <div class="sub">
+    {view === "world"
+      ? "Market regime, geopolitical threats, and news — the world-awareness layer"
+      : view === "smartmoney"
+        ? "Insiders, Congress, institutions, dark pool, short interest, IPOs — who is positioning"
+        : view === "macro"
+          ? "Yield curve, inflation and employment data, market psychology"
+          : "Live order books and perpetual-futures positioning"}
+  </div>
 </div>
 
 <div class="grid">
+  {#if view === "world"}
   <div class="span-4">
     <Panel title="Market Regime" meta={regime?.spy_trend ?? ""}>
       {#if regime}
@@ -196,13 +215,17 @@
       {/if}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-8">
     <Panel title="Threat Map" dotColor="var(--critical)" meta="{threats.length} active" noPad>
       <ThreatMap {threats} />
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "macro"}
   <div class="span-12">
     <Panel title="Treasury Yield Curve" meta={yieldCurve ? `as of ${yieldCurve.latest.date}` : "—"}>
       {#snippet children()}
@@ -246,7 +269,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "macro"}
   <div class="span-12">
     <Panel title="Macro Indicators" meta={macro?.configured ? "FRED · St. Louis Fed" : "not configured"}>
       {#snippet children()}
@@ -274,7 +299,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-12">
     <Panel title="Intelligence Ingestion Health" meta={intelStatus ? intelStatus.status : "—"}>
       {#snippet children()}
@@ -340,7 +367,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-6">
     <Panel title="Threat Escalation Trend" meta="last {threatTrend.length} days">
       {#snippet children()}
@@ -370,7 +399,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-6">
     <Panel title="Position Exposure to Active Threats" meta={exposure ? `${exposure.symbols_exposed}/${exposure.symbols_checked} symbols` : "—"}>
       {#snippet children()}
@@ -394,7 +425,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d` : "—"}>
       {#snippet children()}
@@ -427,7 +460,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel title="Dark Pool / Off-Exchange (ATS) Activity" meta={darkPoolTop ? `week of ${darkPoolTop.week_start} · ${darkPoolTop.tier}` : "—"}>
       {#snippet children()}
@@ -485,7 +520,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "macro"}
   <div class="span-12">
     <Panel
       title="Market Psychology Index"
@@ -545,7 +582,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel
       title="Congressional Trade Disclosures"
@@ -614,7 +653,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel
       title="IPO Pipeline"
@@ -660,7 +701,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel
       title="Institutional Ownership (13F)"
@@ -713,7 +756,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "smartmoney"}
   <div class="span-12">
     <Panel
       title="Short Interest / Squeeze Fuel"
@@ -788,19 +833,25 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "cryptodesk"}
   <div class="span-12">
     <Panel title="Crypto Order Book (Level 2)" meta="Binance + Coinbase · live">
       <OrderBookPanel />
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "cryptodesk"}
   <div class="span-12">
     <Panel title="Crypto Derivatives" meta="OKX perpetuals · funding, OI, liquidations">
       <CryptoDerivativesPanel />
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-6">
     <Panel title="Active Threats" meta="{threats.length} active">
       {#snippet children()}
@@ -854,7 +905,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-6">
     <Panel title="News" meta="{news.length} items">
       {#snippet children()}
@@ -904,7 +957,9 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 
+  {#if view === "world"}
   <div class="span-12">
     <Panel title="Market Watchlist" meta="{marketTab === 'equities' ? equities.length : crypto.length} shown">
       {#snippet children()}
@@ -932,6 +987,7 @@
       {/snippet}
     </Panel>
   </div>
+  {/if}
 </div>
 
 <style>

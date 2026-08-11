@@ -15,6 +15,18 @@
   --critical: #ff3864;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
   --sans: -apple-system, "Segoe UI", "Avenir Next", system-ui, sans-serif;
+  /* Spacing / radius tokens — colors and type were tokenized from the start,
+     but every component hardcoded its own px values for these. New work
+     should use the tokens; existing hardcoded values migrate opportunistically
+     as components get touched (matching the values already in use: panels
+     use 10px radius and 14px padding, pills 4-6px). */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 14px;
+  --space-lg: 20px;
+  --space-xl: 32px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
 }
 
 * {

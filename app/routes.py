@@ -1141,9 +1141,19 @@ def get_market_psychology(persist: bool = True):
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     with get_db() as db:
-        changes = [
-            r[0] for r in db.query(MarketAsset.change_percent).all() if r[0] is not None
-        ]
+        rows_all = db.query(MarketAsset.asset_class, MarketAsset.change_percent).all()
+        changes = [r[1] for r in rows_all if r[1] is not None]
+        changes_by_market = {"stocks": [], "crypto": [], "futures": []}
+        for ac, chg in rows_all:
+            if chg is None:
+                continue
+            c = (ac or "").lower()
+            if "crypto" in c:
+                changes_by_market["crypto"].append(chg)
+            elif "equity" in c or "etf" in c or "stock" in c:
+                changes_by_market["stocks"].append(chg)
+            else:
+                changes_by_market["futures"].append(chg)
 
         # One snapshot per symbol — the newest — so a symbol polled more often
         # doesn't get extra weight in the averages.
@@ -1190,6 +1200,21 @@ def get_market_psychology(persist: bool = True):
         except ValueError:
             hours = None
     result["rate_of_change"] = compute_rate_of_change(result["score"], prior_score, hours)
+
+    # Per-market indexes: same components, market-scoped breadth, per-market
+    # weighting (lib/market_psychology.MARKET_COMPONENT_MAP). Crypto uses its
+    # derivatives components; stocks/futures use VIX + their own breadth.
+    from lib.market_psychology import compute_market_index
+    result["markets"] = {
+        market: compute_market_index(market, {
+            "vix": components["vix"],
+            "breadth": breadth_component(changes_by_market[market]),
+            "funding": components["funding"],
+            "long_short": components["long_short"],
+            "liquidations": components["liquidations"],
+        })
+        for market in ("stocks", "crypto", "futures")
+    }
     result["computed_at"] = datetime.now(timezone.utc).isoformat()
 
     if persist and result["score"] is not None:

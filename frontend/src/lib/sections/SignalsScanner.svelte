@@ -72,6 +72,16 @@
     }
   }
 
+  // Market color coding: left edge + tint per asset class, while the TOP
+  // border stays green/red for long/short. Classes beyond the big three
+  // fall into "other" (futures palette) rather than inventing more hues.
+  const marketClass = (ac: string | null) => {
+    const c = (ac ?? "").toLowerCase();
+    if (c.includes("crypto")) return "mkt-crypto";
+    if (c.includes("equity") || c.includes("stock") || c.includes("etf")) return "mkt-equity";
+    return "mkt-other";
+  };
+
   const verdictTone = (v: string) => (v === "CONFIRMED" ? "good" : v === "INVALIDATED" ? "bad" : v === "STALE_ENTRY" ? "warm" : "neutral");
 
   async function loadSignals() {
@@ -468,7 +478,7 @@
         <div class="sig-cards">
           {#each filteredSignals as sig (sig.id)}
             <div
-              class="sig-card"
+              class="sig-card {marketClass(sig.asset_class)}"
               class:short={sig.direction.toLowerCase().includes("short")}
               onclick={() => (analysisSignalId = sig.id)}
               onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
@@ -481,7 +491,10 @@
                   title="Link {sig.asset_symbol} across windows"
                   onclick={(e) => { e.stopPropagation(); linkStore.link(sig.asset_symbol); }}
                 >{sig.asset_symbol}</button>
-                <span class="sc-age num" title={sig.generated_at}>{fmtAge(sig.generated_at)}</span>
+                <span class="sc-right">
+                  <span class="sc-mkt">{(sig.asset_class ?? "?").slice(0, 6)}</span>
+                  <span class="sc-age num" title={sig.generated_at}>{fmtAge(sig.generated_at)}</span>
+                </span>
               </div>
               <div class="sc-pills">
                 <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
@@ -825,6 +838,33 @@
   .sig-card.short {
     border-top-color: var(--bad);
   }
+  /* Market identity: left edge + faint wash. Long/short stays on the top edge. */
+  .sig-card.mkt-crypto {
+    border-left: 3px solid #f7931a;
+    background: linear-gradient(90deg, rgba(247, 147, 26, 0.05), var(--surface-raised) 40%);
+  }
+  .sig-card.mkt-equity {
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, rgba(124, 154, 255, 0.05), var(--surface-raised) 40%);
+  }
+  .sig-card.mkt-other {
+    border-left: 3px solid #b48cff;
+    background: linear-gradient(90deg, rgba(180, 140, 255, 0.05), var(--surface-raised) 40%);
+  }
+  .sc-right {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .sc-mkt {
+    font-size: 8.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .mkt-crypto .sc-mkt { color: #f7931a; }
+  .mkt-equity .sc-mkt { color: var(--accent); }
+  .mkt-other .sc-mkt { color: #b48cff; }
   .sig-card:hover {
     border-color: var(--line-bright);
     border-top-color: inherit;

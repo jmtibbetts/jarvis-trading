@@ -205,6 +205,43 @@ def compute_psychology_index(components: dict) -> dict:
     }
 
 
+MARKET_COMPONENT_MAP: dict[str, dict[str, float]] = {
+    # Per-market composites use only the components that genuinely describe
+    # that market. Weights renormalize over what's present (same abstention
+    # rule as the global index).
+    "stocks": {"vix": 0.55, "breadth": 0.45},
+    "crypto": {"breadth": 0.25, "funding": 0.25, "long_short": 0.25, "liquidations": 0.25},
+    # Futures has the thinnest honest input set: VIX (index-futures vol) and
+    # the futures universe's own breadth. No funding/liquidation analog is
+    # collected for traditional futures, and none is faked.
+    "futures": {"vix": 0.5, "breadth": 0.5},
+}
+
+
+def compute_market_index(market: str, components: dict) -> dict:
+    """One market's fear/greed composite from its own component subset.
+    components uses the same keys/shapes as compute_psychology_index; the
+    breadth component passed here must already be scoped to the market's own
+    universe (the route does that scoping)."""
+    weights = MARKET_COMPONENT_MAP.get(market, {})
+    present = {k: v for k, v in components.items()
+               if k in weights and v and v.get("score") is not None}
+    if not present:
+        return {"market": market, "score": None, "label": None,
+                "components_available": 0, "components": components,
+                "note": "no inputs available for this market"}
+    total = sum(weights[k] for k in present)
+    score = round(_clamp(sum(v["score"] * weights[k] for k, v in present.items()) / total), 1)
+    return {
+        "market": market,
+        "score": score,
+        "label": label_for(score),
+        "components_available": len(present),
+        "components_possible": len(weights),
+        "components": components,
+    }
+
+
 def compute_rate_of_change(current: float | None, prior: float | None, hours: float | None) -> dict | None:
     """Change in the index since an earlier snapshot. The mega-prompt asks for
     both absolute level and rate of change — a fast move from greed toward fear

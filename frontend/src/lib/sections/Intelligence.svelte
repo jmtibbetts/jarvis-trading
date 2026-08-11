@@ -4,7 +4,7 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse, type InsiderTransaction } from "../api";
 
   let {
     view = "world",
@@ -29,6 +29,7 @@
   let showSources = $state(false);
   let exposure = $state<ThreatExposure | null>(null);
   let insiderClusters = $state<InsiderClustersResponse | null>(null);
+  let insiderTxs = $state<InsiderTransaction[]>([]);
   let yieldCurve = $state<YieldCurveSnapshot | null>(null);
   let macro = $state<MacroSnapshot | null>(null);
   let darkPoolTop = $state<DarkPoolTopActivity | null>(null);
@@ -135,6 +136,9 @@
     intelStatus = st;
     exposure = ex;
     insiderClusters = ic;
+    if (SM) {
+      api.insiderActivity(undefined, 14, 40).then((rows) => (insiderTxs = rows)).catch(() => {});
+    }
     yieldCurve = yc;
     macro = fr;
     darkPoolTop = dp;
@@ -171,6 +175,14 @@
     const num = unit.includes("%") ? v.toFixed(1) : v.toLocaleString();
     return `${sign}${num}${unit.includes("%") ? "%" : ""}`;
   };
+  const reportDelayDays = (txDate: string | null, filedAt: string | null) => {
+    if (!txDate || !filedAt) return null;
+    const d = (new Date(filedAt).getTime() - new Date(txDate).getTime()) / 86400000;
+    return d >= 0 ? Math.round(d) : null;
+  };
+  const fmtUsdShort = (v: number | null) =>
+    v == null ? "—" : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v).toLocaleString()}`;
+
   const fmtAgo = (iso: string | null | undefined) => {
     if (!iso) return "—";
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -429,7 +441,7 @@
 
   {#if view === "smartmoney"}
   <div class="span-12">
-    <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d` : "—"}>
+    <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d · ${insiderTxs.length} recent filings` : "—"}>
       {#snippet children()}
         {#if insiderClusters && insiderClusters.clusters.length}
           <div class="insider-list">
@@ -456,6 +468,33 @@
           <div class="empty">No notable insider buy/sell clusters in the last {insiderClusters.window_days} days</div>
         {:else}
           <div class="empty">Insider activity unavailable</div>
+        {/if}
+        {#if insiderTxs.length}
+          <div class="itx-head">Recent filings — price, value, and reporting lag</div>
+          <div class="wl-scroll">
+            <table class="tbl">
+              <thead>
+                <tr><th>Ticker</th><th>Insider</th><th>Action</th><th>@ Price</th><th>Total</th><th>Traded</th><th>Reported</th></tr>
+              </thead>
+              <tbody>
+                {#each insiderTxs.slice(0, 15) as t (t.id)}
+                  <tr>
+                    <td class="sym">{t.ticker ?? "—"}</td>
+                    <td title={t.owner_title ?? ""}>{(t.owner_name ?? "").slice(0, 22)}{t.is_officer ? " • officer" : t.is_director ? " • director" : ""}</td>
+                    <td class={t.transaction_code === "P" ? "pl-up" : t.transaction_code === "S" ? "pl-down" : "dim"}>{t.transaction_label}</td>
+                    <td class="num">{t.price_per_share != null ? `$${t.price_per_share.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
+                    <td class="num">{fmtUsdShort(t.total_value)}</td>
+                    <td class="num">{t.transaction_date ?? "—"}</td>
+                    <td class="num">
+                      {#if reportDelayDays(t.transaction_date, t.filed_at) != null}
+                        +{reportDelayDays(t.transaction_date, t.filed_at)}d
+                      {:else}—{/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
       {/snippet}
     </Panel>
@@ -555,6 +594,20 @@
             {/if}
           </div>
 
+          {#if psychology.markets}
+            <div class="psy-markets">
+              {#each Object.values(psychology.markets) as m (m.market)}
+                <div class="psy-mkt">
+                  <div class="psy-mkt-name">{m.market}</div>
+                  <div class="psy-mkt-score num">{m.score != null ? m.score.toFixed(0) : "—"}</div>
+                  <div class="psy-mkt-label {m.score == null ? '' : m.score >= 60 ? 'pl-up' : m.score < 40 ? 'pl-down' : ''}">
+                    {(m.label ?? "no data").replaceAll("_", " ").toLowerCase()}
+                  </div>
+                  <div class="psy-mkt-meta dim">{m.components_available}/{m.components_possible ?? "?"} inputs</div>
+                </div>
+              {/each}
+            </div>
+          {/if}
           <table class="tbl">
             <thead>
               <tr><th>Component</th><th>Reading</th><th>Detail</th></tr>
@@ -1456,6 +1509,47 @@
     color: var(--ink-faint);
     letter-spacing: 0.04em;
     text-transform: uppercase;
+  }
+  .psy-markets {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm);
+    margin: 10px 0 12px;
+  }
+  .psy-mkt {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    text-align: center;
+    background: var(--surface-raised);
+  }
+  .psy-mkt-name {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .psy-mkt-score {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+  .psy-mkt-label {
+    font-size: 10px;
+  }
+  .psy-mkt-meta {
+    font-size: 9px;
+    margin-top: 2px;
+  }
+  .itx-head {
+    margin: 12px 0 6px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .wl-scroll {
+    overflow-x: auto;
   }
   .psy-roc {
     margin-top: 8px;

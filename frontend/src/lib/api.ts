@@ -546,6 +546,10 @@ export type PsychologyIndex = {
   weight_coverage?: number;
   note: string;
   rate_of_change: { delta: number; hours: number; per_day: number; direction: string } | null;
+  markets?: Record<string, {
+    market: string; score: number | null; label: string | null;
+    components_available: number; components_possible?: number;
+  }>;
   computed_at: string;
 };
 

@@ -976,6 +976,12 @@ export const api = {
       if (!r.ok) throw new Error(body?.detail ?? `add ${r.status}`);
       return body as { ok: boolean; symbol: string; already_tracked?: boolean };
     }),
+  fxRates: () =>
+    get<{ pairs: { symbol: string; pair: string; rate: number | null; rate_source: string | null; change_pct: number | null; history: { date: string; rate: number }[] }[]; as_of: string; note: string }>(`/fx/rates`),
+  cryptoMarkets: () =>
+    get<{ coins: { id: string; symbol: string; price: number; market_cap: number; volume_24h: number; chg_1h: number | null; chg_24h: number | null; chg_7d: number | null; ath: number; ath_chg_pct: number }[]; as_of: string; note: string }>(`/crypto/markets`),
+  webNews: () =>
+    get<{ items: { title: string; snippet: string | null }[]; as_of: string | null; note: string }>(`/news/web`),
   autosimReset: () => post<{ ok: boolean }>(`/autosim/reset`),
   congressActivity: (limit = 20, days = 180) =>
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),

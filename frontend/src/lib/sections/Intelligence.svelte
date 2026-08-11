@@ -1,5 +1,6 @@
 <script lang="ts">
   import Panel from "../components/Panel.svelte";
+  import Sparkline from "../components/Sparkline.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
@@ -41,6 +42,9 @@
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
+  let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
+  let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
+  let webNews = $state<Awaited<ReturnType<typeof api.webNews>> | null>(null);
   let expandedOfficial = $state<string | null>(null);
   let psychology = $state<PsychologyIndex | null>(null);
   let ipo = $state<IpoPipelineResponse | null>(null);
@@ -108,7 +112,7 @@
     // null/[] instantly. squeezeTop alone is 12 paginated FINRA requests, so
     // the world/macro/crypto views not paying for it matters, and a popout
     // window polling every 30s only polls its own tab's endpoints.
-    const W = view === "world", SM = view === "smartmoney", MA = view === "macro";
+    const W = view === "world", SM = view === "smartmoney", MA = view === "macro", CD = view === "cryptodesk";
     const none = <T,>(v: T) => Promise.resolve(v);
     const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy, ipoRes] = await Promise.all([
       W ? api.regime().catch(() => null) : none(null),
@@ -129,6 +133,14 @@
       MA ? api.psychology().catch(() => null) : none(null),
       SM ? api.ipoPipeline(30).catch(() => null) : none(null),
     ]);
+    const [fxR, cgR, wnR] = await Promise.all([
+      MA ? api.fxRates().catch(() => null) : none(null),
+      CD ? api.cryptoMarkets().catch(() => null) : none(null),
+      W || MA ? api.webNews().catch(() => null) : none(null),
+    ]);
+    fxRates = fxR ?? fxRates;
+    cryptoMarkets = cgR ?? cryptoMarkets;
+    webNews = wnR ?? webNews;
     regime = r;
     threats = t;
     news = n;
@@ -238,6 +250,61 @@
   <div class="span-8">
     <Panel title="Threat Map" dotColor="var(--critical)" meta="{threats.length} active" noPad>
       <ThreatMap {threats} />
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "world" || view === "macro"}
+  <div class="span-12">
+    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : "—"}>
+      {#snippet children()}
+        {#if webNews && webNews.items.length}
+          <div class="list">
+            {#each webNews.items as it, i (i)}
+              <div class="row">
+                <div class="row-main">
+                  <div class="row-title">{it.title}</div>
+                  {#if it.snippet}<div class="row-meta">{it.snippet}</div>{/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+          <p class="insider-note">Unverified live web search (tavily/exa) — exactly the FRESH WEB NEWS block injected into every signal-generation LLM prompt. Refreshes every 30 minutes.</p>
+        {:else}
+          <div class="empty">No web pulse yet — populates on the next signal-generation run</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "macro"}
+  <div class="span-12">
+    <Panel title="FX Rates — Live Interbank" meta={fxRates ? `${fxRates.pairs.length} pairs · AllRatesToday` : "—"}>
+      {#snippet children()}
+        {#if fxRates && fxRates.pairs.length}
+          <div class="fx-grid">
+            {#each fxRates.pairs as p (p.pair)}
+              <div class="fx-card">
+                <div class="fx-head">
+                  <span class="fx-pair">{p.pair}</span>
+                  <span class="fx-chg num {p.change_pct != null && p.change_pct >= 0 ? 'pl-up' : 'pl-down'}">
+                    {p.change_pct != null ? `${p.change_pct >= 0 ? "+" : ""}${p.change_pct.toFixed(2)}% 30d` : "—"}
+                  </span>
+                </div>
+                <div class="fx-rate num">{p.rate ?? "—"}</div>
+                {#if p.history.length >= 2}
+                  <Sparkline points={p.history.map((h) => h.rate)} width={170} height={38}
+                    color={p.change_pct != null && p.change_pct >= 0 ? "var(--good)" : "var(--bad)"} />
+                {/if}
+              </div>
+            {/each}
+          </div>
+          <p class="insider-note">Live interbank mid rates with 30 days of daily closes — the same feed injected into forex signal generation. Refreshes every 15 minutes.</p>
+        {:else}
+          <div class="empty">FX rates unavailable — needs ALLRATES_API_KEY</div>
+        {/if}
+      {/snippet}
     </Panel>
   </div>
   {/if}
@@ -942,6 +1009,46 @@
 
   {#if view === "cryptodesk"}
   <div class="span-12">
+    <Panel title="Market Structure" meta={cryptoMarkets ? `${cryptoMarkets.coins.length} coins · CoinGecko live` : "—"}>
+      {#snippet children()}
+        {#if cryptoMarkets && cryptoMarkets.coins.length}
+          <div class="wl-scroll cap-h">
+            <table class="tbl">
+              <thead>
+                <tr><th>Coin</th><th class="num">Price</th><th class="num">1h</th><th class="num">24h</th><th class="num">7d</th><th class="num">Vol 24h</th><th class="num">Mkt Cap</th><th class="num">From ATH</th></tr>
+              </thead>
+              <tbody>
+                {#each cryptoMarkets.coins as c0 (c0.id)}
+                  <tr>
+                    <td class="sym">{c0.symbol.toUpperCase()}</td>
+                    <td class="num">${c0.price < 1 ? c0.price.toPrecision(4) : c0.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                    <td class="num {`${(c0.chg_1h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_1h != null ? `${c0.chg_1h >= 0 ? "+" : ""}${c0.chg_1h.toFixed(1)}%` : "—"}</td>
+                    <td class="num {`${(c0.chg_24h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_24h != null ? `${c0.chg_24h >= 0 ? "+" : ""}${c0.chg_24h.toFixed(1)}%` : "—"}</td>
+                    <td class="num {`${(c0.chg_7d ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_7d != null ? `${c0.chg_7d >= 0 ? "+" : ""}${c0.chg_7d.toFixed(1)}%` : "—"}</td>
+                    <td class="num dim">${(c0.volume_24h / 1e9).toFixed(2)}B</td>
+                    <td class="num dim">${(c0.market_cap / 1e9).toFixed(1)}B</td>
+                    <td class="num">
+                      <span class="ath-bar" title={`ATH $${c0.ath.toLocaleString()}`}>
+                        <span class="ath-fill" style={`width:${Math.max(2, Math.min(100, 100 + c0.ath_chg_pct))}%`}></span>
+                      </span>
+                      <span class="dim">{c0.ath_chg_pct.toFixed(0)}%</span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <p class="insider-note">Live CoinGecko market data (same source Deep Verify feeds the LLM). "From ATH" shows how far below the all-time high each coin trades. Refreshes every 5 minutes.</p>
+        {:else}
+          <div class="empty">CoinGecko market data unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "cryptodesk"}
+  <div class="span-12">
     <Panel title="Crypto Order Book (Level 2)" meta="Binance + Coinbase · live">
       <OrderBookPanel />
     </Panel>
@@ -1592,6 +1699,52 @@
   .psy-mkt-meta {
     font-size: 9px;
     margin-top: 2px;
+  }
+  .fx-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+  }
+  .fx-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .fx-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .fx-pair {
+    font-weight: 650;
+    font-size: 12px;
+  }
+  .fx-chg {
+    font-size: 10.5px;
+  }
+  .fx-rate {
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: 0.2px;
+  }
+  .ath-bar {
+    display: inline-block;
+    width: 46px;
+    height: 5px;
+    background: var(--surface-raised);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .ath-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
   }
   .cap-h {
     max-height: 420px;

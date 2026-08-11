@@ -597,6 +597,106 @@ def get_mcp_status():
     }
 
 
+_fx_panel_cache = {"at": None, "data": None}
+_cg_panel_cache = {"at": None, "data": None}
+
+
+@router.get("/fx/rates")
+def get_fx_rates():
+    """Live interbank FX rates + 7d daily history for the majors Jarvis
+    trades (AllRatesToday). Cached 15 min to respect the unknown quota —
+    same TTL the underlying lib uses, so this adds no extra API calls."""
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    if _fx_panel_cache["at"] and (now - _fx_panel_cache["at"]).total_seconds() < 900 and _fx_panel_cache["data"]:
+        return _fx_panel_cache["data"]
+    from lib.allrates_data import fx_pair_from_symbol, get_fx_rate, get_fx_history
+    pairs_out = []
+    for sym in ["EURUSD=X", "JPY=X", "GBPUSD=X", "CHF=X", "AUDUSD=X"]:
+        pair = fx_pair_from_symbol(sym)
+        if not pair:
+            continue
+        src, tgt = pair
+        rate = get_fx_rate(src, tgt)
+        hist = get_fx_history(src, tgt, "30d") or get_fx_history(src, tgt, "7d")
+        points = [
+            {"date": p.get("date"), "rate": p.get("rate")}
+            for p in ((hist or {}).get("data") or [])
+            if p.get("rate") is not None
+        ]
+        chg_pct = None
+        if len(points) >= 2 and points[0]["rate"]:
+            chg_pct = (float(points[-1]["rate"]) - float(points[0]["rate"])) / float(points[0]["rate"]) * 100
+        pairs_out.append({
+            "symbol": sym, "pair": f"{src}/{tgt}",
+            "rate": (rate or {}).get("rate"),
+            "rate_source": (rate or {}).get("source"),
+            "history": points, "change_pct": round(chg_pct, 3) if chg_pct is not None else None,
+        })
+    data = {
+        "pairs": pairs_out,
+        "as_of": now.isoformat(),
+        "note": "Live interbank rates via AllRatesToday; history is daily closes. Cached 15 min.",
+    }
+    if any(p["rate"] is not None for p in pairs_out):
+        _fx_panel_cache["at"] = now
+        _fx_panel_cache["data"] = data
+    return data
+
+
+@router.get("/crypto/markets")
+def get_crypto_markets():
+    """CoinGecko market structure for every mapped tracked coin — price,
+    1h/24h/7d change, volume, market cap, distance from ATH. One MCP call,
+    cached 5 min (demo tier is 30 req/min; this uses ~1 per 5 min)."""
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    if _cg_panel_cache["at"] and (now - _cg_panel_cache["at"]).total_seconds() < 300 and _cg_panel_cache["data"]:
+        return _cg_panel_cache["data"]
+    from lib.mcp_client import coingecko_snapshot, COINGECKO_IDS
+    raw = coingecko_snapshot([f"{base}/USD" for base in COINGECKO_IDS])
+    rows = []
+    if raw:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            rows = parsed.get("result") or []
+        except Exception as e:
+            logger.debug(f"[CryptoMarkets] parse failed: {e}")
+    data = {
+        "coins": rows,
+        "as_of": now.isoformat(),
+        "note": "Live CoinGecko market data (keyless MCP + demo key). Cached 5 min.",
+    }
+    if rows:
+        _cg_panel_cache["at"] = now
+        _cg_panel_cache["data"] = data
+    return data
+
+
+@router.get("/news/web")
+def get_web_news():
+    """The exact FRESH WEB NEWS block injected into signal-generation LLM
+    prompts (tavily-first, exa fallback, 30-min cache) — surfaced so the
+    user sees what the model sees. Reads the shared cache; costs nothing."""
+    from jobs.generate_signals import _mcp_market_headlines, _web_headlines_cache
+    text = _mcp_market_headlines()
+    at = _web_headlines_cache.get("at")
+    items = []
+    for ln in (text or "").split("\n"):
+        ln = ln.strip()
+        if ln.startswith("- "):
+            head, _, body = ln[2:].partition(": ")
+            items.append({"title": head.strip(), "snippet": body.strip() or None})
+    if not items and text:
+        items = [{"title": t.strip(), "snippet": None} for t in text.split(" | ") if t.strip()]
+    return {
+        "items": items,
+        "as_of": at.isoformat() if at else None,
+        "raw": text or "",
+        "note": "Unverified live web search results — exactly what signal generation injects into the LLM. Refreshes every 30 min.",
+    }
+
+
 @router.get("/calendar/catalysts")
 def get_catalyst_calendar():
     """Universal catalyst calendar — deterministic market dates plus events

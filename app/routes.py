@@ -881,9 +881,9 @@ def ask_analyst(body: dict):
             intent = triage.get("intent")
             query = str(triage.get("query") or "")[:300]
             if intent and intent != "none" and query:
-                # Tool names per each server's OFFICIAL docs — tavily's are
-                # hyphenated (tavily-search/-extract), a detail that would
-                # 404 as underscores the moment a key connects it.
+                # Tool names verified LIVE against each hosted server —
+                # tavily's are underscored (tavily_search/_extract), despite
+                # older docs showing hyphens.
                 routes_by_intent: dict[str, list] = {
                     # exa/firecrawl first — both hosted MCPs work keyless
                     # (verified live); tavily's 401s without an API key, so it
@@ -891,16 +891,16 @@ def ask_analyst(body: dict):
                     "news": [
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
-                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
+                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
                     ],
                     "research": [
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
-                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
+                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
                     ],
                     "fetch_url": [
                         ("firecrawl", "firecrawl_scrape", {"url": query}),
-                        ("tavily", "tavily-extract", {"urls": [query]}),
+                        ("tavily", "tavily_extract", {"urls": [query]}),
                         ("exa", "web_fetch_exa", {"url": query}),
                     ],
                     "market_data": [

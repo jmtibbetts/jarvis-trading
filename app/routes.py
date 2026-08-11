@@ -10,9 +10,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import Optional, Union
 from app.database import (
-    AiDecision, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
+    AiDecision, CongressTrade, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
     InstitutionalHolding, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
-    NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
+    NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling, SignalEvaluation,
     ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
 from lib.learning_engine import get_all_outcomes, get_all_accuracy, get_all_patterns, get_all_regime_stats, get_all_lessons
@@ -492,6 +492,121 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     if not result:
         raise HTTPException(503, "FINRA short interest data unavailable")
     return result
+
+
+_CONGRESS_DISCLAIMER = {
+    "data_type": "U.S. House Periodic Transaction Reports (STOCK Act), free Clerk of the House data",
+    "amounts_are_ranges": (
+        "Disclosed amounts are RANGES (e.g. $1,001 - $15,000). Exact transaction "
+        "size is never disclosed, and no midpoint is estimated here."
+    ),
+    "reporting_delay": (
+        "Disclosure is delayed by statute — the STOCK Act allows up to 45 days. "
+        "filing_delay_days shows the actual gap and is normal, not an irregularity."
+    ),
+    "interpretation": (
+        "These are legally required disclosures. Their presence does not imply "
+        "wrongdoing, insider knowledge, or illegality. Trades are frequently made "
+        "by financial advisors in managed or blind accounts without the member's "
+        "involvement."
+    ),
+    "coverage": (
+        "House only — Senate disclosures use a separate system not ingested here. "
+        "Assets disclosed without a ticker (treasuries, bonds, many funds) are "
+        "recorded with no symbol rather than having one inferred."
+    ),
+}
+
+
+def _congress_trade_dict(t) -> dict:
+    return {
+        "doc_id": t.doc_id, "member_name": t.member_name, "state_district": t.state_district,
+        "chamber": t.chamber, "owner": t.owner, "asset_name": t.asset_name,
+        "ticker": t.ticker, "asset_type": t.asset_type,
+        "transaction_code": t.transaction_code, "transaction_label": t.transaction_label,
+        "transaction_date": t.transaction_date, "notification_date": t.notification_date,
+        "filing_date": t.filing_date, "filing_delay_days": t.filing_delay_days,
+        "amount_low": t.amount_low, "amount_high": t.amount_high, "amount_text": t.amount_text,
+        "pdf_url": t.pdf_url,
+    }
+
+
+@router.get("/congress/trades")
+def get_congress_trades(limit: int = 50, ticker: str = None, days: int = 180):
+    """Recent congressional stock-trade disclosures. See the disclaimer in the
+    response — amounts are ranges, disclosure is delayed by statute, and none
+    of this implies wrongdoing."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(days, 1))).date().isoformat()
+    with get_db() as db:
+        q = db.query(CongressTrade).filter(CongressTrade.transaction_date >= cutoff)
+        if ticker:
+            q = q.filter(CongressTrade.ticker == ticker.upper())
+        rows = q.order_by(CongressTrade.transaction_date.desc()).limit(min(max(limit, 1), 200)).all()
+        trades = [_congress_trade_dict(t) for t in rows]
+        coverage = db.query(ProcessedCongressFiling).count()
+    return {
+        "trades": trades, "count": len(trades),
+        "filings_processed": coverage,
+        "disclaimer": _CONGRESS_DISCLAIMER,
+    }
+
+
+@router.get("/congress/activity/top")
+def get_congress_top_activity(limit: int = 20, days: int = 180):
+    """Most-disclosed tickers, with buy/sell counts and how many distinct
+    members disclosed each. Counts are of DISCLOSURES, not dollar flow —
+    exact amounts are never disclosed, so summing them is not possible."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(days, 1))).date().isoformat()
+    with get_db() as db:
+        rows = (
+            db.query(CongressTrade)
+            .filter(CongressTrade.transaction_date >= cutoff, CongressTrade.ticker.isnot(None))
+            .all()
+        )
+        by_ticker: dict = {}
+        for t in rows:
+            e = by_ticker.setdefault(t.ticker, {
+                "ticker": t.ticker, "purchases": 0, "sales": 0, "other": 0,
+                "members": set(), "range_low_total": 0.0, "range_high_total": 0.0,
+                "latest_transaction_date": None,
+            })
+            code = (t.transaction_code or "").upper()
+            if code.startswith("P"):
+                e["purchases"] += 1
+            elif code.startswith("S"):
+                e["sales"] += 1
+            else:
+                e["other"] += 1
+            if t.member_name:
+                e["members"].add(t.member_name)
+            e["range_low_total"] += t.amount_low or 0.0
+            e["range_high_total"] += t.amount_high or 0.0
+            if not e["latest_transaction_date"] or (t.transaction_date or "") > e["latest_transaction_date"]:
+                e["latest_transaction_date"] = t.transaction_date
+
+    results = []
+    for e in by_ticker.values():
+        total = e["purchases"] + e["sales"] + e["other"]
+        results.append({
+            **{k: v for k, v in e.items() if k != "members"},
+            "member_count": len(e["members"]),
+            "disclosure_count": total,
+            # Net direction by COUNT of disclosures, not dollars — the data
+            # cannot support a dollar-flow figure.
+            "net_direction": "net_buying" if e["purchases"] > e["sales"]
+                             else "net_selling" if e["sales"] > e["purchases"] else "mixed",
+        })
+    results.sort(key=lambda r: (-r["disclosure_count"], -r["member_count"]))
+    return {
+        "tickers": results[:min(max(limit, 1), 100)],
+        "window_days": days,
+        "note": (
+            "Ranked by number of disclosures. range_low_total/range_high_total are "
+            "the summed bounds of the disclosed ranges — the true total lies somewhere "
+            "between them and cannot be known more precisely."
+        ),
+        "disclaimer": _CONGRESS_DISCLAIMER,
+    }
 
 
 def _institutional_periods(db, ticker: str | None = None) -> list[str]:

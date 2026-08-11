@@ -27,10 +27,12 @@ from lib.sec_edgar import _get
 logger = logging.getLogger(__name__)
 
 FETCH_COUNT = 40
-# Cap CUSIP resolutions per run: OpenFIGI's keyless tier is 25 req/min at 10
-# identifiers each. Unresolved CUSIPs simply carry over to the next run
-# rather than being dropped, so coverage fills in over successive passes.
+# Cap CUSIP resolutions per run. The keyless tier is 25 req/min at 10 identifiers
+# each; a free API key allows 100 per request, so the keyed cap is raised to match
+# that throughput. Unresolved CUSIPs carry over to the next run rather than being
+# dropped, so coverage fills in over successive passes either way.
 MAX_NEW_CUSIPS_PER_RUN = 200
+MAX_NEW_CUSIPS_PER_RUN_KEYED = 2000
 
 
 def _tracked_tickers(db) -> set[str]:
@@ -84,10 +86,11 @@ def run():
             parsed_filings.append({"filing": f, "cover": cover, "holdings": holdings})
             all_cusips.update(h["cusip"] for h in holdings)
 
-        unknown = [c for c in all_cusips if c not in cusip_cache][:MAX_NEW_CUSIPS_PER_RUN]
+        api_key = os.getenv("OPENFIGI_API_KEY")
+        cap = MAX_NEW_CUSIPS_PER_RUN_KEYED if api_key else MAX_NEW_CUSIPS_PER_RUN
+        unknown = [c for c in all_cusips if c not in cusip_cache][:cap]
         newly_resolved, attempted = (
-            resolve_cusips(unknown, api_key=os.getenv("OPENFIGI_API_KEY"), client=client)
-            if unknown else ({}, set())
+            resolve_cusips(unknown, api_key=api_key, client=client) if unknown else ({}, set())
         )
 
     if attempted:

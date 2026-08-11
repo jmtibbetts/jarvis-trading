@@ -231,6 +231,59 @@ class InstitutionalHolding(Base):
     created_date     = Column(String, default=now_iso)
 
 
+class CongressTrade(Base):
+    """A single stock transaction disclosed in a U.S. House Periodic
+    Transaction Report (STOCK Act) — free Clerk of the House data, no vendor.
+    See lib/congress_trading.py for parsing details and caveats.
+
+    Load-bearing honesty notes:
+      - amount_low/amount_high are the DISCLOSED RANGE. Exact transaction size
+        is never disclosed; there is deliberately no midpoint column, because
+        a stored midpoint would inevitably be read as an actual amount.
+      - ticker is NULL for assets disclosed without one (treasuries, bonds,
+        many funds). The trade is still recorded; no symbol is inferred.
+      - filing_delay_days is normal statutory reporting lag (the STOCK Act
+        allows up to 45 days), not an irregularity.
+      - These are legally required disclosures. Nothing in this table implies
+        wrongdoing, insider knowledge, or illegality, and trades are often
+        executed by advisors in managed accounts without member involvement."""
+    __tablename__ = "congress_trades"
+    id                = Column(String, primary_key=True, default=new_id)
+    doc_id            = Column(String, nullable=False, index=True)
+    member_name       = Column(String, index=True)
+    state_district    = Column(String)
+    chamber           = Column(String, default="House")
+    owner             = Column(String)      # SP (spouse) | JT (joint) | DC (dependent child)
+    asset_name        = Column(String)
+    ticker            = Column(String, index=True)
+    asset_type        = Column(String)      # House asset code, e.g. ST (stock), OT (other)
+    transaction_code  = Column(String)      # P | S | S (partial) | E
+    transaction_label = Column(String)
+    transaction_date  = Column(String, index=True)
+    notification_date = Column(String)
+    filing_date       = Column(String)
+    filing_delay_days = Column(Integer)
+    amount_low        = Column(Float)
+    amount_high       = Column(Float)
+    amount_text       = Column(String)
+    pdf_url           = Column(String)
+    created_date      = Column(String, default=now_iso)
+
+
+class ProcessedCongressFiling(Base):
+    """Tracks which PTR filings have been downloaded and parsed, so each PDF
+    is fetched once. rows_unparsed is persisted rather than discarded: it is
+    the per-filing coverage signal, and a filing that parsed zero rows needs
+    to be distinguishable from one that genuinely disclosed no trades."""
+    __tablename__ = "processed_congress_filings"
+    doc_id             = Column(String, primary_key=True)
+    member_name        = Column(String)
+    rows_seen          = Column(Integer, default=0)
+    rows_unparsed      = Column(Integer, default=0)
+    transactions_saved = Column(Integer, default=0)
+    processed_at       = Column(String, default=now_iso)
+
+
 class Processed13FFiling(Base):
     """Tracks which 13F filings have been fully processed.
 

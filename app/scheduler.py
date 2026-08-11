@@ -56,6 +56,7 @@ job_status = {
     'autosim':   {'status': 'idle', 'last': None, 'error': None},
     'insider':   {'status': 'idle', 'last': None, 'error': None},
     'inst13f':   {'status': 'idle', 'last': None, 'error': None},
+    'congress':  {'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
 }
 
@@ -409,6 +410,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.auto_simulator import run as autosim_run
     from jobs.fetch_insider_activity import run as insider_run
     from jobs.fetch_13f_filings import run as inst13f_run
+    from jobs.fetch_congress_trades import run as congress_run
     from jobs.fetch_crypto_derivatives import run as crypto_derivatives_run
 
     now = datetime.now(timezone.utc)
@@ -501,6 +503,15 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('inst13f', inst13f_run),
                   'interval', hours=2, id='inst13f',
                   next_run_time=now + timedelta(minutes=5),
+                  replace_existing=True, max_instances=1)
+
+    # House STOCK Act trade disclosures every 6 hours — free Clerk of the House
+    # data, no LLM. Disclosure is delayed up to 45 days by statute, so there is
+    # nothing to gain from polling faster; the interval also paces the per-filing
+    # PDF downloads, which are bounded per run and resume next run.
+    sched.add_job(make_job_runner('congress', congress_run),
+                  'interval', hours=6, id='congress',
+                  next_run_time=now + timedelta(minutes=8),
                   replace_existing=True, max_instances=1)
 
     # Crypto derivatives (funding/OI/long-short ratio/liquidations) every 10 min —

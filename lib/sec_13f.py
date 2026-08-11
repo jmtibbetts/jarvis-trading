@@ -42,9 +42,12 @@ from lib.sec_edgar import ARCHIVES, BASE, _ATOM_NS, _get
 logger = logging.getLogger(__name__)
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
-# OpenFIGI's keyless tier allows 25 requests/minute with up to 10 identifiers
-# each. A free API key raises this substantially; set OPENFIGI_API_KEY to use one.
+# OpenFIGI's keyless tier allows 25 requests/minute at up to 10 identifiers per
+# request; a free API key raises that to 100 identifiers per request. Batch size
+# is chosen per call from whether a key was supplied — a 10x throughput
+# difference for CUSIP backfill, which is the slow part of 13F ingestion.
 OPENFIGI_BATCH_SIZE = 10
+OPENFIGI_BATCH_SIZE_KEYED = 100
 
 
 def _local(tag: str) -> str:
@@ -244,14 +247,15 @@ def resolve_cusips(cusips: list[str], api_key: str | None = None,
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-OPENFIGI-APIKEY"] = api_key
+    batch_size = OPENFIGI_BATCH_SIZE_KEYED if api_key else OPENFIGI_BATCH_SIZE
 
     owns_client = client is None
     c = client or httpx.Client(timeout=20.0)
     resolved: dict[str, str] = {}
     attempted: set[str] = set()
     try:
-        for start in range(0, len(cusips), OPENFIGI_BATCH_SIZE):
-            batch = cusips[start:start + OPENFIGI_BATCH_SIZE]
+        for start in range(0, len(cusips), batch_size):
+            batch = cusips[start:start + batch_size]
             payload = [{"idType": "ID_CUSIP", "idValue": cu} for cu in batch]
             try:
                 resp = c.post(OPENFIGI_URL, json=payload, headers=headers)

@@ -1,8 +1,24 @@
 import unittest
 
 from lib.congress_trading import (
-    _delay_days, _to_iso, extract_ticker, parse_amount_range, parse_transaction_line,
+    _delay_days, _to_iso, _trailing_amount, extract_ticker, parse_amount_range,
+    parse_transaction_line,
 )
+
+
+class TrailingAmountTests(unittest.TestCase):
+    def test_extracts_wrapped_upper_bound(self):
+        """Real continuation line from a live filing: the transaction row ends
+        '$15,001 -' and its upper bound wraps to the next line."""
+        self.assertEqual(_trailing_amount("Stock (FERG) [ST] $50,000"), 50000.0)
+
+    def test_takes_last_amount_when_several(self):
+        self.assertEqual(_trailing_amount("foo $1,000 bar $250,000"), 250000.0)
+
+    def test_no_amount_returns_none(self):
+        self.assertIsNone(_trailing_amount("Stock (FERG) [ST]"))
+        self.assertIsNone(_trailing_amount(""))
+        self.assertIsNone(_trailing_amount(None))
 
 
 class ToIsoTests(unittest.TestCase):

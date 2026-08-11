@@ -4,7 +4,7 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -33,6 +33,8 @@
   let darkPoolVenuesLoading = $state(false);
   let squeeze = $state<SqueezeTopResponse | null>(null);
   let institutional = $state<InstitutionalAccumulation | null>(null);
+  let congress = $state<CongressTradesResponse | null>(null);
+  let congressActivity = $state<CongressActivityResponse | null>(null);
   let expandedSqueezeSymbol = $state<string | null>(null);
 
   async function toggleDarkPoolExpand(symbol: string, weekStart: string) {
@@ -93,7 +95,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -107,6 +109,8 @@
       api.darkPoolTop("T1", 20).catch(() => null),
       api.squeezeTop(20, 3).catch(() => null),
       api.institutionalAccumulation(20).catch(() => null),
+      api.congressTrades(25).catch(() => null),
+      api.congressActivity(12).catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -122,6 +126,8 @@
     darkPoolTop = dp;
     squeeze = sq;
     institutional = inst;
+    congress = cg;
+    congressActivity = cga;
   }
 
   $effect(() => {
@@ -469,6 +475,75 @@
           </table>
         {:else}
           <div class="empty">Dark pool / ATS data unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel
+      title="Congressional Trade Disclosures"
+      meta={congress ? `${congress.filings_processed} filings processed · House` : "—"}
+    >
+      {#snippet children()}
+        {#if congress && congress.trades.length}
+          <div class="dp-banner">
+            ⚠ Amounts are disclosed <strong>ranges</strong>, never exact values. Disclosure is
+            delayed by statute (STOCK Act allows up to 45 days). These are legally required
+            filings — their presence does not imply wrongdoing or insider knowledge, and trades
+            are frequently made by advisors in managed accounts. House only.
+          </div>
+
+          {#if congressActivity && congressActivity.tickers.length}
+            <div class="cg-chips">
+              {#each congressActivity.tickers.slice(0, 10) as t (t.ticker)}
+                <span class="cg-chip">
+                  <strong>{t.ticker}</strong>
+                  <span class="num {t.net_direction === 'net_buying' ? 'pl-up' : t.net_direction === 'net_selling' ? 'pl-down' : ''}">
+                    {t.purchases}P/{t.sales}S
+                  </span>
+                  <span class="dim">{t.member_count} {t.member_count === 1 ? "member" : "members"}</span>
+                </span>
+              {/each}
+            </div>
+          {/if}
+
+          <table class="tbl">
+            <thead>
+              <tr><th>Ticker</th><th>Member</th><th>Type</th><th>Transaction</th><th>Disclosed</th><th>Amount Range</th></tr>
+            </thead>
+            <tbody>
+              {#each congress.trades as t (t.doc_id + t.ticker + t.transaction_date + t.amount_text)}
+                <tr>
+                  <td class="sym">
+                    {#if t.ticker}{t.ticker}{:else}<span class="dim" title={t.asset_name ?? ""}>no ticker</span>{/if}
+                  </td>
+                  <td>
+                    {t.member_name}
+                    {#if t.owner}<span class="dim"> ({t.owner})</span>{/if}
+                  </td>
+                  <td>
+                    <Pill
+                      label={t.transaction_label}
+                      tone={t.transaction_code.startsWith("P") ? "good" : t.transaction_code.startsWith("S") ? "bad" : "neutral"}
+                    />
+                  </td>
+                  <td class="num">{t.transaction_date}</td>
+                  <td class="num">
+                    {t.notification_date}
+                    {#if t.filing_delay_days != null}<span class="dim"> +{t.filing_delay_days}d</span>{/if}
+                  </td>
+                  <td class="num">{t.amount_text ?? "—"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="si-footnote">{congress.disclaimer.interpretation}</div>
+        {:else}
+          <div class="empty">
+            No congressional disclosures ingested yet — the scheduled job processes filings in
+            batches and builds coverage over successive runs.
+          </div>
         {/if}
       {/snippet}
     </Panel>
@@ -1172,6 +1247,22 @@
   }
   .dim {
     color: var(--ink-faint);
+  }
+  .cg-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .cg-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 10.5px;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--surface-raised);
   }
   .si-footnote {
     margin-top: 10px;

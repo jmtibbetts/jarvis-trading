@@ -185,6 +185,18 @@ def extract_ticker(asset_cell: str | None) -> tuple[str | None, str | None]:
     return m.group(1), m.group(2)
 
 
+def _trailing_amount(line: str) -> float | None:
+    """Last dollar figure on a continuation line — the wrapped upper bound of
+    an amount range, e.g. 'Stock (FERG) [ST] $50,000' -> 50000.0."""
+    matches = re.findall(r"\$\s?([\d,]+)", line or "")
+    if not matches:
+        return None
+    try:
+        return float(matches[-1].replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _clean(cell) -> str:
     """PDF cells carry NUL padding from the House's form font."""
     return (cell or "").replace("\x00", "").replace("\n", " ").strip()
@@ -287,19 +299,32 @@ def parse_ptr_pdf(pdf_bytes: bytes) -> dict:
                         rows_unparsed += 1
                         continue
 
-                    # A long asset name wraps, pushing "(TICKER) [ST]" onto the
-                    # following line. Only borrow from that line when it is a
-                    # genuine continuation — it must carry NO dates of its own,
-                    # otherwise it is the next transaction and taking its ticker
+                    # A long asset name wraps, pushing "(TICKER) [ST]" and the
+                    # amount's upper bound onto the following line, e.g.
+                    #   "... P 12/12/2025 01/06/2026 $15,001 -"
+                    #   "Stock (FERG) [ST] $50,000"
+                    # Only borrow from that line when it is a genuine
+                    # continuation — it must carry NO dates of its own, otherwise
+                    # it is the next transaction and taking its ticker or amount
                     # would attribute this trade to the wrong security.
-                    if not parsed["ticker"] and i + 1 < len(lines):
+                    needs_ticker = not parsed["ticker"]
+                    needs_high = parsed["amount_low"] is not None and parsed["amount_high"] is None
+                    if (needs_ticker or needs_high) and i + 1 < len(lines):
                         nxt = lines[i + 1]
-                        if not _DATE_ANYWHERE_RE.search(nxt) and not _NON_TX_LINE_RE.search(nxt):
-                            ticker, asset_type = extract_ticker(nxt)
-                            if ticker:
-                                parsed["ticker"] = ticker
-                                parsed["asset_type"] = asset_type
-                                parsed["asset_name"] = f"{parsed['asset_name']} {nxt}".strip()
+                        if nxt and not _DATE_ANYWHERE_RE.search(nxt) and not _NON_TX_LINE_RE.search(nxt):
+                            if needs_ticker:
+                                ticker, asset_type = extract_ticker(nxt)
+                                if ticker:
+                                    parsed["ticker"] = ticker
+                                    parsed["asset_type"] = asset_type
+                                    parsed["asset_name"] = f"{parsed['asset_name']} {nxt}".strip()
+                            if needs_high:
+                                high = _trailing_amount(nxt)
+                                # Must exceed the low bound to be a plausible upper
+                                # bound; anything else is unrelated text with a $ in it.
+                                if high is not None and high > parsed["amount_low"]:
+                                    parsed["amount_high"] = high
+                                    parsed["amount_text"] = f"${parsed['amount_low']:,.0f} - ${high:,.0f}"
                     transactions.append(parsed)
     except Exception as e:
         # pdfminer raises a wide variety of errors on malformed PDFs; one bad

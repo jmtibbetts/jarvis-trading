@@ -473,6 +473,37 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type CongressDisclaimer = {
+  data_type: string; amounts_are_ranges: string; reporting_delay: string;
+  interpretation: string; coverage: string;
+};
+
+export type CongressTrade = {
+  doc_id: string; member_name: string; state_district: string | null; chamber: string;
+  owner: string | null; asset_name: string | null; ticker: string | null; asset_type: string | null;
+  transaction_code: string; transaction_label: string;
+  transaction_date: string; notification_date: string; filing_date: string | null;
+  filing_delay_days: number | null;
+  amount_low: number | null; amount_high: number | null; amount_text: string | null;
+  pdf_url: string | null;
+};
+
+export type CongressTradesResponse = {
+  trades: CongressTrade[]; count: number; filings_processed: number;
+  disclaimer: CongressDisclaimer;
+};
+
+export type CongressTickerActivity = {
+  ticker: string; purchases: number; sales: number; other: number;
+  member_count: number; disclosure_count: number; net_direction: string;
+  range_low_total: number; range_high_total: number; latest_transaction_date: string | null;
+};
+
+export type CongressActivityResponse = {
+  tickers: CongressTickerActivity[]; window_days: number; note: string;
+  disclaimer: CongressDisclaimer;
+};
+
 export type InstitutionalTickerRow = {
   ticker: string; issuer_name: string | null;
   holder_count: number; total_value_usd: number; total_shares: number;
@@ -823,6 +854,13 @@ export const api = {
   cryptoDerivatives: (symbol: string, liquidationHours = 24) =>
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
+  congressTrades: (limit = 50, opts: { ticker?: string; days?: number } = {}) => {
+    const p = new URLSearchParams({ limit: String(limit), days: String(opts.days ?? 180) });
+    if (opts.ticker) p.set("ticker", opts.ticker);
+    return get<CongressTradesResponse>(`/congress/trades?${p}`);
+  },
+  congressActivity: (limit = 20, days = 180) =>
+    get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
     get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
   shortInterest: (symbol: string) => get<ShortInterestRow>(`/shortinterest/${symbol}`),

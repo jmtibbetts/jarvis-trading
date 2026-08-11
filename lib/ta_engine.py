@@ -9,6 +9,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+TIMEFRAME_LADDER = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "1D"]
+
 # Detect which TA library is available
 try:
     import talib as _talib
@@ -115,6 +117,17 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     last  = float(close.iloc[-1])
     prev  = float(close.iloc[-2]) if len(close) > 1 else last
     result = {"tf": tf_label, "bars": len(df), "backend": _BACKEND}
+    try:
+        last_bar = pd.Timestamp(df.index[-1])
+        last_bar = last_bar.tz_localize("UTC") if last_bar.tzinfo is None else last_bar.tz_convert("UTC")
+        now = pd.Timestamp.now(tz="UTC")
+        result["bar_time"] = last_bar.isoformat()
+        result["bar_age_seconds"] = max(0, round((now - last_bar).total_seconds()))
+        result["data_source"] = df.attrs.get("source", "unknown")
+    except Exception:
+        result["bar_time"] = None
+        result["bar_age_seconds"] = None
+        result["data_source"] = df.attrs.get("source", "unknown")
 
     # Price
     result["price"] = {
@@ -261,6 +274,15 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     except:
         result["obv_trend"] = None
 
+    # Extension indicators (Williams %R, CCI, MFI, Keltner, Donchian,
+    # Supertrend, pivots, market structure) — pure-pandas module, identical
+    # under either backend; each key independently None on failure.
+    try:
+        from lib.ta_extensions import compute_extensions
+        result.update(compute_extensions(df))
+    except Exception:
+        pass
+
     return result
 
 
@@ -278,7 +300,7 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
         return f"${p:,.0f}" if p > 1000 else f"${p:.4f}" if p < 1 else f"${p:.2f}"
 
     lines = [f"[{symbol}]" + (f" {asset_name}" if asset_name else "")]
-    for tf in ["1H", "4H", "1D"]:   # dropped 2H — redundant
+    for tf in TIMEFRAME_LADDER:
         d = ta_data.get(tf)
         if not d or d.get("error"):
             continue

@@ -495,6 +495,66 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     return result
 
 
+@router.get("/scenarios/{symbol}")
+def get_scenarios(symbol: str, timeframe: str = "1D"):
+    """Deterministic long+short scenarios from computed TA levels (swings,
+    Donchian channels, Supertrend) — lib/scenario_engine.py. Both directions
+    are always evaluated; NO_TRADE is a valid state, and every referenced
+    price is an actual computed level, never an invented one."""
+    from lib.ohlcv import fetch_multi_timeframe
+    from lib.ta_engine import compute_timeframe
+    from lib.scenario_engine import build_scenarios
+
+    bars = fetch_multi_timeframe(symbol.upper(), [timeframe])
+    df = bars.get(timeframe)
+    if df is None or len(df) < 10:
+        raise HTTPException(503, f"No usable {timeframe} bars for {symbol}")
+    ta = compute_timeframe(df, timeframe)
+    scenarios = build_scenarios(ta)
+    if not scenarios:
+        raise HTTPException(503, f"TA computation failed for {symbol}")
+    return {
+        "symbol": symbol.upper(),
+        "timeframe": timeframe,
+        **scenarios,
+        "market_structure": ta.get("market_structure"),
+        "supertrend": ta.get("supertrend"),
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/ev/summary")
+def get_ev_summary():
+    """Empirical win-probability / expected-value buckets over all evaluated
+    signals — lib/ev_model.py. A probability is never shown without its
+    sample size; buckets under the sample floor report counts only."""
+    from lib.ev_model import MIN_DECIDED, compute_ev_buckets
+
+    with get_db() as db:
+        joined = (
+            db.query(SignalEvaluation, TradingSignal.composite_score)
+            .outerjoin(TradingSignal, TradingSignal.id == SignalEvaluation.signal_id)
+            .all()
+        )
+        rows = [{
+            "outcome": ev.outcome, "direction": ev.direction, "asset_class": ev.asset_class,
+            "entry_price": ev.entry_price, "target_price": ev.target_price, "stop_loss": ev.stop_loss,
+            "composite_score": score,
+        } for ev, score in joined]
+
+    return {
+        "buckets": compute_ev_buckets(rows),
+        "total_evaluations": len(rows),
+        "min_decided_for_probability": MIN_DECIDED,
+        "note": (
+            "Empirical frequencies of past signal outcomes, bucketed by "
+            "conditions at generation time. Undecided outcomes (open/expired/"
+            "ambiguous) are counted but excluded from win-rate denominators. "
+            "Realized moves come from each signal's own stored levels."
+        ),
+    }
+
+
 @router.get("/ipo/pipeline")
 def get_ipo_pipeline(limit: int = 40):
     """IPO registration pipeline from free EDGAR filings: S-1 (filed) ->

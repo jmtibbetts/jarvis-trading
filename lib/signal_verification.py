@@ -221,6 +221,15 @@ def _market_data_block(symbol: str, asset_class: str | None) -> str | None:
             if parts:
                 return "\n\n".join(parts)
         else:
+            # Forex first — AllRatesToday has live interbank rates, which beat
+            # Massive's previous-session data for currency pairs.
+            try:
+                from lib.allrates_data import fx_summary_block
+                fx = fx_summary_block(symbol)
+                if fx:
+                    return fx
+            except Exception as e:
+                logger.debug(f"[DeepVerify] FX block failed for {symbol}: {e}")
             from lib.massive_data import get_market_summary
             summary = get_market_summary(symbol, days=5)
             if summary:

@@ -933,6 +933,16 @@ def ask_analyst(body: dict):
                     except Exception as e:
                         logger.debug(f"[Analyst] CoinGecko lookup failed: {e}")
                     if not handled:
+                        # FX pairs → AllRatesToday live interbank rates
+                        try:
+                            from lib.allrates_data import fx_summary_block
+                            fx = fx_summary_block(sym_guess)
+                            if fx:
+                                context_blocks["market_data"] = {"provider": "allratestoday", "live": True, "data": fx}
+                                handled = True
+                        except Exception as e:
+                            logger.debug(f"[Analyst] AllRates lookup failed: {e}")
+                    if not handled:
                         from lib.massive_data import get_market_summary
                         summary = get_market_summary(sym_guess)
                         if summary:

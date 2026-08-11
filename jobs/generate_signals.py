@@ -786,10 +786,20 @@ def run():
             f"{s}={FUTURES_UNIVERSE.get(s,{}).get('name',s)}"
             for s in batch
         )
+        # Live interbank FX rates for the forex symbols in this batch —
+        # fresher than the (delayed) bar data the TA profiles come from.
+        fx_ctx = ""
+        try:
+            from lib.allrates_data import fx_summary_block
+            fx_lines = [b for b in (fx_summary_block(s) for s in batch) if b]
+            if fx_lines:
+                fx_ctx = "\n\n" + "\n".join(fx_lines)
+        except Exception as _fx_e:
+            logger.debug(f"[Signals] FX context unavailable: {_fx_e}")
         prompt = make_batch_prompt(
             batch, "FUTURES/FOREX/COMMODITIES",
             f"Macro/commodity/forex setup. Symbols: {_fut_asset_ref}. Use 5x moderate/10x high/20x very high conviction.",
-            threat_ctx, futures_news_ctx or news_ctx, regime, "",
+            threat_ctx, (futures_news_ctx or news_ctx) + fx_ctx, regime, "",
             futures_rule, FUTURES_PAPER_SCHEMA, futures_profiles=futures_ta_profiles
         )
         all_batches.append((f"F{i}", batch, prompt, True))

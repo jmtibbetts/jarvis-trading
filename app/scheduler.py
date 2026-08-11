@@ -397,8 +397,19 @@ Respond ONLY with valid JSON:
 
 
 def create_scheduler() -> BackgroundScheduler:
-    executors = {'default': _DaemonThreadPoolExecutor(max_workers=6)}
-    sched = BackgroundScheduler(executors=executors, timezone='UTC')
+    executors = {'default': _DaemonThreadPoolExecutor(max_workers=10)}
+    # job_defaults are the fix for "jobs only run when triggered manually":
+    # APScheduler's DEFAULT misfire_grace_time is 1 second — if a job's fire
+    # moment passes while all workers are busy (LLM batches, 13F/congress
+    # downloads regularly hold threads for minutes), the run is silently
+    # skipped as a misfire. With ~20 registered jobs and 6 workers that
+    # happened constantly. Now: late jobs run late (up to 10 min) instead of
+    # not at all, coalesce collapses a backlog into one run, and the pool is
+    # larger.
+    sched = BackgroundScheduler(
+        executors=executors, timezone='UTC',
+        job_defaults={'misfire_grace_time': 600, 'coalesce': True},
+    )
 
     from jobs.fetch_market_data import run as market_run
     from jobs.fetch_threat_news import run as threats_run

@@ -251,6 +251,39 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     return s
 
 
+_web_headlines_cache = {"at": None, "text": ""}
+
+
+def _mcp_market_headlines() -> str:
+    """One MCP web search per ~30 min across ALL generation runs — broad
+    market-moving headlines compressed to one prompt line. Empty string on
+    any failure; signal generation never depends on it."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    at = _web_headlines_cache["at"]
+    if at is not None and (now - at).total_seconds() < 1800:
+        return _web_headlines_cache["text"]
+    _web_headlines_cache["at"] = now
+    try:
+        from lib.mcp_client import call_tool
+        raw = call_tool("exa", "web_search_exa", {
+            "query": "biggest stock and crypto market moving news today",
+            "numResults": 4,
+        })
+        if raw:
+            # Titles are on lines starting "Title:" in exa's text payload;
+            # fall back to the first few non-empty lines.
+            titles = [ln.split(":", 1)[1].strip() for ln in raw.splitlines()
+                      if ln.lower().startswith("title:")][:4]
+            if not titles:
+                titles = [ln.strip() for ln in raw.splitlines() if ln.strip()][:3]
+            _web_headlines_cache["text"] = " | ".join(t[:80] for t in titles)
+    except Exception as e:
+        logger.debug(f"[Signals] MCP headlines unavailable: {e}")
+        _web_headlines_cache["text"] = ""
+    return _web_headlines_cache["text"]
+
+
 _postmortem_cache = {"loaded_at": None, "rows": []}
 
 
@@ -639,6 +672,15 @@ def run():
         for n in news[:5]
     ]) or "No recent news."
 
+    # Fresh web headlines via MCP — ONE bounded search per generation run
+    # (cached 30 min in-process), so up-to-the-hour market context reaches
+    # the signal LLM without per-signal web calls. Keyless exa first; the
+    # block is prefixed as EXTERNAL reporting so the model treats it as
+    # context, not verified system data.
+    web_ctx = _mcp_market_headlines()
+    if web_ctx:
+        news_ctx = f"{news_ctx} || WEB (unverified, fresh): {web_ctx}"
+
     sys_p = "You are an expert quantitative trader. Output only valid JSON arrays. No commentary, no markdown — start with '[' end with ']'."
     directional_rule = horizon_rule + " " + (
         " Evaluate bullish and bearish TA equally. direction='Long', 'Bounce', or 'Short'. "
@@ -911,6 +953,18 @@ def run():
                     skipped += 1
                     continue
                 scored["trade_horizon"] = horizon_for_timeframe(scored.get("timeframe"))
+
+                # Postmortem-driven floor: 226 signals expired in one 48h window
+                # and NONE had ever reached a broker order — most sat below or
+                # near the execution gate (55) and could never fire. Signals
+                # scoring under MIN_PERSIST_SCORE are noise that only churns
+                # Expired rows and pollutes the failure stats; drop them here
+                # instead of letting them die slowly. Floor sits well under
+                # both the live gate (55) and paper auto-trade behavior.
+                MIN_PERSIST_SCORE = 45.0
+                if float(scored.get("composite_score") or 0) < MIN_PERSIST_SCORE:
+                    skipped += 1
+                    continue
 
                 target_status = _target_status_for_signal(scored, is_paper, market_open)
 

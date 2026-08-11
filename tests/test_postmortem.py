@@ -18,11 +18,19 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(code, "STOP_HIT")
         self.assertIn("-5.2", detail)
 
-    def test_expired_untriggered(self):
+    def test_expired_never_executed(self):
+        """Measured on real data: 226/226 expired signals had no broker order.
+        Those are EXPIRED_UNEXECUTED (overproduction/gating), distinct from a
+        submitted order that never filled."""
         code, _ = classify(_sig(status="Expired"), {"outcome": "OPEN"})
-        self.assertEqual(code, "EXPIRED_UNTRIGGERED")
+        self.assertEqual(code, "EXPIRED_UNEXECUTED")
         code2, _ = classify(_sig(status="Expired"), None)
-        self.assertEqual(code2, "EXPIRED_UNTRIGGERED")
+        self.assertEqual(code2, "EXPIRED_UNEXECUTED")
+
+    def test_expired_with_submitted_order_is_unfilled(self):
+        code, detail = classify(_sig(status="Expired", alpaca_order_id="ord-123"), None)
+        self.assertEqual(code, "EXPIRED_UNFILLED_ORDER")
+        self.assertIn("never filled", detail)
 
     def test_ambiguous_bar(self):
         code, _ = classify(_sig(status="Closed"), {"outcome": "AMBIGUOUS"})
@@ -57,7 +65,7 @@ class AggregateTests(unittest.TestCase):
         pms = [
             {"reason_code": "STOP_HIT", "symbol": "AMD", "setup_type": "scalp"},
             {"reason_code": "STOP_HIT", "symbol": "AMD", "setup_type": "scalp"},
-            {"reason_code": "EXPIRED_UNTRIGGERED", "symbol": "TLT", "setup_type": "swing"},
+            {"reason_code": "EXPIRED_UNEXECUTED", "symbol": "TLT", "setup_type": "swing"},
         ]
         agg = aggregate_reasons(pms)
         self.assertEqual(agg["by_reason"]["STOP_HIT"], 2)

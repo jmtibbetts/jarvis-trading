@@ -8,8 +8,10 @@ Reason taxonomy (deterministic — classification is rules over recorded
 facts, never an LLM judgment):
 
   STOP_HIT              evaluation shows the stop was struck first
-  EXPIRED_UNTRIGGERED   signal expired with evaluation never resolving —
-                        the entry never gave a tradeable fill in time
+  EXPIRED_UNFILLED_ORDER  order submitted, entry never filled (true entry-
+                          placement failure)
+  EXPIRED_UNEXECUTED      expired without ever reaching execution — gating,
+                          slot limits, or overproduction, not entry placement
   AMBIGUOUS_BAR         target and stop struck within one bar (untradeable
                         volatility for the chosen timeframe)
   DATA_ERROR            evaluation flagged INVALID_DATA (symbol/exchange
@@ -38,7 +40,7 @@ LOOKBACK_DAYS = 45
 DEGENERATE_SPACING_PCT = 0.1
 
 REASON_CODES = (
-    "STOP_HIT", "EXPIRED_UNTRIGGERED", "AMBIGUOUS_BAR", "DATA_ERROR",
+    "STOP_HIT", "EXPIRED_UNFILLED_ORDER", "EXPIRED_UNEXECUTED", "AMBIGUOUS_BAR", "DATA_ERROR",
     "REJECTED_BY_USER", "NOT_TRADABLE", "DEGENERATE_LEVELS", "EXPIRED_OTHER",
 )
 
@@ -72,8 +74,15 @@ def classify(signal: dict, evaluation: dict | None) -> tuple[str, str] | None:
     if status == "Rejected":
         return "REJECTED_BY_USER", "explicitly denied via dashboard or Telegram"
     if status == "Expired":
+        # Split by whether a broker order ever existed — measured on real data
+        # (226/226 expired signals in one window had NO order): the dominant
+        # mode is signals never submitted at all (gating/slots/overproduction),
+        # which is a different problem from a submitted limit that never
+        # filled (true entry placement).
+        if signal.get("alpaca_order_id"):
+            return "EXPIRED_UNFILLED_ORDER", "order submitted but the entry never filled before expiry"
         if outcome in (None, "OPEN", "EXPIRED"):
-            return "EXPIRED_UNTRIGGERED", "expired without the setup resolving — entry likely never filled"
+            return "EXPIRED_UNEXECUTED", "expired without ever reaching execution (gate/slots/overproduction)"
         return "EXPIRED_OTHER", f"expired with evaluation outcome {outcome}"
     if signal.get("paper_mode") and (signal.get("notes") or "").startswith("not_tradable"):
         return "NOT_TRADABLE", signal.get("notes") or "venue does not list this symbol"

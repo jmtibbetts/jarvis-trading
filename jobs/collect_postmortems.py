@@ -47,6 +47,7 @@ def run():
             "entry_price": s.entry_price, "target_price": s.target_price,
             "stop_loss": s.stop_loss, "paper_mode": s.paper_mode,
             "notes": s.notes, "generated_at": s.generated_at,
+            "alpaca_order_id": s.alpaca_order_id,
         } for s in candidates if s.id not in existing]
 
         eval_by_id = {}

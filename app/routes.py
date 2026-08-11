@@ -495,6 +495,113 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     return result
 
 
+@router.get("/portfolio/risk")
+def get_portfolio_risk():
+    """Returns-based portfolio risk over CURRENT positions: correlation
+    matrix, hidden-concentration flags, and 1-day historical-simulation VaR —
+    lib/portfolio_risk.py. Price history comes from the OHLCV cache only (no
+    provider calls on request); symbols without cached history are listed as
+    uncovered rather than silently dropped."""
+    from datetime import datetime as dt
+    from lib.portfolio_risk import (
+        concentration_summary, correlation_matrix, historical_var, returns_frame,
+    )
+    from lib.ohlcv_cache import get_cached_range
+
+    try:
+        from lib.alpaca_client import get_positions
+        positions = get_positions()
+    except Exception as e:
+        raise HTTPException(503, f"Positions unavailable: {e}")
+    if not positions:
+        return {"positions": 0, "note": "No open positions — nothing to measure."}
+
+    weights: dict = {}
+    for p in positions:
+        try:
+            sym = p.symbol
+            # Alpaca reports crypto positions in suffix form ("SOLUSD") that the
+            # cache doesn't recognize as crypto — normalize to the app-native
+            # BASE/USD key or the cache lookup silently misses (observed live:
+            # every crypto position landed in uncovered_symbols).
+            if str(getattr(p, "asset_class", "")).lower().endswith("crypto"):
+                from lib.crypto_market_data import normalize_crypto_symbol
+                sym = normalize_crypto_symbol(sym)
+            weights[sym] = float(p.market_value)
+        except (TypeError, ValueError):
+            continue
+
+    end = dt.now(timezone.utc)
+    start = end - timedelta(days=400)
+    closes = {}
+    uncovered = []
+    for sym in weights:
+        df = get_cached_range(sym, "1D", start, end)
+        if df is not None and len(df) >= 2:
+            closes[sym] = df["close"]
+        else:
+            uncovered.append(sym)
+
+    rf = returns_frame(closes)
+    matrix = correlation_matrix(rf) if not rf.empty else {}
+    gross = sum(abs(v) for v in weights.values())
+    # VaR must be scaled to the gross it actually measured. With partial cache
+    # coverage, scaling var_pct by the FULL book's gross would present a
+    # 3-symbol VaR as whole-portfolio risk (the first live run did exactly
+    # that: 3 of 12 positions covered, var_usd quoted against the full gross).
+    covered_gross = sum(abs(weights[s]) for s in closes)
+    var = historical_var(rf, weights, gross_value=covered_gross) if not rf.empty else None
+    if var is not None:
+        var["covered_gross_usd"] = round(covered_gross, 2)
+        var["coverage_pct_of_gross"] = round(covered_gross / gross * 100, 1) if gross else None
+    return {
+        "positions": len(weights),
+        "gross_value_usd": round(gross, 2),
+        "correlation_matrix": matrix,
+        "concentration": concentration_summary(matrix, weights) if matrix else None,
+        "var": var,
+        "uncovered_symbols": uncovered,
+        "note": (
+            "Cache-only price history; uncovered symbols had no cached daily "
+            "bars and are excluded from every statistic above. VaR is 1-day "
+            "historical simulation, scaled ONLY to the covered gross (see "
+            "coverage_pct_of_gross), and abstains below its sample floor."
+        ),
+    }
+
+
+@router.get("/market/breadth")
+def get_market_breadth():
+    """Share of tracked equities above their own 20/50/200-day SMAs, computed
+    from cached daily bars only, with per-window coverage counts — 5 of 40
+    covered is a different claim from 40 of 40 and is never hidden."""
+    from datetime import datetime as dt
+    from lib.portfolio_risk import breadth_above_smas
+    from lib.ohlcv_cache import get_cached_range
+
+    with get_db() as db:
+        symbols = [
+            r[0] for r in db.query(MarketAsset.symbol)
+            .filter(MarketAsset.asset_class == "Equity").all() if r[0]
+        ]
+    end = dt.now(timezone.utc)
+    start = end - timedelta(days=420)
+    closes = {}
+    for sym in symbols:
+        df = get_cached_range(sym, "1D", start, end)
+        if df is not None and len(df) >= 20:
+            closes[sym] = df["close"]
+
+    breadth = breadth_above_smas(closes)
+    breadth["tracked_equities"] = len(symbols)
+    breadth["with_cached_history"] = len(closes)
+    breadth["note"] = (
+        "Cache-only computation over tracked equities; eligible counts per "
+        "window show true coverage."
+    )
+    return breadth
+
+
 @router.get("/scenarios/{symbol}")
 def get_scenarios(symbol: str, timeframe: str = "1D"):
     """Deterministic long+short scenarios from computed TA levels (swings,

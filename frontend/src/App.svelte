@@ -9,7 +9,7 @@
   import Intelligence from "./lib/sections/Intelligence.svelte";
   import Performance from "./lib/sections/Performance.svelte";
   import Ops from "./lib/sections/Ops.svelte";
-  import { sectionStore, SECTIONS, isPopout } from "./lib/stores/section.svelte";
+  import { sectionStore, SECTIONS, isPopout, popPanel } from "./lib/stores/section.svelte";
   import { killSwitchStore } from "./lib/stores/kill.svelte";
   import { wsStore } from "./lib/stores/ws.svelte";
 
@@ -33,7 +33,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="shell" class:popout={isPopout}>
+<div class="shell" class:popout={isPopout} class:panelpop={popPanel !== null}>
   {#if !isPopout}
     <TopHud />
     <NavRail />
@@ -86,5 +86,18 @@
   }
   .shell.popout main {
     padding: 14px 16px 28px;
+  }
+  /* Panel-popout: one panel per window. Hidden panels leave their grid
+     wrappers empty — collapse those, and let the survivor span the full
+     grid regardless of its original span class. */
+  .shell.panelpop main :global(.grid > div:empty) {
+    display: none;
+  }
+  .shell.panelpop main :global(.grid > div) {
+    grid-column: span 12 !important;
+  }
+  .shell.panelpop main :global(.page-head),
+  .shell.panelpop main :global(.kpis) {
+    display: none;
   }
 </style>

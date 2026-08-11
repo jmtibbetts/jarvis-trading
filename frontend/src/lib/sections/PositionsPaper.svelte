@@ -353,6 +353,8 @@
     {/if}
   </Panel>
 
+
+  <div class="two-col">
   <Panel title="Open Orders" meta="{orders.length} working at Alpaca">
     {#snippet children()}
       {#if orders.length}
@@ -377,7 +379,6 @@
       {/if}
     {/snippet}
   </Panel>
-
   <Panel title="Execution Slippage" meta={slippage?.count ? `${slippage.count} fills` : "no data"}>
     {#if slippage && slippage.count}
       <div class="slip-stats">
@@ -402,6 +403,7 @@
       <div class="empty">No live fills recorded yet — slippage is tracked the first time manage_positions observes a filled live position.</div>
     {/if}
   </Panel>
+  </div>
   </div>
 {:else if account === "paper"}
   <div class="kpis">
@@ -468,6 +470,16 @@
       {/if}
     {/snippet}
   </Panel>
+  </div>
+{:else if account === "autosim"}
+  <div class="kpis">
+    <KpiTile label="Equity" value={autosim ? fmtUsd(autosim.summary.equity) : "—"} />
+    <KpiTile label="Realized P&L" value={autosim ? fmtUsd(autosim.summary.realized_pnl) : "—"} trend={autosim && autosim.summary.realized_pnl >= 0 ? "up" : "down"} />
+    <KpiTile label="Win Rate" value={autosim ? `${autosim.summary.win_rate}%` : "—"} />
+    <KpiTile label="Total Trades" value={String(autosim?.summary.total_trades ?? "—")} />
+  </div>
+  <div class="stack">
+  <div class="two-col">
   <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}">
     {#if paper && paper.trades.length}
       <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
@@ -489,15 +501,6 @@
       <div class="empty">No closed trades yet</div>
     {/if}
   </Panel>
-  </div>
-{:else if account === "autosim"}
-  <div class="kpis">
-    <KpiTile label="Equity" value={autosim ? fmtUsd(autosim.summary.equity) : "—"} />
-    <KpiTile label="Realized P&L" value={autosim ? fmtUsd(autosim.summary.realized_pnl) : "—"} trend={autosim && autosim.summary.realized_pnl >= 0 ? "up" : "down"} />
-    <KpiTile label="Win Rate" value={autosim ? `${autosim.summary.win_rate}%` : "—"} />
-    <KpiTile label="Total Trades" value={String(autosim?.summary.total_trades ?? "—")} />
-  </div>
-  <div class="stack">
   <Panel title="Auto Sim" meta="follows every eligible signal automatically — paper-only, no broker">
     <p class="note">
       Auto Sim is a separate always-on paper ledger that opens a $1,000-notional virtual position for every eligible
@@ -505,6 +508,7 @@
       {autosim?.summary.losses ?? 0} losses.
     </p>
   </Panel>
+  </div>
   </div>
 {/if}
 

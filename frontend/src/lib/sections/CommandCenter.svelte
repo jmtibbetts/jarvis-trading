@@ -144,6 +144,73 @@
     />
   </div>
 
+  <div class="span-8">
+    <Panel title="Equity Curve" meta="{equity.length} snapshots &middot; 7d">
+      <EquityChart points={equity} />
+    </Panel>
+  </div>
+  <div class="span-4">
+    <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open">
+      {#if positionsResp && positionsResp.positions.length}
+        <table class="pos">
+          <thead>
+            <tr><th>Sym</th><th>Side</th><th>P&amp;L</th></tr>
+          </thead>
+          <tbody>
+            {#each positionsResp.positions as p (p.symbol)}
+              <tr>
+                <td class="sym">{p.symbol}</td>
+                <td>{p.side}</td>
+                <td class={p.unrealized_plpc >= 0 ? "pl-up" : "pl-down"}>{fmtPct(p.unrealized_plpc)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <div class="empty">No open positions</div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-7">
+    <Panel title="Active Signals" meta="top {signals.length} by score">
+      <div class="sig-list">
+        {#each signals as sig (sig.id)}
+          <div
+            class="sig"
+            onclick={() => (analysisSignalId = sig.id)}
+            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
+            role="button"
+            tabindex="0"
+          >
+            <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} />
+            <div>
+              <div class="sig-sym">
+                {sig.asset_symbol}
+                <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
+              </div>
+              <div class="sig-meta num">entry {sig.entry_price ?? "—"} &middot; {sig.timeframe ?? "—"}</div>
+            </div>
+            <div class="sig-rr">
+              <div class="lbl">R:R</div>
+              <span class="num">{sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</span>
+            </div>
+          </div>
+        {:else}
+          <div class="empty">No active signals right now</div>
+        {/each}
+      </div>
+    </Panel>
+  </div>
+  <div class="span-5">
+    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active" noPad>
+      <ThreatMap {threats} />
+      <div class="map-legend">
+        <span><i style="background:var(--critical)"></i> Critical</span>
+        <span><i style="background:var(--warm)"></i> High</span>
+        <span><i style="background:var(--accent)"></i> Medium</span>
+      </div>
+    </Panel>
+  </div>
   <div class="span-4">
     <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked">
       <div class="sig-list cap-h">
@@ -203,7 +270,6 @@
       </div>
     </Panel>
   </div>
-
   <div class="span-8">
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
       {#if watchlist && watchlist.rows.length}
@@ -256,7 +322,6 @@
       {/if}
     </Panel>
   </div>
-
   <div class="span-8">
     <Panel title="Ask JARVIS" meta="analyst over system data · cites its sources">
       <form
@@ -292,7 +357,6 @@
       {/if}
     </Panel>
   </div>
-
   <div class="span-4">
     <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : "—"}>
       {#if catalysts && catalysts.events.length}
@@ -317,90 +381,14 @@
     </Panel>
   </div>
 
-  <div class="span-8">
-    <Panel title="Equity Curve" meta="{equity.length} snapshots &middot; 7d">
-      <EquityChart points={equity} />
-    </Panel>
-  </div>
 
-  <div class="span-4">
-    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active" noPad>
-      <ThreatMap {threats} />
-      <div class="map-legend">
-        <span><i style="background:var(--critical)"></i> Critical</span>
-        <span><i style="background:var(--warm)"></i> High</span>
-        <span><i style="background:var(--accent)"></i> Medium</span>
-      </div>
-    </Panel>
-  </div>
 
-  <div class="span-5">
-    <Panel title="Active Signals" meta="top {signals.length} by score">
-      <div class="sig-list">
-        {#each signals as sig (sig.id)}
-          <div
-            class="sig"
-            onclick={() => (analysisSignalId = sig.id)}
-            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
-            role="button"
-            tabindex="0"
-          >
-            <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} />
-            <div>
-              <div class="sig-sym">
-                {sig.asset_symbol}
-                <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
-              </div>
-              <div class="sig-meta num">entry {sig.entry_price ?? "—"} &middot; {sig.timeframe ?? "—"}</div>
-            </div>
-            <div class="sig-rr">
-              <div class="lbl">R:R</div>
-              <span class="num">{sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</span>
-            </div>
-          </div>
-        {:else}
-          <div class="empty">No active signals right now</div>
-        {/each}
-      </div>
-    </Panel>
-  </div>
 
-  <div class="span-4">
-    <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open">
-      {#if positionsResp && positionsResp.positions.length}
-        <table class="pos">
-          <thead>
-            <tr><th>Sym</th><th>Side</th><th>P&amp;L</th></tr>
-          </thead>
-          <tbody>
-            {#each positionsResp.positions as p (p.symbol)}
-              <tr>
-                <td class="sym">{p.symbol}</td>
-                <td>{p.side}</td>
-                <td class={p.unrealized_plpc >= 0 ? "pl-up" : "pl-down"}>{fmtPct(p.unrealized_plpc)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {:else}
-        <div class="empty">No open positions</div>
-      {/if}
-    </Panel>
-  </div>
 
-  <div class="span-3">
-    <Panel title="Job Health" meta="{jobEntries.filter(([, j]) => j.status === 'ok').length}/{jobEntries.length}">
-      <div class="ops-list">
-        {#each jobEntries as [name, job] (name)}
-          <div class="op-row">
-            <span class="d {job.status}"></span>
-            <span class="name">{name}</span>
-            <span class="t num">{fmtAgo(job.last)}</span>
-          </div>
-        {/each}
-      </div>
-    </Panel>
-  </div>
+
+
+
+
 
   <div class="ticker">
     <div class="lbl">WIRE</div>
@@ -468,8 +456,8 @@
     background: var(--surface);
     z-index: 1;
   }
-  .span-12 {
-    grid-column: span 12;
+  .span-7 {
+    grid-column: span 7;
   }
   .span-8 {
     grid-column: span 8;
@@ -479,9 +467,6 @@
   }
   .span-4 {
     grid-column: span 4;
-  }
-  .span-3 {
-    grid-column: span 3;
   }
 
   .map-legend {
@@ -720,38 +705,6 @@
     color: var(--bad);
   }
 
-  .ops-list {
-    display: flex;
-    flex-direction: column;
-    margin: -14px;
-  }
-  .op-row {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 6px 14px;
-    font-size: 11.5px;
-  }
-  .op-row .d {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--ink-faint);
-  }
-  .op-row .d.ok {
-    background: var(--good);
-    box-shadow: 0 0 6px var(--good);
-  }
-  .op-row .d.running {
-    background: var(--warm);
-    box-shadow: 0 0 6px var(--warm);
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-  .op-row .d.error {
-    background: var(--bad);
-    box-shadow: 0 0 6px var(--bad);
-  }
   @keyframes pulse {
     0%,
     100% {
@@ -760,14 +713,6 @@
     50% {
       opacity: 0.35;
     }
-  }
-  .op-row .name {
-    flex: 1;
-    color: var(--ink-dim);
-  }
-  .op-row .t {
-    font-size: 10px;
-    color: var(--ink-faint);
   }
 
   .ticker {
@@ -814,11 +759,10 @@
     .kpis {
       grid-template-columns: repeat(3, 1fr);
     }
-    .span-12,
     .span-8,
+    .span-7,
     .span-5,
-    .span-4,
-    .span-3 {
+    .span-4 {
       grid-column: span 12;
     }
   }

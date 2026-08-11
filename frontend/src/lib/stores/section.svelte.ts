@@ -42,9 +42,21 @@ function sectionFromHash(): SectionId {
  * popout for its lifetime. */
 export const isPopout = new URLSearchParams(window.location.search).has("popout");
 
+/** Panel-level popout target (slugified panel title), or null. When set, the
+ * section renders but every Panel except the matching one returns nothing —
+ * so ANY panel in the app can live in its own window with zero per-panel
+ * wiring. */
+export const popPanel: string | null =
+  new URLSearchParams(window.location.search).get("panel");
+
 export function openPopout(id: SectionId) {
   const url = `${window.location.pathname}?popout=1#${id}`;
   window.open(url, `jarvis-${id}`, "popup=yes,width=1180,height=860");
+}
+
+export function openPanelPopout(section: SectionId, panelId: string) {
+  const url = `${window.location.pathname}?popout=1&panel=${encodeURIComponent(panelId)}#${section}`;
+  window.open(url, `jarvis-${section}-${panelId}`, "popup=yes,width=920,height=760");
 }
 
 class SectionStore {

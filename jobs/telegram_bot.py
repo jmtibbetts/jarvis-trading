@@ -237,6 +237,14 @@ def _price_levels(entry, stop, target):
 
 # Horizon labels mirror lib/signal_scorer._setup_type's timeframe mapping —
 # the user-facing answer to "is this a scalp or a swing?"
+# Expected hold duration per chart timeframe — shown on every setup so
+# "scalp or swing, and for how long?" is answered in the message itself.
+_HOLD_BY_TF = {
+    "1m": "<30 min", "3m": "<30 min", "5m": "<1 hr",
+    "15m": "1-4 hr", "30m": "2-8 hr", "1H": "4-24 hr",
+    "2H": "1-3 days", "4H": "1-5 days", "1D": "1-4 weeks",
+}
+
 _HORIZON_BY_TF = {
     "1m": "SCALP", "3m": "SCALP", "5m": "SCALP",
     "15m": "INTRADAY", "30m": "INTRADAY", "1H": "INTRADAY",
@@ -279,6 +287,7 @@ def _format_trade_setup(signal, updated=False):
     name_line = f" — {escape(name)}" if name else ""
     horizon = escape(_horizon(signal))
     timeframe = escape(str(getattr(signal, "timeframe", "") or "N/A"))
+    hold = escape(_HOLD_BY_TF.get(str(getattr(signal, "timeframe", "") or ""), "varies"))
     source = escape(str(getattr(signal, "signal_source", "") or "watchlist"))
     score = getattr(signal, "composite_score", None)
     score_txt = f"{float(score):.0f}" if score is not None else "—"
@@ -288,7 +297,7 @@ def _format_trade_setup(signal, updated=False):
     return (
         f"<b>{title}</b>\n\n"
         f"<b>{symbol}</b>{name_line}\n"
-        f"<b>{side}</b> | <b>{horizon}</b> ({timeframe} chart)\n\n"
+        f"<b>{side}</b> | <b>{horizon}</b> ({timeframe} chart · expect {hold})\n\n"
         f"Entry: <b>{entry_s}</b>\n"
         f"Stop Loss: <b>{stop_s}</b> ({risk_pct:.2f}% risk)\n"
         f"Take Profit: <b>{target_s}</b> ({reward_pct:.2f}% target)\n"

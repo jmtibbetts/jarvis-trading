@@ -67,7 +67,10 @@ class FormatTradeSetupTests(unittest.TestCase):
     def test_message_carries_horizon_and_timeframe(self, _):
         text = _format_trade_setup(self._sig())
         self.assertIn("SCALP", text)
-        self.assertIn("(5m chart)", text)
+        self.assertIn("5m chart", text)
+        # every setup carries an expected hold duration for its timeframe
+        self.assertIn("expect", text)
+        self.assertIn("1 hr", text)
 
     @patch("jobs.telegram_bot._asset_name", return_value=None)
     def test_message_carries_risk_and_target_pct(self, _):

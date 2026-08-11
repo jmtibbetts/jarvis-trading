@@ -82,6 +82,15 @@
     return "mkt-other";
   };
 
+  // Expected hold time per chart timeframe — the user-facing answer to
+  // "how long is this trade supposed to take?"
+  const HOLD_BY_TF: Record<string, string> = {
+    "1m": "<30 min", "3m": "<30 min", "5m": "<1 hr",
+    "15m": "1-4 hr", "30m": "2-8 hr", "1H": "4-24 hr",
+    "2H": "1-3 days", "4H": "1-5 days", "1D": "1-4 weeks",
+  };
+  const holdEstimate = (tf: string | null) => HOLD_BY_TF[tf ?? ""] ?? "varies";
+
   const verdictTone = (v: string) => (v === "CONFIRMED" ? "good" : v === "INVALIDATED" ? "bad" : v === "STALE_ENTRY" ? "warm" : "neutral");
 
   async function loadSignals() {
@@ -510,6 +519,7 @@
                   <div class="num"><span class="dim">conf</span> {Math.round(sig.confidence ?? 0)}%</div>
                   <div class="num"><span class="dim">R:R</span> {sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</div>
                   <div class="num"><span class="dim">tf</span> {sig.timeframe ?? "—"}</div>
+                  <div class="num"><span class="dim">hold</span> {holdEstimate(sig.timeframe)}</div>
                 </div>
               </div>
               <div class="sc-levels num">

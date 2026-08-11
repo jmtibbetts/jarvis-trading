@@ -808,8 +808,12 @@ def run():
     # 90s was too tight for local "thinking" models (Qwen3 etc. burn tokens reasoning
     # before answering) — most batches were hitting the fallback path well before the
     # LLM was actually unavailable. 240s still leaves headroom inside the 30-min cycle.
-    llm_budget = max(10.0, float(os.getenv("SIGNAL_LLM_TIME_BUDGET_SECONDS", "240")))
-    llm_request_timeout = max(5.0, float(os.getenv("SIGNAL_LLM_REQUEST_TIMEOUT_SECONDS", "30")))
+    llm_budget = max(10.0, float(os.getenv("SIGNAL_LLM_TIME_BUDGET_SECONDS", "420")))
+    # 30s was tuned for a 9B model; the user runs larger local models
+    # (observed live: a 26B swap made every request time out, tripping the
+    # circuit breaker so ALL batches instantly fell back to TA — 628
+    # "RuntimeError" fallbacks in one log). 90s absorbs big-model latency.
+    llm_request_timeout = max(5.0, float(os.getenv("SIGNAL_LLM_REQUEST_TIMEOUT_SECONDS", "90")))
     llm_queue_timeout = max(1.0, float(os.getenv("SIGNAL_LLM_QUEUE_TIMEOUT_SECONDS", "8")))
     llm_deadline = time.monotonic() + llm_budget
 
@@ -854,7 +858,7 @@ def run():
             is_conn_err = "running at" in str(e) or "LLM call failed" in str(e)
             reason = (
                 f"Local LLM unreachable ({e})" if is_conn_err
-                else f"LLM call failed for this batch ({type(e).__name__})"
+                else f"LLM call failed for this batch ({type(e).__name__}: {str(e)[:80]})"
             )
             _append_fallback(batch_id, batch_syms, is_paper, reason=reason)
 

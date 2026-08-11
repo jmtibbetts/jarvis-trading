@@ -144,9 +144,9 @@
     />
   </div>
 
-  <div class="span-12">
+  <div class="span-4">
     <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked">
-      <div class="sig-list">
+      <div class="sig-list cap-h">
         {#each opportunities as opp (opp.signal_id)}
           <div
             class="sig opp"
@@ -204,10 +204,10 @@
     </Panel>
   </div>
 
-  <div class="span-12">
+  <div class="span-8">
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
       {#if watchlist && watchlist.rows.length}
-        <div class="wl-scroll">
+        <div class="wl-scroll cap-h">
           <table class="wl">
             <thead>
               <tr><th>Sym</th><th>Price</th><th>Chg</th><th>Signal</th><th>Insider</th><th>Congress 90d</th><th>13F</th><th>Dark Pool</th></tr>
@@ -453,6 +453,23 @@
     display: grid;
     grid-template-columns: repeat(6, 1fr);
     gap: 14px;
+  }
+  .cap-h {
+    /* Cap panel body height so tall lists scroll INSIDE their panel instead
+       of stretching the whole grid row — the source of the giant blank areas
+       beside shorter panels. Height chosen to align the opportunities and
+       watchlist rows. */
+    max-height: 480px;
+    overflow-y: auto;
+  }
+  .cap-h table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    z-index: 1;
+  }
+  .span-12 {
+    grid-column: span 12;
   }
   .span-8 {
     grid-column: span 8;
@@ -797,6 +814,7 @@
     .kpis {
       grid-template-columns: repeat(3, 1fr);
     }
+    .span-12,
     .span-8,
     .span-5,
     .span-4,

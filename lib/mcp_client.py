@@ -51,9 +51,10 @@ MCP_SERVERS: dict[str, dict] = {
     "tavily": {"url": "https://mcp.tavily.com/mcp/", "key_env": "TAVILY_API_KEY"},
     "exa": {"url": "https://mcp.exa.ai/mcp", "key_env": "EXA_API_KEY"},  # /mcp per official Exa docs (verified live)
     "firecrawl": {"url": "https://mcp.firecrawl.dev/v2/mcp", "key_env": "FIRECRAWL_API_KEY"},
-    # Keyless (verified live) — code-execution server: the `execute` tool runs
-    # JS against the CoinGecko SDK. COINGECKO_API_KEY optional for pro tiers.
-    "coingecko": {"url": "https://mcp.api.coingecko.com/mcp", "key_env": "COINGECKO_API_KEY"},
+    # Works keyless; a demo key raises rate limits. CoinGecko's documented
+    # auth is the x-cg-demo-api-key header, NOT Bearer (verified live).
+    "coingecko": {"url": "https://mcp.api.coingecko.com/mcp", "key_env": "COINGECKO_API_KEY",
+                  "key_header": "x-cg-demo-api-key"},
 }
 
 # Prebuilt JS for coingecko's execute tool — one snapshot call for a list of
@@ -98,10 +99,15 @@ _tool_cache: dict[str, list[dict]] = {}  # server -> tools
 
 def _headers(server: str) -> dict:
     h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    key_env = MCP_SERVERS[server].get("key_env")
-    key = os.getenv(key_env or "")
+    cfg = MCP_SERVERS[server]
+    key = os.getenv(cfg.get("key_env") or "")
     if key:
-        h["Authorization"] = f"Bearer {key}"
+        # Most servers take a Bearer token; some (CoinGecko) use a vendor
+        # header — key_header overrides when set.
+        if cfg.get("key_header"):
+            h[cfg["key_header"]] = key
+        else:
+            h["Authorization"] = f"Bearer {key}"
     if server in _sessions:
         h["Mcp-Session-Id"] = _sessions[server]
     return h

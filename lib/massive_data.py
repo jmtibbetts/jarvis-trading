@@ -35,6 +35,25 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 300
 _cache: dict[str, tuple[float, dict]] = {}
 
+# Plan-level rate budget: ~5 requests/minute (verified live — faster probing
+# exhausted retries). A summary costs 2 calls, so this window admits at most
+# 2 summaries/minute and rejects further ones CLEANLY instead of letting the
+# SDK spin in its own retry loop against 429s.
+RATE_LIMIT_CALLS = 5
+RATE_WINDOW_SECONDS = 60.0
+_call_times: list[float] = []
+
+
+def _budget_allows(calls_needed: int) -> bool:
+    now = time.time()
+    while _call_times and now - _call_times[0] > RATE_WINDOW_SECONDS:
+        _call_times.pop(0)
+    return len(_call_times) + calls_needed <= RATE_LIMIT_CALLS
+
+
+def _spend_budget(calls: int):
+    _call_times.extend([time.time()] * calls)
+
 
 def is_configured() -> bool:
     return bool(os.getenv("MASSIVE_API_KEY"))
@@ -60,6 +79,11 @@ def get_market_summary(symbol: str, days: int = 10) -> dict | None:
     cached = _cache.get(key)
     if cached and now - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]
+
+    if not _budget_allows(2):
+        logger.info(f"[Massive] Rate budget exhausted — skipping fresh fetch for {symbol}")
+        return cached[1] if cached else None
+    _spend_budget(2)
 
     try:
         from datetime import date, timedelta

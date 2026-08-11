@@ -1,0 +1,150 @@
+"""
+Signal double-check — user-initiated re-verification of a trade setup
+against fresh data. Deterministic: every check is arithmetic over fetched
+prices; no LLM anywhere in the verdict.
+
+Price sources by asset class:
+  crypto   live exchange price via lib/crypto_market_data (free, cached ~30s)
+  equity   Massive REST previous-session data (lib/massive_data — respects
+           the plan's 5-calls/min budget and 5-min cache; note this is
+           end-of-day data, and the verdict says so via price_asof)
+
+Verdicts:
+  CONFIRMED         current price still inside the setup's validity: entry
+                    not run away, stop not breached, target not already hit
+  STALE_ENTRY       price has drifted more than STALE_ENTRY_PCT from entry —
+                    the fill the signal assumed no longer exists. A
+                    suggested_update re-anchors entry to the current price
+                    and shifts stop/target by the SAME ABSOLUTE DISTANCES
+                    (preserving the original risk/reward geometry). Applied
+                    only when the user explicitly clicks apply — never
+                    automatically.
+  INVALIDATED       stop already breached or target already reached at the
+                    checked price — the trade as written is over
+  DATA_UNAVAILABLE  no fresh price could be fetched; nothing is guessed
+
+STALE_ENTRY_PCT is deliberately generous (1.5%): normal drift within a bar
+shouldn't nag; a real run-away should.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+STALE_ENTRY_PCT = 1.5
+
+
+def fetch_current_price(symbol: str, asset_class: str | None) -> tuple[float | None, str | None, str | None]:
+    """(price, source, asof) — asof 'live' for exchange quotes, 'previous_session'
+    for Massive end-of-day data."""
+    is_crypto = "/" in (symbol or "") or (asset_class or "").lower() == "crypto"
+    if is_crypto:
+        try:
+            from lib.crypto_market_data import fetch_crypto_prices
+            prices = fetch_crypto_prices([symbol])
+            row = prices.get(symbol) or next(iter(prices.values()), None)
+            if row and row.get("price"):
+                return float(row["price"]), row.get("source", "exchange"), "live"
+        except Exception as e:
+            logger.debug(f"[Verify] Crypto price fetch failed for {symbol}: {e}")
+    try:
+        from lib.massive_data import get_market_summary
+        summary = get_market_summary(symbol, days=3)
+        prev = (summary or {}).get("previous_close")
+        if prev and prev.get("close"):
+            return float(prev["close"]), "massive", "previous_session"
+    except Exception as e:
+        logger.debug(f"[Verify] Massive price fetch failed for {symbol}: {e}")
+    # Last resort: the app's own stored asset price (age unknown but real).
+    try:
+        from app.database import get_db, MarketAsset
+        with get_db() as db:
+            row = db.query(MarketAsset).filter(MarketAsset.symbol == symbol).first()
+            if row and row.price:
+                return float(row.price), "market_assets_cache", row.last_updated or "unknown"
+    except Exception:
+        pass
+    return None, None, None
+
+
+def verify_levels(direction: str, entry: float, target: float, stop: float,
+                  current: float) -> dict:
+    """Pure arithmetic verdict for one setup at one observed price."""
+    short = str(direction or "").lower().startswith("short")
+    checks = []
+
+    stop_breached = current >= stop if short else current <= stop
+    target_reached = current <= target if short else current >= target
+    drift_pct = abs(current - entry) / entry * 100 if entry else None
+
+    checks.append({
+        "check": "stop_not_breached",
+        "ok": not stop_breached,
+        "detail": f"price {current:g} vs stop {stop:g}",
+    })
+    checks.append({
+        "check": "target_not_already_reached",
+        "ok": not target_reached,
+        "detail": f"price {current:g} vs target {target:g}",
+    })
+    checks.append({
+        "check": "entry_still_near",
+        "ok": drift_pct is not None and drift_pct <= STALE_ENTRY_PCT,
+        "detail": f"price {current:g} is {drift_pct:.2f}% from entry {entry:g}" if drift_pct is not None else "no entry",
+    })
+
+    if stop_breached or target_reached:
+        verdict = "INVALIDATED"
+    elif drift_pct is not None and drift_pct > STALE_ENTRY_PCT:
+        verdict = "STALE_ENTRY"
+    else:
+        verdict = "CONFIRMED"
+
+    suggested = None
+    if verdict == "STALE_ENTRY":
+        # Re-anchor to current price, PRESERVING the original absolute
+        # stop/target distances — same risk geometry, fresh anchor.
+        stop_dist = stop - entry
+        target_dist = target - entry
+        suggested = {
+            "entry_price": round(current, 8),
+            "stop_loss": round(current + stop_dist, 8),
+            "target_price": round(current + target_dist, 8),
+            "basis": "entry re-anchored to checked price; stop/target shifted by the original absolute distances",
+        }
+
+    return {"verdict": verdict, "checks": checks, "drift_pct": round(drift_pct, 3) if drift_pct is not None else None,
+            "suggested_update": suggested}
+
+
+def verify_signal(signal: dict) -> dict:
+    """Full verification for one signal dict (needs asset_symbol, asset_class,
+    direction, entry_price, target_price, stop_loss)."""
+    symbol = signal.get("asset_symbol") or ""
+    entry = float(signal.get("entry_price") or 0)
+    target = float(signal.get("target_price") or 0)
+    stop = float(signal.get("stop_loss") or 0)
+    if not (entry and target and stop):
+        return {"verdict": "DATA_UNAVAILABLE", "checks": [],
+                "detail": "signal is missing price levels", "current_price": None}
+
+    current, source, asof = fetch_current_price(symbol, signal.get("asset_class"))
+    if current is None:
+        return {"verdict": "DATA_UNAVAILABLE", "checks": [],
+                "detail": "no fresh price available from any source", "current_price": None}
+
+    result = verify_levels(signal.get("direction") or "Long", entry, target, stop, current)
+    result.update({
+        "current_price": current,
+        "price_source": source,
+        "price_asof": asof,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "Deterministic re-check against fresh data. previous_session prices "
+            "are end-of-day (Massive plan has no live quotes) — a CONFIRMED "
+            "verdict on session-old data means 'was still valid at last close'."
+        ),
+    })
+    return result

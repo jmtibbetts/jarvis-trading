@@ -88,7 +88,9 @@ class TradingSignal(Base):
     fill_recorded_at = Column(String)
     scaled_out       = Column(Boolean, default=False)   # partial-close-at-TP1 already applied
     scaled_out_qty   = Column(Float)
-    notes            = Column(Text)                     # free-text trade journal note
+    notes            = Column(Text)
+    verification_json = Column(Text)   # last double-check result (verdict, checks, prices)
+    verified_at      = Column(String)                     # free-text trade journal note
     user_id          = Column(String, default=DEFAULT_USER_ID)
     created_date     = Column(String, default=now_iso)
     updated_date     = Column(String, default=now_iso)
@@ -262,6 +264,31 @@ class IpoFiling(Base):
     cover_mentions_ipo = Column(Boolean)
     filing_url         = Column(String)
     updated_date       = Column(String, default=now_iso)
+
+
+class SignalPostmortem(Base):
+    """One row per signal that reached a terminal failure/cancel state — the
+    memory of WHY things didn't work, keyed by a deterministic reason
+    taxonomy (lib/postmortem.py) rather than free text, so failure modes can
+    be counted, aggregated, and fed back into scoring. reason_detail keeps
+    the human-readable specifics; market context (regime at collection) is
+    recorded because the same setup can fail for regime reasons."""
+    __tablename__ = "signal_postmortems"
+    id             = Column(String, primary_key=True, default=new_id)
+    signal_id      = Column(String, nullable=False, unique=True, index=True)
+    symbol         = Column(String, index=True)
+    asset_class    = Column(String)
+    direction      = Column(String)
+    timeframe      = Column(String)
+    setup_type     = Column(String, index=True)
+    signal_source  = Column(String)
+    composite_score= Column(Float)
+    terminal_status= Column(String)                 # Rejected | Expired | evaluation outcome
+    reason_code    = Column(String, index=True)     # taxonomy in lib/postmortem.py
+    reason_detail  = Column(Text)
+    regime_label   = Column(String)
+    generated_at   = Column(String)
+    collected_at   = Column(String, default=now_iso, index=True)
 
 
 class PsychologySnapshot(Base):
@@ -917,6 +944,8 @@ def _migrate_columns():
             ("scaled_out", "INTEGER DEFAULT 0"),
             ("scaled_out_qty", "REAL"),
             ("notes", "TEXT"),
+            ("verification_json", "TEXT"),
+            ("verified_at", "TEXT"),
         ],
         "news_items": [
             ("canonical_url", "TEXT"),

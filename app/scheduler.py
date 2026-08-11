@@ -58,6 +58,7 @@ job_status = {
     'inst13f':   {'status': 'idle', 'last': None, 'error': None},
     'congress':  {'status': 'idle', 'last': None, 'error': None},
     'ipo':       {'status': 'idle', 'last': None, 'error': None},
+    'postmortem':{'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
 }
 
@@ -413,6 +414,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.fetch_13f_filings import run as inst13f_run
     from jobs.fetch_congress_trades import run as congress_run
     from jobs.fetch_ipo_filings import run as ipo_run
+    from jobs.collect_postmortems import run as postmortem_run
     from jobs.fetch_crypto_derivatives import run as crypto_derivatives_run
 
     now = datetime.now(timezone.utc)
@@ -522,6 +524,13 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('ipo', ipo_run),
                   'interval', hours=4, id='ipo',
                   next_run_time=now + timedelta(minutes=10),
+                  replace_existing=True, max_instances=1)
+
+    # Failure postmortems every 30 min — pure DB sweep classifying terminal
+    # signals into the failure taxonomy that feeds the scoring penalty.
+    sched.add_job(make_job_runner('postmortem', postmortem_run),
+                  'interval', minutes=30, id='postmortem',
+                  next_run_time=now + timedelta(minutes=4),
                   replace_existing=True, max_instances=1)
 
     # Crypto derivatives (funding/OI/long-short ratio/liquidations) every 10 min —

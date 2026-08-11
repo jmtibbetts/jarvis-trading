@@ -3,7 +3,7 @@
   import Pill from "../components/Pill.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
-  import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference } from "../api";
+  import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference, type VerifyResult } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
   import { linkStore } from "../stores/link.svelte";
@@ -35,6 +35,44 @@
   let statusFilter = $state("Active");
   let classFilter = $state("");
   let busyIds = $state<Set<string>>(new Set());
+  let verifyResults = $state<Record<string, VerifyResult>>({});
+
+  async function doVerify(sig: Signal) {
+    setBusy(sig.id, true);
+    try {
+      let res = await api.verifySignal(sig.id);
+      verifyResults = { ...verifyResults, [sig.id]: res };
+      if (res.verdict === "STALE_ENTRY" && res.suggested_update) {
+        const u = res.suggested_update;
+        const ok = confirm(
+          `${sig.asset_symbol}: price moved ${res.drift_pct}% from entry.
+` +
+          `Re-anchor levels?
+  entry ${u.entry_price}
+  stop ${u.stop_loss}
+  target ${u.target_price}
+` +
+          `(${u.basis})`,
+        );
+        if (ok) {
+          res = await api.verifySignal(sig.id, true);
+          verifyResults = { ...verifyResults, [sig.id]: res };
+          toastStore.ok(`${sig.asset_symbol}: levels re-anchored`);
+          await loadSignals();
+        }
+      } else if (res.verdict === "INVALIDATED") {
+        toastStore.err(`${sig.asset_symbol}: setup invalidated at current price`);
+      } else if (res.verdict === "CONFIRMED") {
+        toastStore.ok(`${sig.asset_symbol}: levels still valid (${res.price_asof})`);
+      }
+    } catch (e) {
+      toastStore.err(`Verify failed: ${e}`);
+    } finally {
+      setBusy(sig.id, false);
+    }
+  }
+
+  const verdictTone = (v: string) => (v === "CONFIRMED" ? "good" : v === "INVALIDATED" ? "bad" : v === "STALE_ENTRY" ? "warm" : "neutral");
 
   async function loadSignals() {
     try {
@@ -449,6 +487,9 @@
                 <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
                 {#if sig.paper_mode}<Pill label="paper" tone="warm" />{/if}
                 <Pill label={sig.status} tone="neutral" />
+                {#if verifyResults[sig.id]}
+                  <Pill label={verifyResults[sig.id].verdict.replaceAll("_", " ").toLowerCase()} tone={verdictTone(verifyResults[sig.id].verdict)} />
+                {/if}
               </div>
               <div class="sc-score">
                 <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={46} />
@@ -474,6 +515,12 @@
                 {#if sig.paper_mode && (sig.status === "Active" || sig.status === "PendingApproval")}
                   <button class="btn tiny outline" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "paper"); }}>Paper</button>
                 {/if}
+                <button
+                  class="btn tiny outline"
+                  title="Double-check this setup against fresh data"
+                  disabled={busyIds.has(sig.id)}
+                  onclick={(e) => { e.stopPropagation(); doVerify(sig); }}
+                >Verify</button>
                 <button class="btn tiny ghost" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "delete"); }}>✕</button>
               </div>
             </div>

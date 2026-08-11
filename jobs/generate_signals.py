@@ -251,14 +251,37 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     return s
 
 
+_postmortem_cache = {"loaded_at": None, "rows": []}
+
+
+def _recent_postmortems():
+    """Loaded once per ~10 min across a generation run — the failure memory
+    is small and changes slowly; per-signal DB reads would be waste."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    loaded = _postmortem_cache["loaded_at"]
+    if loaded is None or (now - loaded).total_seconds() > 600:
+        try:
+            from lib.postmortem import load_recent_postmortems
+            _postmortem_cache["rows"] = load_recent_postmortems()
+        except Exception as e:
+            logger.debug(f"[Signals] Postmortem load failed: {e}")
+            _postmortem_cache["rows"] = []
+        _postmortem_cache["loaded_at"] = now
+    return _postmortem_cache["rows"]
+
+
 def score_safe(signal, ta_profiles, regime, earnings_set, accuracy_map=None, news_confidence=50.0):
     try:
         from lib.signal_scorer import score_signal
+        from lib.postmortem import get_failure_adjustment
         sym = signal.get("asset_symbol", "")
+        failure_adj = get_failure_adjustment(sym, signal.get("setup_type"), _recent_postmortems())
         return score_signal(signal, ta_profiles.get(sym, {}), regime,
                             earnings_risk=sym.replace("/USD", "") in earnings_set,
                             historical=(accuracy_map or {}).get(sym),
-                            news_confidence=news_confidence)
+                            news_confidence=news_confidence,
+                            failure_adjustment=failure_adj)
     except Exception as e:
         logger.warning(f"[Signals] Scorer failed for {signal.get('asset_symbol')}: {e} — failing closed")
         # Fail toward NOT trading: a scorer exception means we couldn't verify data

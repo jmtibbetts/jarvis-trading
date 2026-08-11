@@ -495,6 +495,88 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     return result
 
 
+@router.post("/signals/{signal_id}/verify")
+def verify_signal_route(signal_id: str, apply_update: bool = False):
+    """User-initiated double-check of a signal against fresh data —
+    lib/signal_verification.py. Deterministic verdict (CONFIRMED /
+    STALE_ENTRY / INVALIDATED / DATA_UNAVAILABLE); equity prices come from
+    Massive within its 5-calls/min budget, crypto from live exchange feeds.
+
+    apply_update=true additionally applies the suggested level re-anchor,
+    ONLY when the verdict is STALE_ENTRY and only for signals still awaiting
+    action — an executed trade's levels are history, not editable."""
+    from lib.signal_verification import verify_signal
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404, "Signal not found")
+        sig_dict = {
+            "asset_symbol": sig.asset_symbol, "asset_class": sig.asset_class,
+            "direction": sig.direction, "entry_price": sig.entry_price,
+            "target_price": sig.target_price, "stop_loss": sig.stop_loss,
+            "status": sig.status,
+        }
+
+    result = verify_signal(sig_dict)
+
+    applied = False
+    if (apply_update and result.get("verdict") == "STALE_ENTRY"
+            and result.get("suggested_update")
+            and sig_dict["status"] in ("Active", "PendingApproval")):
+        upd = result["suggested_update"]
+        with get_db() as db:
+            sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+            if sig and sig.status in ("Active", "PendingApproval"):
+                sig.entry_price = upd["entry_price"]
+                sig.stop_loss = upd["stop_loss"]
+                sig.target_price = upd["target_price"]
+                sig.notes = ((sig.notes or "") + f"\n[verify] levels re-anchored at {result['verified_at']}").strip()
+                sig.updated_date = datetime.now(timezone.utc).isoformat()
+                applied = True
+        result["update_applied"] = applied
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if sig:
+            sig.verification_json = json.dumps(result, default=str)
+            sig.verified_at = result.get("verified_at")
+
+    return {"signal_id": signal_id, **result, "update_applied": applied}
+
+
+@router.get("/learning/postmortems")
+def get_postmortems(days: int = 45):
+    """The failure memory: classified reasons for every terminally failed or
+    cancelled signal, aggregated by reason and by symbol/setup bucket. This
+    is what the scoring penalty (failure_penalty in score_breakdown) is
+    computed from — see lib/postmortem.py for the taxonomy."""
+    from lib.postmortem import aggregate_reasons, load_recent_postmortems
+
+    rows = load_recent_postmortems(days=max(1, min(days, 365)))
+    agg = aggregate_reasons(rows)
+    worst_buckets = sorted(
+        (
+            {"symbol": k[0], "setup_type": k[1], "failures": sum(v.values()),
+             "reasons": v, "dominant": max(v, key=v.get)}
+            for k, v in agg["by_bucket"].items()
+        ),
+        key=lambda b: -b["failures"],
+    )[:20]
+    return {
+        "window_days": days,
+        "total_failures": agg["total"],
+        "by_reason": agg["by_reason"],
+        "worst_buckets": worst_buckets,
+        "recent": rows[-50:],
+        "note": (
+            "Deterministic failure taxonomy — no LLM judgments. Buckets with "
+            "5+ failures in the window actively penalize new signals of the "
+            "same symbol/setup (failure_penalty in score_breakdown)."
+        ),
+    }
+
+
 @router.get("/mcp/status")
 def get_mcp_status():
     """Connectivity/auth status of the configured MCP servers — the same

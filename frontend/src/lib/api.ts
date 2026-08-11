@@ -473,6 +473,21 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type VerifyResult = {
+  signal_id: string;
+  verdict: "CONFIRMED" | "STALE_ENTRY" | "INVALIDATED" | "DATA_UNAVAILABLE";
+  checks: { check: string; ok: boolean; detail: string }[];
+  current_price: number | null;
+  price_source?: string | null;
+  price_asof?: string | null;
+  drift_pct?: number | null;
+  suggested_update?: { entry_price: number; stop_loss: number; target_price: number; basis: string } | null;
+  update_applied?: boolean;
+  verified_at?: string;
+  note?: string;
+  detail?: string;
+};
+
 export type CatalystEvent = {
   date: string; type: string; title: string;
   days_away: number | null; approximation: string | null;
@@ -939,6 +954,11 @@ export const api = {
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
     get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
+  verifySignal: (id: string, applyUpdate = false) =>
+    fetch(`/api/signals/${id}/verify?apply_update=${applyUpdate}`, { method: "POST" }).then((r) => {
+      if (!r.ok) throw new Error(`verify ${r.status}`);
+      return r.json() as Promise<VerifyResult>;
+    }),
   shortInterest: (symbol: string) => get<ShortInterestRow>(`/shortinterest/${symbol}`),
   squeezeTop: (limit = 20, minDaysToCover = 3) =>
     get<SqueezeTopResponse>(`/shortinterest/squeeze/top?limit=${limit}&min_days_to_cover=${minDaysToCover}`),

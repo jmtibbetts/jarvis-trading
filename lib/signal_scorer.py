@@ -90,6 +90,7 @@ def _expiry(generated_at: datetime, timeframe: str) -> str:
 def score_signal(signal: dict, ta_data: dict, regime: dict,
                  earnings_risk: bool = False, historical: dict | None = None,
                  news_confidence: float | None = None,
+                 failure_adjustment: dict | None = None,
                  now: datetime | None = None) -> dict:
     """Return the signal enriched with an auditable 0-100 evidence score."""
     now = now or datetime.now(timezone.utc)
@@ -175,6 +176,11 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     conflict_penalty = -12 if conflict_ratio >= 0.5 else -6 if conflict_ratio >= 0.34 else 0
     stale_penalty = -15 if freshness < 25 else -7 if freshness < 50 else 0
     earnings_penalty = -25 if earnings_risk else 0
+    # Failure-memory penalty (lib/postmortem.get_failure_adjustment): this
+    # symbol/setup bucket has a recurring, classified failure history. The
+    # adjustment dict carries its own reason breakdown, surfaced in the
+    # score_breakdown below so the penalty is explainable, not a vibe.
+    failure_penalty = -float((failure_adjustment or {}).get("penalty") or 0)
 
     values = {
         "calibrated_confidence": calibrated,
@@ -194,7 +200,7 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
         "freshness": 0.07, "liquidity": 0.05, "volatility": 0.04, "news": 0.05,
     }
     composite = sum(values[key] * weights[key] for key in weights)
-    composite += conflict_penalty + stale_penalty + earnings_penalty
+    composite += conflict_penalty + stale_penalty + earnings_penalty + failure_penalty
 
     bar_times = [data.get("bar_time") for _, data in valid if data.get("bar_time")]
     market_data_at = max(bar_times) if bar_times else None
@@ -215,6 +221,8 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             "conflict_penalty": conflict_penalty,
             "stale_penalty": stale_penalty,
             "earnings_penalty": earnings_penalty,
+            "failure_penalty": failure_penalty,
+            "failure_history": failure_adjustment,
         },
         "data_quality_score": round(quality, 1),
         "freshness_score": round(freshness, 1),

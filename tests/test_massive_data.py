@@ -21,6 +21,7 @@ class SymbolConversionTests(unittest.TestCase):
 class GetMarketSummaryTests(unittest.TestCase):
     def setUp(self):
         md._cache.clear()
+        md._call_times.clear()  # rate budget is process-global; isolate tests
 
     def _agg(self, close, ts=1786000000000):
         return SimpleNamespace(open=close - 1, high=close + 1, low=close - 2,

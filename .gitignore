@@ -12,3 +12,4 @@ venv/
 # frontend/ (Vite+Svelte dashboard rebuild)
 frontend/node_modules/
 static/dist/
+.mcp.json

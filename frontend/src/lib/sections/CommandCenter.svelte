@@ -6,12 +6,18 @@
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
-  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity } from "../api";
+  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer } from "../api";
   import { wsStore } from "../stores/ws.svelte";
 
   let analysisSignalId = $state<string | null>(null);
   let signals = $state<Signal[]>([]);
   let opportunities = $state<RankedOpportunity[]>([]);
+  let catalysts = $state<CatalystCalendar | null>(null);
+  let watchlist = $state<EnrichedWatchlist | null>(null);
+  let analystQ = $state("");
+  let analystBusy = $state(false);
+  let analystAnswer = $state<AnalystAnswer | null>(null);
+  let analystError = $state<string | null>(null);
   let expandedOpp = $state<string | null>(null);
   let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
@@ -27,7 +33,7 @@
 
   async function loadAll() {
     try {
-      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes] = await Promise.all([
+      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes] = await Promise.all([
         api.signals("Active", 8),
         api.threats(8),
         api.positions().catch(() => null), // Alpaca may be unreachable/unconfigured — degrade gracefully
@@ -38,9 +44,13 @@
         fetch("/api/signals/performance").then((r) => r.json()).catch(() => null),
         api.news(12).catch(() => []),
         api.opportunitiesRanked(8).catch(() => []),
+        api.catalystCalendar().catch(() => null),
+        api.enrichedWatchlist(25).catch(() => null),
       ]);
       signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
       opportunities = oppRes;
+      catalysts = catRes;
+      watchlist = wlRes;
       threats = threatRes;
       positionsResp = posRes;
       equity = eqRes;
@@ -54,6 +64,20 @@
       loadError = null;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function askAnalyst() {
+    const q = analystQ.trim();
+    if (!q || analystBusy) return;
+    analystBusy = true;
+    analystError = null;
+    try {
+      analystAnswer = await api.askAnalyst(q);
+    } catch (e) {
+      analystError = e instanceof Error ? e.message : String(e);
+    } finally {
+      analystBusy = false;
     }
   }
 
@@ -175,6 +199,113 @@
           <div class="empty">No ranked opportunities right now</div>
         {/each}
       </div>
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
+      {#if watchlist && watchlist.rows.length}
+        <div class="wl-scroll">
+          <table class="wl">
+            <thead>
+              <tr><th>Sym</th><th>Price</th><th>Chg</th><th>Signal</th><th>Insider</th><th>Congress 90d</th><th>13F</th><th>Dark Pool</th></tr>
+            </thead>
+            <tbody>
+              {#each watchlist.rows as r (r.symbol)}
+                <tr>
+                  <td class="sym">{r.symbol}</td>
+                  <td class="num">{r.price != null ? (r.price > 1000 ? r.price.toLocaleString(undefined, { maximumFractionDigits: 0 }) : r.price.toFixed(2)) : "—"}</td>
+                  <td class="num {r.change_percent == null ? '' : r.change_percent >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(r.change_percent)}</td>
+                  <td class="num">
+                    {#if r.signal}{r.signal.composite_score?.toFixed(0) ?? "—"}
+                      <span class="dim">{r.signal.direction?.[0] ?? ""}</span>{:else}—{/if}
+                  </td>
+                  <td>
+                    {#if r.insider_flags.length}
+                      <Pill
+                        label={r.insider_flags[0].replaceAll("_", " ").toLowerCase()}
+                        tone={r.insider_flags[0].includes("BUY") || r.insider_flags[0].includes("OFFICER") ? "good" : "bad"}
+                      />
+                    {:else}<span class="dim">—</span>{/if}
+                  </td>
+                  <td class="num">
+                    {#if r.congress_90d}
+                      <span class={r.congress_90d.purchases > r.congress_90d.sales ? "pl-up" : r.congress_90d.sales > r.congress_90d.purchases ? "pl-down" : ""}>
+                        {r.congress_90d.purchases}P/{r.congress_90d.sales}S
+                      </span>
+                    {:else}<span class="dim">—</span>{/if}
+                  </td>
+                  <td class="num">{r.institutional_holders ?? "—"}</td>
+                  <td>{#if r.in_dark_pool_top}<Pill label="top 100" tone="warm" />{:else}<span class="dim">—</span>{/if}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <div class="wl-note">{watchlist.note}</div>
+      {:else}
+        <div class="empty">Watchlist unavailable</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-8">
+    <Panel title="Ask JARVIS" meta="analyst over system data · cites its sources">
+      <form
+        class="ask-row"
+        onsubmit={(e) => {
+          e.preventDefault();
+          askAnalyst();
+        }}
+      >
+        <input
+          class="ask-input"
+          type="text"
+          maxlength="500"
+          placeholder="e.g. What threatens my current positions right now?"
+          bind:value={analystQ}
+          disabled={analystBusy}
+        />
+        <button class="ask-btn" type="submit" disabled={analystBusy || !analystQ.trim()}>
+          {analystBusy ? "Thinking…" : "Ask"}
+        </button>
+      </form>
+      {#if analystError}
+        <div class="err">Analyst unavailable: {analystError}</div>
+      {:else if analystAnswer}
+        <div class="ask-answer">{analystAnswer.answer}</div>
+        <div class="wl-note">
+          Context: {analystAnswer.context_used.join(", ")} — answers come only from system data; verify numbers against their panels.
+        </div>
+      {:else}
+        <div class="ask-hint dim">
+          One model call per question, grounded in the system's own data (regime, psychology, opportunities, portfolio risk, alerts).
+        </div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : "—"}>
+      {#if catalysts && catalysts.events.length}
+        <div class="cat-list">
+          {#each catalysts.events.slice(0, 9) as e (e.type + e.date + (e.title ?? ""))}
+            <div class="cat-item">
+              <div class="cat-date num">{e.date.slice(5)}</div>
+              <div>
+                <div class="cat-title">{e.title}</div>
+                {#if e.tickers?.length}
+                  <div class="cat-meta dim">{e.tickers.slice(0, 8).join(", ")}{e.tickers.length > 8 ? "…" : ""}</div>
+                {:else if e.days_away != null}
+                  <div class="cat-meta dim">{e.days_away === 0 ? "this week" : `in ${e.days_away}d`}{e.approximation ? " · approx" : ""}</div>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">No upcoming catalysts assembled</div>
+      {/if}
     </Panel>
   </div>
 
@@ -379,6 +510,114 @@
   }
   .anomaly-line {
     color: var(--warm);
+  }
+  .dim {
+    color: var(--ink-faint);
+  }
+  .wl-scroll {
+    overflow-x: auto;
+  }
+  table.wl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+  }
+  table.wl th {
+    text-align: left;
+    font-size: 9px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  table.wl td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  table.wl tr:last-child td {
+    border-bottom: none;
+  }
+  .wl-note {
+    margin-top: 8px;
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--ink-faint);
+  }
+  .ask-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .ask-input {
+    flex: 1;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    padding: 7px 10px;
+  }
+  .ask-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ask-btn {
+    background: rgba(124, 154, 255, 0.14);
+    border: 1px solid var(--accent-dim);
+    border-radius: 6px;
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    padding: 7px 16px;
+    cursor: pointer;
+  }
+  .ask-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .ask-answer {
+    font-size: 12px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .ask-hint {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .cat-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .cat-item {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 9px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  .cat-item:last-child {
+    border-bottom: none;
+  }
+  .cat-date {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .cat-title {
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .cat-meta {
+    font-size: 10px;
+    margin-top: 1px;
   }
   .sig-sym {
     font-weight: 650;

@@ -473,6 +473,31 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type CatalystEvent = {
+  date: string; type: string; title: string;
+  days_away: number | null; approximation: string | null;
+  tickers?: string[]; ticker?: string | null; granularity?: string;
+};
+
+export type CatalystCalendar = { events: CatalystEvent[]; note: string };
+
+export type WatchlistRow = {
+  symbol: string; name: string | null; asset_class: string | null;
+  price: number | null; change_percent: number | null; volume: number | null;
+  signal: { composite_score: number | null; direction: string; id: string } | null;
+  insider_flags: string[];
+  insider_net_value: number | null;
+  congress_90d: { purchases: number; sales: number } | null;
+  institutional_holders: number | null;
+  in_dark_pool_top: boolean;
+};
+
+export type EnrichedWatchlist = { rows: WatchlistRow[]; note: string };
+
+export type AnalystAnswer = {
+  question: string; answer: string; context_used: string[]; note: string;
+};
+
 export type IpoPipelineRow = {
   cik: string; company_name: string; stage: string; latest_form: string;
   latest_filed_at: string | null; first_seen_at: string | null;
@@ -893,6 +918,18 @@ export const api = {
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
   psychology: () => get<PsychologyIndex>("/psychology"),
   ipoPipeline: (limit = 40) => get<IpoPipelineResponse>(`/ipo/pipeline?limit=${limit}`),
+  catalystCalendar: () => get<CatalystCalendar>("/calendar/catalysts"),
+  enrichedWatchlist: (limit = 40, assetClass?: string) =>
+    get<EnrichedWatchlist>(`/watchlist/enriched?limit=${limit}${assetClass ? `&asset_class=${assetClass}` : ""}`),
+  askAnalyst: (question: string) =>
+    fetch("/api/analyst/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`analyst ${r.status}`);
+      return r.json() as Promise<AnalystAnswer>;
+    }),
   congressTrades: (limit = 50, opts: { ticker?: string; days?: number } = {}) => {
     const p = new URLSearchParams({ limit: String(limit), days: String(opts.days ?? 180) });
     if (opts.ticker) p.set("ticker", opts.ticker);

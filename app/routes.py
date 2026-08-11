@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import Optional, Union
 from app.database import (
-    AiDecision, CongressTrade, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
+    AiDecision, Alert, CongressTrade, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
     InstitutionalHolding, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
     IpoFiling, NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling,
     PsychologySnapshot, SignalEvaluation,
@@ -493,6 +493,215 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     if not result:
         raise HTTPException(503, "FINRA short interest data unavailable")
     return result
+
+
+@router.get("/calendar/catalysts")
+def get_catalyst_calendar():
+    """Universal catalyst calendar — deterministic market dates plus events
+    from feeds this system already ingests. Every entry states its
+    granularity/approximation; see lib/catalyst_calendar.py for what is
+    deliberately absent (economic-release schedules) and why."""
+    from lib.catalyst_calendar import assemble_calendar
+
+    earnings = set()
+    try:
+        from lib.earnings_calendar import get_earnings_this_week
+        earnings = get_earnings_this_week()
+    except Exception as e:
+        logger.debug(f"[Calendar] Earnings fetch failed: {e}")
+
+    with get_db() as db:
+        tracked = {
+            r[0].upper() for r in db.query(MarketAsset.symbol)
+            .filter(MarketAsset.asset_class == "Equity").all() if r[0]
+        }
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        priced = [{
+            "company_name": r.company_name, "ticker": r.ticker,
+            "latest_filed_at": r.latest_filed_at,
+        } for r in db.query(IpoFiling)
+            .filter(IpoFiling.stage == "priced", IpoFiling.latest_filed_at >= cutoff)
+            .order_by(IpoFiling.latest_filed_at.desc()).limit(10).all()
+            # follow-ons by listed companies are not IPO catalysts
+            if r.cover_mentions_ipo is not False]
+
+    return assemble_calendar(
+        datetime.now(timezone.utc).date(),
+        earnings_tickers=earnings, tracked_equities=tracked, priced_ipos=priced,
+    )
+
+
+@router.get("/watchlist/enriched")
+def get_enriched_watchlist(limit: int = 40, asset_class: str = None):
+    """Watchlist 2.0: one row per tracked symbol fusing every intelligence
+    source already ingested — price/volume, active-signal score, insider
+    clusters, congressional disclosures, institutional holders, dark-pool
+    presence, squeeze score. All DB/cache reads, no external calls; a flag's
+    absence means no data, not a judgment."""
+    from lib.insider_analytics import cluster_summary
+
+    with get_db() as db:
+        q = db.query(MarketAsset).order_by(MarketAsset.volume.desc().nullslast())
+        if asset_class:
+            q = q.filter(MarketAsset.asset_class == asset_class)
+        # Plain dicts INSIDE the session — ORM objects read after it closes
+        # raise DetachedInstanceError (same failure /opportunities/ranked had).
+        assets = [{
+            "symbol": a.symbol, "name": a.name, "asset_class": a.asset_class,
+            "price": a.price, "change_percent": a.change_percent, "volume": a.volume,
+        } for a in q.limit(min(max(limit, 1), 150)).all()]
+        symbols = [a["symbol"] for a in assets]
+        equity_syms = {a["symbol"].upper() for a in assets if (a["asset_class"] or "").lower() == "equity"}
+
+        sig_by_symbol: dict = {}
+        for s in (db.query(TradingSignal)
+                  .filter(TradingSignal.status.in_(["Active", "PendingApproval"]),
+                          TradingSignal.asset_symbol.in_(symbols)).all()):
+            existing = sig_by_symbol.get(s.asset_symbol)
+            if not existing or (s.composite_score or 0) > (existing["composite_score"] or 0):
+                sig_by_symbol[s.asset_symbol] = {
+                    "composite_score": s.composite_score, "direction": s.direction, "id": s.id,
+                }
+
+        cutoff14 = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        insider_tx: dict = {}
+        for r in (db.query(InsiderTransaction)
+                  .filter(InsiderTransaction.ticker.in_(equity_syms),
+                          InsiderTransaction.transaction_date >= cutoff14).all()):
+            insider_tx.setdefault(r.ticker, []).append({
+                "owner_cik": r.owner_cik, "owner_name": r.owner_name, "is_officer": r.is_officer,
+                "transaction_code": r.transaction_code, "total_value": r.total_value,
+            })
+
+        cutoff90 = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
+        congress_counts: dict = {}
+        for r in (db.query(CongressTrade)
+                  .filter(CongressTrade.ticker.in_(equity_syms),
+                          CongressTrade.transaction_date >= cutoff90).all()):
+            e = congress_counts.setdefault(r.ticker, {"purchases": 0, "sales": 0})
+            code = (r.transaction_code or "").upper()
+            if code.startswith("P"):
+                e["purchases"] += 1
+            elif code.startswith("S"):
+                e["sales"] += 1
+
+        inst_periods = _institutional_periods(db)
+        inst_holders: dict = {}
+        if inst_periods:
+            for r in (db.query(InstitutionalHolding)
+                      .filter(InstitutionalHolding.period_of_report == inst_periods[0],
+                              InstitutionalHolding.ticker.in_(equity_syms)).all()):
+                inst_holders[r.ticker] = inst_holders.get(r.ticker, 0) + 1
+
+    dark_pool_syms = set()
+    try:
+        from lib.finra_ats import get_top_activity
+        dp = get_top_activity(tier="T1", limit=100)  # 12h in-process cache
+        dark_pool_syms = {r["symbol"] for r in (dp or {}).get("symbols", [])}
+    except Exception:
+        pass
+
+    rows = []
+    for a in assets:
+        sym = a["symbol"]
+        usym = sym.upper()
+        cluster = cluster_summary(insider_tx[usym]) if usym in insider_tx else None
+        rows.append({
+            **a,
+            "signal": sig_by_symbol.get(sym),
+            "insider_flags": cluster["flags"] if cluster else [],
+            "insider_net_value": cluster["net_value"] if cluster else None,
+            "congress_90d": congress_counts.get(usym),
+            "institutional_holders": inst_holders.get(usym),
+            "in_dark_pool_top": usym in dark_pool_syms,
+        })
+    return {
+        "rows": rows,
+        "note": (
+            "Fused view of already-ingested sources. Empty flags mean no data "
+            "in the window, not an all-clear. Insider window 14d, congress "
+            "window 90d; institutional count is the latest ingested quarter."
+        ),
+    }
+
+
+@router.post("/analyst/ask")
+def ask_analyst(body: dict):
+    """Conversational market analyst over the system's own normalized data.
+    One LLM call per user question (user-initiated only — never per tick, per
+    the AI-cost-control rule). The prompt carries ONLY data this system
+    computed; the system prompt requires citing which blocks informed the
+    answer and forbids numbers not present in the context."""
+    question = (body or {}).get("question", "").strip()
+    if not question:
+        raise HTTPException(400, "question is required")
+    if len(question) > 500:
+        raise HTTPException(400, "question too long (500 chars max)")
+
+    context_blocks: dict = {}
+    try:
+        from lib.market_regime import get_regime
+        r = get_regime()
+        context_blocks["regime"] = {
+            "label": r.get("label"), "risk": r.get("risk"), "flags": r.get("flags"),
+            "spy_trend": r.get("spy_trend"), "recommendation": r.get("recommendation"),
+        }
+    except Exception:
+        pass
+    try:
+        with get_db() as db:
+            snap = (db.query(PsychologySnapshot)
+                    .order_by(PsychologySnapshot.created_at.desc()).first())
+            if snap:
+                context_blocks["psychology"] = {"score": snap.score, "label": snap.label}
+            alerts = (db.query(Alert)
+                      .filter(Alert.created_at >= (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat())
+                      .order_by(Alert.created_at.desc()).limit(8).all())
+            context_blocks["alerts_24h"] = [
+                {"severity": a.severity, "source": a.source, "title": a.title} for a in alerts
+            ]
+    except Exception:
+        pass
+    try:
+        opportunities = get_ranked_opportunities(limit=5)
+        context_blocks["top_opportunities"] = [{
+            "symbol": o["symbol"], "direction": o["direction"],
+            "opportunity_score": o["opportunity_score"],
+            "smart_money_note": o["opportunity_breakdown"]["smart_money_note"],
+        } for o in opportunities]
+    except Exception:
+        pass
+    try:
+        risk = get_portfolio_risk()
+        context_blocks["portfolio"] = {
+            "positions": risk.get("positions"),
+            "var": {k: (risk.get("var") or {}).get(k) for k in ("var_pct", "var_usd", "coverage_pct_of_gross")},
+            "concentration": (risk.get("concentration") or {}).get("interpretation"),
+            "high_correlation_pairs": (risk.get("concentration") or {}).get("high_correlation_pairs"),
+        }
+    except Exception:
+        pass
+
+    import json as _json
+    from lib.lmstudio import call_lm_studio
+    system = (
+        "You are the market analyst inside a trading dashboard. Answer the user's "
+        "question using ONLY the data blocks provided. Cite which block(s) each "
+        "claim comes from in [brackets]. If the provided data cannot answer the "
+        "question, say exactly that — do not use outside knowledge for prices, "
+        "levels, or events, and never invent a number that is not in the context."
+    )
+    prompt = f"DATA BLOCKS:\n{_json.dumps(context_blocks, default=str)}\n\nQUESTION: {question}"
+    try:
+        answer = call_lm_studio(prompt, system=system, max_tokens=600, temperature=0.2)
+    except Exception as e:
+        raise HTTPException(503, f"Analyst model unavailable: {e}")
+    return {
+        "question": question,
+        "answer": answer,
+        "context_used": sorted(context_blocks.keys()),
+        "note": "Answer generated from the listed context blocks only; verify numbers against their panels.",
+    }
 
 
 @router.get("/portfolio/risk")

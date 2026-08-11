@@ -172,20 +172,32 @@ def _fresh_ta_block(symbol: str) -> tuple[str | None, dict | None]:
 
 
 def _mcp_news_block(symbol: str) -> str | None:
-    """One exa web search for fresh symbol news (keyless hosted MCP, verified
-    live; tavily's hosted MCP 401s without a key so it is not used here)."""
+    """Fresh symbol news for the LLM: tavily first (keyed, structured
+    title+content per story), exa as keyless fallback. Both verified live."""
+    query = f"{symbol} price news today"
     try:
         from lib.mcp_client import call_tool
-        raw = call_tool("exa", "web_search_exa", {
-            "query": f"{symbol} price news today",
-            "numResults": 5,
-        })
-        if not raw:
-            return None
-        return f"FRESH NEWS (exa web search — unverified):\n{str(raw)[:1800]}"
+        import json as _json
+        raw = call_tool("tavily", "tavily_search", {"query": query, "max_results": 5})
+        if raw:
+            try:
+                data = _json.loads(raw) if isinstance(raw, str) else raw
+                lines = []
+                for r in (data.get("results") or [])[:5]:
+                    title = str(r.get("title") or "").strip()[:110]
+                    content = str(r.get("content") or "").strip()[:250]
+                    if title:
+                        lines.append(f"- {title}: {content}" if content else f"- {title}")
+                if lines:
+                    return "FRESH NEWS (tavily web search — unverified):\n" + "\n".join(lines)[:1800]
+            except Exception:
+                return f"FRESH NEWS (tavily web search — unverified):\n{str(raw)[:1800]}"
+        raw = call_tool("exa", "web_search_exa", {"query": query, "numResults": 5})
+        if raw:
+            return f"FRESH NEWS (exa web search — unverified):\n{str(raw)[:1800]}"
     except Exception as e:
         logger.debug(f"[DeepVerify] MCP news failed for {symbol}: {e}")
-        return None
+    return None
 
 
 def _market_data_block(symbol: str, asset_class: str | None) -> str | None:

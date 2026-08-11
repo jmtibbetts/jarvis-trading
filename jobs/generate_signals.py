@@ -272,8 +272,10 @@ def _mcp_market_headlines() -> str:
     # inject BOTH so the model sees the substance, not just headlines.
     try:
         import json as _json
+        # NOTE: tavily's hosted MCP only accepts topic='general' (verified
+        # live — 'news' fails schema validation, unlike their REST API).
         raw = call_tool("tavily", "tavily_search", {
-            "query": query, "max_results": 5, "topic": "news",
+            "query": query, "max_results": 5,
         })
         if raw:
             data = _json.loads(raw) if isinstance(raw, str) else raw

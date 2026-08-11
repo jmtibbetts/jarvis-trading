@@ -1,7 +1,18 @@
 <script lang="ts">
   import { killSwitchStore } from "../stores/kill.svelte";
   import { wsStore } from "../stores/ws.svelte";
+  import { api } from "../api";
+  import { sectionStore } from "../stores/section.svelte";
   import NotificationCenter from "./NotificationCenter.svelte";
+
+  let providers = $state<{ name: string; ok: boolean; detail: string }[]>([]);
+  $effect(() => {
+    const load = () => api.providerStatus().then((r) => (providers = r.providers)).catch(() => {});
+    load();
+    const id = setInterval(load, 120_000);
+    return () => clearInterval(id);
+  });
+  const downCount = $derived(providers.filter((p) => !p.ok).length);
 
   let clock = $state(new Date().toTimeString().slice(0, 8));
   $effect(() => {
@@ -31,6 +42,20 @@
   </div>
 
   <div class="hud-right">
+    {#if providers.length}
+      <button
+        class="providers"
+        title={providers.map((p) => `${p.ok ? "●" : "○"} ${p.name}: ${p.detail}`).join(" | ")}
+        onclick={() => sectionStore.go("ops")}
+      >
+        {#each providers as p (p.name)}
+          <span class="prov" class:down={!p.ok} title={`${p.name}: ${p.detail}`}>
+            <i></i><em>{p.name}</em>
+          </span>
+        {/each}
+        {#if downCount > 0}<span class="prov-warn num">{downCount} down</span>{/if}
+      </button>
+    {/if}
     <div class="ws-pill" class:live={wsStore.connected} title={wsStore.connected ? "Live feed connected" : "Reconnecting…"}>
       <i></i>
       {wsStore.connected ? "LIVE" : "RECONNECTING"}
@@ -109,6 +134,60 @@
     display: flex;
     align-items: center;
     gap: 14px;
+  }
+
+  .providers {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: none;
+    border: none;
+    padding: 4px 6px;
+    cursor: pointer;
+    border-radius: 7px;
+  }
+  .providers:hover {
+    background: rgba(124, 154, 255, 0.07);
+  }
+  .prov {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .prov i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 6px var(--good);
+  }
+  .prov.down i {
+    background: var(--bad);
+    box-shadow: 0 0 6px var(--bad);
+  }
+  .prov em {
+    font-style: normal;
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    text-transform: uppercase;
+  }
+  .prov.down em {
+    color: var(--bad);
+  }
+  .prov-warn {
+    font-size: 9.5px;
+    color: var(--bad);
+    font-weight: 700;
+  }
+  @media (max-width: 1450px) {
+    .prov em {
+      display: none;
+    }
+    .providers {
+      gap: 6px;
+    }
   }
 
   .ws-pill {

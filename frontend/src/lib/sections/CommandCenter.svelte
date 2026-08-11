@@ -6,7 +6,7 @@
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
-  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer } from "../api";
+  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer, type PsychologyIndex } from "../api";
   import { wsStore } from "../stores/ws.svelte";
   import { linkStore } from "../stores/link.svelte";
   import { sectionStore } from "../stores/section.svelte";
@@ -51,11 +51,12 @@
   let sharpe = $state<number | null>(null);
   let maxDrawdown = $state<number | null>(null);
   let news = $state<{ title: string; sentiment: string | null; source: string }[]>([]);
+  let psychology = $state<PsychologyIndex | null>(null);
   let loadError = $state<string | null>(null);
 
   async function loadAll() {
     try {
-      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes] = await Promise.all([
+      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes, psyRes] = await Promise.all([
         api.signals("Active", 8),
         api.threats(8),
         api.positions().catch(() => null), // Alpaca may be unreachable/unconfigured — degrade gracefully
@@ -68,6 +69,7 @@
         api.opportunitiesRanked(8).catch(() => []),
         api.catalystCalendar().catch(() => null),
         api.enrichedWatchlist(25).catch(() => null),
+        api.psychology().catch(() => null),
       ]);
       signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
       opportunities = oppRes;
@@ -83,6 +85,7 @@
       winRate = sigPerfRes?.summary?.hit_rate ?? null;
       profitFactor = sigPerfRes?.summary?.profit_factor ?? null;
       news = newsRes;
+      psychology = psyRes;
       loadError = null;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -149,7 +152,7 @@
 <div class="grid">
   <div class="kpis">
     <KpiTile label="Win Rate" value={winRate != null ? `${winRate.toFixed(1)}%` : "—"} period="signals" />
-    <KpiTile label="Sharpe" value={sharpe != null ? sharpe.toFixed(2) : "—"} />
+    <KpiTile label="Sharpe" value={sharpe != null && Math.abs(sharpe) <= 20 ? sharpe.toFixed(2) : "—"} />
     <KpiTile
       label="Max Drawdown"
       value={maxDrawdown != null ? `${maxDrawdown.toFixed(1)}%` : "—"}
@@ -161,6 +164,19 @@
       label="Unrealized P&L"
       value={positionsResp ? fmtUsd(positionsResp.account.unrealized_pl) : "—"}
       trend={positionsResp ? (positionsResp.account.unrealized_pl >= 0 ? "up" : "down") : "neutral"}
+    />
+    <KpiTile label="Account Equity" value={positionsResp ? fmtUsd(positionsResp.account.equity) : "—"} />
+    <KpiTile label="Buying Power" value={positionsResp ? fmtUsd(positionsResp.account.buying_power) : "—"} />
+    <KpiTile
+      label="Active Signals"
+      value={String(signals.length)}
+      period={threats.length ? `${threats.length} threats` : ""}
+    />
+    <KpiTile
+      label="Market Psychology"
+      value={psychology?.score != null ? `${Math.round(psychology.score)}` : "—"}
+      period={psychology?.label ?? ""}
+      trend={psychology?.score != null ? (psychology.score >= 60 ? "up" : psychology.score <= 40 ? "down" : "neutral") : "neutral"}
     />
   </div>
 
@@ -477,7 +493,8 @@
   .kpis {
     grid-column: span 12;
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    /* 10 tiles → two even rows of 5 */
+    grid-template-columns: repeat(5, 1fr);
     gap: 14px;
   }
   .cap-h {

@@ -599,6 +599,80 @@ def get_mcp_status():
 
 _fx_panel_cache = {"at": None, "data": None}
 _cg_panel_cache = {"at": None, "data": None}
+_provider_status_cache = {"at": None, "data": None}
+
+
+@router.get("/status/providers")
+def get_provider_status():
+    """Per-provider connectivity for the HUD header. Every check is either a
+    lightweight live ping or a cached-result read; the whole response is
+    cached 120s so header polling costs nothing."""
+    from datetime import datetime as _dt, timezone as _tz
+    import os as _os
+    now = _dt.now(_tz.utc)
+    if _provider_status_cache["at"] and (now - _provider_status_cache["at"]).total_seconds() < 120 and _provider_status_cache["data"]:
+        return _provider_status_cache["data"]
+
+    providers = []
+
+    def add(name, ok, detail):
+        providers.append({"name": name, "ok": ok, "detail": detail})
+
+    # LM Studio — live ping (local, 5s timeout)
+    try:
+        from lib.lmstudio import check_health
+        h = check_health()
+        add("LM Studio", bool(h.get("ok")), h.get("model") or h.get("error") or "")
+    except Exception as e:
+        add("LM Studio", False, str(e)[:60])
+
+    # Alpaca — live clock call (light, authenticated)
+    try:
+        from lib.alpaca_client import get_trading_client
+        clock = get_trading_client().get_clock()
+        add("Alpaca", True, "market open" if clock.is_open else "market closed")
+    except Exception as e:
+        add("Alpaca", False, str(e)[:60])
+
+    # Massive REST — key presence only; a live call would burn the 5/min budget
+    add("Massive", bool(_os.getenv("MASSIVE_API_KEY")), "REST (key set)" if _os.getenv("MASSIVE_API_KEY") else "no key")
+
+    # CoinGecko — live ping (their documented health endpoint)
+    try:
+        import httpx as _hx
+        hdr = {}
+        if _os.getenv("COINGECKO_API_KEY"):
+            hdr["x-cg-demo-api-key"] = _os.getenv("COINGECKO_API_KEY")
+        r = _hx.get("https://api.coingecko.com/api/v3/ping", headers=hdr, timeout=6)
+        add("CoinGecko", r.status_code == 200, "demo key" if hdr else "keyless")
+    except Exception as e:
+        add("CoinGecko", False, str(e)[:60])
+
+    # AllRatesToday — reads the lib's 15-min cache (a hit costs nothing)
+    try:
+        from lib.allrates_data import get_fx_rate
+        rate = get_fx_rate("USD", "EUR")
+        add("AllRates", bool(rate and rate.get("rate")), "interbank FX" if rate else "no data")
+    except Exception as e:
+        add("AllRates", False, str(e)[:60])
+
+    # Web-search MCPs — initialize-level check via list_tools (cached inside
+    # mcp_client per process; failures return empty rather than raising)
+    try:
+        from lib.mcp_client import list_tools
+        for server, label in (("tavily", "Tavily"), ("exa", "Exa"), ("firecrawl", "Firecrawl")):
+            try:
+                tools = list_tools(server)
+                add(label, bool(tools), f"{len(tools)} tools" if tools else "unreachable/no key")
+            except Exception as e:
+                add(label, False, str(e)[:60])
+    except Exception:
+        pass
+
+    data = {"providers": providers, "checked_at": now.isoformat()}
+    _provider_status_cache["at"] = now
+    _provider_status_cache["data"] = data
+    return data
 
 
 @router.get("/fx/rates")

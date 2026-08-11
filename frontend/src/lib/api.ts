@@ -976,6 +976,8 @@ export const api = {
       if (!r.ok) throw new Error(body?.detail ?? `add ${r.status}`);
       return body as { ok: boolean; symbol: string; already_tracked?: boolean };
     }),
+  providerStatus: () =>
+    get<{ providers: { name: string; ok: boolean; detail: string }[]; checked_at: string }>(`/status/providers`),
   fxRates: () =>
     get<{ pairs: { symbol: string; pair: string; rate: number | null; rate_source: string | null; change_pct: number | null; history: { date: string; rate: number }[] }[]; as_of: string; note: string }>(`/fx/rates`),
   cryptoMarkets: () =>

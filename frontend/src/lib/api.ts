@@ -378,6 +378,23 @@ export type YieldCurveSnapshot = {
 
 export type MacroReading = { date: string; value: number; compared_to: string | null; unit: string; series_id: string } | null;
 
+export type DarkPoolSymbol = {
+  symbol: string;
+  issuer_name: string | null;
+  shares: number | null;
+  trade_count: number | null;
+  notional: number | null;
+  wow_pct: number | null;
+  week_start: string;
+  published_at: string | null;
+  reporting_delay_days: number | null;
+};
+
+export type DarkPoolTopActivity = { tier: string; week_start: string; symbols: DarkPoolSymbol[]; fetched_at: string };
+
+export type DarkPoolVenue = { mpid: string | null; name: string | null; shares: number | null; trade_count: number | null; notional: number | null };
+export type DarkPoolVenues = { symbol: string; week_start: string; venues: DarkPoolVenue[] };
+
 export type MacroSnapshot = {
   configured: boolean;
   fetched_at: string | null;
@@ -662,6 +679,8 @@ export const api = {
   insiderClusters: (days = 14) => get<InsiderClustersResponse>(`/insider/clusters?days=${days}`),
   yieldCurve: () => get<YieldCurveSnapshot>(`/macro/yield-curve`),
   macroFred: () => get<MacroSnapshot>(`/macro/fred`),
+  darkPoolTop: (tier = "T1", limit = 25) => get<DarkPoolTopActivity>(`/darkpool/top?tier=${tier}&limit=${limit}`),
+  darkPoolVenues: (symbol: string, weekStart: string) => get<DarkPoolVenues>(`/darkpool/${symbol}/venues?week_start=${weekStart}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

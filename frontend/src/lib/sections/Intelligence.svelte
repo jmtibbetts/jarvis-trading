@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -25,6 +25,31 @@
   let insiderClusters = $state<InsiderClustersResponse | null>(null);
   let yieldCurve = $state<YieldCurveSnapshot | null>(null);
   let macro = $state<MacroSnapshot | null>(null);
+  let darkPoolTop = $state<DarkPoolTopActivity | null>(null);
+  let expandedDarkPoolSymbol = $state<string | null>(null);
+  let darkPoolVenues = $state<DarkPoolVenues | null>(null);
+  let darkPoolVenuesLoading = $state(false);
+
+  async function toggleDarkPoolExpand(symbol: string, weekStart: string) {
+    if (expandedDarkPoolSymbol === symbol) {
+      expandedDarkPoolSymbol = null;
+      darkPoolVenues = null;
+      return;
+    }
+    expandedDarkPoolSymbol = symbol;
+    darkPoolVenues = null;
+    darkPoolVenuesLoading = true;
+    try {
+      darkPoolVenues = await api.darkPoolVenues(symbol, weekStart);
+    } catch {
+      darkPoolVenues = null;
+    } finally {
+      darkPoolVenuesLoading = false;
+    }
+  }
+
+  const stripMpidPrefix = (name: string | null, mpid: string | null) =>
+    name && mpid && name.startsWith(mpid + " ") ? name.slice(mpid.length + 1) : name;
 
   const threatTrend = $derived.by(() => {
     const days: { date: string; critical: number; high: number; other: number; total: number }[] = [];
@@ -63,7 +88,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc, fr] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr, dp] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -74,6 +99,7 @@
       api.insiderClusters(14).catch(() => null),
       api.yieldCurve().catch(() => null),
       api.macroFred().catch(() => null),
+      api.darkPoolTop("T1", 20).catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -86,6 +112,7 @@
     insiderClusters = ic;
     yieldCurve = yc;
     macro = fr;
+    darkPoolTop = dp;
   }
 
   $effect(() => {
@@ -375,6 +402,64 @@
           <div class="empty">No notable insider buy/sell clusters in the last {insiderClusters.window_days} days</div>
         {:else}
           <div class="empty">Insider activity unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Dark Pool / Off-Exchange (ATS) Activity" meta={darkPoolTop ? `week of ${darkPoolTop.week_start} · ${darkPoolTop.tier}` : "—"}>
+      {#snippet children()}
+        {#if darkPoolTop && darkPoolTop.symbols.length}
+          <div class="dp-banner">⚠ Delayed, weekly-aggregated FINRA data — published ~2-4 weeks after the trading week, not real-time order flow. Click a row for the per-venue breakdown.</div>
+          <table class="tbl">
+            <thead>
+              <tr><th>Symbol</th><th>Shares</th><th>Trades</th><th>Notional</th><th>WoW</th><th>Published</th></tr>
+            </thead>
+            <tbody>
+              {#each darkPoolTop.symbols as s (s.symbol)}
+                <tr
+                  class="expandable"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => toggleDarkPoolExpand(s.symbol, s.week_start)}
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleDarkPoolExpand(s.symbol, s.week_start); } }}
+                >
+                  <td class="sym">{expandedDarkPoolSymbol === s.symbol ? "▾" : "▸"} {s.symbol}</td>
+                  <td class="num">{s.shares?.toLocaleString() ?? "—"}</td>
+                  <td class="num">{s.trade_count?.toLocaleString() ?? "—"}</td>
+                  <td class="num">{s.notional != null ? `$${Math.round(s.notional / 1_000_000).toLocaleString()}M` : "—"}</td>
+                  <td class="num {s.wow_pct == null ? '' : s.wow_pct >= 0 ? 'pl-up' : 'pl-down'}">
+                    {s.wow_pct != null ? `${s.wow_pct >= 0 ? "+" : ""}${s.wow_pct}%` : "—"}
+                  </td>
+                  <td class="num small">{s.published_at ?? "—"} ({s.reporting_delay_days ?? "?"}d delay)</td>
+                </tr>
+                {#if expandedDarkPoolSymbol === s.symbol}
+                  <tr class="expand-row">
+                    <td colspan="6">
+                      <div class="dp-venues">
+                        {#if darkPoolVenuesLoading}
+                          <div class="empty small">Loading venue breakdown…</div>
+                        {:else if darkPoolVenues && darkPoolVenues.venues.length}
+                          {#each darkPoolVenues.venues.slice(0, 10) as v (v.mpid)}
+                            <div class="dp-venue-row">
+                              <span class="dp-venue-name">{stripMpidPrefix(v.name, v.mpid)}</span>
+                              <span class="num">{v.shares?.toLocaleString() ?? "—"} sh</span>
+                              <span class="num">{v.trade_count?.toLocaleString() ?? "—"} trades</span>
+                            </div>
+                          {/each}
+                        {:else}
+                          <div class="empty small">No per-venue data for this symbol/week</div>
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
+              {/each}
+            </tbody>
+          </table>
+        {:else}
+          <div class="empty">Dark pool / ATS data unavailable</div>
         {/if}
       {/snippet}
     </Panel>
@@ -895,6 +980,52 @@
     font-size: 10.5px;
     color: var(--ink-faint);
     line-height: 1.5;
+  }
+
+  .dp-banner {
+    font-size: 11px;
+    color: var(--warm);
+    background: rgba(255, 180, 84, 0.08);
+    border: 1px solid rgba(255, 180, 84, 0.25);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+  tr.expandable {
+    cursor: pointer;
+  }
+  tr.expandable:hover td {
+    background: rgba(124, 154, 255, 0.04);
+  }
+  tr.expand-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .dp-venues {
+    background: rgba(124, 154, 255, 0.03);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .dp-venue-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 14px;
+    font-size: 11.5px;
+    color: var(--ink-dim);
+  }
+  .dp-venue-name {
+    font-weight: 550;
+  }
+  .num.small {
+    font-size: 10px;
+    color: var(--ink-faint);
+  }
+  .empty.small {
+    padding: 10px 0;
+    font-size: 11px;
   }
 
   .macro-grid {

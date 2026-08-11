@@ -416,6 +416,32 @@ def _insider_tx_dict(row):
     }
 
 
+@router.get("/darkpool/top")
+def get_darkpool_top(tier: str = "T1", limit: int = 25):
+    """Top symbols by off-exchange (ATS/dark pool) share volume for the
+    latest available week — free FINRA Off-Exchange Transparency data, no
+    vendor. This is DELAYED, WEEKLY-AGGREGATED data (~2-4 week publish lag,
+    see reporting_delay_days per row), not real-time order flow — there is
+    no free source for individual dark-pool prints."""
+    from lib.finra_ats import get_top_activity
+    snapshot = get_top_activity(tier=tier, limit=min(max(limit, 1), 100))
+    if not snapshot:
+        raise HTTPException(503, "FINRA ATS data unavailable")
+    return snapshot
+
+
+@router.get("/darkpool/{symbol}/venues")
+def get_darkpool_venues(symbol: str, week_start: str = None):
+    """Per-venue (individual dark pool) breakdown for one symbol. Pass
+    week_start from a /darkpool/top row to avoid a redundant week-discovery
+    lookup; omit it to use the latest available week."""
+    from lib.finra_ats import get_symbol_venues
+    result = get_symbol_venues(symbol, week_start=week_start)
+    if not result:
+        raise HTTPException(503, "FINRA ATS data unavailable")
+    return result
+
+
 @router.get("/macro/yield-curve")
 def get_yield_curve():
     """US Treasury daily yield curve — free, unauthenticated Treasury.gov

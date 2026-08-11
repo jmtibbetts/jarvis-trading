@@ -3,7 +3,8 @@
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues } from "../api";
+  import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -30,6 +31,9 @@
   let expandedDarkPoolSymbol = $state<string | null>(null);
   let darkPoolVenues = $state<DarkPoolVenues | null>(null);
   let darkPoolVenuesLoading = $state(false);
+  let squeeze = $state<SqueezeTopResponse | null>(null);
+  let institutional = $state<InstitutionalAccumulation | null>(null);
+  let expandedSqueezeSymbol = $state<string | null>(null);
 
   async function toggleDarkPoolExpand(symbol: string, weekStart: string) {
     if (expandedDarkPoolSymbol === symbol) {
@@ -89,7 +93,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc, fr, dp] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -101,6 +105,8 @@
       api.yieldCurve().catch(() => null),
       api.macroFred().catch(() => null),
       api.darkPoolTop("T1", 20).catch(() => null),
+      api.squeezeTop(20, 3).catch(() => null),
+      api.institutionalAccumulation(20).catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -114,6 +120,8 @@
     yieldCurve = yc;
     macro = fr;
     darkPoolTop = dp;
+    squeeze = sq;
+    institutional = inst;
   }
 
   $effect(() => {
@@ -467,8 +475,142 @@
   </div>
 
   <div class="span-12">
+    <Panel
+      title="Institutional Ownership (13F)"
+      meta={institutional ? `Q ending ${institutional.current_period} · ${institutional.tickers.length} tickers` : "—"}
+    >
+      {#snippet children()}
+        {#if institutional && institutional.tickers.length}
+          <div class="dp-banner">
+            ⚠ Quarterly 13F snapshot, filed up to 45 days after quarter-end — long US equity
+            positions only. Never shows shorts, hedges, or current buying.
+            {#if institutional.insufficient_history}
+              Only one quarter ingested so far, so quarter-over-quarter change is not yet available.
+            {/if}
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr><th>Ticker</th><th>Holders</th><th>Total Value</th><th>Shares</th><th>QoQ Change</th></tr>
+            </thead>
+            <tbody>
+              {#each institutional.tickers as t (t.ticker)}
+                <tr>
+                  <td class="sym">{t.ticker}</td>
+                  <td class="num">
+                    {t.holder_count}{#if t.holder_delta != null && t.holder_delta !== 0}<span
+                        class="num {t.holder_delta > 0 ? 'pl-up' : 'pl-down'}"
+                      > ({t.holder_delta > 0 ? "+" : ""}{t.holder_delta})</span
+                    >{/if}
+                  </td>
+                  <td class="num">${Math.round(t.total_value_usd / 1_000_000).toLocaleString()}M</td>
+                  <td class="num">{Math.round(t.total_shares).toLocaleString()}</td>
+                  <td class="num {t.share_change_pct == null ? '' : t.share_change_pct >= 0 ? 'pl-up' : 'pl-down'}">
+                    {#if t.insufficient_history}
+                      <span class="dim">no prior quarter</span>
+                    {:else if t.share_change_pct == null}
+                      {t.status === "newly_reported" ? "newly reported" : "—"}
+                    {:else}
+                      {t.share_change_pct >= 0 ? "+" : ""}{t.share_change_pct.toFixed(1)}%
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="si-footnote">{institutional.disclaimer.coverage_note}</div>
+        {:else}
+          <div class="empty">
+            No 13F holdings ingested yet — the scheduled job builds coverage over successive runs.
+          </div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel
+      title="Short Interest / Squeeze Fuel"
+      meta={squeeze ? `settled ${squeeze.settlement_date} · ${squeeze.qualified_count.toLocaleString()} qualified` : "—"}
+    >
+      {#snippet children()}
+        {#if squeeze && squeeze.candidates.length}
+          <div class="dp-banner">
+            ⚠ Delayed semi-monthly FINRA data — settled {squeeze.settlement_date}
+            {#if squeeze.reporting_lag_days != null}({squeeze.reporting_lag_days}d ago){/if}, not a live short book.
+            Measures squeeze <em>fuel</em> (crowding + short buildup), not a prediction. Click a row for components.
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr><th>Symbol</th><th>Days to Cover</th><th>Short Shares</th><th>Chg %</th><th>Squeeze</th></tr>
+            </thead>
+            <tbody>
+              {#each squeeze.candidates as c (c.symbol)}
+                <tr
+                  class="expandable"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => (expandedSqueezeSymbol = expandedSqueezeSymbol === c.symbol ? null : c.symbol)}
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); expandedSqueezeSymbol = expandedSqueezeSymbol === c.symbol ? null : c.symbol; } }}
+                >
+                  <td class="sym">
+                    {expandedSqueezeSymbol === c.symbol ? "▾" : "▸"} {c.symbol}
+                    <span class="si-name">{c.issue_name ?? ""}</span>
+                  </td>
+                  <td class="num">{c.days_to_cover?.toFixed(2) ?? "—"}</td>
+                  <td class="num">{c.current_short_shares?.toLocaleString() ?? "—"}</td>
+                  <td class="num {c.change_percent == null ? '' : c.change_percent >= 0 ? 'pl-up' : 'pl-down'}">
+                    {c.change_percent != null ? `${c.change_percent >= 0 ? "+" : ""}${c.change_percent.toFixed(1)}%` : "—"}
+                  </td>
+                  <td class="num"><b>{c.squeeze.squeeze_score?.toFixed(1) ?? "—"}</b></td>
+                </tr>
+                {#if expandedSqueezeSymbol === c.symbol}
+                  <tr class="expand-row">
+                    <td colspan="5">
+                      <div class="si-detail">
+                        <div>
+                          <span class="si-lbl">Days-to-cover component</span>
+                          <span class="num">{c.squeeze.days_to_cover_component ?? "—"}</span>
+                        </div>
+                        <div>
+                          <span class="si-lbl">Short-change component</span>
+                          <span class="num">{c.squeeze.short_change_component ?? "—"}</span>
+                        </div>
+                        <div>
+                          <span class="si-lbl">Avg daily volume</span>
+                          <span class="num">{c.avg_daily_volume?.toLocaleString() ?? "—"}</span>
+                        </div>
+                        <div class="si-note">{c.squeeze.float_note}</div>
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
+              {/each}
+            </tbody>
+          </table>
+          <div class="si-footnote">
+            Ranked {squeeze.qualified_count.toLocaleString()} of {squeeze.universe_size.toLocaleString()} exchange-listed rows
+            ({squeeze.exchanges_included.join(", ")}; OTC excluded). Filtered out:
+            {squeeze.excluded.below_min_days_to_cover.toLocaleString()} below min days-to-cover,
+            {squeeze.excluded.funds_and_spacs.toLocaleString()} funds/SPACs/warrants,
+            {squeeze.excluded.sentinel_days_to_cover.toLocaleString()} sentinel values,
+            {squeeze.excluded.implausible_days_to_cover.toLocaleString()} implausible ratios.
+          </div>
+        {:else}
+          <div class="empty">Short interest data unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
     <Panel title="Crypto Order Book (Level 2)" meta="Binance + Coinbase · live">
       <OrderBookPanel />
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Crypto Derivatives" meta="OKX perpetuals · funding, OI, liquidations">
+      <CryptoDerivativesPanel />
     </Panel>
   </div>
 
@@ -998,6 +1140,44 @@
     padding: 8px 10px;
     margin-bottom: 12px;
     line-height: 1.5;
+  }
+  .si-name {
+    color: var(--ink-faint);
+    font-weight: 400;
+    font-size: 10px;
+    margin-left: 6px;
+  }
+  .si-detail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    padding: 8px 4px;
+    font-size: 11px;
+  }
+  .si-detail > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .si-lbl {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+  }
+  .si-note {
+    flex-basis: 100%;
+    color: var(--ink-faint);
+    font-style: italic;
+  }
+  .dim {
+    color: var(--ink-faint);
+  }
+  .si-footnote {
+    margin-top: 10px;
+    font-size: 10px;
+    line-height: 1.6;
+    color: var(--ink-faint);
   }
   tr.expandable {
     cursor: pointer;

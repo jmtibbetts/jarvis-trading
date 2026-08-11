@@ -55,6 +55,8 @@ job_status = {
     'evaluation':{'status': 'idle', 'last': None, 'error': None},
     'autosim':   {'status': 'idle', 'last': None, 'error': None},
     'insider':   {'status': 'idle', 'last': None, 'error': None},
+    'inst13f':   {'status': 'idle', 'last': None, 'error': None},
+    'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -406,6 +408,8 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.evaluate_signals import run as evaluation_run
     from jobs.auto_simulator import run as autosim_run
     from jobs.fetch_insider_activity import run as insider_run
+    from jobs.fetch_13f_filings import run as inst13f_run
+    from jobs.fetch_crypto_derivatives import run as crypto_derivatives_run
 
     now = datetime.now(timezone.utc)
 
@@ -487,6 +491,24 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('insider', insider_run),
                   'interval', minutes=30, id='insider',
                   next_run_time=now + timedelta(minutes=2),
+                  replace_existing=True, max_instances=1)
+
+    # SEC Form 13F institutional holdings every 2 hours — free EDGAR API, no LLM.
+    # 13F is quarterly data with a 45-day filing deadline, so there is nothing to
+    # gain from polling faster. The interval also paces CUSIP->ticker resolution:
+    # OpenFIGI's keyless tier caps how many new CUSIPs each run can map, and
+    # unfinished filings are reprocessed next run until fully resolved.
+    sched.add_job(make_job_runner('inst13f', inst13f_run),
+                  'interval', hours=2, id='inst13f',
+                  next_run_time=now + timedelta(minutes=5),
+                  replace_existing=True, max_instances=1)
+
+    # Crypto derivatives (funding/OI/long-short ratio/liquidations) every 10 min —
+    # free OKX public REST, no LLM. 10 min balances freshness against OKX's rate
+    # limits across a 5-symbol watchlist x 4 endpoints per run.
+    sched.add_job(make_job_runner('crypto_derivatives', crypto_derivatives_run),
+                  'interval', minutes=10, id='crypto_derivatives',
+                  next_run_time=now + timedelta(minutes=2, seconds=30),
                   replace_existing=True, max_instances=1)
 
 

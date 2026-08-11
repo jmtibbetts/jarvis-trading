@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import Optional, Union
 from app.database import (
-    AiDecision, InsiderTransaction, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
+    AiDecision, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
+    InstitutionalHolding, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
     NewsItem, PlatformConfig, PortfolioSnapshot, Position, SignalEvaluation,
     ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
@@ -451,6 +452,297 @@ def get_orderbook(symbol: str):
     if not binance and not coinbase:
         raise HTTPException(503, f"No order book data yet for {symbol} — streams may still be connecting")
     return {"symbol": symbol, "binance": binance, "coinbase": coinbase}
+
+
+@router.get("/alerts")
+def get_alerts(hours: int = 24, severity: str = None, limit: int = 200):
+    """Cross-module alert feed (lib/alert_engine.py) — insider notable buys,
+    large crypto liquidations, kill-switch trips, etc. Complements the
+    live WS "alert" broadcast with a page-load-time snapshot."""
+    from lib.alert_engine import get_recent_alerts
+    return get_recent_alerts(hours=hours, severity=severity, limit=limit)
+
+
+@router.get("/shortinterest/{symbol}")
+def get_short_interest(symbol: str):
+    """FINRA consolidated short interest + squeeze-fuel score for one symbol
+    — free FINRA Query API, no vendor. This is SEMI-MONTHLY, DELAYED data
+    (~8 business day publish lag; see reporting_lag_days), not a live short
+    book. Short-interest-as-%-of-float is deliberately absent: FINRA
+    publishes no shares-outstanding figure, so it can't be computed
+    honestly. See lib/short_interest.py."""
+    from lib.short_interest import fetch_symbol_short_interest
+    result = fetch_symbol_short_interest(symbol)
+    if not result:
+        raise HTTPException(404, f"No published short interest for {symbol.upper()} at the latest settlement date")
+    return result
+
+
+@router.get("/shortinterest/squeeze/top")
+def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_funds: bool = True):
+    """Highest squeeze-fuel symbols for the latest published settlement
+    date. Excludes OTC, FINRA's 999.99 days-to-cover sentinel, and (by
+    default) ETFs/ETNs/SPAC units/warrants — vehicles that structurally
+    can't squeeze and would otherwise dominate the ranking. Everything
+    dropped is reported in the `excluded` counts rather than hidden."""
+    from lib.short_interest import get_top_squeeze_candidates
+    result = get_top_squeeze_candidates(
+        limit=limit, min_days_to_cover=min_days_to_cover, exclude_funds=exclude_funds
+    )
+    if not result:
+        raise HTTPException(503, "FINRA short interest data unavailable")
+    return result
+
+
+def _institutional_periods(db, ticker: str | None = None) -> list[str]:
+    q = db.query(InstitutionalHolding.period_of_report).distinct()
+    if ticker:
+        q = q.filter(InstitutionalHolding.ticker == ticker.upper())
+    return sorted({r[0] for r in q.all() if r[0]}, reverse=True)
+
+
+def _holdings_for_period(db, period: str, ticker: str | None = None) -> list[dict]:
+    q = db.query(InstitutionalHolding).filter(InstitutionalHolding.period_of_report == period)
+    if ticker:
+        q = q.filter(InstitutionalHolding.ticker == ticker.upper())
+    return [{
+        "ticker": h.ticker, "filer_name": h.filer_name, "issuer_name": h.issuer_name,
+        "value_usd": h.value_usd, "shares": h.shares,
+    } for h in q.all()]
+
+
+def _institutional_disclaimer(periods: list[str]) -> dict:
+    return {
+        "data_type": "SEC Form 13F quarterly holdings (free EDGAR data)",
+        "caveat": (
+            "Quarterly snapshot filed up to 45 days after quarter-end — up to ~4.5 months "
+            "stale, and long US-listed equity positions only. 13F never shows short "
+            "positions, hedges, cash, or non-US holdings, and cannot see intra-quarter "
+            "trading. This is what managers reported holding on the quarter-end date, "
+            "not what they are buying now."
+        ),
+        "periods_ingested": periods,
+        "coverage_note": (
+            "Coverage builds up from first ingestion — there is no historical backfill, "
+            "so quarter-over-quarter comparison requires two ingested quarters."
+        ),
+    }
+
+
+@router.get("/institutional/{symbol}")
+def get_institutional_holdings(symbol: str):
+    """Institutional (13F) holders of one ticker, with quarter-over-quarter
+    change when two quarters have been ingested. See lib/sec_13f.py and
+    lib/institutional_analytics.py for the full honesty caveats — most
+    importantly that this is stale quarterly data, long-only, and never
+    evidence of current buying."""
+    from lib.institutional_analytics import aggregate_by_ticker, compare_quarters
+
+    ticker = symbol.upper()
+    with get_db() as db:
+        periods = _institutional_periods(db, ticker)
+        if not periods:
+            raise HTTPException(404, f"No 13F holdings ingested for {ticker} yet")
+        current = aggregate_by_ticker(_holdings_for_period(db, periods[0], ticker))
+        prior = aggregate_by_ticker(_holdings_for_period(db, periods[1], ticker)) if len(periods) > 1 else {}
+
+    rows = compare_quarters(current, prior)
+    row = rows[0] if rows else None
+    return {
+        "symbol": ticker,
+        "current_period": periods[0],
+        "prior_period": periods[1] if len(periods) > 1 else None,
+        "summary": row,
+        "holders": current.get(ticker, {}).get("holders", []),
+        "disclaimer": _institutional_disclaimer(periods),
+    }
+
+
+@router.get("/institutional/accumulation/top")
+def get_institutional_accumulation(limit: int = 25):
+    """Tickers ranked by quarter-over-quarter institutional share change.
+    Returns an explicit insufficient_history marker (rather than a
+    misleading ranking) until two quarters have been ingested."""
+    from lib.institutional_analytics import aggregate_by_ticker, compare_quarters
+
+    with get_db() as db:
+        periods = _institutional_periods(db)
+        if not periods:
+            raise HTTPException(503, "No 13F holdings ingested yet")
+        current = aggregate_by_ticker(_holdings_for_period(db, periods[0]))
+        prior = aggregate_by_ticker(_holdings_for_period(db, periods[1])) if len(periods) > 1 else {}
+
+    rows = compare_quarters(current, prior)
+    return {
+        "current_period": periods[0],
+        "prior_period": periods[1] if len(periods) > 1 else None,
+        "insufficient_history": len(periods) < 2,
+        "tickers": rows[:min(max(limit, 1), 100)],
+        "disclaimer": _institutional_disclaimer(periods),
+    }
+
+
+@router.get("/opportunities/ranked")
+def get_ranked_opportunities(limit: int = 30):
+    """JARVIS Opportunity Score: ranks active trade signals by combining the
+    existing TA/regime composite_score (lib/signal_scorer.py) with
+    smart-money alignment (insider clusters + dark-pool activity for
+    equities) and that symbol's historical win rate. See
+    lib/signal_fusion.py for the full scoring rationale — every component
+    is returned alongside the composite, nothing is hidden behind one
+    number. Crypto signals get descriptive derivatives context (funding/OI/
+    long-short ratio) rather than a smart-money score — see that module's
+    docstring for why funding rate isn't scored as directional "smart
+    money." Options are intentionally excluded here: pulling a live chain
+    per active signal on every request would mean many synchronous external
+    calls per page load; see GET /options/{symbol}/summary for the
+    per-symbol version already used in the Signal Analysis Modal."""
+    from lib.insider_analytics import cluster_summary
+    from lib.finra_ats import get_top_activity
+    from lib.signal_fusion import (
+        compute_anomaly_flags, compute_dark_pool_component, compute_insider_component,
+        compute_opportunity_score, compute_smart_money_alignment,
+    )
+    from lib.learning_engine import get_all_accuracy
+
+    with get_db() as db:
+        signal_rows = (
+            db.query(TradingSignal)
+            .filter(TradingSignal.status.in_(["Active", "PendingApproval"]))
+            .order_by(TradingSignal.generated_at.desc())
+            .limit(200)
+            .all()
+        )
+        if not signal_rows:
+            return []
+        signals = [{
+            "id": s.id, "asset_symbol": s.asset_symbol, "asset_class": s.asset_class,
+            "direction": s.direction, "timeframe": s.timeframe, "composite_score": s.composite_score,
+        } for s in signal_rows]
+
+        tickers = {s["asset_symbol"] for s in signals if (s["asset_class"] or "").lower() == "equity"}
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        insider_rows = (
+            db.query(InsiderTransaction)
+            .filter(InsiderTransaction.ticker.in_(tickers), InsiderTransaction.transaction_date >= cutoff)
+            .all() if tickers else []
+        )
+        insider_by_ticker: dict = {}
+        for r in insider_rows:
+            insider_by_ticker.setdefault(r.ticker, []).append({
+                "owner_cik": r.owner_cik, "owner_name": r.owner_name, "is_officer": r.is_officer,
+                "transaction_code": r.transaction_code, "total_value": r.total_value,
+            })
+
+        crypto_symbols = {s["asset_symbol"].upper().split("/")[0] for s in signals if (s["asset_class"] or "").lower() == "crypto"}
+        crypto_snapshots: dict = {}
+        for sym in crypto_symbols:
+            row = (
+                db.query(CryptoDerivativesSnapshot)
+                .filter(CryptoDerivativesSnapshot.symbol == sym)
+                .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
+                .first()
+            )
+            if row:
+                crypto_snapshots[sym] = {
+                    "funding_rate": row.funding_rate, "open_interest_usd": row.open_interest_usd,
+                    "long_short_ratio": row.long_short_ratio,
+                }
+
+        accuracy_by_symbol: dict = {}
+        for row in get_all_accuracy():
+            existing = accuracy_by_symbol.get(row["symbol"])
+            if not existing or (row["total_trades"] or 0) > (existing["total_trades"] or 0):
+                accuracy_by_symbol[row["symbol"]] = row
+
+    dark_pool_snapshot = get_top_activity(tier="T1", limit=100) or {}
+    dark_pool_by_symbol = {r["symbol"]: r for r in dark_pool_snapshot.get("symbols", [])}
+
+    results = []
+    for s in signals:
+        symbol = s["asset_symbol"]
+        asset_class = (s["asset_class"] or "").lower()
+        smart_money = None
+        anomaly = None
+        crypto_context = None
+
+        if asset_class == "equity":
+            txs = insider_by_ticker.get(symbol)
+            cluster = cluster_summary(txs) if txs else None
+            insider_comp = compute_insider_component(cluster) if cluster and cluster["flags"] else None
+            dark_pool_row = dark_pool_by_symbol.get(symbol)
+            dark_pool_comp = compute_dark_pool_component(dark_pool_row) if dark_pool_row else None
+            smart_money = compute_smart_money_alignment(insider=insider_comp, dark_pool=dark_pool_comp)
+            anomaly = compute_anomaly_flags(dark_pool=dark_pool_row)
+        elif asset_class == "crypto":
+            crypto_context = crypto_snapshots.get(symbol.upper().split("/")[0])
+
+        historical = accuracy_by_symbol.get(symbol)
+        opp = compute_opportunity_score(s["composite_score"], s["direction"], smart_money=smart_money, historical=historical)
+
+        results.append({
+            "signal_id": s["id"], "symbol": symbol, "asset_class": s["asset_class"], "direction": s["direction"],
+            "timeframe": s["timeframe"], "base_composite_score": s["composite_score"],
+            "opportunity_score": opp["opportunity_score"], "opportunity_breakdown": opp["breakdown"],
+            "smart_money": smart_money, "anomaly": anomaly, "crypto_context": crypto_context,
+            "historical": {"total_trades": historical["total_trades"], "win_rate": historical["win_rate"]} if historical else None,
+        })
+
+    results.sort(key=lambda r: r["opportunity_score"], reverse=True)
+    return results[:min(max(limit, 1), 100)]
+
+
+@router.get("/crypto/{symbol}/derivatives")
+def get_crypto_derivatives(symbol: str, liquidation_hours: int = 24):
+    """Perpetual-futures state (funding rate, open interest, long/short
+    account ratio) plus recent liquidations — free OKX public data, no
+    vendor. OI/price divergence is computed from the two most recent stored
+    snapshots (~10 min apart); a brand-new symbol will show it as null until
+    a second snapshot exists. See lib/crypto_derivatives.py for why OKX is
+    the sole source (Binance derivatives geo-blocked, Bybit CloudFront-blocked
+    from this deployment)."""
+    from lib.crypto_derivatives import classify_oi_price_action, summarize_liquidations
+    base = symbol.upper().split("/")[0]
+    with get_db() as db:
+        snapshots = (
+            db.query(CryptoDerivativesSnapshot)
+            .filter(CryptoDerivativesSnapshot.symbol == base)
+            .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
+            .limit(2).all()
+        )
+        if not snapshots:
+            raise HTTPException(503, f"No derivatives data yet for {base} — job may still be running")
+        latest, prev = snapshots[0], (snapshots[1] if len(snapshots) > 1 else None)
+
+        oi_price_action = None
+        if prev and prev.open_interest_usd and prev.price and latest.price:
+            oi_change_pct = (latest.open_interest_usd - prev.open_interest_usd) / prev.open_interest_usd * 100
+            price_change_pct = (latest.price - prev.price) / prev.price * 100
+            oi_price_action = classify_oi_price_action(oi_change_pct, price_change_pct)
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, liquidation_hours))).isoformat()
+        liquidations = (
+            db.query(CryptoLiquidation)
+            .filter(CryptoLiquidation.symbol == base, CryptoLiquidation.liquidated_at >= cutoff)
+            .order_by(CryptoLiquidation.liquidated_at.desc())
+            .limit(200).all()
+        )
+        liq_dicts = [{
+            "side": l.side, "pos_side": l.pos_side, "price": l.price, "size": l.size,
+            "notional_usd": l.notional_usd, "liquidated_at": l.liquidated_at,
+        } for l in liquidations]
+
+        return {
+            "symbol": base,
+            "price": latest.price,
+            "funding_rate": latest.funding_rate,
+            "open_interest_usd": latest.open_interest_usd,
+            "long_short_ratio": latest.long_short_ratio,
+            "oi_price_action": oi_price_action,
+            "fetched_at": latest.fetched_at,
+            "liquidations": liq_dicts,
+            "liquidations_summary": summarize_liquidations(liq_dicts),
+        }
 
 
 @router.get("/darkpool/top")

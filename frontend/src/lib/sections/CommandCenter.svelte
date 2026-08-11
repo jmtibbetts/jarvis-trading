@@ -6,11 +6,13 @@
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
-  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime } from "../api";
+  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity } from "../api";
   import { wsStore } from "../stores/ws.svelte";
 
   let analysisSignalId = $state<string | null>(null);
   let signals = $state<Signal[]>([]);
+  let opportunities = $state<RankedOpportunity[]>([]);
+  let expandedOpp = $state<string | null>(null);
   let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
   let equity = $state<EquityPoint[]>([]);
@@ -25,7 +27,7 @@
 
   async function loadAll() {
     try {
-      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes] = await Promise.all([
+      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes] = await Promise.all([
         api.signals("Active", 8),
         api.threats(8),
         api.positions().catch(() => null), // Alpaca may be unreachable/unconfigured — degrade gracefully
@@ -35,8 +37,10 @@
         api.performanceAnalytics(30).catch(() => null),
         fetch("/api/signals/performance").then((r) => r.json()).catch(() => null),
         api.news(12).catch(() => []),
+        api.opportunitiesRanked(8).catch(() => []),
       ]);
       signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
+      opportunities = oppRes;
       threats = threatRes;
       positionsResp = posRes;
       equity = eqRes;
@@ -112,6 +116,66 @@
       value={positionsResp ? fmtUsd(positionsResp.account.unrealized_pl) : "—"}
       trend={positionsResp ? (positionsResp.account.unrealized_pl >= 0 ? "up" : "down") : "neutral"}
     />
+  </div>
+
+  <div class="span-12">
+    <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked">
+      <div class="sig-list">
+        {#each opportunities as opp (opp.signal_id)}
+          <div
+            class="sig opp"
+            onclick={() => (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
+            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
+            role="button"
+            tabindex="0"
+          >
+            <RadialScore score={Math.round(opp.opportunity_score)} />
+            <div>
+              <div class="sig-sym">
+                {opp.symbol}
+                <Pill label={opp.direction} tone={opp.direction.toLowerCase().includes("short") ? "bad" : "good"} />
+                {#if opp.smart_money?.alignment_score != null}
+                  <Pill
+                    label="smart money {opp.smart_money.agreement}"
+                    tone={opp.smart_money.alignment_score > 55 ? "good" : opp.smart_money.alignment_score < 45 ? "bad" : "neutral"}
+                  />
+                {/if}
+                {#if opp.anomaly?.flags.length}
+                  <Pill label="{opp.anomaly.flags.length} anomaly" tone="warm" />
+                {/if}
+              </div>
+              <div class="sig-meta num">
+                base {opp.base_composite_score.toFixed(0)} &middot; {opp.timeframe ?? "—"}
+                {#if opp.opportunity_breakdown.smart_money_adjustment !== 0}
+                  &middot; smart money {opp.opportunity_breakdown.smart_money_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.smart_money_adjustment.toFixed(1)}
+                {/if}
+              </div>
+              {#if expandedOpp === opp.signal_id}
+                <div class="opp-detail">
+                  <div>{opp.opportunity_breakdown.smart_money_note}</div>
+                  <div>{opp.opportunity_breakdown.historical_note}</div>
+                  {#if opp.crypto_context}
+                    <div>
+                      Funding {opp.crypto_context.funding_rate != null ? `${(opp.crypto_context.funding_rate * 100).toFixed(3)}%` : "—"}
+                      &middot; L/S ratio {opp.crypto_context.long_short_ratio?.toFixed(2) ?? "—"}
+                    </div>
+                  {/if}
+                  {#each opp.anomaly?.flags ?? [] as f (f.flag)}
+                    <div class="anomaly-line">⚠ {f.detail}</div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+            <div class="sig-rr">
+              <div class="lbl">Opportunity</div>
+              <span class="num">{opp.opportunity_score.toFixed(1)}</span>
+            </div>
+          </div>
+        {:else}
+          <div class="empty">No ranked opportunities right now</div>
+        {/each}
+      </div>
+    </Panel>
   </div>
 
   <div class="span-8">
@@ -302,6 +366,19 @@
   }
   .sig:last-child {
     border-bottom: none;
+  }
+  .opp-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--line);
+    font-size: 10.5px;
+    color: var(--ink-dim);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .anomaly-line {
+    color: var(--warm);
   }
   .sig-sym {
     font-weight: 650;

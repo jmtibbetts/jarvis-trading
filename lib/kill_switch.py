@@ -45,4 +45,15 @@ def set_live_trading_enabled(enabled: bool, reason: str | None = None) -> dict:
         row.paused_reason = None if enabled else (reason or "Manually paused")
         row.paused_at = None if enabled else now
         row.updated_at = now
-    return get_kill_switch_state()
+    state = get_kill_switch_state()
+    if not enabled:
+        try:
+            from lib.alert_engine import raise_alert
+            raise_alert(
+                source="kill_switch", severity="CRITICAL",
+                title="Live trading paused", detail=state["paused_reason"] or "",
+                dedup_key=f"kill_switch_pause_{state['paused_at']}", cooldown_minutes=1,
+            )
+        except Exception:
+            pass
+    return state

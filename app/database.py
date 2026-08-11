@@ -149,6 +149,121 @@ class InsiderTransaction(Base):
     created_date      = Column(String, default=now_iso)
 
 
+class CryptoDerivativesSnapshot(Base):
+    """Periodic snapshot of perpetual-futures market state — free, unauthenticated
+    OKX public REST (api.okx.com), no vendor key. Binance/Bybit derivatives APIs are
+    both geo-blocked from this deployment (confirmed live), so OKX is the sole source.
+    One row per (symbol, fetch), used to compute funding/OI divergence over time —
+    single-snapshot values alone don't reveal whether funding or OI is rising or
+    falling relative to price."""
+    __tablename__ = "crypto_derivatives_snapshots"
+    id               = Column(String, primary_key=True, default=new_id)
+    symbol           = Column(String, nullable=False, index=True)   # app-native BASE/USD
+    inst_id          = Column(String)                               # OKX instId, e.g. BTC-USDT-SWAP
+    price            = Column(Float)
+    funding_rate     = Column(Float)
+    open_interest_usd= Column(Float)
+    long_short_ratio = Column(Float)                                # accounts long/short, OKX contract ratio
+    fetched_at       = Column(String, default=now_iso, index=True)
+
+
+class CryptoLiquidation(Base):
+    """Individual liquidation fills from OKX's public liquidation-orders endpoint.
+    Dedup key is (inst_id, ts, bk_px, size) since OKX doesn't assign a stable event id."""
+    __tablename__ = "crypto_liquidations"
+    id          = Column(String, primary_key=True, default=new_id)
+    symbol      = Column(String, nullable=False, index=True)
+    inst_id     = Column(String)
+    side        = Column(String)      # "buy" | "sell" (the liquidation's forced order side)
+    pos_side    = Column(String)      # "long" | "short" (the position that got liquidated)
+    price       = Column(Float)
+    size        = Column(Float)
+    notional_usd= Column(Float)
+    liquidated_at = Column(String, index=True)   # OKX event ts, ISO
+    ingested_at = Column(String, default=now_iso)
+    __table_args__ = (UniqueConstraint("inst_id", "liquidated_at", "price", "size", name="uq_liquidation_event"),)
+
+
+class Alert(Base):
+    """Generic cross-module alert — the single place every intelligence
+    source (insider, crypto liquidations, kill switch, future modules)
+    raises a notification through, instead of each module pushing straight
+    to Telegram with its own ad-hoc dedup logic. dedup_key + cooldown lets
+    raise_alert() (lib/alert_engine.py) suppress repeat noise for the same
+    underlying event without every caller reimplementing that check."""
+    __tablename__ = "alerts"
+    id          = Column(String, primary_key=True, default=new_id)
+    source      = Column(String, nullable=False, index=True)   # e.g. "insider", "crypto_derivatives", "kill_switch"
+    severity    = Column(String, nullable=False, index=True)   # INFO | WATCH | ACTIONABLE | HIGH_PRIORITY | CRITICAL
+    title       = Column(String, nullable=False)
+    detail      = Column(Text)
+    dedup_key   = Column(String, index=True)
+    extra_json  = Column(Text)          # arbitrary structured payload, e.g. {"symbol": "BTC", "value": 123}
+    delivered_telegram = Column(Boolean, default=False)
+    created_at  = Column(String, default=now_iso, index=True)
+
+
+class InstitutionalHolding(Base):
+    """One line item from a Form 13F-HR information table — free EDGAR data,
+    no vendor. See lib/sec_13f.py for the full honesty caveats; the critical
+    ones: this is a QUARTERLY snapshot filed up to 45 days after quarter-end
+    (so up to ~4.5 months stale), and it covers LONG US-listed equity
+    positions only — never short positions or hedges.
+
+    Dedup key is (accession_number, cusip): one filing reports a given
+    security once. ticker is resolved from cusip via OpenFIGI and may be
+    NULL when no US-listed equity match exists — the raw cusip is always
+    kept so an unresolved holding is visibly unresolved, not silently lost."""
+    __tablename__ = "institutional_holdings"
+    id               = Column(String, primary_key=True, default=new_id)
+    accession_number = Column(String, nullable=False, index=True)
+    filer_cik        = Column(String, index=True)
+    filer_name       = Column(String, index=True)
+    period_of_report = Column(String, index=True)   # ISO date of the quarter end
+    cusip            = Column(String, nullable=False, index=True)
+    ticker           = Column(String, index=True)   # resolved via OpenFIGI; NULL if unmapped
+    issuer_name      = Column(String)
+    title_of_class   = Column(String)
+    value_usd        = Column(Float)
+    shares           = Column(Float)
+    shares_type      = Column(String)               # "SH" (shares) | "PRN" (principal)
+    filed_at         = Column(String)
+    created_date     = Column(String, default=now_iso)
+
+
+class Processed13FFiling(Base):
+    """Tracks which 13F filings have been fully processed.
+
+    This exists because "we saved some holdings from this filing" is NOT the
+    same as "we're done with it": OpenFIGI's rate limit caps how many new
+    CUSIPs one run can resolve, so an early run may parse a filing while most
+    of its CUSIPs are still unmapped. Deduping on saved holdings alone would
+    mark such a filing complete and silently lose every holding whose CUSIP
+    hadn't been resolved yet. Only filings with fully_resolved=True are
+    skipped on later runs; the rest are reprocessed once the CUSIP map has
+    grown."""
+    __tablename__ = "processed_13f_filings"
+    accession_number = Column(String, primary_key=True)
+    filer_cik        = Column(String)
+    fully_resolved   = Column(Boolean, default=False, index=True)
+    unresolved_count = Column(Integer, default=0)
+    processed_at     = Column(String, default=now_iso)
+
+
+class CusipTickerMap(Base):
+    """Persistent CUSIP -> ticker cache. CUSIP-to-ticker is a licensed
+    dataset, so mappings are resolved through OpenFIGI's free API and cached
+    here permanently — the mapping is stable, and OpenFIGI's keyless tier is
+    rate-limited enough that re-resolving on every ingest run would throttle.
+    resolved_ticker NULL means "looked up, genuinely no US equity match" —
+    distinct from "not yet looked up" (no row at all), so failed lookups
+    aren't retried forever."""
+    __tablename__ = "cusip_ticker_map"
+    cusip            = Column(String, primary_key=True)
+    resolved_ticker  = Column(String, index=True)
+    resolved_at      = Column(String, default=now_iso)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
     id              = Column(String, primary_key=True, default=new_id)

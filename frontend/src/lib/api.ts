@@ -420,6 +420,26 @@ export type OrderBookSnapshot = {
 
 export type OrderBookResponse = { symbol: string; binance: OrderBookSnapshot | null; coinbase: OrderBookSnapshot | null };
 
+export type CryptoLiquidationRow = {
+  side: string | null; pos_side: "long" | "short" | null; price: number; size: number;
+  notional_usd: number; liquidated_at: string;
+};
+
+export type CryptoDerivativesSnapshot = {
+  symbol: string;
+  price: number | null;
+  funding_rate: number | null;
+  open_interest_usd: number | null;
+  long_short_ratio: number | null;
+  oi_price_action: "long_buildup" | "short_buildup" | "short_covering" | "long_unwinding" | null;
+  fetched_at: string;
+  liquidations: CryptoLiquidationRow[];
+  liquidations_summary: {
+    count: number; long_liquidated_usd: number; short_liquidated_usd: number;
+    total_liquidated_usd: number; long_liquidation_share: number | null;
+  };
+};
+
 export type DarkPoolSymbol = {
   symbol: string;
   issuer_name: string | null;
@@ -451,6 +471,82 @@ export type MacroSnapshot = {
     real_gdp: MacroReading;
     jobless_claims: MacroReading;
   } | null;
+};
+
+export type InstitutionalTickerRow = {
+  ticker: string; issuer_name: string | null;
+  holder_count: number; total_value_usd: number; total_shares: number;
+  insufficient_history: boolean;
+  prior_holder_count: number | null; holder_delta: number | null;
+  prior_shares: number | null; share_delta: number | null; share_change_pct: number | null;
+  status: string;
+};
+
+export type InstitutionalDisclaimer = {
+  data_type: string; caveat: string; periods_ingested: string[]; coverage_note: string;
+};
+
+export type InstitutionalAccumulation = {
+  current_period: string; prior_period: string | null;
+  insufficient_history: boolean;
+  tickers: InstitutionalTickerRow[];
+  disclaimer: InstitutionalDisclaimer;
+};
+
+export type SqueezeScore = {
+  squeeze_score: number | null;
+  days_to_cover_component: number | null;
+  short_change_component: number | null;
+  short_interest_pct_of_float: null;
+  float_note: string;
+  interpretation: string;
+};
+
+export type ShortInterestRow = {
+  symbol: string;
+  issue_name: string | null;
+  settlement_date: string;
+  current_short_shares: number | null;
+  previous_short_shares: number | null;
+  change_shares: number | null;
+  change_percent: number | null;
+  avg_daily_volume: number | null;
+  days_to_cover: number | null;
+  market_class: string | null;
+  squeeze: SqueezeScore;
+  reporting_lag_days?: number | null;
+};
+
+export type SqueezeTopResponse = {
+  settlement_date: string;
+  reporting_lag_days: number | null;
+  candidates: ShortInterestRow[];
+  universe_size: number;
+  qualified_count: number;
+  excluded: {
+    sentinel_days_to_cover: number; implausible_days_to_cover: number;
+    below_min_days_to_cover: number; no_short_position: number; funds_and_spacs: number;
+  };
+  exchanges_included: string[];
+  funds_excluded: boolean;
+  fund_filter_note: string;
+  fetched_at: string;
+};
+
+export type RankedOpportunity = {
+  signal_id: string; symbol: string; asset_class: string; direction: string; timeframe: string;
+  base_composite_score: number; opportunity_score: number;
+  opportunity_breakdown: {
+    base_composite_score: number; smart_money_adjustment: number; smart_money_note: string;
+    historical_adjustment: number; historical_note: string;
+  };
+  smart_money: {
+    alignment_score: number | null; net_directional_score: number | null; agreement: string; sources_available: number;
+    components: { insider: unknown; options: unknown; dark_pool_activity: unknown };
+  } | null;
+  anomaly: { flags: { flag: string; detail: string }[]; anomaly_score: number | null; sources_evaluated: number } | null;
+  crypto_context: { funding_rate: number | null; open_interest_usd: number | null; long_short_ratio: number | null } | null;
+  historical: { total_trades: number; win_rate: number } | null;
 };
 
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
@@ -724,6 +820,14 @@ export const api = {
   darkPoolTop: (tier = "T1", limit = 25) => get<DarkPoolTopActivity>(`/darkpool/top?tier=${tier}&limit=${limit}`),
   darkPoolVenues: (symbol: string, weekStart: string) => get<DarkPoolVenues>(`/darkpool/${symbol}/venues?week_start=${weekStart}`),
   orderbook: (symbol: string) => get<OrderBookResponse>(`/orderbook/${symbol}`),
+  cryptoDerivatives: (symbol: string, liquidationHours = 24) =>
+    get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
+  opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
+  institutionalAccumulation: (limit = 25) =>
+    get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
+  shortInterest: (symbol: string) => get<ShortInterestRow>(`/shortinterest/${symbol}`),
+  squeezeTop: (limit = 20, minDaysToCover = 3) =>
+    get<SqueezeTopResponse>(`/shortinterest/squeeze/top?limit=${limit}&min_days_to_cover=${minDaysToCover}`),
   optionsSummary: (symbol: string, dteMax = 45) => get<OptionsSummary>(`/options/${symbol}/summary?dte_max=${dteMax}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),

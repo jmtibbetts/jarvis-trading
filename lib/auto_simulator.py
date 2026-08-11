@@ -246,6 +246,28 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
         }
 
 
+def flatten_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
+    """Close every open Auto Sim position at its last known price, preserving
+    the trade history and win/loss record (unlike reset, which wipes it).
+    Positions without a usable price are left open and reported."""
+    closed = 0
+    no_price = []
+    with get_db() as db:
+        portfolio = _ensure_portfolio(db, user_id)
+        rows = db.query(AutoSimPosition).filter(
+            AutoSimPosition.user_id == user_id,
+            AutoSimPosition.status == "Open",
+        ).all()
+        for pos in rows:
+            price = float(pos.current_price or pos.entry_price or 0)
+            if price <= 0:
+                no_price.append(pos.symbol)
+                continue
+            _close(db, pos, price, "manual flatten", portfolio)
+            closed += 1
+    return {"closed": closed, "skipped_no_price": no_price}
+
+
 def reset_auto_simulator(user_id: str = DEFAULT_USER_ID) -> None:
     with get_db() as db:
         db.query(AutoSimTrade).filter(AutoSimTrade.user_id == user_id).delete()

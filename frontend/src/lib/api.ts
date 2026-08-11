@@ -991,7 +991,7 @@ export const api = {
     }).then(async (r) => {
       const body = await r.json();
       if (!r.ok) throw new Error(body?.detail ?? `flatten ${r.status}`);
-      return body as { ok: boolean; scope: string; live?: { orders_cancelled: number; positions_closed: number; errors: string[] }; paper?: { positions_closed: number; errors: string[] }; signals_rejected: number };
+      return body as { ok: boolean; scope: string; live?: { orders_cancelled: number; positions_closed: number; errors: string[] }; paper?: { positions_closed: number; errors: string[] }; autosim?: { closed: number; skipped_no_price?: string[]; error?: string }; signals_rejected: number };
     }),
   autosimReset: () => post<{ ok: boolean }>(`/autosim/reset`),
   congressActivity: (limit = 20, days = 180) =>

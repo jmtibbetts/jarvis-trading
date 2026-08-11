@@ -233,6 +233,7 @@ Type FLATTEN to confirm:`,
       const bits: string[] = [];
       if (res.live) bits.push(`live: ${res.live.positions_closed} closed, ${res.live.orders_cancelled} orders cancelled`);
       if (res.paper) bits.push(`paper: ${res.paper.positions_closed} closed`);
+      if (res.autosim) bits.push(`auto sim: ${res.autosim.closed} closed`);
       bits.push(`${res.signals_rejected} pending signals rejected`);
       toastStore.ok(`Flattened — ${bits.join(" · ")}`);
       const errs = [...(res.live?.errors ?? []), ...(res.paper?.errors ?? [])];
@@ -575,7 +576,7 @@ Type FLATTEN to confirm:`,
         </div>
         <div class="dz-item">
           <button class="btn small dz-btn" disabled={flattenBusy} onclick={() => doFlatten("paper")}>Flatten PAPER</button>
-          <span class="dz-desc">Close every open paper position at last price, reject pending paper signals. Cash preserved.</span>
+          <span class="dz-desc">Close every open paper AND Auto Sim position at last price, reject pending paper signals. Cash and history preserved.</span>
         </div>
         <div class="dz-item">
           <button class="btn small dz-btn" disabled={flattenBusy} onclick={() => doFlatten("all")}>Flatten EVERYTHING</button>

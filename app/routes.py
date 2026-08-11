@@ -3210,8 +3210,10 @@ def flatten_trading(body: FlattenRequest):
             Alpaca dashboard (Account → Reset); flattening returns the
             account to all-cash at its current equity.
     paper — internal engine: close every open paper position at the latest
-            known price, reject paper-pending signals. Cash is preserved;
-            use /paper/reset afterwards for a clean $100k.
+            known price, reject paper-pending signals, and close all open
+            Auto Sim virtual positions (history and win/loss record kept).
+            Cash is preserved; use /paper/reset and /autosim/reset
+            afterwards for a clean $100k each.
     """
     if body.confirm != "FLATTEN":
         raise HTTPException(400, 'Confirmation required: pass confirm="FLATTEN"')
@@ -3263,6 +3265,11 @@ def flatten_trading(body: FlattenRequest):
         except Exception as e:
             paper_res["errors"].append(str(e)[:80])
         out["paper"] = paper_res
+        try:
+            from lib.auto_simulator import flatten_auto_simulator
+            out["autosim"] = flatten_auto_simulator()
+        except Exception as e:
+            out["autosim"] = {"closed": 0, "error": str(e)[:80]}
 
     # Pending signals: reject everything still awaiting action in scope.
     with get_db() as db:

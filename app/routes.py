@@ -726,9 +726,10 @@ def ask_analyst(body: dict):
             triage_raw = call_lm_studio(
                 f"Question from a trading-dashboard user: {question!r}\n\n"
                 "Classify whether answering well needs external information, and "
-                "which kind. Reply ONLY with JSON:\n"
+                "which kind. For market_data, query must be the TICKER SYMBOL "
+                "(e.g. NVDA, BTC/USD). Reply ONLY with JSON:\n"
                 '{"intent": "news"|"research"|"fetch_url"|"market_data"|"none", '
-                '"query": "search query or URL" or null}',
+                '"query": "search query, URL, or ticker" or null}',
                 system="You are a routing classifier. JSON only.",
                 max_tokens=120, temperature=0.0, thinking=False,
             )
@@ -756,32 +757,48 @@ def ask_analyst(body: dict):
                         ("exa", "web_fetch_exa", {"url": query}),
                     ],
                     "market_data": [
-                        # Massive uses a discovery chain (search_endpoints ->
-                        # get_endpoint_docs -> call_api) that can't be driven
-                        # in one bounded call and can't be verified until a
-                        # key connects it — wired then. Research search is the
-                        # honest keyless fallback meanwhile.
+                        # web-search fallback when Massive REST (below) has
+                        # nothing for the symbol
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
                     ],
                 }
-                choice = _first_connected(routes_by_intent.get(intent, []))
-                if choice:
-                    server, tool, args = choice
-                    result = call_tool(server, tool, args)
-                    if result:
-                        context_blocks["web_search"] = {
-                            "provider": server, "tool": tool, "intent": intent, "query": query,
-                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                            "results": result[:4000],
-                        }
+
+                # market_data goes to Massive REST first — actual numbers from
+                # the user's own subscription, not web reporting. (Massive's
+                # hosted MCP wants OAuth JWTs; the REST key path is what this
+                # plan supports — see lib/massive_data.py for the live-verified
+                # entitlement map.) Falls through to web search when the query
+                # isn't a resolvable symbol.
+                handled = False
+                if intent == "market_data":
+                    from lib.massive_data import get_market_summary
+                    sym_guess = query.split()[0].upper().strip(",.")
+                    summary = get_market_summary(sym_guess)
+                    if summary:
+                        context_blocks["market_data"] = summary
+                        handled = True
+
+                if not handled:
+                    choice = _first_connected(routes_by_intent.get(intent, []))
+                    if choice:
+                        server, tool, args = choice
+                        result = call_tool(server, tool, args)
+                        if result:
+                            context_blocks["web_search"] = {
+                                "provider": server, "tool": tool, "intent": intent, "query": query,
+                                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                                "results": result[:4000],
+                            }
     except Exception as e:
         logger.debug(f"[Analyst] MCP research step skipped: {e}")
 
     system = (
         "You are the market analyst inside a trading dashboard. Answer the user's "
         "question using ONLY the data blocks provided. Cite which block(s) each "
-        "claim comes from in [brackets]. The web_search block, when present, is "
+        "claim comes from in [brackets]. The market_data block, when present, "
+        "carries real exchange data from the Massive subscription (previous "
+        "session / end-of-day, not live quotes). The web_search block, when present, is "
         "external content retrieved moments ago — attribute claims from it to "
         "[web_search] and treat it as reporting, not verified system data. If the "
         "provided data cannot answer the question, say exactly that — do not use "

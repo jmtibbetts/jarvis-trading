@@ -495,6 +495,22 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     return result
 
 
+@router.get("/mcp/status")
+def get_mcp_status():
+    """Connectivity/auth status of the configured MCP servers — the same
+    ones the user runs in LM Studio, driven directly by Jarvis because
+    LM Studio's MCP config never reaches API callers. Servers reporting
+    needs_key_env light up once the key lands in .env."""
+    from lib.mcp_client import available_servers
+    return {
+        "servers": available_servers(),
+        "note": (
+            "Jarvis speaks MCP directly (lib/mcp_client.py); the analyst uses "
+            "these tools for at most one web-research call per question."
+        ),
+    }
+
+
 @router.get("/calendar/catalysts")
 def get_catalyst_calendar():
     """Universal catalyst calendar — deterministic market dates plus events
@@ -683,13 +699,87 @@ def ask_analyst(body: dict):
         pass
 
     import json as _json
-    from lib.lmstudio import call_lm_studio
+    from lib.lmstudio import call_lm_studio, parse_json
+
+    # MCP research step (bounded: at most ONE web search per question).
+    # LM Studio's own MCP config never reaches API callers, so Jarvis drives
+    # the tools itself via lib/mcp_client.py. A fast /no_think triage call
+    # decides whether the question needs fresh external information and with
+    # what query; the search result then becomes one more cited context
+    # block. Deterministic two-step rather than model-native function
+    # calling — bounded cost, graceful degradation, and the citation rule
+    # still holds because the web result IS a context block.
+    # Purpose-routing per the user's own map of their servers:
+    #   massive -> market data, tavily -> current news, exa -> deeper
+    #   research, firecrawl -> retrieve a specific article/URL.
+    # Each intent falls back to whichever connected server can serve it.
+    try:
+        from lib.mcp_client import call_tool, list_tools
+
+        def _first_connected(preferences: list[tuple[str, str, dict]]) -> tuple[str, str, dict] | None:
+            for server, tool, args in preferences:
+                if any(t.get("name") == tool for t in list_tools(server)):
+                    return server, tool, args
+            return None
+
+        if any(list_tools(s) for s in ("exa", "firecrawl", "tavily", "massive")):
+            triage_raw = call_lm_studio(
+                f"Question from a trading-dashboard user: {question!r}\n\n"
+                "Classify whether answering well needs external information, and "
+                "which kind. Reply ONLY with JSON:\n"
+                '{"intent": "news"|"research"|"fetch_url"|"market_data"|"none", '
+                '"query": "search query or URL" or null}',
+                system="You are a routing classifier. JSON only.",
+                max_tokens=120, temperature=0.0, thinking=False,
+            )
+            triage = parse_json(triage_raw) or {}
+            intent = triage.get("intent")
+            query = str(triage.get("query") or "")[:300]
+            if intent and intent != "none" and query:
+                routes_by_intent: dict[str, list] = {
+                    "news": [
+                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
+                        ("exa", "web_search_exa", {"query": query, "numResults": 4}),
+                        ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
+                    ],
+                    "research": [
+                        ("exa", "web_search_exa", {"query": query, "numResults": 4}),
+                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
+                        ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
+                    ],
+                    "fetch_url": [
+                        ("firecrawl", "firecrawl_scrape", {"url": query}),
+                        ("exa", "web_fetch_exa", {"url": query}),
+                    ],
+                    "market_data": [
+                        # Massive's tool names are unknown until a key connects it;
+                        # research search is the honest keyless fallback.
+                        ("exa", "web_search_exa", {"query": query, "numResults": 4}),
+                        ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
+                    ],
+                }
+                choice = _first_connected(routes_by_intent.get(intent, []))
+                if choice:
+                    server, tool, args = choice
+                    result = call_tool(server, tool, args)
+                    if result:
+                        context_blocks["web_search"] = {
+                            "provider": server, "tool": tool, "intent": intent, "query": query,
+                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                            "results": result[:4000],
+                        }
+    except Exception as e:
+        logger.debug(f"[Analyst] MCP research step skipped: {e}")
+
     system = (
         "You are the market analyst inside a trading dashboard. Answer the user's "
         "question using ONLY the data blocks provided. Cite which block(s) each "
-        "claim comes from in [brackets]. If the provided data cannot answer the "
-        "question, say exactly that — do not use outside knowledge for prices, "
-        "levels, or events, and never invent a number that is not in the context."
+        "claim comes from in [brackets]. The web_search block, when present, is "
+        "external content retrieved moments ago — attribute claims from it to "
+        "[web_search] and treat it as reporting, not verified system data. If the "
+        "provided data cannot answer the question, say exactly that — do not use "
+        "outside knowledge for prices, levels, or events, and never invent a "
+        "number that is not in the context."
     )
     prompt = f"DATA BLOCKS:\n{_json.dumps(context_blocks, default=str)}\n\nQUESTION: {question}"
     try:

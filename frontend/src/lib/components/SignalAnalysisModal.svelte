@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type SignalAnalysis, type TfAnalysis } from "../api";
+  import { api, type SignalAnalysis, type TfAnalysis, type OptionsSummary } from "../api";
   import Pill from "./Pill.svelte";
   import CandleChart from "./CandleChart.svelte";
   import { toastStore } from "../stores/toast.svelte";
@@ -13,10 +13,15 @@
   let notesInput = $state("");
   let notesSaving = $state(false);
   let notesDirty = $state(false);
+  let options = $state<OptionsSummary | null>(null);
+  let optionsLoading = $state(false);
+  let optionsUnavailable = $state(false);
 
   async function load() {
     loading = true;
     error = null;
+    options = null;
+    optionsUnavailable = false;
     try {
       data = await api.signalAnalysis(signalId);
       notesInput = data.signal.notes ?? "";
@@ -28,6 +33,16 @@
       } else {
         const firstGood = data.timeframes.find((tf) => data!.candles[tf]?.length);
         if (firstGood) activeTf = firstGood;
+      }
+      // Options chains only exist for equities/ETFs — skip the fetch entirely
+      // for crypto/futures/forex signals rather than hitting a guaranteed 400/503.
+      if ((data.signal.asset_class ?? "").toLowerCase() === "equity") {
+        optionsLoading = true;
+        api
+          .optionsSummary(data.signal.asset_symbol)
+          .then((res) => (options = res))
+          .catch(() => (optionsUnavailable = true))
+          .finally(() => (optionsLoading = false));
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -192,6 +207,33 @@
           {notesSaving ? "Saving…" : "Save note"}
         </button>
       </div>
+
+      {#if (s.asset_class ?? "").toLowerCase() === "equity"}
+        <div class="options-section">
+          <div class="section-label">Options Chain (real, Alpaca data)</div>
+          {#if optionsLoading}
+            <p class="options-empty">Loading options chain…</p>
+          {:else if options}
+            <div class="options-stats">
+              <div class="options-stat"><span>Put/Call</span><b class="num">{options.put_call_ratio ?? "—"}</b></div>
+              <div class="options-stat"><span>Avg Call IV</span><b class="num">{options.avg_call_iv != null ? `${(options.avg_call_iv * 100).toFixed(0)}%` : "—"}</b></div>
+              <div class="options-stat"><span>Avg Put IV</span><b class="num">{options.avg_put_iv != null ? `${(options.avg_put_iv * 100).toFixed(0)}%` : "—"}</b></div>
+              <div class="options-stat"><span>IV Skew</span><b class="num {options.iv_skew != null && options.iv_skew > 0 ? 'pl-down' : ''}">{options.iv_skew != null ? `${options.iv_skew >= 0 ? "+" : ""}${(options.iv_skew * 100).toFixed(1)}pp` : "—"}</b></div>
+              <div class="options-stat"><span>Net Delta</span><b class="num">{(options.total_call_delta + options.total_put_delta).toFixed(1)}</b></div>
+            </div>
+            {#if options.expected_move}
+              <p class="options-move">
+                Market-implied move to <b>{options.expected_move.expiration}</b>: ±{options.expected_move.expected_move_pct}%
+                (<span class="pl-down">{options.expected_move.expected_move_low}</span> – <span class="pl-up">{options.expected_move.expected_move_high}</span>),
+                from the ATM {options.expected_move.strike} straddle priced at {options.expected_move.straddle_price}.
+              </p>
+            {/if}
+            <p class="options-note">{options.contracts_analyzed} contracts across {options.expirations_covered.length} expirations (next 45 days, ±15% of spot). No open-interest data available from this feed, so unusual-volume/OI signals aren't computed — only what's genuinely in the data.</p>
+          {:else if optionsUnavailable}
+            <p class="options-empty">Options data unavailable for {s.asset_symbol} (no chain, or account lacks options market data access).</p>
+          {/if}
+        </div>
+      {/if}
 
       <div class="context-grid">
         <div>
@@ -467,6 +509,50 @@
     color: var(--accent);
     font-weight: 600;
   }
+
+  .options-section {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .options-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 10px;
+  }
+  .options-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .options-stat span {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+  }
+  .options-stat b {
+    font-size: 13px;
+  }
+  .options-move {
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    line-height: 1.6;
+    margin: 0 0 6px;
+  }
+  .options-note {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    line-height: 1.5;
+    margin: 0;
+  }
+  .options-empty {
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    margin: 0;
+  }
+
   .btn:disabled {
     opacity: 0.5;
     cursor: default;

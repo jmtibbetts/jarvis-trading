@@ -11,6 +11,7 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta, timezone
@@ -96,6 +97,10 @@ def get_stock_data_client() -> StockHistoricalDataClient:
 def get_crypto_data_client() -> CryptoHistoricalDataClient:
     key, secret, _ = get_alpaca_creds()
     return CryptoHistoricalDataClient(api_key=key, secret_key=secret)
+
+def get_option_data_client() -> OptionHistoricalDataClient:
+    key, secret, _ = get_alpaca_creds()
+    return OptionHistoricalDataClient(api_key=key, secret_key=secret)
 
 def get_account():
     client = get_trading_client()

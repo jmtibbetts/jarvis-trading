@@ -416,6 +416,28 @@ def _insider_tx_dict(row):
     }
 
 
+@router.get("/options/{symbol}/summary")
+def get_options_summary(symbol: str, current_price: float = None, dte_max: int = 45):
+    """Options chain intelligence for one underlying — real chain data from
+    Alpaca's options market data API (same broker/credentials as the rest
+    of this app, no new vendor). See lib/options_analytics.py for exactly
+    what's computed and, just as importantly, what's deliberately excluded
+    (no open-interest-based "unusual activity" detection — Alpaca's
+    snapshot doesn't expose open interest, so this doesn't approximate it)."""
+    from lib.options_analytics import get_chain_summary
+    price = current_price
+    if price is None:
+        with get_db() as db:
+            asset = db.query(MarketAsset).filter(MarketAsset.symbol == symbol.upper()).first()
+            price = asset.price if asset else None
+    if not price:
+        raise HTTPException(400, f"No current price available for {symbol} — pass current_price explicitly")
+    summary = get_chain_summary(symbol, current_price=price, dte_max=dte_max)
+    if not summary:
+        raise HTTPException(503, f"Options data unavailable for {symbol} — no chain data returned")
+    return summary
+
+
 @router.get("/orderbook/{symbol}")
 def get_orderbook(symbol: str):
     """Latest in-memory Level 2 snapshot for a symbol from both exchanges

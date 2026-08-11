@@ -378,6 +378,31 @@ export type YieldCurveSnapshot = {
 
 export type MacroReading = { date: string; value: number; compared_to: string | null; unit: string; series_id: string } | null;
 
+export type OptionsSummary = {
+  underlying: string;
+  current_price: number;
+  contracts_analyzed: number;
+  call_count: number;
+  put_count: number;
+  traded_call_count: number;
+  traded_put_count: number;
+  put_call_ratio: number | null;
+  avg_call_iv: number | null;
+  avg_put_iv: number | null;
+  iv_skew: number | null;
+  total_call_delta: number;
+  total_put_delta: number;
+  total_gamma: number;
+  expirations_covered: string[];
+  nearest_expiration: string | null;
+  expected_move: {
+    strike: number; expiration: string; straddle_price: number;
+    expected_move_pct: number | null; expected_move_low: number; expected_move_high: number;
+  } | null;
+  top_iv_contracts: { symbol: string; type: "call" | "put"; strike: number; expiration: string; iv: number }[];
+  fetched_at: string;
+};
+
 export type OrderBookSnapshot = {
   exchange: "binance" | "coinbase";
   symbol: string;
@@ -699,6 +724,7 @@ export const api = {
   darkPoolTop: (tier = "T1", limit = 25) => get<DarkPoolTopActivity>(`/darkpool/top?tier=${tier}&limit=${limit}`),
   darkPoolVenues: (symbol: string, weekStart: string) => get<DarkPoolVenues>(`/darkpool/${symbol}/venues?week_start=${weekStart}`),
   orderbook: (symbol: string) => get<OrderBookResponse>(`/orderbook/${symbol}`),
+  optionsSummary: (symbol: string, dteMax = 45) => get<OptionsSummary>(`/options/${symbol}/summary?dte_max=${dteMax}`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

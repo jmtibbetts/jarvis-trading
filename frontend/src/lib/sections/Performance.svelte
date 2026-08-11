@@ -352,7 +352,6 @@
     display: grid;
     grid-template-columns: repeat(12, 1fr);
     gap: 14px;
-    align-items: start;
   }
   .span-4 {
     grid-column: span 4;

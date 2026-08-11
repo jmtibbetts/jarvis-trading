@@ -124,15 +124,23 @@
     expandedLive = next;
   }
 
+  let liveLoadFailed = $state(false);
+
   async function loadAll() {
     const [l, p, a, s, e] = await Promise.all([
-      api.positionsWithSignals().catch(() => null),
+      api.positionsWithSignals().catch(() => {
+        liveLoadFailed = true;
+        return null;
+      }),
       api.paperSummary().catch(() => null),
       api.autoSimSummary().catch(() => null),
       api.slippageSummary(50).catch(() => null),
       api.earningsWatchlist().catch(() => null),
     ]);
-    live = l;
+    if (l) liveLoadFailed = false;
+    // A failed fetch keeps the LAST GOOD data on screen instead of flashing
+    // an empty "0 positions" state that reads as if everything was closed.
+    live = l ?? live;
     paper = p;
     autosim = a;
     slippage = s;
@@ -360,7 +368,11 @@
         </tbody>
       </table>
     {:else}
-      <div class="empty">No open live positions{live ? "" : " — Alpaca unreachable"}</div>
+      {#if liveLoadFailed}
+        <div class="empty err-note">Couldn't load live positions (server/Alpaca unreachable) — retrying automatically. This is a data-fetch failure, not zero positions.</div>
+      {:else}
+        <div class="empty">No open live positions</div>
+      {/if}
     {/if}
   </Panel>
 
@@ -890,5 +902,8 @@
     .two-col {
       grid-template-columns: 1fr;
     }
+  }
+  .err-note {
+    color: var(--bad);
   }
 </style>

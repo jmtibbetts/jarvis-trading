@@ -2,7 +2,6 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import EquityChart from "../components/EquityChart.svelte";
-  import ThreatMap from "../components/ThreatMap.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
@@ -333,13 +332,22 @@
     </Panel>
   </div>
   <div class="span-5">
-    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active" noPad>
-      <ThreatMap {threats} />
-      <div class="map-legend">
-        <span><i style="background:var(--critical)"></i> Critical</span>
-        <span><i style="background:var(--warm)"></i> High</span>
-        <span><i style="background:var(--accent)"></i> Medium</span>
-      </div>
+    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active · map on Intelligence tab">
+      {#if threats.length}
+        <div class="threat-list">
+          {#each threats.slice(0, 6) as t (t.id)}
+            <div class="threat-row">
+              <Pill label={t.severity} tone={t.severity === "Critical" ? "critical" : t.severity === "High" ? "warm" : "neutral"} />
+              <div class="threat-main">
+                <div class="threat-title">{t.title}</div>
+                <div class="threat-meta dim">{t.country || t.region || "Global"} · {fmtAgo(t.published_at)}</div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">No active threats</div>
+      {/if}
     </Panel>
   </div>
   <div class="span-4">
@@ -583,7 +591,6 @@
     display: grid;
     grid-template-columns: repeat(12, 1fr);
     gap: 14px;
-    align-items: start;
   }
   .kpis {
     grid-column: span 12;
@@ -619,24 +626,6 @@
     grid-column: span 4;
   }
 
-  .map-legend {
-    display: flex;
-    gap: 12px;
-    padding: 9px 14px;
-    border-top: 1px solid var(--line);
-    font-size: 10.5px;
-    color: var(--ink-dim);
-  }
-  .map-legend span {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .map-legend i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-  }
 
   .sig-list {
     display: flex;
@@ -844,6 +833,25 @@
     font-size: 12px;
   }
 
+  .threat-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .threat-row:last-child {
+    border-bottom: none;
+  }
+  .threat-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .threat-meta {
+    font-size: 10px;
+    margin-top: 2px;
+  }
   .movers {
     display: grid;
     grid-template-columns: 1fr;

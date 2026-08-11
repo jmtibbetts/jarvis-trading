@@ -12,7 +12,7 @@ from typing import Optional, Union
 from app.database import (
     AiDecision, CongressTrade, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
     InstitutionalHolding, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
-    NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling,
+    IpoFiling, NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling,
     PsychologySnapshot, SignalEvaluation,
     ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
@@ -493,6 +493,48 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     if not result:
         raise HTTPException(503, "FINRA short interest data unavailable")
     return result
+
+
+@router.get("/ipo/pipeline")
+def get_ipo_pipeline(limit: int = 40):
+    """IPO registration pipeline from free EDGAR filings: S-1 (filed) ->
+    S-1/A (amended) -> 424B4 (priced). Offering terms come only from 424B4
+    cover pages via conservative deterministic extraction — a field the
+    pattern couldn't match is null, never estimated. Rows flagged
+    cover_mentions_ipo=false are follow-on offerings by already-listed
+    companies (Rule 424(b)(4) covers those too), not IPOs."""
+    with get_db() as db:
+        rows = (
+            db.query(IpoFiling)
+            .order_by(IpoFiling.latest_filed_at.desc())
+            .limit(min(max(limit, 1), 200))
+            .all()
+        )
+        pipeline = [{
+            "cik": r.cik, "company_name": r.company_name, "stage": r.stage,
+            "latest_form": r.latest_form, "latest_filed_at": r.latest_filed_at,
+            "first_seen_at": r.first_seen_at,
+            "ticker": r.ticker, "exchange": r.exchange,
+            "offer_price": r.offer_price, "shares_offered": r.shares_offered,
+            "total_offering_usd": r.total_offering_usd,
+            "is_likely_spac": bool(r.is_likely_spac),
+            "cover_mentions_ipo": r.cover_mentions_ipo,
+            "filing_url": r.filing_url,
+        } for r in rows]
+        counts = {
+            stage: db.query(IpoFiling).filter(IpoFiling.stage == stage).count()
+            for stage in ("filed", "amended", "priced")
+        }
+    return {
+        "pipeline": pipeline,
+        "stage_counts": counts,
+        "note": (
+            "Coverage builds from first ingestion (no historical backfill). "
+            "is_likely_spac is a company-NAME heuristic only. Offering terms "
+            "are extracted from 424B4 cover pages; null means not stated or "
+            "not matched, never zero."
+        ),
+    }
 
 
 @router.get("/psychology")

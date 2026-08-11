@@ -57,6 +57,7 @@ job_status = {
     'insider':   {'status': 'idle', 'last': None, 'error': None},
     'inst13f':   {'status': 'idle', 'last': None, 'error': None},
     'congress':  {'status': 'idle', 'last': None, 'error': None},
+    'ipo':       {'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
 }
 
@@ -411,6 +412,7 @@ def create_scheduler() -> BackgroundScheduler:
     from jobs.fetch_insider_activity import run as insider_run
     from jobs.fetch_13f_filings import run as inst13f_run
     from jobs.fetch_congress_trades import run as congress_run
+    from jobs.fetch_ipo_filings import run as ipo_run
     from jobs.fetch_crypto_derivatives import run as crypto_derivatives_run
 
     now = datetime.now(timezone.utc)
@@ -512,6 +514,14 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('congress', congress_run),
                   'interval', hours=6, id='congress',
                   next_run_time=now + timedelta(minutes=8),
+                  replace_existing=True, max_instances=1)
+
+    # IPO registration pipeline every 4 hours — free EDGAR feeds, no LLM.
+    # Registration filings arrive at business pace; the interval also bounds
+    # the multi-MB 424B4 cover downloads (already capped per run).
+    sched.add_job(make_job_runner('ipo', ipo_run),
+                  'interval', hours=4, id='ipo',
+                  next_run_time=now + timedelta(minutes=10),
                   replace_existing=True, max_instances=1)
 
     # Crypto derivatives (funding/OI/long-short ratio/liquidations) every 10 min —

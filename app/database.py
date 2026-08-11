@@ -231,6 +231,39 @@ class InstitutionalHolding(Base):
     created_date     = Column(String, default=now_iso)
 
 
+class IpoFiling(Base):
+    """One company's registration pipeline, keyed by CIK — free EDGAR data.
+    stage progresses filed -> amended -> priced as S-1 / S-1/A / 424B4
+    filings arrive (lib/ipo_intelligence.py). A row is updated in place when
+    a later-stage filing appears; it never regresses to an earlier stage.
+
+    Offering-term columns are populated ONLY from a 424B4 cover page and only
+    when the conservative extraction patterns matched — NULL means "not
+    stated / not extracted", never zero. is_likely_spac is a NAME heuristic
+    (see _SPAC_NAME_RE) and is labeled as such in the UI."""
+    __tablename__ = "ipo_filings"
+    cik                = Column(String, primary_key=True)
+    company_name       = Column(String, index=True)
+    stage              = Column(String, index=True)      # filed | amended | priced
+    latest_form        = Column(String)
+    latest_accession   = Column(String)
+    first_seen_at      = Column(String)
+    latest_filed_at    = Column(String, index=True)
+    ticker             = Column(String, index=True)
+    exchange           = Column(String)
+    offer_price        = Column(Float)
+    shares_offered     = Column(Float)
+    total_offering_usd = Column(Float)
+    is_likely_spac     = Column(Boolean, default=False)
+    # True/False only when a 424B4 cover was actually parsed; NULL = unknown
+    # (cover not yet downloaded). False means the prospectus is a follow-on by
+    # an already-listed company — Rule 424(b)(4) covers those too (observed
+    # live), and they must not be presented as IPO pricings.
+    cover_mentions_ipo = Column(Boolean)
+    filing_url         = Column(String)
+    updated_date       = Column(String, default=now_iso)
+
+
 class PsychologySnapshot(Base):
     """Point-in-time reading of the JARVIS Market Psychology Index.
 

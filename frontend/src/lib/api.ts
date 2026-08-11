@@ -473,6 +473,21 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type IpoPipelineRow = {
+  cik: string; company_name: string; stage: string; latest_form: string;
+  latest_filed_at: string | null; first_seen_at: string | null;
+  ticker: string | null; exchange: string | null;
+  offer_price: number | null; shares_offered: number | null; total_offering_usd: number | null;
+  is_likely_spac: boolean; cover_mentions_ipo: boolean | null;
+  filing_url: string | null;
+};
+
+export type IpoPipelineResponse = {
+  pipeline: IpoPipelineRow[];
+  stage_counts: { filed: number; amended: number; priced: number };
+  note: string;
+};
+
 export type PsychologyComponent = {
   score: number;
   detail: string;
@@ -877,6 +892,7 @@ export const api = {
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
   psychology: () => get<PsychologyIndex>("/psychology"),
+  ipoPipeline: (limit = 40) => get<IpoPipelineResponse>(`/ipo/pipeline?limit=${limit}`),
   congressTrades: (limit = 50, opts: { ticker?: string; days?: number } = {}) => {
     const p = new URLSearchParams({ limit: String(limit), days: String(opts.days ?? 180) });
     if (opts.ticker) p.set("ticker", opts.ticker);

@@ -4,7 +4,7 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -36,6 +36,7 @@
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
   let psychology = $state<PsychologyIndex | null>(null);
+  let ipo = $state<IpoPipelineResponse | null>(null);
   let expandedSqueezeSymbol = $state<string | null>(null);
 
   async function toggleDarkPoolExpand(symbol: string, weekStart: string) {
@@ -96,7 +97,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy, ipoRes] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -113,6 +114,7 @@
       api.congressTrades(25).catch(() => null),
       api.congressActivity(12).catch(() => null),
       api.psychology().catch(() => null),
+      api.ipoPipeline(30).catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -131,6 +133,7 @@
     congress = cg;
     congressActivity = cga;
     psychology = psy;
+    ipo = ipoRes;
   }
 
   $effect(() => {
@@ -606,6 +609,52 @@
           <div class="empty">
             No congressional disclosures ingested yet — the scheduled job processes filings in
             batches and builds coverage over successive runs.
+          </div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel
+      title="IPO Pipeline"
+      meta={ipo
+        ? `${ipo.stage_counts.filed} filed · ${ipo.stage_counts.amended} amended · ${ipo.stage_counts.priced} priced`
+        : "—"}
+    >
+      {#snippet children()}
+        {#if ipo && ipo.pipeline.length}
+          <table class="tbl">
+            <thead>
+              <tr><th>Company</th><th>Stage</th><th>Ticker</th><th>Price</th><th>Shares</th><th>Offering</th><th>Filed</th></tr>
+            </thead>
+            <tbody>
+              {#each ipo.pipeline as r (r.cik)}
+                <tr>
+                  <td>
+                    {r.company_name}
+                    {#if r.is_likely_spac}<Pill label="likely SPAC" tone="warm" />{/if}
+                    {#if r.cover_mentions_ipo === false}<Pill label="follow-on, not IPO" tone="neutral" />{/if}
+                  </td>
+                  <td>
+                    <Pill
+                      label={r.stage}
+                      tone={r.stage === "priced" ? "good" : r.stage === "amended" ? "neutral" : "warm"}
+                    />
+                  </td>
+                  <td class="sym">{r.ticker ?? "—"}</td>
+                  <td class="num">{r.offer_price != null ? `$${r.offer_price}` : "—"}</td>
+                  <td class="num">{r.shares_offered != null ? r.shares_offered.toLocaleString() : "—"}</td>
+                  <td class="num">{r.total_offering_usd != null ? `$${Math.round(r.total_offering_usd / 1_000_000)}M` : "—"}</td>
+                  <td class="num">{r.latest_filed_at?.slice(0, 10) ?? "—"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="si-footnote">{ipo.note}</div>
+        {:else}
+          <div class="empty">
+            No registration filings ingested yet — the scheduled job builds pipeline coverage over successive runs.
           </div>
         {/if}
       {/snippet}

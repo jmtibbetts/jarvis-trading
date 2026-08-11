@@ -520,6 +520,10 @@ _CONGRESS_DISCLAIMER = {
 
 def _congress_trade_dict(t) -> dict:
     return {
+        # id is the stable unique key. A single filing can legitimately disclose
+        # the same ticker, date, and amount range more than once (separate
+        # partial sales), so no combination of the business fields is unique.
+        "id": t.id,
         "doc_id": t.doc_id, "member_name": t.member_name, "state_district": t.state_district,
         "chamber": t.chamber, "owner": t.owner, "asset_name": t.asset_name,
         "ticker": t.ticker, "asset_type": t.asset_type,
@@ -616,6 +620,40 @@ def _institutional_periods(db, ticker: str | None = None) -> list[str]:
     return sorted({r[0] for r in q.all() if r[0]}, reverse=True)
 
 
+def _prior_quarter_end(period: str) -> str | None:
+    """The calendar quarter-end immediately before `period`."""
+    try:
+        d = datetime.fromisoformat(period).date()
+    except ValueError:
+        return None
+    ends = {(3, 31): (1, 1), (6, 30): (4, 1), (9, 30): (7, 1), (12, 31): (10, 1)}
+    if (d.month, d.day) not in ends:
+        return None
+    quarter_index = (d.month - 1) // 3          # 0..3
+    if quarter_index == 0:
+        return f"{d.year - 1}-12-31"
+    prior_month = quarter_index * 3             # 3, 6, or 9
+    last_day = 31 if prior_month == 12 else (31 if prior_month == 3 else 30)
+    return f"{d.year}-{prior_month:02d}-{last_day:02d}"
+
+
+def _select_comparison_periods(periods: list[str]) -> tuple[str | None, str | None]:
+    """Pick (current, prior) for quarter-over-quarter comparison.
+
+    The prior period must be the ACTUAL preceding calendar quarter, not merely
+    the next-most-recent period on file. Managers file late and amended 13Fs
+    for old quarters — without this check a stale filing (observed live: a
+    2008-09-30 period sitting alongside 2026-06-30) becomes the comparison
+    baseline and every "quarter-over-quarter change" is nonsense."""
+    if not periods:
+        return None, None
+    current = periods[0]
+    expected_prior = _prior_quarter_end(current)
+    if expected_prior and expected_prior in periods:
+        return current, expected_prior
+    return current, None
+
+
 def _holdings_for_period(db, period: str, ticker: str | None = None) -> list[dict]:
     q = db.query(InstitutionalHolding).filter(InstitutionalHolding.period_of_report == period)
     if ticker:
@@ -658,15 +696,16 @@ def get_institutional_holdings(symbol: str):
         periods = _institutional_periods(db, ticker)
         if not periods:
             raise HTTPException(404, f"No 13F holdings ingested for {ticker} yet")
-        current = aggregate_by_ticker(_holdings_for_period(db, periods[0], ticker))
-        prior = aggregate_by_ticker(_holdings_for_period(db, periods[1], ticker)) if len(periods) > 1 else {}
+        cur_period, prior_period = _select_comparison_periods(periods)
+        current = aggregate_by_ticker(_holdings_for_period(db, cur_period, ticker))
+        prior = aggregate_by_ticker(_holdings_for_period(db, prior_period, ticker)) if prior_period else {}
 
     rows = compare_quarters(current, prior)
     row = rows[0] if rows else None
     return {
         "symbol": ticker,
-        "current_period": periods[0],
-        "prior_period": periods[1] if len(periods) > 1 else None,
+        "current_period": cur_period,
+        "prior_period": prior_period,
         "summary": row,
         "holders": current.get(ticker, {}).get("holders", []),
         "disclaimer": _institutional_disclaimer(periods),
@@ -684,14 +723,15 @@ def get_institutional_accumulation(limit: int = 25):
         periods = _institutional_periods(db)
         if not periods:
             raise HTTPException(503, "No 13F holdings ingested yet")
-        current = aggregate_by_ticker(_holdings_for_period(db, periods[0]))
-        prior = aggregate_by_ticker(_holdings_for_period(db, periods[1])) if len(periods) > 1 else {}
+        cur_period, prior_period = _select_comparison_periods(periods)
+        current = aggregate_by_ticker(_holdings_for_period(db, cur_period))
+        prior = aggregate_by_ticker(_holdings_for_period(db, prior_period)) if prior_period else {}
 
     rows = compare_quarters(current, prior)
     return {
-        "current_period": periods[0],
-        "prior_period": periods[1] if len(periods) > 1 else None,
-        "insufficient_history": len(periods) < 2,
+        "current_period": cur_period,
+        "prior_period": prior_period,
+        "insufficient_history": prior_period is None,
         "tickers": rows[:min(max(limit, 1), 100)],
         "disclaimer": _institutional_disclaimer(periods),
     }

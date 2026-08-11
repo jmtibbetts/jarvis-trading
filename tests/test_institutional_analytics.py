@@ -122,5 +122,44 @@ class InstitutionalComponentTests(unittest.TestCase):
         self.assertAlmostEqual(compute_institutional_component(row)["score"], 20.0, places=1)
 
 
+
+
+class QuarterSelectionTests(unittest.TestCase):
+    """Regression tests for the comparison-baseline bug found live: a stale
+    2008-09-30 filing sat alongside 2026-06-30 and was being used as "last
+    quarter", making every quarter-over-quarter change meaningless."""
+
+    def setUp(self):
+        from app.routes import _prior_quarter_end, _select_comparison_periods
+        self._prior = _prior_quarter_end
+        self._select = _select_comparison_periods
+
+    def test_prior_quarter_within_year(self):
+        self.assertEqual(self._prior("2026-06-30"), "2026-03-31")
+        self.assertEqual(self._prior("2026-09-30"), "2026-06-30")
+        self.assertEqual(self._prior("2026-12-31"), "2026-09-30")
+
+    def test_prior_quarter_crosses_year_boundary(self):
+        self.assertEqual(self._prior("2026-03-31"), "2025-12-31")
+
+    def test_non_quarter_end_returns_none(self):
+        self.assertIsNone(self._prior("2026-05-15"))
+        self.assertIsNone(self._prior("not-a-date"))
+
+    def test_stale_old_filing_is_not_used_as_baseline(self):
+        current, prior = self._select(["2026-06-30", "2008-09-30"])
+        self.assertEqual(current, "2026-06-30")
+        self.assertIsNone(prior)
+
+    def test_consecutive_quarter_is_selected_even_when_stale_periods_exist(self):
+        current, prior = self._select(["2026-06-30", "2026-03-31", "2008-09-30"])
+        self.assertEqual((current, prior), ("2026-06-30", "2026-03-31"))
+
+    def test_single_period_has_no_prior(self):
+        self.assertEqual(self._select(["2026-06-30"]), ("2026-06-30", None))
+
+    def test_empty_periods(self):
+        self.assertEqual(self._select([]), (None, None))
+
 if __name__ == "__main__":
     unittest.main()

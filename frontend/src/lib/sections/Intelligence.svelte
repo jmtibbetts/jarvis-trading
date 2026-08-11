@@ -513,7 +513,7 @@
               <tr><th>Ticker</th><th>Member</th><th>Type</th><th>Transaction</th><th>Disclosed</th><th>Amount Range</th></tr>
             </thead>
             <tbody>
-              {#each congress.trades as t (t.doc_id + t.ticker + t.transaction_date + t.amount_text)}
+              {#each congress.trades as t (t.id)}
                 <tr>
                   <td class="sym">
                     {#if t.ticker}{t.ticker}{:else}<span class="dim" title={t.asset_name ?? ""}>no ticker</span>{/if}

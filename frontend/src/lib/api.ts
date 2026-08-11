@@ -479,6 +479,7 @@ export type CongressDisclaimer = {
 };
 
 export type CongressTrade = {
+  id: string;
   doc_id: string; member_name: string; state_district: string | null; chamber: string;
   owner: string | null; asset_name: string | null; ticker: string | null; asset_type: string | null;
   transaction_code: string; transaction_label: string;

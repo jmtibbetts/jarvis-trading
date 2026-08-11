@@ -357,28 +357,30 @@ def _manage_open_positions(prices: dict) -> dict:
         return {"evaluated": 0, "closed": 0, "held": 0}
 
     threat_ctx, news_ctx = _get_context()
-    evaluated = 0
-    closed = 0
-    held = 0
-    adjusted = 0
 
-    for pos in positions:
+    def _manage_one(pos: dict) -> dict:
+        """One position's full evaluation — deterministic tiers, risk plan,
+        then LLM. Independent of every other position (own DB sessions), so
+        positions run through a small pool: the serial version made ~40
+        back-to-back LLM calls at ~6s each (visible as 'one prompt at a
+        time' in LM Studio) while the model has 4 idle slots."""
+        r = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
         sym = pos["symbol"]
         current_price = _get_current_price(sym, prices)
         if not current_price or current_price <= 0:
             logger.debug(f"[PaperTrading] No price for {sym} — skipping management")
-            continue
+            return r
 
         entry = pos["entry_price"]
         if entry <= 0:
-            continue
+            return r
 
         is_c = _is_crypto(sym)
         direction = pos["direction"].lower()
         side = -1 if direction == "short" else 1
         plpc = ((current_price - entry) / entry) * 100 * side
         pl_dollar = (current_price - entry) * pos["qty"] * side * pos["leverage"]
-        evaluated += 1
+        r["evaluated"] += 1
         ta_data = _fetch_ta(sym)
 
         plan = _paper_exit_plan(pos, current_price, pl_dollar, ta_data)
@@ -386,8 +388,8 @@ def _manage_open_positions(prices: dict) -> dict:
             logger.warning(f"[PaperTrading] Risk EXIT {sym}: {plan.get('reason')} | P&L=${pl_dollar:.2f}")
             log_decision("paper", "EXIT", plan.get("reason", "Max paper loss breached"), symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=plan.get("reason", "risk_guard"))
-            closed += 1
-            continue
+            r["closed"] += 1
+            return r
         if plan.get("ok") and plan.get("action") == "ADJUST":
             new_stop = float(plan["stop_loss"])
             new_target = float(plan["target_price"])
@@ -399,7 +401,7 @@ def _manage_open_positions(prices: dict) -> dict:
                         p.target_price = new_target
                 pos["stop_loss"] = new_stop
                 pos["target_price"] = new_target
-                adjusted += 1
+                r["adjusted"] += 1
                 logger.info(f"[PaperTrading] Risk guard {sym}: stop=${new_stop:.6g} target=${new_target:.6g}")
 
         # ── Deterministic hard rules (same as real trading) ────────────────
@@ -408,12 +410,12 @@ def _manage_open_positions(prices: dict) -> dict:
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=tier["label"])
-            closed += 1
-            continue
+            r["closed"] += 1
+            return r
 
         if _maybe_scale_out_paper(pos, current_price):
-            adjusted += 1
-            continue
+            r["adjusted"] += 1
+            return r
 
         # ── LLM + TA evaluation ────────────────────────────────────────────
         ta_block = build_ta_prompt_block(sym, ta_data) if ta_data else "TA unavailable"
@@ -484,7 +486,7 @@ Respond ONLY with valid JSON (no markdown):
             logger.info(f"[PaperTrading] 🤖 LLM EXIT {sym} {plpc:+.2f}% | {reasoning}")
             log_decision("paper", "EXIT", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=f"AI EXIT: {reasoning[:80]}")
-            closed += 1
+            r["closed"] += 1
         elif action == "TIGHTEN_STOP" and new_stop_pct:
             try:
                 new_stop = round(current_price * (1.0 - float(new_stop_pct) / 100.0), 6)
@@ -499,13 +501,21 @@ Respond ONLY with valid JSON (no markdown):
                     logger.debug(f"[PaperTrading] TIGHTEN_STOP for {sym} ignored — new stop ${new_stop:.4f} not above current ${pos['stop_loss']:.4f}")
             except Exception as e:
                 logger.warning(f"[PaperTrading] TIGHTEN_STOP update failed for {sym}: {e}")
-            held += 1
+            r["held"] += 1
         else:
             logger.info(f"[PaperTrading] 🤖 HOLD {sym} {plpc:+.2f}% | {reasoning}")
             log_decision("paper", "HOLD", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
-            held += 1
+            r["held"] += 1
+        return r
 
-    return {"evaluated": evaluated, "closed": closed, "held": held, "adjusted": adjusted}
+    from concurrent.futures import ThreadPoolExecutor
+    workers = max(1, min(4, int(os.getenv("LLM_MAX_PARALLEL", "4"))))
+    totals = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="papermgmt") as pool:
+        for res in pool.map(_manage_one, positions):
+            for k in totals:
+                totals[k] += res.get(k, 0)
+    return totals
 
 
 # ────────────────────────────────────────────────────────────────────────────

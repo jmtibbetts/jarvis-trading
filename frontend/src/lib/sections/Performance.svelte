@@ -222,7 +222,7 @@
     </Panel>
   </div>
 
-  <div class="span-12">
+  <div class="span-6">
     <Panel title="R-Multiple Distribution" meta="{rmult?.count ?? 0} closed trades with a stop on record">
       {#snippet children()}
         {#if rmult && rmult.count}
@@ -259,7 +259,7 @@
     <LearningPanel />
   </div>
 
-  <div class="span-12">
+  <div class="span-6">
     <Panel title="Backtester" meta="deterministic TA-fallback pipeline, no LLM">
       {#snippet children()}
         <div class="bt-form">

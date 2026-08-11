@@ -976,6 +976,15 @@ export const api = {
 
   approveAllSignals: () => post<{ ok: boolean; approved?: number }>(`/signals/approve-all`),
   rejectAllSignals: () => post<{ ok: boolean; rejected?: number }>(`/signals/reject-all`),
+  updateSetting: (id: string, body: Record<string, unknown>) =>
+    fetch(`/api/settings/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`update ${r.status}`);
+      return r.json();
+    }),
   cancelAllOrders: () => del<{ ok: boolean }>(`/alpaca/orders`),
   alpacaOrders: () => get<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>(`/alpaca/orders`),
   cancelOrder: (id: string) => del<{ ok: boolean }>(`/alpaca/orders/${id}`),

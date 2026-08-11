@@ -15,6 +15,36 @@
   let slippage = $state<SlippageSummary | null>(null);
   let earnings = $state<EarningsWatchlist | null>(null);
   let busy = $state<Set<string>>(new Set());
+  let orders = $state<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>([]);
+  let orderBusy = $state<Set<string>>(new Set());
+
+  async function loadOrders() {
+    orders = await api.alpacaOrders().catch(() => []);
+  }
+
+  async function cancelOrder(id: string, symbol: string) {
+    const next = new Set(orderBusy); next.add(id); orderBusy = next;
+    try {
+      await api.cancelOrder(id);
+      toastStore.ok(`${symbol}: order cancelled`);
+      await loadOrders();
+    } catch (e) {
+      toastStore.err(`Cancel failed: ${e}`);
+    } finally {
+      const done = new Set(orderBusy); done.delete(id); orderBusy = done;
+    }
+  }
+
+  async function cancelAllOrders() {
+    if (!confirm(`Cancel all ${orders.length} open orders?`)) return;
+    try {
+      await api.cancelAllOrders();
+      toastStore.ok("All open orders cancelled");
+      await loadOrders();
+    } catch (e) {
+      toastStore.err(`Cancel all failed: ${e}`);
+    }
+  }
   let expandedLive = $state<Set<string>>(new Set());
   let showManualOpen = $state(false);
   let manualOpen = $state({ symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" });
@@ -127,6 +157,7 @@
       manualOpen = { symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" };
       showManualOpen = false;
       await loadAll();
+    loadOrders();
     } catch (e) {
       toastStore.err(`Open failed: ${e}`);
     }
@@ -320,6 +351,31 @@
     {:else}
       <div class="empty">No open live positions{live ? "" : " — Alpaca unreachable"}</div>
     {/if}
+  </Panel>
+
+  <Panel title="Open Orders" meta="{orders.length} working at Alpaca">
+    {#snippet children()}
+      {#if orders.length}
+        <button class="btn tiny outline" style="margin-bottom:8px" onclick={cancelAllOrders}>Cancel All</button>
+        <table class="tbl">
+          <thead><tr><th>Sym</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {#each orders as o (o.id)}
+              <tr>
+                <td class="sym">{o.symbol}</td>
+                <td class={o.side === "buy" ? "pl-up" : "pl-down"}>{o.side}</td>
+                <td class="num">{o.qty}</td>
+                <td>{o.type}</td>
+                <td>{o.status}</td>
+                <td><button class="btn tiny ghost" disabled={orderBusy.has(o.id)} onclick={() => cancelOrder(o.id, o.symbol)}>✕</button></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <div class="empty">No working orders — brackets appear here once submitted</div>
+      {/if}
+    {/snippet}
   </Panel>
 
   <Panel title="Execution Slippage" meta={slippage?.count ? `${slippage.count} fills` : "no data"}>

@@ -68,6 +68,28 @@
     }
   }
 
+  let editingId = $state<string | null>(null);
+  let editCfg = $state<{ label: string; api_url: string; api_key: string }>({ label: "", api_url: "", api_key: "" });
+
+  function startEdit(cfg: (typeof configs)[number]) {
+    editingId = cfg.id;
+    editCfg = { label: cfg.label ?? "", api_url: cfg.api_url ?? "", api_key: "" };
+  }
+
+  async function saveEdit() {
+    if (!editingId) return;
+    try {
+      const body: Record<string, unknown> = { label: editCfg.label, api_url: editCfg.api_url };
+      if (editCfg.api_key.trim()) body.api_key = editCfg.api_key.trim(); // blank = keep existing key
+      await api.updateSetting(editingId, body);
+      toastStore.ok("Provider updated");
+      editingId = null;
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Update failed: ${e}`);
+    }
+  }
+
   $effect(() => {
     loadAll();
     const poll = setInterval(loadAll, 15_000);
@@ -226,7 +248,7 @@
     </Panel>
   </div>
 
-  <div class="span-8">
+  <div class="span-7">
     <Panel title="Jobs" meta="{jobEntries.filter(([, j]) => j.status === 'ok').length}/{jobEntries.length} ok">
       <div class="job-grid">
         {#each jobEntries as [name, job] (name)}
@@ -252,7 +274,7 @@
     </Panel>
   </div>
 
-  <div class="span-4">
+  <div class="span-5">
     <Panel title="Provider Settings" meta="{configs.length} configured">
       {#snippet children()}
         <button class="btn small primary" onclick={() => (showAddForm = !showAddForm)}>
@@ -281,6 +303,9 @@
                 <div class="cfg-meta">{cfg.platform} &middot; {cfg.has_api_key ? "key set" : "no key"}</div>
               </div>
               <div class="cfg-actions">
+                <button class="btn tiny outline" onclick={() => (editingId === cfg.id ? (editingId = null) : startEdit(cfg))}>
+                  {editingId === cfg.id ? "Cancel" : "Edit"}
+                </button>
                 <button class="btn tiny" disabled={busy.has(cfg.id)} onclick={() => toggleActive(cfg)}>
                   {cfg.is_active ? "Disable" : "Enable"}
                 </button>
@@ -290,6 +315,14 @@
                 <button class="btn tiny ghost" onclick={() => deleteConfig(cfg)}>✕</button>
               </div>
             </div>
+            {#if editingId === cfg.id}
+              <div class="add-form edit-form">
+                <input placeholder="Label" bind:value={editCfg.label} />
+                <input placeholder="API URL" bind:value={editCfg.api_url} />
+                <input placeholder="API Key (leave blank to keep current)" type="password" bind:value={editCfg.api_key} />
+                <button class="btn small primary" onclick={saveEdit}>Save Changes</button>
+              </div>
+            {/if}
           {:else}
             <div class="empty">No provider configs yet</div>
           {/each}
@@ -298,36 +331,10 @@
     </Panel>
   </div>
 
-  <div class="span-6">
+  <div class="span-12">
     <TelegramWizard {configs} onSaved={loadAll} />
   </div>
 
-  <div class="span-6">
-    <Panel title="Alpaca Open Orders" meta="{orders.length} open">
-      {#snippet children()}
-        {#if orders.length}
-          <button class="btn tiny outline cancel-all-btn" onclick={cancelAllOrders}>Cancel All</button>
-        {/if}
-        <table class="tbl">
-          <thead><tr><th>Sym</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-            {#each orders as o (o.id)}
-              <tr>
-                <td class="sym">{o.symbol}</td>
-                <td>{o.side}</td>
-                <td class="num">{o.qty}</td>
-                <td>{o.type}</td>
-                <td>{o.status}</td>
-                <td><button class="btn tiny ghost" disabled={busy.has(o.id)} onclick={() => cancelOrder(o.id, o.symbol)}>✕</button></td>
-              </tr>
-            {:else}
-              <tr><td colspan="6" class="empty">No open orders</td></tr>
-            {/each}
-          </tbody>
-        </table>
-      {/snippet}
-    </Panel>
-  </div>
 </div>
 
 <style>
@@ -352,11 +359,14 @@
   .span-4 {
     grid-column: span 4;
   }
-  .span-6 {
-    grid-column: span 6;
+  .span-5 {
+    grid-column: span 5;
   }
-  .span-8 {
-    grid-column: span 8;
+  .span-7 {
+    grid-column: span 7;
+  }
+  .span-12 {
+    grid-column: span 12;
   }
 
   .stat-list {
@@ -401,36 +411,7 @@
     max-width: 70%;
   }
   .backfill-btn,
-  .cancel-all-btn {
-    margin-top: 10px;
-    width: 100%;
-  }
 
-  table.tbl {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 11.5px;
-    margin-top: 8px;
-  }
-  table.tbl th {
-    text-align: left;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--ink-faint);
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--line-strong);
-  }
-  table.tbl td {
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--line);
-  }
-  table.tbl .sym {
-    font-weight: 650;
-  }
-  table.tbl .num {
-    font-family: var(--mono);
-  }
 
   .job-grid {
     display: grid;
@@ -571,8 +552,9 @@
 
   @media (max-width: 1180px) {
     .span-4,
-    .span-6,
-    .span-8 {
+    .span-5,
+    .span-7,
+    .span-12 {
       grid-column: span 12;
     }
     .job-grid {

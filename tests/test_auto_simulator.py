@@ -43,3 +43,36 @@ class AutoSimulatorMathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLeverageLadder:
+    """Score-scaled leverage + physics-respecting stops (user spec:
+    5x-100x by signal strength; scalp stops <=3%, longer <=10%; a
+    position can never out-risk its liquidation point)."""
+
+    def test_score_maps_to_ladder(self):
+        from lib.auto_simulator import score_leverage
+        assert score_leverage(55) == 5
+        assert score_leverage(100) == 100
+        assert score_leverage(0) == 5          # floor
+        assert score_leverage(77.5) in (30, 40)  # middle of the ladder
+        # monotonic: stronger signal never gets less leverage
+        prev = 0
+        for sc in range(55, 101):
+            lev = score_leverage(sc)
+            assert lev >= prev
+            prev = lev
+
+    def test_liquidation_cap_beats_wide_stops(self):
+        from lib.auto_simulator import leverage_capped_stop
+        # 100x long: 0.9% max move regardless of a 5% signal stop
+        assert leverage_capped_stop(100.0, 95.0, "long", 100, "4H") == 99.1
+
+    def test_horizon_caps(self):
+        from lib.auto_simulator import leverage_capped_stop
+        # scalp: 3% ceiling clamps a 5% signal stop
+        assert leverage_capped_stop(100.0, 95.0, "long", 5, "15m") == 97.0
+        # longer: 10% ceiling leaves a 5% signal stop alone
+        assert leverage_capped_stop(100.0, 95.0, "long", 5, "4H") == 95.0
+        # short side mirrors
+        assert leverage_capped_stop(100.0, 105.0, "short", 5, "15m") == 103.0

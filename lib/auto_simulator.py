@@ -30,6 +30,54 @@ def _leverage(direction: str | None) -> float:
     return 2.0 if "leverag" in value.lower() else 1.0
 
 
+# ── Score-scaled leverage (virtual books only) ──────────────────────────────
+# The stronger the signal, the more leverage the sim takes: composite score
+# 55 (the persistence floor) maps to 5x, 100 maps to 100x, stepped so ledger
+# rows read cleanly. This NEVER applies to the broker account — Alpaca caps
+# equities at 2x and crypto at 1x; this is how the virtual book expresses
+# conviction.
+LEVERAGE_STEPS = [5, 10, 15, 20, 30, 40, 50, 65, 80, 100]
+# A position is liquidated when the price moves margin/notional against it —
+# i.e. a 1/L move at leverage L. The sim enforces the stop BEFORE that point:
+# max loss per position is capped at this fraction of margin, and the stop
+# tightens with leverage (a "2-3% price stop" is physically impossible at
+# 100x — the position would liquidate at 1%).
+MAX_MARGIN_LOSS_FRAC = 0.9
+
+
+def score_leverage(composite_score: float | None) -> float:
+    """Map signal strength to leverage: 55 -> 5x ... 100 -> 100x, stepped."""
+    score = float(composite_score or 0)
+    if score <= 55:
+        return float(LEVERAGE_STEPS[0])
+    frac = min(1.0, (score - 55.0) / 45.0)
+    idx = min(len(LEVERAGE_STEPS) - 1, int(round(frac * (len(LEVERAGE_STEPS) - 1))))
+    return float(LEVERAGE_STEPS[idx])
+
+
+# Max stop distance as a fraction of entry, by trade horizon (user spec):
+# scalps get a tight 3% ceiling, longer trades up to 10%. The leverage
+# liquidation cap can only tighten these further, never widen them.
+HORIZON_STOP_CAP = {"scalp": 0.03, "longer": 0.10, "all": 0.10}
+
+
+def leverage_capped_stop(entry: float, signal_stop: float | None, side: str,
+                         leverage: float, timeframe: str | None = None) -> float:
+    """The tightest of: the signal's own stop, the horizon cap (3% scalp /
+    10% longer), and the price distance at which the position would lose
+    MAX_MARGIN_LOSS_FRAC of its margin (0.9/L — at 100x that is 0.9%)."""
+    from lib.trading_preferences import horizon_for_timeframe
+    horizon_cap = HORIZON_STOP_CAP.get(horizon_for_timeframe(timeframe), 0.10)
+    max_move = entry * min(MAX_MARGIN_LOSS_FRAC / max(1.0, leverage), horizon_cap)
+    if side == "short":
+        cap = entry + max_move
+        sig = float(signal_stop or 0)
+        return min(sig, cap) if sig > 0 else cap
+    cap = entry - max_move
+    sig = float(signal_stop or 0)
+    return max(sig, cap) if sig > 0 else cap
+
+
 def _pnl(position, price: float) -> float:
     move = price - float(position.entry_price or 0)
     if position.side == "short":
@@ -153,6 +201,24 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                     pass
             target = float(position.target_price or 0)
             stop = float(position.stop_loss or 0)
+            # Liquidation: losing the full margin at this leverage closes the
+            # position regardless of where the stop sits (mirrors how a real
+            # perp would liquidate before a too-wide stop could trigger).
+            margin = float(position.margin_used or MARGIN_PER_SIGNAL)
+            if reason is None and _pnl(position, price) <= -margin:
+                reason = "liquidated"
+            # Breakeven ratchet: once price has covered half the distance to
+            # target, the stop moves to entry — winners can no longer turn
+            # into losers. Tighten-only, never loosens.
+            if reason is None and target > 0:
+                entry_px = float(position.entry_price or 0)
+                if entry_px > 0:
+                    halfway = entry_px + (target - entry_px) * 0.5
+                    crossed = price <= halfway if position.side == "short" else price >= halfway
+                    improves = (stop > entry_px) if position.side == "short" else (stop < entry_px)
+                    if crossed and improves:
+                        position.stop_loss = entry_px
+                        stop = entry_px
             if position.side == "short":
                 if target > 0 and price <= target:
                     reason = "take_profit"
@@ -183,14 +249,16 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
             if ratio < 0.2 or ratio > 5.0:
                 skipped += 1
                 continue
-            leverage = _leverage(signal.paper_direction or signal.direction)
+            side = _side(signal.direction)
+            leverage = score_leverage(signal.composite_score or signal.confidence)
+            stop = leverage_capped_stop(entry, signal.stop_loss, side, leverage, signal.timeframe)
             qty = MARGIN_PER_SIGNAL * leverage / entry
             db.add(AutoSimPosition(
                 id=new_id(), user_id=user_id, signal_id=signal.id,
                 symbol=signal.asset_symbol, asset_class=signal.asset_class,
-                direction=signal.direction, side=_side(signal.direction), leverage=leverage,
+                direction=signal.direction, side=side, leverage=leverage,
                 qty=qty, entry_price=entry, current_price=entry,
-                target_price=signal.target_price, stop_loss=signal.stop_loss,
+                target_price=signal.target_price, stop_loss=stop,
                 margin_used=MARGIN_PER_SIGNAL, unrealized_pnl=0.0,
                 signal_updated_at=signal.updated_date, opened_at=now.isoformat(),
                 updated_at=now.isoformat(),

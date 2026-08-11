@@ -194,6 +194,7 @@ def run():
                 "entry_price":  s.entry_price,
                 "target_price": s.target_price,
                 "stop_loss":    s.stop_loss,
+                "timeframe":    s.timeframe,
                 "generated_at": gen_str or "",
                 "expires_at": getattr(s, "expires_at", None),
                 "data_quality_score": getattr(s, "data_quality_score", None),
@@ -265,6 +266,19 @@ def run():
             if not entry or not target or not stop:
                 logger.warning(f"[Execute] Skip {sym} — missing price levels (entry={entry} tp={target} sl={stop})")
                 continue
+
+            # Horizon stop cap (user spec): scalps risk at most 3% of entry,
+            # longer trades at most 10%. A wider signal stop gets clamped —
+            # the trade still happens, just with the risk ceiling enforced.
+            from lib.trading_preferences import horizon_for_timeframe
+            cap_pct = 0.03 if horizon_for_timeframe(sig.get("timeframe")) == "scalp" else 0.10
+            min_allowed_stop = entry * (1.0 - cap_pct)
+            if stop < min_allowed_stop:
+                logger.info(
+                    f"[Execute] {sym}: stop clamped {stop:.4g} -> {min_allowed_stop:.4g} "
+                    f"({cap_pct:.0%} {horizon_for_timeframe(sig.get('timeframe'))} cap)"
+                )
+                stop = round(min_allowed_stop, 6)
             if stop >= entry:
                 logger.warning(f"[Execute] Skip {sym} — invalid: stop ${stop} >= entry ${entry}")
                 continue
@@ -289,6 +303,16 @@ def run():
             remaining_slots = max(1, slots - executed)
             per_trade_cap = min(trade_budget, budget / remaining_slots, budget)
             per_trade_cap = max(50.0, per_trade_cap)
+
+            # Conviction sizing (Alpaca's realistic leverage band): the same
+            # score->leverage idea the virtual books use at 5-100x, expressed
+            # here as 1x-2x notional scaling. Equities only — Alpaca margin
+            # covers 2x on stocks; crypto is non-marginable and stays 1x.
+            score = float(sig.get("confidence", 55))
+            conviction_mult = max(1.0, min(2.0, 1.0 + (score - 55.0) / 45.0))
+            if not crypto and conviction_mult > 1.0:
+                per_trade_cap = min(per_trade_cap * conviction_mult, budget)
+                logger.debug(f"[Execute] {sym}: conviction x{conviction_mult:.2f} (score {score:.0f})")
 
             if crypto:
                 qty = round(per_trade_cap / entry, 6)

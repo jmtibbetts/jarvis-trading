@@ -984,6 +984,15 @@ export const api = {
     get<{ coins: { id: string; symbol: string; price: number; market_cap: number; volume_24h: number; chg_1h: number | null; chg_24h: number | null; chg_7d: number | null; ath: number; ath_chg_pct: number }[]; as_of: string; note: string }>(`/crypto/markets`),
   webNews: () =>
     get<{ items: { title: string; snippet: string | null }[]; as_of: string | null; note: string }>(`/news/web`),
+  flattenTrading: (scope: "live" | "paper" | "all") =>
+    fetch(`/api/trading/flatten`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, confirm: "FLATTEN" }),
+    }).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail ?? `flatten ${r.status}`);
+      return body as { ok: boolean; scope: string; live?: { orders_cancelled: number; positions_closed: number; errors: string[] }; paper?: { positions_closed: number; errors: string[] }; signals_rejected: number };
+    }),
   autosimReset: () => post<{ ok: boolean }>(`/autosim/reset`),
   congressActivity: (limit = 20, days = 180) =>
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),

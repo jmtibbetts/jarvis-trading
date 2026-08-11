@@ -213,6 +213,39 @@
     );
   }
 
+  let flattenBusy = $state(false);
+
+  async function doFlatten(scope: "live" | "paper" | "all") {
+    const label = scope === "all" ? "LIVE AND PAPER" : scope.toUpperCase();
+    const typed = prompt(
+      `This closes EVERY open ${label} position at market, cancels all working orders, ` +
+      `and rejects all pending signals.
+
+Type FLATTEN to confirm:`,
+    );
+    if (typed !== "FLATTEN") {
+      if (typed !== null) toastStore.err("Flatten cancelled — confirmation text did not match");
+      return;
+    }
+    flattenBusy = true;
+    try {
+      const res = await api.flattenTrading(scope);
+      const bits: string[] = [];
+      if (res.live) bits.push(`live: ${res.live.positions_closed} closed, ${res.live.orders_cancelled} orders cancelled`);
+      if (res.paper) bits.push(`paper: ${res.paper.positions_closed} closed`);
+      bits.push(`${res.signals_rejected} pending signals rejected`);
+      toastStore.ok(`Flattened — ${bits.join(" · ")}`);
+      const errs = [...(res.live?.errors ?? []), ...(res.paper?.errors ?? [])];
+      if (errs.length) toastStore.err(`${errs.length} issue(s): ${errs[0]}`);
+      await loadAll();
+      await loadOrders();
+    } catch (e) {
+      toastStore.err(`Flatten failed: ${e}`);
+    } finally {
+      flattenBusy = false;
+    }
+  }
+
   async function resetAutoSim() {
     if (!confirm("Reset the Auto Sim account? This wipes its positions and history.")) return;
     try {
@@ -532,6 +565,39 @@
       {autosim?.summary.losses ?? 0} losses.
     </p>
   </Panel>
+  </div>
+  <div class="span-12">
+    <Panel title="Danger Zone" dotColor="var(--bad)" meta="typed confirmation required for every action">
+      <div class="dz-row">
+        <div class="dz-item">
+          <button class="btn small dz-btn" disabled={flattenBusy} onclick={() => doFlatten("live")}>Flatten LIVE</button>
+          <span class="dz-desc">Close all Alpaca positions at market, cancel all working orders, reject pending live signals.</span>
+        </div>
+        <div class="dz-item">
+          <button class="btn small dz-btn" disabled={flattenBusy} onclick={() => doFlatten("paper")}>Flatten PAPER</button>
+          <span class="dz-desc">Close every open paper position at last price, reject pending paper signals. Cash preserved.</span>
+        </div>
+        <div class="dz-item">
+          <button class="btn small dz-btn" disabled={flattenBusy} onclick={() => doFlatten("all")}>Flatten EVERYTHING</button>
+          <span class="dz-desc">Both of the above in one action.</span>
+        </div>
+      </div>
+      <div class="dz-row">
+        <div class="dz-item">
+          <button class="btn small outline" onclick={resetPaper}>Reset Paper → $100k</button>
+          <span class="dz-desc">Wipes paper positions, trades, and history; fresh $100,000.</span>
+        </div>
+        <div class="dz-item">
+          <button class="btn small outline" onclick={resetAutoSim}>Reset Auto Sim → $100k</button>
+          <span class="dz-desc">Same, for the follow-everything simulator.</span>
+        </div>
+      </div>
+      <p class="dz-note">
+        Live account balance: Alpaca has no API to reset paper-account equity to a fixed $100,000 — flattening returns it to
+        all-cash at current value. For an exact $100k, use the Alpaca dashboard: Account → <b>Reset paper account</b> (one click),
+        then restart Jarvis so equity history starts clean.
+      </p>
+    </Panel>
   </div>
   </div>
 {/if}
@@ -905,5 +971,35 @@
   }
   .err-note {
     color: var(--bad);
+  }
+  .dz-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-bottom: 12px;
+  }
+  .dz-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1 1 280px;
+  }
+  .dz-btn {
+    border-color: var(--bad);
+    color: var(--bad);
+    background: rgba(255, 92, 114, 0.08);
+  }
+  .dz-desc {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    line-height: 1.4;
+  }
+  .dz-note {
+    font-size: 10.5px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    margin: 4px 0 0;
+    line-height: 1.5;
   }
 </style>

@@ -3193,6 +3193,94 @@ def autosim_reset():
     return {"ok": True, "message": "Auto-sim account reset"}
 
 
+class FlattenRequest(BaseModel):
+    scope: str            # "live" | "paper" | "all"
+    confirm: str          # must be exactly "FLATTEN" — typed confirmation
+
+
+@router.post("/trading/flatten")
+def flatten_trading(body: FlattenRequest):
+    """Close every open position, cancel every working order, and reject all
+    pending signals in the chosen scope. Requires confirm="FLATTEN" so a
+    stray click can never liquidate a book.
+
+    live  — Alpaca: cancel all orders, close all positions (market), reject
+            pending live signals. Alpaca offers no API to reset the paper
+            account's equity to a fixed $100k — that is one click on the
+            Alpaca dashboard (Account → Reset); flattening returns the
+            account to all-cash at its current equity.
+    paper — internal engine: close every open paper position at the latest
+            known price, reject paper-pending signals. Cash is preserved;
+            use /paper/reset afterwards for a clean $100k.
+    """
+    if body.confirm != "FLATTEN":
+        raise HTTPException(400, 'Confirmation required: pass confirm="FLATTEN"')
+    scope = body.scope.lower()
+    if scope not in ("live", "paper", "all"):
+        raise HTTPException(400, "scope must be live, paper, or all")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    out: dict = {"ok": True, "scope": scope}
+
+    if scope in ("live", "all"):
+        live_res = {"orders_cancelled": 0, "positions_closed": 0, "errors": []}
+        try:
+            from lib.alpaca_client import get_trading_client
+            client = get_trading_client()
+            try:
+                cancelled = client.cancel_orders()
+                live_res["orders_cancelled"] = len(cancelled or [])
+            except Exception as e:
+                live_res["errors"].append(f"cancel orders: {str(e)[:80]}")
+            try:
+                closed = client.close_all_positions(cancel_orders=True)
+                live_res["positions_closed"] = len(closed or [])
+            except Exception as e:
+                live_res["errors"].append(f"close positions: {str(e)[:80]}")
+        except Exception as e:
+            live_res["errors"].append(f"alpaca client: {str(e)[:80]}")
+        out["live"] = live_res
+
+    if scope in ("paper", "all"):
+        paper_res = {"positions_closed": 0, "errors": []}
+        try:
+            from lib.paper_engine import close_paper_position
+            from app.database import PaperPosition
+            with get_db() as db:
+                open_ids = [
+                    (row.id, row.symbol, float(row.current_price or row.entry_price or 0))
+                    for row in db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
+                ]
+            for pid, sym, px in open_ids:
+                try:
+                    if px > 0:
+                        close_paper_position(pid, px, reason="manual flatten")
+                        paper_res["positions_closed"] += 1
+                    else:
+                        paper_res["errors"].append(f"{sym}: no price to close at")
+                except Exception as e:
+                    paper_res["errors"].append(f"{sym}: {str(e)[:60]}")
+        except Exception as e:
+            paper_res["errors"].append(str(e)[:80])
+        out["paper"] = paper_res
+
+    # Pending signals: reject everything still awaiting action in scope.
+    with get_db() as db:
+        q = db.query(TradingSignal).filter(TradingSignal.status.in_(["Active", "PendingApproval"]))
+        if scope == "live":
+            q = q.filter(TradingSignal.paper_mode.is_(False))
+        elif scope == "paper":
+            q = q.filter(TradingSignal.paper_mode.is_(True))
+        rejected = 0
+        for sig in q.all():
+            sig.status = "Rejected"
+            sig.updated_date = now_iso
+            rejected += 1
+    out["signals_rejected"] = rejected
+    logger.warning(f"[Flatten] scope={scope}: {out}")
+    return out
+
+
 @router.post("/paper/reset")
 def paper_reset():
     """Reset paper portfolio to starting capital ($100k). Wipes all positions and trades."""

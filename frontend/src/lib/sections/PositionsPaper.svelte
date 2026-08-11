@@ -205,6 +205,17 @@
     );
   }
 
+  async function resetAutoSim() {
+    if (!confirm("Reset the Auto Sim account? This wipes its positions and history.")) return;
+    try {
+      await api.autosimReset();
+      toastStore.ok("Auto Sim account reset");
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Auto Sim reset failed: ${e}`);
+    }
+  }
+
   async function resetPaper() {
     if (!confirm("Reset the paper portfolio to $100,000? This wipes all paper positions and trade history.")) return;
     try {
@@ -502,6 +513,7 @@
     {/if}
   </Panel>
   <Panel title="Auto Sim" meta="follows every eligible signal automatically — paper-only, no broker">
+    <button class="btn small outline" style="margin-bottom:8px" onclick={resetAutoSim}>Reset Auto Sim</button>
     <p class="note">
       Auto Sim is a separate always-on paper ledger that opens a $1,000-notional virtual position for every eligible
       signal automatically, independent of manual paper trading above. {autosim?.summary.wins ?? 0} wins /

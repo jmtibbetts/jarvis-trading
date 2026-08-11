@@ -1,4 +1,4 @@
-# Jarvis Trading AI v6.1 — Windows PowerShell Setup
+# Jarvis Trading AI v6.1 - Windows PowerShell Setup
 # Creates .venv, installs deps, creates Desktop shortcut
 param([string]$RootDir = $PSScriptRoot)
 if (-not $RootDir) { $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) {
     }
     & pip install $wheel --quiet
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  TA-Lib wheel failed — falling back to 'ta'" -ForegroundColor Yellow
+        Write-Host "  TA-Lib wheel failed - falling back to 'ta'" -ForegroundColor Yellow
         & pip install ta==0.11.0 --quiet
     } else {
         Write-Host "  TA-Lib 0.6.8 installed!" -ForegroundColor Green
@@ -57,7 +57,7 @@ $envFile = Join-Path $RootDir ".env"
 if (-not (Test-Path $envFile)) {
     $envExample = Join-Path $RootDir ".env.example"
     if (Test-Path $envExample) { Copy-Item $envExample $envFile }
-    Write-Host "  Created .env from template — edit with your API keys." -ForegroundColor Yellow
+    Write-Host "  Created .env from template - edit with your API keys." -ForegroundColor Yellow
 }
 
 # Desktop shortcut

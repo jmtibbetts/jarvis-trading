@@ -19,7 +19,8 @@ v6.2: Global threading lock — only one LLM call at a time (local model can't p
       Supports LM Studio, Ollama, OpenAI, Anthropic, Groq, DeepSeek.
       Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
 """
-import os, json, re, logging, threading
+import os, json, re, logging, threading, time
+from contextlib import contextmanager
 import httpx
 from app.database import get_db, PlatformConfig
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
-TIMEOUT       = 120.0  # 2 min — enough for big prompts; reduced from 300s to prevent shutdown hangs
+TIMEOUT       = 45.0
 
 # Max tokens to request on retry with /no_think — must stay under LM Studio's hard server cap.
 # Set conservatively so the model has budget for actual output after thinking tokens are stripped.
@@ -35,6 +36,50 @@ RETRY_MAX_TOKENS = 16384
 
 # ── Shutdown flag — set on SIGINT/SIGTERM so blocking calls abort cleanly ─────
 _shutdown_event = threading.Event()
+_llm_circuit_lock = threading.Lock()
+_llm_circuit_open_until = 0.0
+
+
+def _llm_circuit_remaining():
+    with _llm_circuit_lock:
+        return max(0.0, _llm_circuit_open_until - time.monotonic())
+
+
+def get_llm_cooldown() -> float:
+    """Seconds until the LLM circuit closes again (0 when healthy). Callers
+    that can afford to WAIT (batch signal generation) should sleep this out
+    instead of failing instantly — one provider hiccup was killing every
+    remaining batch in a run within the same second."""
+    return _llm_circuit_remaining()
+
+
+def _cool_down_llm(seconds=15.0):
+    global _llm_circuit_open_until
+    with _llm_circuit_lock:
+        _llm_circuit_open_until = max(
+            _llm_circuit_open_until,
+            time.monotonic() + max(1.0, float(seconds)),
+        )
+
+
+@contextmanager
+def _llm_slot(queue_timeout=None):
+    cooldown = _llm_circuit_remaining()
+    if cooldown > 0:
+        raise RuntimeError(f"Local LLM cooling down for {cooldown:.1f}s after a provider failure")
+    if queue_timeout is None:
+        acquired = _llm_lock.acquire()
+    else:
+        acquired = _llm_lock.acquire(timeout=max(0.0, float(queue_timeout)))
+    if not acquired:
+        raise RuntimeError(f"LLM queue busy after {queue_timeout:.1f}s")
+    try:
+        cooldown = _llm_circuit_remaining()
+        if cooldown > 0:
+            raise RuntimeError(f"Local LLM cooling down for {cooldown:.1f}s after a provider failure")
+        yield
+    finally:
+        _llm_lock.release()
 
 # _shutdown_event is set externally by main.py lifespan on shutdown
 
@@ -49,7 +94,7 @@ class _EmptyThinkingResponse(RuntimeError):
 # ── Concurrency limiter — LM Studio supports N parallel inference slots ─────
 # BoundedSemaphore(4) allows 4 concurrent LLM calls, matching LM Studio's 4-slot config.
 # Increase LLM_MAX_PARALLEL env var to match your LM Studio "Parallel Requests" setting.
-_LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "4"))
+_LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "1"))
 _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
 # ── Model auto-resolution cache ───────────────────────────────────────────────
@@ -184,7 +229,9 @@ def check_health() -> dict:
 
 
 def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
-                   temperature: float = 0.15, thinking: bool = True) -> str:
+                   temperature: float = 0.15, thinking: bool = True,
+                   queue_timeout: float = None,
+                   request_timeout: float = None) -> str:
     """
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
     Aborts immediately if shutdown has been signalled.
@@ -194,6 +241,9 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     """
     if _shutdown_event.is_set():
         raise RuntimeError("LLM call aborted — shutdown in progress")
+    cooldown = _llm_circuit_remaining()
+    if cooldown > 0:
+        raise RuntimeError(f"Local LLM cooling down for {cooldown:.1f}s after a provider failure")
 
     cfg = get_llm_config()
     # Auto-resolve placeholder model names (e.g. "local-model") to the real loaded model ID
@@ -207,15 +257,17 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         prefix = '/no_think\n\n'
         effective_system = prefix + (system or '')
 
-    with _llm_lock:
+    with _llm_slot(queue_timeout):
         if _shutdown_event.is_set():
             raise RuntimeError("LLM call aborted — shutdown in progress")
         logger.debug(f"[LLM] Acquired lock → {cfg['platform']} @ {cfg['url']} model={cfg['model']} max_tokens={effective_max} thinking={thinking}")
         try:
             if cfg['provider'] == 'anthropic':
-                return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg)
+                return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg,
+                                       request_timeout=request_timeout)
             else:
-                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg, thinking_mode=thinking)
+                return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg,
+                                           thinking_mode=thinking, request_timeout=request_timeout)
         except _EmptyThinkingResponse:
             # Qwen3 produced only <think> tokens — retry immediately with /no_think
             # Use RETRY_MAX_TOKENS (not the full requested amount) so the model has room to output
@@ -224,9 +276,11 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 fallback_system = '/no_think\n\n' + (system or '')
                 try:
                     if cfg['provider'] == 'anthropic':
-                        return _call_anthropic(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg)
+                        return _call_anthropic(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg,
+                                               request_timeout=request_timeout)
                     else:
-                        return _call_openai_compat(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg, thinking_mode=False)
+                        return _call_openai_compat(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg,
+                                                   thinking_mode=False, request_timeout=request_timeout)
                 except _EmptyThinkingResponse:
                     # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
                     # Return empty JSON array so the track degrades gracefully instead of crashing.
@@ -237,7 +291,8 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
 
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
-                         temperature: float, cfg: dict, thinking_mode: bool = False) -> str:
+                         temperature: float, cfg: dict, thinking_mode: bool = False,
+                         request_timeout: float = None) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -274,7 +329,9 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
 
     # Use a streaming-capable client with a shorter connect timeout
     # so we don't block forever if LM Studio is gone
-    timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)
+    read_timeout = max(1.0, float(request_timeout or TIMEOUT))
+    timeout = httpx.Timeout(connect=min(10.0, read_timeout), read=read_timeout,
+                            write=min(30.0, read_timeout), pool=min(10.0, read_timeout))
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -309,13 +366,15 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
     except _EmptyThinkingResponse:
         raise  # pass through to retry handler — do NOT wrap
     except httpx.TimeoutException:
-        raise RuntimeError(f"LLM timeout after {TIMEOUT}s — is {cfg['platform']} running at {cfg['url']}?")
+        _cool_down_llm()
+        raise RuntimeError(f"LLM timeout after {read_timeout:.1f}s - is {cfg['platform']} running at {cfg['url']}?")
     except Exception as e:
+        _cool_down_llm()
         raise RuntimeError(f"LLM call failed ({cfg['platform']} @ {cfg['url']}): {e}")
 
 
 def _call_anthropic(prompt: str, system: str, max_tokens: int,
-                    temperature: float, cfg: dict) -> str:
+                    temperature: float, cfg: dict, request_timeout: float = None) -> str:
     headers = {
         "x-api-key":         cfg['api_key'],
         "anthropic-version": "2023-06-01",
@@ -331,7 +390,9 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
         payload["system"] = system
 
     url = "https://api.anthropic.com/v1/messages"
-    timeout = httpx.Timeout(connect=10.0, read=TIMEOUT, write=30.0, pool=10.0)
+    read_timeout = max(1.0, float(request_timeout or TIMEOUT))
+    timeout = httpx.Timeout(connect=min(10.0, read_timeout), read=read_timeout,
+                            write=min(30.0, read_timeout), pool=min(10.0, read_timeout))
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.post(url, json=payload, headers=headers)
@@ -339,6 +400,7 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
         data = r.json()
         return data['content'][0]['text']
     except Exception as e:
+        _cool_down_llm()
         raise RuntimeError(f"Anthropic API error: {e}")
 
 

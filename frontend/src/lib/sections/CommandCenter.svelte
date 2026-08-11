@@ -20,6 +20,26 @@
   let analystBusy = $state(false);
   let analystAnswer = $state<AnalystAnswer | null>(null);
   let analystError = $state<string | null>(null);
+  let newTicker = $state("");
+  let addingTicker = $state(false);
+
+  async function addTicker() {
+    const sym = newTicker.trim().toUpperCase();
+    if (!sym || addingTicker) return;
+    addingTicker = true;
+    try {
+      const res = await api.watchlistAdd(sym);
+      newTicker = "";
+      const { toastStore } = await import("../stores/toast.svelte");
+      toastStore.ok(res.already_tracked ? `${res.symbol} already tracked` : `${res.symbol} added to watchlist`);
+      await loadAll();
+    } catch (e) {
+      const { toastStore } = await import("../stores/toast.svelte");
+      toastStore.err(`Add failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      addingTicker = false;
+    }
+  }
   let expandedOpp = $state<string | null>(null);
   let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
@@ -242,6 +262,12 @@
                 {#if opp.opportunity_breakdown.smart_money_adjustment !== 0}
                   &middot; smart money {opp.opportunity_breakdown.smart_money_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.smart_money_adjustment.toFixed(1)}
                 {/if}
+                {#if opp.opportunity_breakdown.historical_adjustment !== 0}
+                  &middot; history {opp.opportunity_breakdown.historical_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.historical_adjustment.toFixed(1)}
+                {/if}
+              </div>
+              <div class="opp-why dim">
+                {opp.opportunity_breakdown.smart_money_note}{opp.historical ? ` · ${opp.opportunity_breakdown.historical_note}` : ""}
               </div>
               {#if expandedOpp === opp.signal_id}
                 <div class="opp-detail">
@@ -272,6 +298,18 @@
   </div>
   <div class="span-8">
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
+      <form
+        class="wl-add"
+        onsubmit={(e) => {
+          e.preventDefault();
+          addTicker();
+        }}
+      >
+        <input placeholder="Add ticker (NVDA or BTC/USD)" bind:value={newTicker} disabled={addingTicker} />
+        <button class="ask-btn" type="submit" disabled={addingTicker || !newTicker.trim()}>
+          {addingTicker ? "Verifying…" : "+ Add"}
+        </button>
+      </form>
       {#if watchlist && watchlist.rows.length}
         <div class="wl-scroll cap-h">
           <table class="wl">
@@ -507,6 +545,30 @@
   }
   .sig:last-child {
     border-bottom: none;
+  }
+  .wl-add {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .wl-add input {
+    flex: 1;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+  .wl-add input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .opp-why {
+    font-size: 10px;
+    margin-top: 3px;
+    line-height: 1.4;
   }
   .opp-detail {
     margin-top: 6px;

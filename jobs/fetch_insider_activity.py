@@ -87,3 +87,15 @@ def run():
             })
         except Exception:
             pass
+        try:
+            from lib.alert_engine import raise_alert
+            top = max(notable, key=lambda n: n[2])
+            raise_alert(
+                source="insider", severity="ACTIONABLE",
+                title=f"Notable insider buy: {top[0]}",
+                detail=f"{top[1]} bought ${top[2]:,.0f}" + (f" ({len(notable)} notable buys this run)" if len(notable) > 1 else ""),
+                dedup_key=f"insider_buy_{top[0]}_{top[1]}_{round(top[2])}", cooldown_minutes=1440,
+                extra={"ticker": top[0], "owner_name": top[1], "value": round(top[2], 0)},
+            )
+        except Exception:
+            pass

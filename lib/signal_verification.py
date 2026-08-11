@@ -148,3 +148,123 @@ def verify_signal(signal: dict) -> dict:
         ),
     })
     return result
+
+
+# --------------------------------------------------------------------------
+# Deep verification — deterministic verdict PLUS fresh Python TA, MCP market
+# data, and MCP news, all fed into the LLM for a second opinion. The LLM
+# NEVER overrides the arithmetic verdict above; it adds an assessment layer
+# (does the setup still make sense given fresh TA + news?) that the user
+# reads alongside the deterministic result.
+# --------------------------------------------------------------------------
+
+def _fresh_ta_block(symbol: str) -> tuple[str | None, dict | None]:
+    """Recompute multi-timeframe TA right now (same engine signals use)."""
+    try:
+        from lib.ohlcv import fetch_multi_timeframe
+        from lib.ta_engine import analyze_symbol, build_ta_prompt_block
+        bars = fetch_multi_timeframe(symbol, ["1H", "4H", "1D"])
+        ta = analyze_symbol(bars)
+        return build_ta_prompt_block(symbol, ta), ta
+    except Exception as e:
+        logger.debug(f"[DeepVerify] TA recompute failed for {symbol}: {e}")
+        return None, None
+
+
+def _mcp_news_block(symbol: str) -> str | None:
+    """One tavily-search call for fresh symbol news (best-effort, honest label)."""
+    try:
+        from lib.mcp_client import call_tool, available_servers
+        if "tavily" not in available_servers():
+            return None
+        raw = call_tool("tavily", "tavily-search", {
+            "query": f"{symbol} stock price news today",
+            "max_results": 5, "topic": "news",
+        })
+        if not raw:
+            return None
+        return f"FRESH NEWS (tavily web search — unverified):\n{str(raw)[:1800]}"
+    except Exception as e:
+        logger.debug(f"[DeepVerify] MCP news failed for {symbol}: {e}")
+        return None
+
+
+def _market_data_block(symbol: str, asset_class: str | None) -> str | None:
+    """Massive REST summary (equity) or crypto derivatives snapshot."""
+    is_crypto = "/" in (symbol or "") or (asset_class or "").lower() == "crypto"
+    try:
+        if is_crypto:
+            from lib.crypto_derivatives import fetch_derivatives_snapshot
+            snap = fetch_derivatives_snapshot(symbol)
+            if snap:
+                import json as _json
+                return "CRYPTO DERIVATIVES (live, free exchange APIs):\n" + _json.dumps(snap, default=str)[:1500]
+        else:
+            from lib.massive_data import get_market_summary
+            summary = get_market_summary(symbol, days=5)
+            if summary:
+                import json as _json
+                return "MARKET DATA (Massive REST, previous sessions — not live quotes):\n" + _json.dumps(summary, default=str)[:1500]
+    except Exception as e:
+        logger.debug(f"[DeepVerify] Market data block failed for {symbol}: {e}")
+    return None
+
+
+def deep_verify_signal(signal: dict) -> dict:
+    """Deterministic verify + LLM second opinion over fresh TA, market data,
+    and news. Returns the deterministic result with an `llm_assessment` key
+    added ({assessment, confidence, reasoning} or an honest unavailability
+    note). Costs: 1 tavily call, up to 1 Massive call, 1 LLM call."""
+    base = verify_signal(signal)
+    symbol = signal.get("asset_symbol") or ""
+
+    ta_block, ta = _fresh_ta_block(symbol)
+    news_block = _mcp_news_block(symbol)
+    md_block = _market_data_block(symbol, signal.get("asset_class"))
+
+    blocks = [b for b in (ta_block, md_block, news_block) if b]
+    context_used = {
+        "fresh_ta": ta_block is not None,
+        "market_data": md_block is not None,
+        "web_news": news_block is not None,
+    }
+    if not blocks:
+        base["llm_assessment"] = {
+            "assessment": "UNAVAILABLE",
+            "reasoning": "No fresh context (TA, market data, or news) could be gathered — skipping LLM opinion rather than guessing.",
+            "context_used": context_used,
+        }
+        return base
+
+    import json as _json
+    prompt = (
+        f"You are double-checking an EXISTING trade signal. Do not invent prices.\n\n"
+        f"SIGNAL: {symbol} {signal.get('direction')} | entry {signal.get('entry_price')} | "
+        f"target {signal.get('target_price')} | stop {signal.get('stop_loss')} | "
+        f"timeframe {signal.get('timeframe')} | original reasoning: {str(signal.get('reasoning') or '')[:400]}\n\n"
+        f"DETERMINISTIC RE-CHECK (arithmetic, trust it): {_json.dumps({k: base.get(k) for k in ('verdict', 'current_price', 'price_asof', 'drift_pct')})}\n\n"
+        + "\n\n".join(blocks)
+        + "\n\nGiven the FRESH data above, does this trade still make sense? "
+          "Answer JSON only: {\"assessment\": \"AGREE|DISAGREE|UNCERTAIN\", "
+          "\"confidence\": 0-100, \"reasoning\": \"2-3 sentences citing the fresh data\", "
+          "\"key_change\": \"what changed since the signal was generated, or 'nothing material'\"}"
+    )
+    try:
+        from lib.lmstudio import call_lm_studio, parse_json
+        text = call_lm_studio(prompt, system="You are a rigorous trade verification analyst. JSON only.",
+                              max_tokens=400, request_timeout=90)
+        parsed = parse_json(text) or {}
+        base["llm_assessment"] = {
+            "assessment": str(parsed.get("assessment") or "UNCERTAIN").upper(),
+            "confidence": parsed.get("confidence"),
+            "reasoning": parsed.get("reasoning"),
+            "key_change": parsed.get("key_change"),
+            "context_used": context_used,
+        }
+    except Exception as e:
+        base["llm_assessment"] = {
+            "assessment": "UNAVAILABLE",
+            "reasoning": f"LLM unavailable ({str(e)[:80]}) — deterministic verdict above still stands.",
+            "context_used": context_used,
+        }
+    return base

@@ -474,6 +474,13 @@ export type MacroSnapshot = {
 };
 
 export type VerifyResult = {
+  llm_assessment?: {
+    assessment: string;
+    confidence?: number | null;
+    reasoning?: string | null;
+    key_change?: string | null;
+    context_used?: Record<string, boolean>;
+  };
   signal_id: string;
   verdict: "CONFIRMED" | "STALE_ENTRY" | "INVALIDATED" | "DATA_UNAVAILABLE";
   checks: { check: string; ok: boolean; detail: string }[];
@@ -954,12 +961,28 @@ export const api = {
     if (opts.ticker) p.set("ticker", opts.ticker);
     return get<CongressTradesResponse>(`/congress/trades?${p}`);
   },
+  congressByOfficial: (days = 365, limit = 50) =>
+    get<{ officials: {
+      member_name: string; state_district: string | null; chamber: string;
+      purchases: number; sales: number; other: number; trade_count: number;
+      range_low_total: number; range_high_total: number; trades: CongressTrade[];
+    }[]; note: string }>(`/congress/by-official?days=${days}&limit=${limit}`),
+  watchlistAdd: (symbol: string) =>
+    fetch(`/api/watchlist/add`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol }),
+    }).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail ?? `add ${r.status}`);
+      return body as { ok: boolean; symbol: string; already_tracked?: boolean };
+    }),
+  autosimReset: () => post<{ ok: boolean }>(`/autosim/reset`),
   congressActivity: (limit = 20, days = 180) =>
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
     get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
-  verifySignal: (id: string, applyUpdate = false) =>
-    fetch(`/api/signals/${id}/verify?apply_update=${applyUpdate}`, { method: "POST" }).then((r) => {
+  verifySignal: (id: string, applyUpdate = false, deep = false) =>
+    fetch(`/api/signals/${id}/verify?apply_update=${applyUpdate}&deep=${deep}`, { method: "POST" }).then((r) => {
       if (!r.ok) throw new Error(`verify ${r.status}`);
       return r.json() as Promise<VerifyResult>;
     }),

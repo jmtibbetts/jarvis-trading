@@ -40,6 +40,8 @@
   let institutional = $state<InstitutionalAccumulation | null>(null);
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
+  let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
+  let expandedOfficial = $state<string | null>(null);
   let psychology = $state<PsychologyIndex | null>(null);
   let ipo = $state<IpoPipelineResponse | null>(null);
   let expandedSqueezeSymbol = $state<string | null>(null);
@@ -146,6 +148,9 @@
     institutional = inst;
     congress = cg;
     congressActivity = cga;
+    if (SM) {
+      api.congressByOfficial(365, 40).then((r) => (congressOfficials = r)).catch(() => {});
+    }
     psychology = psy;
     ipo = ipoRes;
   }
@@ -471,7 +476,7 @@
         {/if}
         {#if insiderTxs.length}
           <div class="itx-head">Recent filings — price, value, and reporting lag</div>
-          <div class="wl-scroll">
+          <div class="wl-scroll cap-h">
             <table class="tbl">
               <thead>
                 <tr><th>Ticker</th><th>Insider</th><th>Action</th><th>@ Price</th><th>Total</th><th>Traded</th><th>Reported</th></tr>
@@ -757,6 +762,53 @@
   {/if}
 
   {#if view === "smartmoney"}
+  <div class="span-12">
+    <Panel title="Trades by Official" meta={congressOfficials ? `${congressOfficials.officials.length} officials · 365d` : "—"}>
+      {#snippet children()}
+        {#if congressOfficials && congressOfficials.officials.length}
+          <div class="cap-h">
+            {#each congressOfficials.officials as o (o.member_name)}
+              <div
+                class="off-row"
+                role="button"
+                tabindex="0"
+                onclick={() => (expandedOfficial = expandedOfficial === o.member_name ? null : o.member_name)}
+                onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (expandedOfficial = expandedOfficial === o.member_name ? null : o.member_name)}
+              >
+                <span class="off-caret">{expandedOfficial === o.member_name ? "▾" : "▸"}</span>
+                <span class="off-name">{o.member_name} <i class="dim">({o.state_district ?? o.chamber})</i></span>
+                <span class="num">{o.trade_count} trades</span>
+                <span class="num"><span class="pl-up">{o.purchases}P</span>/<span class="pl-down">{o.sales}S</span></span>
+                <span class="num dim">${Math.round(o.range_low_total / 1000).toLocaleString()}k–${Math.round(o.range_high_total / 1000).toLocaleString()}k range</span>
+              </div>
+              {#if expandedOfficial === o.member_name}
+                <div class="off-detail">
+                  <table class="tbl">
+                    <thead><tr><th>Ticker</th><th>Action</th><th>Amount</th><th>Traded</th><th>Reported</th></tr></thead>
+                    <tbody>
+                      {#each o.trades as t (t.id)}
+                        <tr>
+                          <td class="sym">{t.ticker ?? "—"}</td>
+                          <td class={t.transaction_code.startsWith("P") ? "pl-up" : t.transaction_code.startsWith("S") ? "pl-down" : "dim"}>{t.transaction_label}</td>
+                          <td class="num">{t.amount_text ?? "—"}</td>
+                          <td class="num">{t.transaction_date}</td>
+                          <td class="num">{t.notification_date}{#if t.filing_delay_days != null} <span class="dim">+{t.filing_delay_days}d</span>{/if}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+            {/each}
+          </div>
+          <div class="si-footnote">{congressOfficials.note}</div>
+        {:else}
+          <div class="empty">No per-official data yet — coverage builds as filings are processed.</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
   <div class="span-12">
     <Panel
       title="Institutional Ownership (13F)"
@@ -1540,6 +1592,32 @@
   .psy-mkt-meta {
     font-size: 9px;
     margin-top: 2px;
+  }
+  .cap-h {
+    max-height: 420px;
+    overflow-y: auto;
+  }
+  .off-row {
+    display: grid;
+    grid-template-columns: 16px 1fr auto auto auto;
+    gap: 10px;
+    align-items: baseline;
+    padding: 7px 4px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .off-row:hover {
+    background: rgba(124, 154, 255, 0.05);
+  }
+  .off-caret {
+    color: var(--ink-faint);
+  }
+  .off-name {
+    font-weight: 600;
+  }
+  .off-detail {
+    padding: 4px 0 10px 26px;
   }
   .itx-head {
     margin: 12px 0 6px;

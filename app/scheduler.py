@@ -525,7 +525,7 @@ def create_scheduler() -> BackgroundScheduler:
     # nothing to gain from polling faster; the interval also paces the per-filing
     # PDF downloads, which are bounded per run and resume next run.
     sched.add_job(make_job_runner('congress', congress_run),
-                  'interval', hours=6, id='congress',
+                  'interval', hours=2, id='congress',
                   next_run_time=now + timedelta(minutes=8),
                   replace_existing=True, max_instances=1)
 

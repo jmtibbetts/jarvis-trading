@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Bounded per run: each filing is a PDF download plus parse, and the House
 # publishes hundreds per year. Unprocessed filings are simply picked up next run.
-MAX_FILINGS_PER_RUN = 25
+MAX_FILINGS_PER_RUN = 75
 # Alert threshold — the top of the disclosed range, since the exact amount is
 # never known. Deliberately high so this flags only genuinely large disclosures.
 NOTABLE_AMOUNT_FLOOR = 250_000

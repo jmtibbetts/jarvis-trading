@@ -31,6 +31,11 @@ function describe(msg: WsEnvelope): string | null {
       if (!name || job?.status !== "error") return null;
       return `${name} job failed: ${job.error ?? "unknown error"}`;
     }
+    case "alert": {
+      const severity = data.severity as string;
+      if (severity !== "HIGH_PRIORITY" && severity !== "CRITICAL" && severity !== "ACTIONABLE") return null;
+      return `[${severity}] ${data.title as string}`;
+    }
     default:
       return null;
   }

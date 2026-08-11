@@ -496,7 +496,7 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
 
 
 @router.post("/signals/{signal_id}/verify")
-def verify_signal_route(signal_id: str, apply_update: bool = False):
+def verify_signal_route(signal_id: str, apply_update: bool = False, deep: bool = False):
     """User-initiated double-check of a signal against fresh data —
     lib/signal_verification.py. Deterministic verdict (CONFIRMED /
     STALE_ENTRY / INVALIDATED / DATA_UNAVAILABLE); equity prices come from
@@ -505,7 +505,7 @@ def verify_signal_route(signal_id: str, apply_update: bool = False):
     apply_update=true additionally applies the suggested level re-anchor,
     ONLY when the verdict is STALE_ENTRY and only for signals still awaiting
     action — an executed trade's levels are history, not editable."""
-    from lib.signal_verification import verify_signal
+    from lib.signal_verification import verify_signal, deep_verify_signal
 
     with get_db() as db:
         sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
@@ -515,10 +515,14 @@ def verify_signal_route(signal_id: str, apply_update: bool = False):
             "asset_symbol": sig.asset_symbol, "asset_class": sig.asset_class,
             "direction": sig.direction, "entry_price": sig.entry_price,
             "target_price": sig.target_price, "stop_loss": sig.stop_loss,
-            "status": sig.status,
+            "status": sig.status, "timeframe": sig.timeframe,
+            "reasoning": sig.reasoning,
         }
 
-    result = verify_signal(sig_dict)
+    # deep=true adds fresh Python TA + MCP market data + MCP news, all fed
+    # into the LLM for a second opinion layered ON TOP of the deterministic
+    # verdict (never replacing it). Costs 1 tavily + up to 1 Massive + 1 LLM call.
+    result = deep_verify_signal(sig_dict) if deep else verify_signal(sig_dict)
 
     applied = False
     if (apply_update and result.get("verdict") == "STALE_ENTRY"
@@ -627,6 +631,64 @@ def get_catalyst_calendar():
         datetime.now(timezone.utc).date(),
         earnings_tickers=earnings, tracked_equities=tracked, priced_ipos=priced,
     )
+
+
+class WatchlistAdd(BaseModel):
+    symbol: str
+
+
+@router.post("/watchlist/add")
+def add_watchlist_symbol(body: WatchlistAdd):
+    """Add a ticker to the tracked universe (Watchlist 2.0 source). Crypto in
+    BASE/USD form; equities as plain tickers. The symbol must be verifiable
+    against a real data source before it is added — no unverified rows."""
+    raw = (body.symbol or "").strip().upper()
+    if not raw or len(raw) > 12:
+        raise HTTPException(400, "Provide a symbol like NVDA or BTC/USD")
+
+    is_crypto = "/" in raw or raw.endswith("USD") and len(raw) > 5
+    name = None
+    price = None
+    asset_class = "Equity"
+    if is_crypto:
+        from lib.crypto_market_data import fetch_crypto_prices, normalize_crypto_symbol
+        sym = normalize_crypto_symbol(raw)
+        rowp = fetch_crypto_prices([sym]).get(sym)
+        if not rowp or not rowp.get("price"):
+            raise HTTPException(404, f"No exchange lists {sym} — not added")
+        price = rowp["price"]; name = sym; asset_class = "Crypto"
+    else:
+        sym = raw
+        # verify against Massive (if keyed) or Alpaca asset lookup
+        verified = False
+        try:
+            from lib.massive_data import get_market_summary
+            summary = get_market_summary(sym, days=3)
+            if summary and (summary.get("previous_close") or summary.get("daily_bars")):
+                price = (summary.get("previous_close") or {}).get("close")
+                verified = True
+        except Exception:
+            pass
+        if not verified:
+            try:
+                from lib.alpaca_client import get_trading_client
+                asset = get_trading_client().get_asset(sym)
+                verified = bool(asset and asset.tradable)
+                name = getattr(asset, "name", None)
+            except Exception:
+                pass
+        if not verified:
+            raise HTTPException(404, f"Could not verify {sym} against any data source — not added")
+
+    with get_db() as db:
+        existing = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
+        if existing:
+            return {"ok": True, "symbol": sym, "already_tracked": True}
+        db.add(MarketAsset(
+            symbol=sym, name=name or sym, asset_class=asset_class,
+            price=price, last_updated=datetime.now(timezone.utc).isoformat(),
+        ))
+    return {"ok": True, "symbol": sym, "asset_class": asset_class, "verified_price": price}
 
 
 @router.get("/watchlist/enriched")
@@ -1284,6 +1346,43 @@ def get_congress_trades(limit: int = 50, ticker: str = None, days: int = 180):
     return {
         "trades": trades, "count": len(trades),
         "filings_processed": coverage,
+        "disclaimer": _CONGRESS_DISCLAIMER,
+    }
+
+
+@router.get("/congress/by-official")
+def get_congress_by_official(days: int = 365, limit: int = 50):
+    """Disclosed trades grouped per official — name, chamber, district, trade
+    count, buy/sell split, summed disclosed range bounds, and the full trade
+    list for expandable UI. Counts are of disclosures; exact amounts are
+    never disclosed (range bounds only)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(days, 1))).date().isoformat()
+    with get_db() as db:
+        rows = (db.query(CongressTrade)
+                .filter(CongressTrade.transaction_date >= cutoff)
+                .order_by(CongressTrade.transaction_date.desc()).all())
+        officials: dict = {}
+        for t in rows:
+            o = officials.setdefault(t.member_name or "Unknown", {
+                "member_name": t.member_name, "state_district": t.state_district,
+                "chamber": t.chamber or "House", "purchases": 0, "sales": 0, "other": 0,
+                "range_low_total": 0.0, "range_high_total": 0.0, "trades": [],
+            })
+            code = (t.transaction_code or "").upper()
+            if code.startswith("P"): o["purchases"] += 1
+            elif code.startswith("S"): o["sales"] += 1
+            else: o["other"] += 1
+            o["range_low_total"] += t.amount_low or 0.0
+            o["range_high_total"] += t.amount_high or 0.0
+            o["trades"].append(_congress_trade_dict(t))
+    ranked = sorted(officials.values(), key=lambda o: -len(o["trades"]))[:min(max(limit, 1), 200)]
+    for o in ranked:
+        o["trade_count"] = len(o["trades"])
+    return {
+        "officials": ranked, "window_days": days,
+        "note": ("House disclosures only — Senate (efdsearch) and executive-branch "
+                 "(OGE 278e) filings use separate systems not yet ingested. Amounts "
+                 "are disclosed RANGE bounds, never exact values."),
         "disclaimer": _CONGRESS_DISCLAIMER,
     }
 
@@ -2077,7 +2176,15 @@ def trigger_job(job_name: str):
              "scanner_premarket":("jobs.scan_opportunities","run_pre_market"),
              "scanner_intraday":("jobs.scan_opportunities","run_intraday"),
              "scanner_crypto":("jobs.scan_opportunities","run_crypto"),
-             "scanner_futures":("jobs.scan_opportunities","run_futures")}
+             "scanner_futures":("jobs.scan_opportunities","run_futures"),
+             # Jobs added later were missing here, so their Ops "Run Now"
+             # buttons 404'd — the map must grow with app/scheduler.py.
+             "insider":("jobs.fetch_insider_activity","run"),
+             "inst13f":("jobs.fetch_13f_filings","run"),
+             "congress":("jobs.fetch_congress_trades","run"),
+             "ipo":("jobs.fetch_ipo_filings","run"),
+             "postmortem":("jobs.collect_postmortems","run"),
+             "crypto_derivatives":("jobs.fetch_crypto_derivatives","run")}
     if job_name not in job_map: raise HTTPException(404)
     # make_job_runner silently no-ops a trigger while the job is already
     # "running" — that's correct for the scheduler (avoids double-execution),
@@ -2462,6 +2569,31 @@ def analyze(body: AnalyzeRequest):
                         conflict = f"{bear}/{len(biases)} timeframes are bearish but the signal is {signal.get('direction')}"
                     elif bull >= max(3, len(biases) * 0.7) and "short" in direction:
                         conflict = f"{bull}/{len(biases)} timeframes are bullish but the signal is {signal.get('direction')}"
+                    if conflict:
+                        # One corrective retry with explicit feedback — local
+                        # models routinely ignore the first instruction. If the
+                        # retry still conflicts, the warning stands and the UI
+                        # blocks saving.
+                        try:
+                            retry_raw = call_lm_studio(
+                                prompt
+                                + f"\n\nYOUR PREVIOUS ANSWER WAS WRONG: {conflict}. "
+                                "Re-issue the JSON with a direction that MATCHES the timeframe "
+                                "biases (Short for a bearish chart), with entry/target/stop "
+                                "consistent with that direction.",
+                                max_tokens=800, temperature=0.1)
+                            retry = parse_json(retry_raw)
+                            retry = retry[0] if isinstance(retry, list) else retry
+                            if isinstance(retry, dict) and retry.get("direction"):
+                                rdir = str(retry["direction"]).lower()
+                                fixed = (bear >= bull and "short" in rdir) or (bull > bear and "short" not in rdir)
+                                if fixed:
+                                    signal = retry
+                                    direction = rdir
+                                    conflict = None
+                                    signal["corrected_by_retry"] = True
+                        except Exception:
+                            pass
                     signal["bias_conflict"] = conflict
                     signal["bias_summary"] = {"bullish": bull, "bearish": bear, "total": len(biases)}
                     # horizon + hold estimate for the UI
@@ -2828,6 +2960,15 @@ def paper_close(pos_id: str, price: Optional[float] = None):
     except HTTPException: raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@router.post("/autosim/reset")
+def autosim_reset():
+    """Wipe the auto-sim book back to its starting capital — same contract as
+    /paper/reset but for the follow-everything simulator."""
+    from lib.auto_simulator import reset_auto_simulator
+    reset_auto_simulator()
+    return {"ok": True, "message": "Auto-sim account reset"}
+
 
 @router.post("/paper/reset")
 def paper_reset():

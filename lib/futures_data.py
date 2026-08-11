@@ -103,6 +103,11 @@ CATEGORY_ICONS = {
 
 # Map internal timeframe labels to yfinance period/interval combos
 _YF_TF_MAP = {
+    "1m":  {"interval": "1m",  "period": "1d"},
+    "3m":  {"interval": "1m",  "period": "5d", "resample": "3min"},
+    "5m":  {"interval": "5m",  "period": "5d"},
+    "15m": {"interval": "15m", "period": "5d"},
+    "30m": {"interval": "30m", "period": "1mo"},
     "1H":  {"interval": "1h",  "period": "7d"},
     "2H":  {"interval": "2h",  "period": "14d"},
     "4H":  {"interval": "4h",  "period": "30d"},
@@ -132,6 +137,11 @@ def fetch_futures_ohlcv(symbol: str, timeframe: str = "1D") -> Optional[pd.DataF
         df = df[~df.index.duplicated(keep="last")].sort_index()
         # Drop rows with all-zero prices (bad data)
         df = df[df["close"] > 0]
+        if cfg.get("resample"):
+            df = df.resample(cfg["resample"]).agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna(subset=["close"])
         return df if len(df) >= 5 else None
     except Exception as e:
         logger.warning(f"[Futures] fetch_futures_ohlcv({symbol}, {timeframe}) failed: {e}")

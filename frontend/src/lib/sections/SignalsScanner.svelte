@@ -37,10 +37,11 @@
   let busyIds = $state<Set<string>>(new Set());
   let verifyResults = $state<Record<string, VerifyResult>>({});
 
-  async function doVerify(sig: Signal) {
+  async function doVerify(sig: Signal, deep = false) {
     setBusy(sig.id, true);
+    if (deep) toastStore.ok(`${sig.asset_symbol}: deep verify — fresh TA + web news + LLM, ~30-90s`);
     try {
-      let res = await api.verifySignal(sig.id);
+      let res = await api.verifySignal(sig.id, false, deep);
       verifyResults = { ...verifyResults, [sig.id]: res };
       if (res.verdict === "STALE_ENTRY" && res.suggested_update) {
         const u = res.suggested_update;
@@ -64,6 +65,10 @@
         toastStore.err(`${sig.asset_symbol}: setup invalidated at current price`);
       } else if (res.verdict === "CONFIRMED") {
         toastStore.ok(`${sig.asset_symbol}: levels still valid (${res.price_asof})`);
+      }
+      const a = res.llm_assessment;
+      if (a && a.assessment !== "UNAVAILABLE") {
+        toastStore.ok(`${sig.asset_symbol} AI second opinion: ${a.assessment}${a.confidence != null ? ` (${a.confidence}%)` : ""}`);
       }
     } catch (e) {
       toastStore.err(`Verify failed: ${e}`);
@@ -392,7 +397,12 @@
             <div class="an-signal">
               <div class="an-signal-head">
                 Generated signal
-                <button class="btn tiny outline save-btn" onclick={saveGeneratedSignal}>Save to Signals</button>
+                <button
+                  class="btn tiny outline save-btn"
+                  disabled={!!analyzeResult.signal.bias_conflict}
+                  title={analyzeResult.signal.bias_conflict ? "Blocked: direction conflicts with the chart" : "Save this signal"}
+                  onclick={saveGeneratedSignal}
+                >Save to Signals</button>
               </div>
               <div class="gen-pills">
                 <Pill
@@ -530,6 +540,12 @@
                 <Pill label={sig.status} tone="neutral" />
                 {#if verifyResults[sig.id]}
                   <Pill label={verifyResults[sig.id].verdict.replaceAll("_", " ").toLowerCase()} tone={verdictTone(verifyResults[sig.id].verdict)} />
+                  {#if verifyResults[sig.id].llm_assessment && verifyResults[sig.id].llm_assessment!.assessment !== "UNAVAILABLE"}
+                    <div class="ai-opinion dim" title={verifyResults[sig.id].llm_assessment!.reasoning ?? ""}>
+                      AI: {verifyResults[sig.id].llm_assessment!.assessment}
+                      {#if verifyResults[sig.id].llm_assessment!.key_change}· {verifyResults[sig.id].llm_assessment!.key_change}{/if}
+                    </div>
+                  {/if}
                 {/if}
               </div>
               <div class="sc-score">
@@ -563,6 +579,12 @@
                   disabled={busyIds.has(sig.id)}
                   onclick={(e) => { e.stopPropagation(); doVerify(sig); }}
                 >Verify</button>
+                <button
+                  class="btn tiny outline"
+                  title="Deep verify: fresh multi-timeframe TA + Massive market data + web news, all fed to the LLM for a second opinion (slower, ~30-90s)"
+                  disabled={busyIds.has(sig.id)}
+                  onclick={(e) => { e.stopPropagation(); doVerify(sig, true); }}
+                >Deep</button>
                 <button class="btn tiny ghost" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "delete"); }}>✕</button>
               </div>
             </div>
@@ -867,6 +889,11 @@
     cursor: pointer;
     font-size: 10px;
     padding: 0;
+  }
+  .ai-opinion {
+    font-size: 10px;
+    margin-top: 3px;
+    line-height: 1.35;
   }
   .sig-cards {
     display: grid;

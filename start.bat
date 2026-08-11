@@ -40,14 +40,14 @@ set NEEDS_INSTALL=0
 
 if not exist "%SENTINEL%" (
     set NEEDS_INSTALL=1
-    echo  First run — installing dependencies...
+    echo  First run - installing dependencies...
 ) else (
     :: Compare requirements.txt modified date to sentinel date
     for /f %%a in ('forfiles /p "%~dp0" /m requirements.txt /c "cmd /c echo @fdate @ftime" 2^>nul') do set REQ_DATE=%%a
     for /f %%a in ('forfiles /p "%~dp0\.venv" /m .deps_installed /c "cmd /c echo @fdate @ftime" 2^>nul') do set SENT_DATE=%%a
     if "!REQ_DATE!" neq "!SENT_DATE!" (
         set NEEDS_INSTALL=1
-        echo  requirements.txt changed — updating dependencies...
+        echo  requirements.txt changed - updating dependencies...
     ) else (
         echo  Dependencies up to date ^(delete .venv\.deps_installed to force reinstall^).
     )
@@ -104,7 +104,7 @@ if not exist .env (
     echo  NOTE: No .env file found.
     if exist .env.example (
         copy .env.example .env >nul
-        echo  Created .env from .env.example — edit it with your API keys.
+        echo  Created .env from .env.example - edit it with your API keys.
     ) else (
         echo  Create a .env file with your ALPACA_API_KEY, etc.
     )

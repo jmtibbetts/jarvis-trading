@@ -814,7 +814,7 @@ def run():
     # circuit breaker so ALL batches instantly fell back to TA — 628
     # "RuntimeError" fallbacks in one log). 90s absorbs big-model latency.
     llm_request_timeout = max(5.0, float(os.getenv("SIGNAL_LLM_REQUEST_TIMEOUT_SECONDS", "90")))
-    llm_queue_timeout = max(1.0, float(os.getenv("SIGNAL_LLM_QUEUE_TIMEOUT_SECONDS", "8")))
+    llm_queue_timeout = max(1.0, float(os.getenv("SIGNAL_LLM_QUEUE_TIMEOUT_SECONDS", "45")))
     llm_deadline = time.monotonic() + llm_budget
 
     def _run_batch(batch_id, batch_syms, prompt, is_paper):
@@ -827,6 +827,15 @@ def run():
                     reason=f"LLM time budget ({llm_budget:.0f}s) exhausted before this batch ran",
                 )
                 return
+            # One provider failure trips a 15s circuit cooldown; without this
+            # wait, every remaining batch in the run failed INSTANTLY inside
+            # that window (observed live: 8 batches dead in the same second).
+            # A batch that can afford it sleeps the cooldown out instead.
+            from lib.lmstudio import get_llm_cooldown
+            cooldown = get_llm_cooldown()
+            if cooldown > 0 and (llm_deadline - time.monotonic()) > cooldown + 5:
+                logger.info(f"[Signals] Batch {batch_id} waiting out LLM cooldown ({cooldown:.1f}s)")
+                time.sleep(cooldown + 0.5)
             logger.info(f"[Signals] LLM call batch {batch_id} ({len(batch_syms)} syms)...")
             r = call_lm_studio(prompt, system=sys_p, max_tokens=TRACK_MAX_TOKENS,
                                temperature=0.15, thinking=False,
@@ -975,6 +984,22 @@ def run():
                 rec_key = signal_identity(sym, scored.get("direction"))
                 prior = existing_map.get(rec_key)
                 if prior and prior.status in ("Active", "PendingApproval"):
+                    # COMPARE before superseding: a new signal only replaces a
+                    # live one for the same symbol+direction when it's at least
+                    # as strong (small tolerance) — otherwise the fresh-but-
+                    # weaker take is dropped and the standing signal survives
+                    # with a refreshed updated_date. Prevents score churn where
+                    # each run replaces a good setup with a mediocre rescoring.
+                    prior_score = float(prior.composite_score or 0)
+                    new_score = float(scored.get("composite_score") or 0)
+                    if new_score < prior_score - 5.0:
+                        prior.updated_date = now_iso
+                        logger.debug(
+                            f"[Signals] Kept standing {sym} {scored.get('direction')} "
+                            f"({prior_score:.0f} > new {new_score:.0f}) — new take dropped"
+                        )
+                        skipped += 1
+                        continue
                     prior.status = "Superseded"
                     prior.updated_date = now_iso
                     updated += 1

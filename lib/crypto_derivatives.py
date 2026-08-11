@@ -88,27 +88,72 @@ def parse_long_short_ratio(data: dict) -> dict | None:
         return None
 
 
-def parse_liquidations(data: dict, symbol: str, inst_id: str) -> list[dict]:
+def parse_liquidations(data: dict, symbol: str, inst_id: str, contract_value: float = 1.0) -> list[dict]:
+    """Flatten OKX liquidation-orders into rows.
+
+    contract_value (OKX "ctVal") is REQUIRED for a correct notional. OKX quotes
+    liquidation size in CONTRACTS, not coins, and the contract size differs per
+    instrument — verified live against OKX's instruments endpoint:
+
+        BTC-USDT-SWAP   ctVal = 0.01  BTC
+        ETH-USDT-SWAP   ctVal = 0.1   ETH
+        SOL-USDT-SWAP   ctVal = 1     SOL
+        XRP-USDT-SWAP   ctVal = 100   XRP
+        DOGE-USDT-SWAP  ctVal = 1000  DOGE
+
+    Treating sz as coins (the original bug here) overstated BTC notionals 100x
+    and ETH 10x, while UNDERSTATING XRP 100x and DOGE 1000x. size_coins is
+    stored alongside the raw contract count so the two are never confused again.
+    """
     groups = data.get("data") or []
+    ct_val = contract_value if contract_value and contract_value > 0 else 1.0
     out = []
     for group in groups:
         for d in group.get("details") or []:
             try:
                 price = float(d["bkPx"])
-                size = float(d["sz"])
+                contracts = float(d["sz"])
+                size_coins = contracts * ct_val
                 out.append({
                     "symbol": symbol,
                     "inst_id": inst_id,
                     "side": d.get("side"),
                     "pos_side": d.get("posSide"),
                     "price": price,
-                    "size": size,
-                    "notional_usd": round(price * size, 2),
+                    "size": contracts,          # raw contract count, as reported
+                    "size_coins": size_coins,   # contracts x ctVal
+                    "contract_value": ct_val,
+                    "notional_usd": round(price * size_coins, 2),
                     "liquidated_at": _ms_to_iso(d.get("ts")),
                 })
             except (KeyError, ValueError, TypeError):
                 continue
     return out
+
+
+_contract_value_cache: dict[str, float] = {}
+
+
+def fetch_contract_value(inst_id: str) -> float | None:
+    """OKX contract size (ctVal) for a SWAP instrument, cached in-process.
+
+    Contract specs are effectively static, so this is fetched once per
+    instrument per process. Returns None on failure — callers must NOT fall
+    back to 1.0 silently, because that reintroduces the exact unit error this
+    exists to prevent."""
+    if inst_id in _contract_value_cache:
+        return _contract_value_cache[inst_id]
+    try:
+        data = _get("/api/v5/public/instruments", {"instType": "SWAP", "instId": inst_id})
+        rows = data.get("data") or []
+        if not rows:
+            return None
+        ct_val = float(rows[0]["ctVal"])
+    except (httpx.HTTPError, KeyError, ValueError, TypeError) as e:
+        logger.warning(f"[CryptoDerivatives] ctVal lookup failed for {inst_id}: {e}")
+        return None
+    _contract_value_cache[inst_id] = ct_val
+    return ct_val
 
 
 def _ms_to_iso(ms) -> str | None:
@@ -151,6 +196,12 @@ def fetch_derivatives_snapshot(symbol: str) -> dict | None:
 def fetch_recent_liquidations(symbol: str, limit: int = 100) -> list[dict]:
     base = symbol.upper().split("/")[0]
     inst_id = to_okx_inst_id(symbol)
+    # Without ctVal the notional would be wrong by orders of magnitude in either
+    # direction depending on the instrument, so skip rather than emit bad numbers.
+    ct_val = fetch_contract_value(inst_id)
+    if ct_val is None:
+        logger.warning(f"[CryptoDerivatives] Skipping {symbol} liquidations — contract value unavailable")
+        return []
     try:
         data = _get("/api/v5/public/liquidation-orders", {
             "instType": "SWAP", "instFamily": f"{base}-USDT", "state": "filled", "limit": str(limit),
@@ -158,7 +209,7 @@ def fetch_recent_liquidations(symbol: str, limit: int = 100) -> list[dict]:
     except httpx.HTTPError as e:
         logger.debug(f"[CryptoDerivatives] Liquidations fetch failed for {symbol}: {e}")
         return []
-    return parse_liquidations(data, base, inst_id)
+    return parse_liquidations(data, base, inst_id, contract_value=ct_val)
 
 
 def classify_oi_price_action(oi_change_pct: float | None, price_change_pct: float | None) -> str | None:

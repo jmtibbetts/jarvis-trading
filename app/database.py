@@ -231,6 +231,22 @@ class InstitutionalHolding(Base):
     created_date     = Column(String, default=now_iso)
 
 
+class PsychologySnapshot(Base):
+    """Point-in-time reading of the JARVIS Market Psychology Index.
+
+    Persisted purely so rate-of-change is computable: the index's level and
+    the speed it is moving are different signals, and the speed needs history.
+    components_json keeps the per-component breakdown so a past reading can be
+    explained later rather than being an unexplainable number."""
+    __tablename__ = "psychology_snapshots"
+    id                   = Column(String, primary_key=True, default=new_id)
+    score                = Column(Float)
+    label                = Column(String)
+    components_available = Column(Integer, default=0)
+    components_json      = Column(Text)
+    created_at           = Column(String, default=now_iso, index=True)
+
+
 class CongressTrade(Base):
     """A single stock transaction disclosed in a U.S. House Periodic
     Transaction Report (STOCK Act) — free Clerk of the House data, no vendor.

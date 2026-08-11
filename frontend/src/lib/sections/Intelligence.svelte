@@ -4,7 +4,7 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -35,6 +35,7 @@
   let institutional = $state<InstitutionalAccumulation | null>(null);
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
+  let psychology = $state<PsychologyIndex | null>(null);
   let expandedSqueezeSymbol = $state<string | null>(null);
 
   async function toggleDarkPoolExpand(symbol: string, weekStart: string) {
@@ -95,7 +96,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -111,6 +112,7 @@
       api.institutionalAccumulation(20).catch(() => null),
       api.congressTrades(25).catch(() => null),
       api.congressActivity(12).catch(() => null),
+      api.psychology().catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -128,6 +130,7 @@
     institutional = inst;
     congress = cg;
     congressActivity = cga;
+    psychology = psy;
   }
 
   $effect(() => {
@@ -475,6 +478,66 @@
           </table>
         {:else}
           <div class="empty">Dark pool / ATS data unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel
+      title="Market Psychology Index"
+      meta={psychology?.score != null
+        ? `${psychology.components_available}/${psychology.components_possible} components`
+        : "—"}
+    >
+      {#snippet children()}
+        {#if psychology && psychology.score != null}
+          <div class="psy-head">
+            <div class="psy-score">
+              <div class="psy-num num">{psychology.score.toFixed(0)}</div>
+              <Pill
+                label={(psychology.label ?? "").replace("_", " ")}
+                tone={psychology.score >= 60 ? "good" : psychology.score < 40 ? "bad" : "neutral"}
+              />
+            </div>
+            <div class="psy-meter" aria-hidden="true">
+              <div class="psy-track"></div>
+              <div class="psy-marker" style="left: {psychology.score}%"></div>
+            </div>
+            <div class="psy-scale">
+              <span>extreme fear</span><span>neutral</span><span>extreme greed</span>
+            </div>
+            {#if psychology.rate_of_change}
+              <div class="psy-roc num {psychology.rate_of_change.delta >= 0 ? 'pl-up' : 'pl-down'}">
+                {psychology.rate_of_change.delta >= 0 ? "+" : ""}{psychology.rate_of_change.delta.toFixed(1)}
+                over {psychology.rate_of_change.hours.toFixed(1)}h · {psychology.rate_of_change.direction.replace("_", " ")}
+              </div>
+            {/if}
+          </div>
+
+          <table class="tbl">
+            <thead>
+              <tr><th>Component</th><th>Reading</th><th>Detail</th></tr>
+            </thead>
+            <tbody>
+              {#each Object.entries(psychology.components) as [name, comp] (name)}
+                <tr>
+                  <td class="sym">{name.replace("_", "/")}</td>
+                  <td class="num {comp == null ? '' : comp.score >= 60 ? 'pl-up' : comp.score < 40 ? 'pl-down' : ''}">
+                    {comp == null ? "—" : comp.score.toFixed(0)}
+                  </td>
+                  <td class={comp == null ? "dim" : ""}>
+                    {comp == null ? "no data — abstained rather than scored neutral" : comp.detail}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="si-footnote">{psychology.note}</div>
+        {:else}
+          <div class="empty">
+            Market psychology index unavailable — no component inputs could be computed.
+          </div>
         {/if}
       {/snippet}
     </Panel>
@@ -1247,6 +1310,51 @@
   }
   .dim {
     color: var(--ink-faint);
+  }
+  .psy-head {
+    margin-bottom: 12px;
+  }
+  .psy-score {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .psy-num {
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .psy-meter {
+    position: relative;
+    height: 6px;
+    margin: 10px 0 4px;
+  }
+  .psy-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--bad), var(--warm), var(--good));
+    opacity: 0.55;
+  }
+  .psy-marker {
+    position: absolute;
+    top: -3px;
+    width: 2px;
+    height: 12px;
+    background: var(--ink);
+    transform: translateX(-1px);
+  }
+  .psy-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .psy-roc {
+    margin-top: 8px;
+    font-size: 11px;
   }
   .cg-chips {
     display: flex;

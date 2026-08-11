@@ -12,7 +12,8 @@ from typing import Optional, Union
 from app.database import (
     AiDecision, CongressTrade, CryptoDerivativesSnapshot, CryptoLiquidation, InsiderTransaction,
     InstitutionalHolding, IntelligenceIngestionRun, IntelligenceSourceHealth, MarketAsset,
-    NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling, SignalEvaluation,
+    NewsItem, PlatformConfig, PortfolioSnapshot, Position, ProcessedCongressFiling,
+    PsychologySnapshot, SignalEvaluation,
     ThreatEvent, TradeOutcome, TradingSignal, get_db,
 )
 from lib.learning_engine import get_all_outcomes, get_all_accuracy, get_all_patterns, get_all_regime_stats, get_all_lessons
@@ -491,6 +492,99 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     )
     if not result:
         raise HTTPException(503, "FINRA short interest data unavailable")
+    return result
+
+
+@router.get("/psychology")
+def get_market_psychology(persist: bool = True):
+    """JARVIS Market Psychology Index — a fear/greed composite computed from
+    data this system already collects (VIX history, tracked-universe breadth,
+    crypto perp funding, long/short ratio, liquidation skew) rather than
+    scraped from a third-party index.
+
+    Components with no data ABSTAIN rather than scoring a neutral 50, so the
+    response reports how many of the five actually contributed. See
+    lib/market_psychology.py for each mapping and why it was chosen."""
+    from lib.market_psychology import (
+        breadth_component, compute_psychology_index, compute_rate_of_change,
+        funding_component, liquidation_component, long_short_component, vix_component,
+    )
+
+    vix_now = vix_history = None
+    try:
+        from lib.futures_data import fetch_futures_ohlcv, get_cached_futures_price
+        # get_cached_futures_price returns a dict ({"symbol", "price", ...}),
+        # not a bare float.
+        quote = get_cached_futures_price("^VIX")
+        vix_now = quote.get("price") if isinstance(quote, dict) else quote
+        df = fetch_futures_ohlcv("^VIX", "1D")
+        if df is not None and not df.empty:
+            vix_history = [float(v) for v in df["close"].tolist()]
+            if vix_now is None:
+                vix_now = vix_history[-1]
+    except Exception as e:
+        logger.debug(f"[Psychology] VIX unavailable: {e}")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    with get_db() as db:
+        changes = [
+            r[0] for r in db.query(MarketAsset.change_percent).all() if r[0] is not None
+        ]
+
+        # One snapshot per symbol — the newest — so a symbol polled more often
+        # doesn't get extra weight in the averages.
+        latest_by_symbol: dict = {}
+        for row in (
+            db.query(CryptoDerivativesSnapshot)
+            .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
+            .limit(200).all()
+        ):
+            latest_by_symbol.setdefault(row.symbol, row)
+        funding_rates = [r.funding_rate for r in latest_by_symbol.values()]
+        ls_ratios = [r.long_short_ratio for r in latest_by_symbol.values()]
+
+        long_usd = short_usd = 0.0
+        for liq in db.query(CryptoLiquidation).filter(CryptoLiquidation.liquidated_at >= cutoff).all():
+            # notional_usd is computed at ingest; fall back to price*size only
+            # if that column is empty on older rows.
+            notional = liq.notional_usd if liq.notional_usd is not None else (liq.price or 0) * (liq.size or 0)
+            if (liq.pos_side or "").lower() == "long":
+                long_usd += notional
+            elif (liq.pos_side or "").lower() == "short":
+                short_usd += notional
+
+        prior = (
+            db.query(PsychologySnapshot)
+            .order_by(PsychologySnapshot.created_at.desc()).first()
+        )
+        prior_score = prior.score if prior else None
+        prior_at = prior.created_at if prior else None
+
+    components = {
+        "vix": vix_component(vix_now, vix_history),
+        "breadth": breadth_component(changes),
+        "funding": funding_component(funding_rates),
+        "long_short": long_short_component(ls_ratios),
+        "liquidations": liquidation_component(long_usd, short_usd),
+    }
+    result = compute_psychology_index(components)
+
+    hours = None
+    if prior_at:
+        try:
+            hours = (datetime.now(timezone.utc) - datetime.fromisoformat(prior_at)).total_seconds() / 3600
+        except ValueError:
+            hours = None
+    result["rate_of_change"] = compute_rate_of_change(result["score"], prior_score, hours)
+    result["computed_at"] = datetime.now(timezone.utc).isoformat()
+
+    if persist and result["score"] is not None:
+        with get_db() as db:
+            db.add(PsychologySnapshot(
+                score=result["score"], label=result["label"],
+                components_available=result["components_available"],
+                components_json=json.dumps(components, default=str),
+            ))
     return result
 
 

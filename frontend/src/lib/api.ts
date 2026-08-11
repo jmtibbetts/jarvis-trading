@@ -473,6 +473,27 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type PsychologyComponent = {
+  score: number;
+  detail: string;
+  [k: string]: unknown;
+} | null;
+
+export type PsychologyIndex = {
+  score: number | null;
+  label: string | null;
+  components: {
+    vix: PsychologyComponent; breadth: PsychologyComponent; funding: PsychologyComponent;
+    long_short: PsychologyComponent; liquidations: PsychologyComponent;
+  };
+  components_available: number;
+  components_possible: number;
+  weight_coverage?: number;
+  note: string;
+  rate_of_change: { delta: number; hours: number; per_day: number; direction: string } | null;
+  computed_at: string;
+};
+
 export type CongressDisclaimer = {
   data_type: string; amounts_are_ranges: string; reporting_delay: string;
   interpretation: string; coverage: string;
@@ -855,6 +876,7 @@ export const api = {
   cryptoDerivatives: (symbol: string, liquidationHours = 24) =>
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
+  psychology: () => get<PsychologyIndex>("/psychology"),
   congressTrades: (limit = 50, opts: { ticker?: string; days?: number } = {}) => {
     const p = new URLSearchParams({ limit: String(limit), days: String(opts.days ?? 180) });
     if (opts.ticker) p.set("ticker", opts.ticker);

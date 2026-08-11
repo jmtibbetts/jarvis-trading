@@ -70,10 +70,46 @@ class ParseLiquidationsTests(unittest.TestCase):
             ],
             "instFamily": "BTC-USDT", "instId": "BTC-USDT-SWAP", "instType": "SWAP",
         }]}
-        rows = parse_liquidations(data, symbol="BTC", inst_id="BTC-USDT-SWAP")
+        rows = parse_liquidations(data, symbol="BTC", inst_id="BTC-USDT-SWAP", contract_value=0.01)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["pos_side"], "long")
-        self.assertAlmostEqual(rows[0]["notional_usd"], 63955.7 * 3.62, places=1)
+        # OKX sz is in CONTRACTS. BTC-USDT-SWAP ctVal is 0.01 BTC (verified live
+        # against OKX's instruments endpoint), so 3.62 contracts = 0.0362 BTC.
+        self.assertAlmostEqual(rows[0]["size_coins"], 3.62 * 0.01, places=6)
+        self.assertAlmostEqual(rows[0]["notional_usd"], 63955.7 * 3.62 * 0.01, places=1)
+        self.assertEqual(rows[0]["size"], 3.62)  # raw contract count preserved
+
+
+class LiquidationContractValueTests(unittest.TestCase):
+    """Regression tests for a real unit bug shipped in this module: notional was
+    computed as price * sz, treating OKX's contract count as a coin quantity.
+    Verified live against OKX's instruments endpoint, ctVal varies per
+    instrument, so the error ran in BOTH directions — BTC overstated 100x and
+    ETH 10x, while XRP was understated 100x and DOGE 1000x."""
+
+    def _one(self, ct_val, sz="10", px="100"):
+        data = {"data": [{"details": [
+            {"bkPx": px, "sz": sz, "posSide": "long", "side": "sell", "ts": "1786408771714"},
+        ]}]}
+        return parse_liquidations(data, "X", "X-USDT-SWAP", contract_value=ct_val)[0]
+
+    def test_btc_sized_contract_scales_notional_down(self):
+        self.assertAlmostEqual(self._one(0.01)["notional_usd"], 10 * 0.01 * 100, places=6)
+
+    def test_doge_sized_contract_scales_notional_up(self):
+        """The direction that would have been UNDERSTATED before the fix."""
+        self.assertAlmostEqual(self._one(1000)["notional_usd"], 10 * 1000 * 100, places=6)
+
+    def test_unit_contract_is_unchanged(self):
+        self.assertAlmostEqual(self._one(1)["notional_usd"], 10 * 100, places=6)
+
+    def test_zero_or_negative_contract_value_falls_back_to_one(self):
+        """Defensive: a bad ctVal must not zero out every notional."""
+        self.assertAlmostEqual(self._one(0)["notional_usd"], 10 * 100, places=6)
+        self.assertAlmostEqual(self._one(-5)["notional_usd"], 10 * 100, places=6)
+
+    def test_contract_value_recorded_on_each_row(self):
+        self.assertEqual(self._one(0.1)["contract_value"], 0.1)
 
     def test_malformed_detail_skipped_not_crashed(self):
         data = {"data": [{"details": [{"bkPx": "not-a-number", "sz": "1", "posSide": "long", "side": "sell"}]}]}

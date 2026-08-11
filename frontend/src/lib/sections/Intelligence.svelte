@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import ThreatMap from "../components/ThreatMap.svelte";
-  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot } from "../api";
+  import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot } from "../api";
 
   let regime = $state<Regime | null>(null);
   let threats = $state<Threat[]>([]);
@@ -24,6 +24,7 @@
   let exposure = $state<ThreatExposure | null>(null);
   let insiderClusters = $state<InsiderClustersResponse | null>(null);
   let yieldCurve = $state<YieldCurveSnapshot | null>(null);
+  let macro = $state<MacroSnapshot | null>(null);
 
   const threatTrend = $derived.by(() => {
     const days: { date: string; critical: number; high: number; other: number; total: number }[] = [];
@@ -62,7 +63,7 @@
   }
 
   async function loadAll() {
-    const [r, t, n, m, s, st, ex, ic, yc] = await Promise.all([
+    const [r, t, n, m, s, st, ex, ic, yc, fr] = await Promise.all([
       api.regime().catch(() => null),
       api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }),
       api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }),
@@ -72,6 +73,7 @@
       api.threatExposure().catch(() => null),
       api.insiderClusters(14).catch(() => null),
       api.yieldCurve().catch(() => null),
+      api.macroFred().catch(() => null),
     ]);
     regime = r;
     threats = t;
@@ -83,6 +85,7 @@
     exposure = ex;
     insiderClusters = ic;
     yieldCurve = yc;
+    macro = fr;
   }
 
   $effect(() => {
@@ -99,6 +102,17 @@
     s === "corroborated" ? "corroborated" : s === "unconfirmed_social" ? "unconfirmed" : s === "single_source" ? "single source" : "—";
   const sourceStatusTone = (s: string) => (s === "healthy" ? "good" : s === "degraded" ? "warm" : "bad");
   const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+  const MACRO_LABELS: Record<string, string> = {
+    cpi: "CPI", core_cpi: "Core CPI", pce: "PCE", core_pce: "Core PCE",
+    unemployment_rate: "Unemployment", fed_funds_rate: "Fed Funds Rate",
+    nonfarm_payrolls: "Nonfarm Payrolls", real_gdp: "Real GDP", jobless_claims: "Jobless Claims",
+  };
+  const fmtMacroValue = (v: number, unit: string) => {
+    const isChange = unit.includes("YoY") || unit.includes("MoM");
+    const sign = isChange && v >= 0 ? "+" : "";
+    const num = unit.includes("%") ? v.toFixed(1) : v.toLocaleString();
+    return `${sign}${num}${unit.includes("%") ? "%" : ""}`;
+  };
   const fmtAgo = (iso: string | null | undefined) => {
     if (!iso) return "—";
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -180,6 +194,34 @@
           <p class="insider-note">US Treasury daily yield curve (free, official Treasury.gov data). An inverted curve — short-term yields above long-term — has historically preceded recessions, though timing and lead time vary widely.</p>
         {:else}
           <div class="empty">Yield curve data unavailable</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-12">
+    <Panel title="Macro Indicators" meta={macro?.configured ? "FRED · St. Louis Fed" : "not configured"}>
+      {#snippet children()}
+        {#if macro?.configured && macro.readings}
+          <div class="macro-grid">
+            {#each Object.entries(macro.readings) as [key, reading] (key)}
+              <div class="macro-card">
+                <span class="macro-label">{MACRO_LABELS[key] ?? key}</span>
+                {#if reading}
+                  <span class="macro-val">{fmtMacroValue(reading.value, reading.unit)}</span>
+                  <span class="macro-unit">{reading.unit} · {reading.date}</span>
+                {:else}
+                  <span class="macro-val dim">—</span>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else if macro && !macro.configured}
+          <div class="empty">
+            Not configured — add a free FRED API key (FRED_API_KEY in .env, instant signup at fred.stlouisfed.org) to enable CPI, unemployment, nonfarm payrolls, GDP, and Fed funds rate tracking.
+          </div>
+        {:else}
+          <div class="empty">Macro data unavailable</div>
         {/if}
       {/snippet}
     </Panel>
@@ -853,6 +895,40 @@
     font-size: 10.5px;
     color: var(--ink-faint);
     line-height: 1.5;
+  }
+
+  .macro-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .macro-card {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    background: var(--surface-raised, rgba(255, 255, 255, 0.03));
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .macro-label {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+  }
+  .macro-val {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 16px;
+    font-weight: 650;
+  }
+  .macro-val.dim {
+    color: var(--ink-faint);
+    font-weight: 500;
+  }
+  .macro-unit {
+    font-size: 10px;
+    color: var(--ink-faint);
   }
 
   @media (max-width: 1180px) {

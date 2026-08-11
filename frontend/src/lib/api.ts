@@ -376,6 +376,24 @@ export type YieldCurveSnapshot = {
   fetched_at: string;
 };
 
+export type MacroReading = { date: string; value: number; compared_to: string | null; unit: string; series_id: string } | null;
+
+export type MacroSnapshot = {
+  configured: boolean;
+  fetched_at: string | null;
+  readings: {
+    cpi: MacroReading;
+    core_cpi: MacroReading;
+    pce: MacroReading;
+    core_pce: MacroReading;
+    unemployment_rate: MacroReading;
+    fed_funds_rate: MacroReading;
+    nonfarm_payrolls: MacroReading;
+    real_gdp: MacroReading;
+    jobless_claims: MacroReading;
+  } | null;
+};
+
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
 export type CacheStats = {
   total_bars: number;
@@ -643,6 +661,7 @@ export const api = {
   },
   insiderClusters: (days = 14) => get<InsiderClustersResponse>(`/insider/clusters?days=${days}`),
   yieldCurve: () => get<YieldCurveSnapshot>(`/macro/yield-curve`),
+  macroFred: () => get<MacroSnapshot>(`/macro/fred`),
 
   tradingPreference: () => get<TradingPreference>(`/preferences/trading`),
   setTradeMode: (trade_mode: "scalp" | "longer" | "all") =>

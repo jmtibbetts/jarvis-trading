@@ -428,6 +428,22 @@ def get_yield_curve():
     return snapshot
 
 
+@router.get("/macro/fred")
+def get_macro_fred():
+    """CPI/core CPI, PCE/core PCE, unemployment, nonfarm payrolls, real GDP,
+    fed funds rate, jobless claims — free FRED (St. Louis Fed) data. Requires
+    the user's own free FRED_API_KEY (lib/fred_client.py); returns a clear
+    "not configured" response rather than an error when the key is missing,
+    since this integration is opt-in."""
+    from lib.fred_client import get_macro_snapshot, is_configured
+    if not is_configured():
+        return {"configured": False, "readings": None, "fetched_at": None}
+    snapshot = get_macro_snapshot()
+    if not snapshot:
+        raise HTTPException(503, "FRED data unavailable")
+    return {"configured": True, **snapshot}
+
+
 @router.get("/insider/activity")
 def get_insider_activity(ticker: str = None, days: int = 30, limit: int = 200):
     """Recent SEC Form 4 insider transactions — free EDGAR data, no vendor.

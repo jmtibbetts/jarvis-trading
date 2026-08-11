@@ -52,6 +52,10 @@
   let maxDrawdown = $state<number | null>(null);
   let news = $state<{ title: string; sentiment: string | null; source: string }[]>([]);
   let psychology = $state<PsychologyIndex | null>(null);
+  let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
+  let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
+  let webNews = $state<Awaited<ReturnType<typeof api.webNews>> | null>(null);
+  let postmortems = $state<{ window_days: number; total_failures: number; by_reason: Record<string, number> } | null>(null);
   let loadError = $state<string | null>(null);
 
   async function loadAll() {
@@ -71,6 +75,17 @@
         api.enrichedWatchlist(25).catch(() => null),
         api.psychology().catch(() => null),
       ]);
+      Promise.all([
+        api.fxRates().catch(() => null),
+        api.cryptoMarkets().catch(() => null),
+        api.webNews().catch(() => null),
+        fetch("/api/learning/postmortems?days=30").then((r) => r.json()).catch(() => null),
+      ]).then(([fx, cg, wn, pm]) => {
+        fxRates = fx ?? fxRates;
+        cryptoMarkets = cg ?? cryptoMarkets;
+        webNews = wn ?? webNews;
+        postmortems = pm ?? postmortems;
+      });
       signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
       opportunities = oppRes;
       catalysts = catRes;
@@ -119,6 +134,17 @@
   });
 
   const jobEntries = $derived(Object.entries(jobs));
+  const cryptoMovers = $derived(
+    (cryptoMarkets?.coins ?? [])
+      .filter((c0) => c0.chg_24h != null)
+      .sort((a, b) => Math.abs(b.chg_24h!) - Math.abs(a.chg_24h!))
+      .slice(0, 6),
+  );
+  const fxMajors = $derived((fxRates?.pairs ?? []).slice(0, 5));
+  const failureReasons = $derived(
+    Object.entries(postmortems?.by_reason ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5),
+  );
+  const failureMax = $derived(failureReasons.length ? failureReasons[0][1] : 0);
   const fmtUsd = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const fmtPct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`);
   const fmtAgo = (iso: string | null) => {
@@ -188,22 +214,91 @@
   <div class="span-4">
     <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open">
       {#if positionsResp && positionsResp.positions.length}
-        <table class="pos">
-          <thead>
-            <tr><th>Sym</th><th>Side</th><th>P&amp;L</th></tr>
-          </thead>
-          <tbody>
-            {#each positionsResp.positions as p (p.symbol)}
-              <tr>
-                <td class="sym">{p.symbol}</td>
-                <td>{p.side}</td>
-                <td class={p.unrealized_plpc >= 0 ? "pl-up" : "pl-down"}>{fmtPct(p.unrealized_plpc)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="pos-scroll">
+          <table class="pos">
+            <thead>
+              <tr><th>Sym</th><th>Side</th><th>P&amp;L</th></tr>
+            </thead>
+            <tbody>
+              {#each positionsResp.positions as p (p.symbol)}
+                <tr>
+                  <td class="sym">{p.symbol}</td>
+                  <td>{p.side}</td>
+                  <td class={p.unrealized_plpc >= 0 ? "pl-up" : "pl-down"}>{fmtPct(p.unrealized_plpc)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {:else}
         <div class="empty">No open positions</div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-4">
+    <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : "—"}>
+      <div class="movers">
+        <div class="mv-col">
+          <div class="mv-head">CRYPTO — BIGGEST 24H MOVES</div>
+          {#if cryptoMovers.length}
+            {#each cryptoMovers as c0 (c0.id)}
+              <div class="mv-row">
+                <span class="sym">{c0.symbol.toUpperCase()}</span>
+                <span class="num dim">${c0.price < 1 ? c0.price.toPrecision(3) : c0.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                <span class="num {c0.chg_24h! >= 0 ? 'pl-up' : 'pl-down'}">{c0.chg_24h! >= 0 ? "+" : ""}{c0.chg_24h!.toFixed(1)}%</span>
+              </div>
+            {/each}
+          {:else}
+            <div class="empty">no data yet</div>
+          {/if}
+        </div>
+        <div class="mv-col">
+          <div class="mv-head">FX MAJORS — LIVE INTERBANK</div>
+          {#if fxMajors.length}
+            {#each fxMajors as fp (fp.pair)}
+              <div class="mv-row">
+                <span class="sym">{fp.pair}</span>
+                <span class="num dim">{fp.rate ?? "—"}</span>
+                <span class="num {(fp.change_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fp.change_pct != null ? `${fp.change_pct >= 0 ? "+" : ""}${fp.change_pct.toFixed(2)}%` : "—"}</span>
+              </div>
+            {/each}
+          {:else}
+            <div class="empty">no data yet</div>
+          {/if}
+        </div>
+      </div>
+    </Panel>
+  </div>
+  <div class="span-4">
+    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : "—"}>
+      {#if webNews && webNews.items.length}
+        <div class="pulse">
+          {#each webNews.items.slice(0, 5) as it, i (i)}
+            <div class="pulse-row">
+              <div class="pulse-title">{it.title}</div>
+              {#if it.snippet}<div class="pulse-snippet dim">{it.snippet}</div>{/if}
+            </div>
+          {/each}
+        </div>
+        <div class="pulse-note dim">Unverified live web search — the same block injected into signal-generation prompts.</div>
+      {:else}
+        <div class="empty">Populates on the next signal-generation run</div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-4">
+    <Panel title="Learning Loop" meta={postmortems ? `${postmortems.total_failures} failures analyzed · ${postmortems.window_days}d` : "—"}>
+      {#if failureReasons.length}
+        {#each failureReasons as [reason, count] (reason)}
+          <div class="fail-row">
+            <span class="fail-label">{reason.replaceAll("_", " ").toLowerCase()}</span>
+            <span class="fail-bar"><span class="fail-fill" style={`width:${failureMax ? (count / failureMax) * 100 : 0}%`}></span></span>
+            <span class="num dim">{count}</span>
+          </div>
+        {/each}
+        <div class="pulse-note dim">Why signals died, classified deterministically — feeds the scoring penalty so repeated failure patterns get downranked.</div>
+      {:else}
+        <div class="empty">No failures recorded in this window</div>
       {/if}
     </Panel>
   </div>
@@ -749,12 +844,108 @@
     font-size: 12px;
   }
 
+  .movers {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .fail-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 11.5px;
+  }
+  .fail-row:last-of-type {
+    border-bottom: none;
+  }
+  .fail-label {
+    text-transform: capitalize;
+  }
+  .fail-bar {
+    height: 5px;
+    background: var(--surface-raised);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .fail-fill {
+    display: block;
+    height: 100%;
+    background: var(--bad);
+    opacity: 0.75;
+    border-radius: 3px;
+  }
+  .mv-head {
+    font-size: 9px;
+    letter-spacing: 0.09em;
+    color: var(--ink-faint);
+    font-weight: 650;
+    margin-bottom: 7px;
+  }
+  .mv-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 10px;
+    padding: 5.5px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    align-items: baseline;
+  }
+  .mv-row:last-child {
+    border-bottom: none;
+  }
+  .pulse-row {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .pulse-row:last-child {
+    border-bottom: none;
+  }
+  .pulse-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .pulse-snippet {
+    font-size: 10.5px;
+    line-height: 1.4;
+    margin-top: 2px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .pulse-note {
+    font-size: 9.5px;
+    margin-top: 8px;
+  }
+  /* 40+ open positions made this table grow unbounded, stretching the whole
+     grid row and leaving a huge void under the equity chart — cap it to the
+     chart's height and scroll internally so the panels below flow up. */
+  .pos-scroll {
+    max-height: 372px;
+    overflow-y: auto;
+    margin: -14px;
+  }
+  .pos-scroll table.pos {
+    margin: 0;
+    width: 100%;
+  }
   table.pos {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
     margin: -14px;
     width: calc(100% + 28px);
+  }
+  table.pos thead th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    z-index: 1;
   }
   table.pos th {
     text-align: left;

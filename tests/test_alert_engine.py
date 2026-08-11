@@ -70,11 +70,23 @@ class AlertEngineTests(unittest.TestCase):
             alert_engine.raise_alert("insider", "ACTIONABLE", "Notable buy")
         mock_push.assert_not_called()
 
-    def test_high_priority_pushes_telegram(self):
+    def test_high_priority_does_not_push_telegram_by_default(self):
+        """Telegram carries TRADE SIGNALS ONLY (user instruction) — alert
+        pushes are gated behind TELEGRAM_ALERTS_ENABLED, default off."""
         session, closed_session = self._session_factory()
         with patch.object(alert_engine, "get_db", closed_session), \
              patch.object(alert_engine, "_broadcast"), \
              patch.object(alert_engine, "_push_telegram") as mock_push:
+            alert_engine.raise_alert("crypto_derivatives", "HIGH_PRIORITY", "Big liquidation")
+        mock_push.assert_not_called()
+
+    def test_high_priority_pushes_telegram_when_reenabled(self):
+        import os
+        session, closed_session = self._session_factory()
+        with patch.object(alert_engine, "get_db", closed_session), \
+             patch.object(alert_engine, "_broadcast"), \
+             patch.object(alert_engine, "_push_telegram") as mock_push, \
+             patch.dict(os.environ, {"TELEGRAM_ALERTS_ENABLED": "true"}):
             alert_engine.raise_alert("crypto_derivatives", "HIGH_PRIORITY", "Big liquidation")
         mock_push.assert_called_once()
 

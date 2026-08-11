@@ -394,10 +394,29 @@
                 Generated signal
                 <button class="btn tiny outline save-btn" onclick={saveGeneratedSignal}>Save to Signals</button>
               </div>
+              <div class="gen-pills">
+                <Pill
+                  label={String(analyzeResult.signal.direction ?? "?")}
+                  tone={String(analyzeResult.signal.direction ?? "").toLowerCase().includes("short") ? "bad" : "good"}
+                />
+                <Pill label={String(analyzeResult.signal.horizon ?? "?")} tone="neutral" />
+                <span class="num dim">{analyzeResult.signal.timeframe ?? "—"} chart · expect {analyzeResult.signal.hold_estimate ?? "?"}</span>
+                <span class="num"><span class="dim">confidence</span> {Math.round(Number(analyzeResult.signal.confidence ?? 0))}%</span>
+              </div>
               <div class="num">
-                {analyzeResult.signal.direction} @ {analyzeResult.signal.entry_price} → {analyzeResult.signal.target_price}
+                entry {analyzeResult.signal.entry_price} → target {analyzeResult.signal.target_price}
                 / stop {analyzeResult.signal.stop_loss}
               </div>
+              {#if analyzeResult.signal.bias_conflict}
+                <div class="gen-conflict">
+                  ⚠ Direction conflicts with the chart: {analyzeResult.signal.bias_conflict}. Treat with caution.
+                </div>
+              {/if}
+              {#if analyzeResult.signal.bias_summary}
+                <div class="dim num gen-bias">
+                  timeframe biases: {analyzeResult.signal.bias_summary.bullish} bullish / {analyzeResult.signal.bias_summary.bearish} bearish of {analyzeResult.signal.bias_summary.total}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -810,6 +829,26 @@
     box-shadow: 0 0 6px var(--warm);
   }
 
+  .gen-pills {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 6px 0;
+  }
+  .gen-conflict {
+    margin-top: 6px;
+    font-size: 11px;
+    padding: 6px 9px;
+    border: 1px solid rgba(255, 180, 84, 0.35);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 180, 84, 0.08);
+    color: var(--warm);
+  }
+  .gen-bias {
+    margin-top: 4px;
+    font-size: 10px;
+  }
   .link-chip {
     display: inline-flex;
     align-items: center;

@@ -348,9 +348,8 @@ def alert_new_signals(token, chat_id):
             for s in db.query(TradingSignal).filter(
                 TradingSignal.status.in_(["Active", "PendingApproval"]),
                 TradingSignal.generated_at >= cutoff,
-                TradingSignal.confidence >= 70,
             ).order_by(TradingSignal.generated_at.desc(), TradingSignal.confidence.desc()).limit(
-                max(1, int(os.getenv("TELEGRAM_SETUP_LIMIT", "8")))
+                max(1, int(os.getenv("TELEGRAM_SETUP_LIMIT", "60")))
             ).all()
         ]
 
@@ -1068,7 +1067,11 @@ def run():
 
     # Proactive alerts (every run = every 1min)
     alert_new_signals(token, chat_id)
-    alert_critical_threats(token, chat_id)
-    alert_position_updates(token, chat_id)
+    # Per user instruction the bot sends TRADE SIGNALS ONLY. Threat and
+    # position pushes are off unless explicitly re-enabled — the dashboard
+    # (threat map, positions tab, notification center) is where those live.
+    if os.getenv("TELEGRAM_SIGNALS_ONLY", "true").lower() not in ("1", "true", "yes"):
+        alert_critical_threats(token, chat_id)
+        alert_position_updates(token, chat_id)
 
     return {"updates": len(updates)}

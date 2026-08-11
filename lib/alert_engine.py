@@ -71,7 +71,12 @@ def raise_alert(
         alert = _to_dict(row)
 
     _broadcast(alert)
-    if push_telegram and severity in TELEGRAM_SEVERITIES:
+    # Telegram carries TRADE SIGNALS ONLY (user instruction). Alert pushes
+    # go to the dashboard/WS; set TELEGRAM_ALERTS_ENABLED=true to restore
+    # HIGH_PRIORITY/CRITICAL alert pushes to the bot.
+    import os as _os
+    if (push_telegram and severity in TELEGRAM_SEVERITIES
+            and _os.getenv("TELEGRAM_ALERTS_ENABLED", "false").lower() in ("1", "true", "yes")):
         _push_telegram(alert)
     return alert
 

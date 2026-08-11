@@ -2439,10 +2439,37 @@ def analyze(body: AnalyzeRequest):
                 from lib.lmstudio import call_lm_studio, parse_json
                 from lib.market_regime import get_regime
                 regime=get_regime()
-                prompt=f"""Analyze this ticker for a trade setup:\n\n{pb}\n\nRegime: {regime.get("label")} | Risk: {regime.get("risk")}\n\nGenerate ONE signal as JSON object with keys: asset_symbol, asset_class, direction (Long/Bounce only), confidence, timeframe, entry_price, target_price, stop_loss, reasoning, key_risks, momentum. Return ONLY the JSON."""
+                # "Long/Bounce only" was here originally, which FORCED a long
+                # even when every timeframe read bearish (observed live: an
+                # all-bearish chart produced "Long @ 1.3"). Shorts are now
+                # allowed, and the model must justify direction against the
+                # per-timeframe biases it was shown.
+                prompt=f"""Analyze this ticker for a trade setup:\n\n{pb}\n\nRegime: {regime.get("label")} | Risk: {regime.get("risk")}\n\nGenerate ONE signal as JSON object with keys: asset_symbol, asset_class, direction (Long or Short — match the timeframe biases above; shorting a bearish chart is expected), confidence (0-100), timeframe (one of the analyzed timeframes), entry_price, target_price, stop_loss, reasoning, key_risks, momentum. Return ONLY the JSON."""
                 raw=call_lm_studio(prompt,max_tokens=800,temperature=0.1)
                 parsed=parse_json(raw)
                 signal=parsed[0] if isinstance(parsed,list) else parsed
+
+                # Deterministic conflict check the LLM cannot talk its way out
+                # of: count the per-timeframe biases and flag a signal that
+                # trades AGAINST the clear majority.
+                if isinstance(signal, dict) and not signal.get("error"):
+                    biases = [ (d.get("bias") or "").lower() for d in ta.values()
+                               if isinstance(d, dict) and not d.get("error") ]
+                    bear = biases.count("bearish"); bull = biases.count("bullish")
+                    direction = str(signal.get("direction") or "").lower()
+                    conflict = None
+                    if bear >= max(3, len(biases) * 0.7) and "short" not in direction:
+                        conflict = f"{bear}/{len(biases)} timeframes are bearish but the signal is {signal.get('direction')}"
+                    elif bull >= max(3, len(biases) * 0.7) and "short" in direction:
+                        conflict = f"{bull}/{len(biases)} timeframes are bullish but the signal is {signal.get('direction')}"
+                    signal["bias_conflict"] = conflict
+                    signal["bias_summary"] = {"bullish": bull, "bearish": bear, "total": len(biases)}
+                    # horizon + hold estimate for the UI
+                    tf = str(signal.get("timeframe") or "")
+                    horizon_map = {"1m":"scalp","3m":"scalp","5m":"scalp","15m":"intraday","30m":"intraday","1H":"intraday","2H":"swing","4H":"swing","1D":"position"}
+                    hold_map = {"1m":"<30 min","3m":"<30 min","5m":"<1 hr","15m":"1-4 hr","30m":"2-8 hr","1H":"4-24 hr","2H":"1-3 days","4H":"1-5 days","1D":"1-4 weeks"}
+                    signal["horizon"] = horizon_map.get(tf, "position")
+                    signal["hold_estimate"] = hold_map.get(tf, "varies")
             except Exception as e:
                 signal={"error":str(e)}
         return {"symbol":body.symbol.upper(),"ta":ta,"prompt_block":pb,"signal":signal}

@@ -633,6 +633,12 @@ class UserPreference(Base):
     telegram_enabled    = Column(Boolean, default=False)
     auto_sim_enabled    = Column(Boolean, default=True)
     paper_auto_trade_enabled = Column(Boolean, default=True)
+    # Live (Alpaca paper) auto-execution criteria — an approved signal must
+    # clear ALL of these to be placed on the broker account. Auto Sim takes
+    # every approved signal regardless, so the two books can be compared.
+    live_min_score      = Column(Float, default=55.0)
+    live_min_rr         = Column(Float, default=0.0)   # 0 = no R:R gate
+    live_min_confidence = Column(Float, default=0.0)   # 0 = no confidence gate
     updated_at          = Column(String, default=now_iso)
 
 
@@ -1030,6 +1036,9 @@ def _migrate_columns():
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),
+            ("live_min_score", "REAL DEFAULT 55.0"),
+            ("live_min_rr", "REAL DEFAULT 0.0"),
+            ("live_min_confidence", "REAL DEFAULT 0.0"),
         ],
     }
     try:

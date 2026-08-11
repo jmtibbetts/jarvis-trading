@@ -46,6 +46,25 @@ def update_trading_preference(body: TradingPreferenceRequest):
         raise HTTPException(400, str(exc))
 
 
+class ExecutionCriteriaRequest(BaseModel):
+    live_min_score: Optional[float] = None
+    live_min_rr: Optional[float] = None
+    live_min_confidence: Optional[float] = None
+
+
+@router.put("/preferences/execution")
+def update_execution_criteria(body: ExecutionCriteriaRequest):
+    """Live (Alpaca) auto-execution gates. Auto Sim mirrors every approved
+    signal unconditionally; these criteria decide which of them also reach
+    the broker account."""
+    from lib.trading_preferences import set_execution_criteria
+    return set_execution_criteria(
+        live_min_score=body.live_min_score,
+        live_min_rr=body.live_min_rr,
+        live_min_confidence=body.live_min_confidence,
+    )
+
+
 @router.get("/auto-paper/summary")
 def auto_paper_summary():
     from lib.auto_simulator import get_auto_sim_summary

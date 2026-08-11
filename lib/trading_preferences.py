@@ -39,6 +39,9 @@ def get_user_preference(user_id: str = DEFAULT_USER_ID) -> dict:
             "telegram_enabled": bool(row.telegram_enabled),
             "auto_sim_enabled": bool(row.auto_sim_enabled),
             "paper_auto_trade_enabled": bool(row.paper_auto_trade_enabled),
+            "live_min_score": float(row.live_min_score if row.live_min_score is not None else 55.0),
+            "live_min_rr": float(row.live_min_rr or 0.0),
+            "live_min_confidence": float(row.live_min_confidence or 0.0),
         }
 
 
@@ -52,5 +55,26 @@ def set_trade_mode(mode: str, user_id: str = DEFAULT_USER_ID) -> dict:
             row = UserPreference(user_id=user_id)
             db.add(row)
         row.trade_mode = selected
+        row.updated_at = now_iso()
+    return get_user_preference(user_id)
+
+
+def set_execution_criteria(live_min_score: float | None = None,
+                           live_min_rr: float | None = None,
+                           live_min_confidence: float | None = None,
+                           user_id: str = DEFAULT_USER_ID) -> dict:
+    """Update the live (Alpaca) auto-execution gates. Bounds keep a typo from
+    silently disabling the whole book (score 0-100, rr 0-10, conf 0-100)."""
+    with get_db() as db:
+        row = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
+        if not row:
+            row = UserPreference(user_id=user_id)
+            db.add(row)
+        if live_min_score is not None:
+            row.live_min_score = max(0.0, min(100.0, float(live_min_score)))
+        if live_min_rr is not None:
+            row.live_min_rr = max(0.0, min(10.0, float(live_min_rr)))
+        if live_min_confidence is not None:
+            row.live_min_confidence = max(0.0, min(100.0, float(live_min_confidence)))
         row.updated_at = now_iso()
     return get_user_preference(user_id)

@@ -66,7 +66,17 @@ def run():
     except Exception as e:
         logger.warning(f"[Execute] Regime check failed: {e}")
 
-    min_conf = 75 if regime.get("risk") == "high" else 55
+    # Live-execution criteria: user-configurable floors (Ops → Execution
+    # Criteria), with the high-risk regime bump as a floor that can raise but
+    # never lower the user's setting. Auto Sim takes every approved signal
+    # regardless — these gates only decide what reaches the broker account.
+    from lib.trading_preferences import get_user_preference
+    prefs = get_user_preference()
+    user_min_score = float(prefs.get("live_min_score", 55.0))
+    min_rr = float(prefs.get("live_min_rr", 0.0))
+    min_ai_conf = float(prefs.get("live_min_confidence", 0.0))
+    regime_floor = 75 if regime.get("risk") == "high" else 0
+    min_conf = max(user_min_score, regime_floor)
 
     try:
         from lib.risk_manager import portfolio_heat
@@ -124,7 +134,14 @@ def run():
         cutoff_crypto = now_utc - timedelta(hours=24)
 
         sig_dicts = []
+        gated_rr = gated_conf = 0
         for s in sigs:
+            if min_rr > 0 and float(s.rr_ratio or 0) < min_rr:
+                gated_rr += 1
+                continue
+            if min_ai_conf > 0 and float(s.confidence or 0) < min_ai_conf:
+                gated_conf += 1
+                continue
             expires_at = None
             if getattr(s, "expires_at", None):
                 try:
@@ -183,7 +200,11 @@ def run():
                 "freshness_score": getattr(s, "freshness_score", None),
             })
 
-    logger.info(f"[Execute] {len(sig_dicts)} active signals qualify (conf>={min_conf})")
+    logger.info(
+        f"[Execute] {len(sig_dicts)} active signals qualify "
+        f"(score>={min_conf:g}, rr>={min_rr:g}, conf>={min_ai_conf:g}; "
+        f"gated: {gated_rr} by R:R, {gated_conf} by confidence)"
+    )
 
     candidates = sig_dicts
     try:

@@ -217,6 +217,9 @@ export type TradingPreference = {
   telegram_enabled: boolean;
   auto_sim_enabled: boolean;
   paper_auto_trade_enabled: boolean;
+  live_min_score: number;
+  live_min_rr: number;
+  live_min_confidence: number;
 };
 
 export type PaperPosition = {
@@ -984,6 +987,13 @@ export const api = {
     get<{ coins: { id: string; symbol: string; price: number; market_cap: number; volume_24h: number; chg_1h: number | null; chg_24h: number | null; chg_7d: number | null; ath: number; ath_chg_pct: number }[]; as_of: string; note: string }>(`/crypto/markets`),
   webNews: () =>
     get<{ items: { title: string; snippet: string | null }[]; as_of: string | null; note: string }>(`/news/web`),
+  updateExecutionCriteria: (c: { live_min_score?: number; live_min_rr?: number; live_min_confidence?: number }) =>
+    fetch(`/api/preferences/execution`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`criteria ${r.status}`);
+      return r.json() as Promise<TradingPreference>;
+    }),
   flattenTrading: (scope: "live" | "paper" | "all") =>
     fetch(`/api/trading/flatten`, {
       method: "POST", headers: { "Content-Type": "application/json" },

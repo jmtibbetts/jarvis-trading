@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary } from "../api";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
 
@@ -16,6 +16,29 @@
   let backfilling = $state(false);
   let orders = $state<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>([]);
   let errorRate = $state<ErrorRateSummary | null>(null);
+  let execPrefs = $state<TradingPreference | null>(null);
+  let execSaving = $state(false);
+
+  async function loadExecPrefs() {
+    execPrefs = await api.tradingPreference().catch(() => null);
+  }
+
+  async function saveExecPrefs() {
+    if (!execPrefs) return;
+    execSaving = true;
+    try {
+      execPrefs = await api.updateExecutionCriteria({
+        live_min_score: execPrefs.live_min_score,
+        live_min_rr: execPrefs.live_min_rr,
+        live_min_confidence: execPrefs.live_min_confidence,
+      });
+      toastStore.ok("Execution criteria saved — applies from the next execute run");
+    } catch (e) {
+      toastStore.err(`Save failed: ${e}`);
+    } finally {
+      execSaving = false;
+    }
+  }
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -27,6 +50,7 @@
     jobs = await api.jobStatus().catch(() => ({}));
     configs = await api.settingsList().catch(() => []);
     llmHealth = await api.llmHealth().catch(() => null);
+    loadExecPrefs();
     cacheStats = await api.cacheStats().catch(() => null);
     orders = await api.alpacaOrders().catch(() => []);
     errorRate = await api.errorRate(15).catch(() => null);
@@ -332,6 +356,37 @@
   </div>
 
   <div class="span-12">
+    <Panel title="Execution Criteria" meta="which approved signals reach the broker account">
+      {#if execPrefs}
+        <div class="exec-grid">
+          <label class="exec-field">
+            <span>Min composite score (0–100)</span>
+            <input type="number" min="0" max="100" step="1" bind:value={execPrefs.live_min_score} />
+            <i>High-risk regime enforces a 75 floor regardless.</i>
+          </label>
+          <label class="exec-field">
+            <span>Min R:R ratio (0 = off)</span>
+            <input type="number" min="0" max="10" step="0.1" bind:value={execPrefs.live_min_rr} />
+            <i>e.g. 2 = only take setups paying 2:1 or better.</i>
+          </label>
+          <label class="exec-field">
+            <span>Min AI confidence % (0 = off)</span>
+            <input type="number" min="0" max="100" step="1" bind:value={execPrefs.live_min_confidence} />
+            <i>The LLM's own confidence on the signal.</i>
+          </label>
+          <button class="btn small" disabled={execSaving} onclick={saveExecPrefs}>{execSaving ? "Saving…" : "Save criteria"}</button>
+        </div>
+        <p class="exec-note">
+          Two automatic books run side by side: <b>Auto Sim</b> takes EVERY approved signal unconditionally ($1k virtual each),
+          while the <b>Alpaca account</b> only takes approved signals clearing all criteria above. Comparing the two tells you
+          whether the criteria are earning their keep.
+        </p>
+      {:else}
+        <div class="empty">Loading…</div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-12">
     <TelegramWizard {configs} onSaved={loadAll} />
   </div>
 
@@ -363,6 +418,45 @@
   }
   .span-7 {
     grid-column: span 7;
+  }
+  .exec-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    align-items: flex-end;
+  }
+  .exec-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1 1 200px;
+  }
+  .exec-field span {
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+    font-weight: 600;
+  }
+  .exec-field input {
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    color: var(--ink);
+    font: inherit;
+    padding: 7px 10px;
+  }
+  .exec-field i {
+    font-style: normal;
+    font-size: 9.5px;
+    color: var(--ink-faint);
+  }
+  .exec-note {
+    font-size: 10.5px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    margin: 12px 0 0;
+    padding-top: 10px;
+    line-height: 1.5;
   }
   .span-12 {
     grid-column: span 12;

@@ -736,24 +736,31 @@ def ask_analyst(body: dict):
             intent = triage.get("intent")
             query = str(triage.get("query") or "")[:300]
             if intent and intent != "none" and query:
+                # Tool names per each server's OFFICIAL docs — tavily's are
+                # hyphenated (tavily-search/-extract), a detail that would
+                # 404 as underscores the moment a key connects it.
                 routes_by_intent: dict[str, list] = {
                     "news": [
-                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
+                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
                     ],
                     "research": [
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
-                        ("tavily", "tavily_search", {"query": query, "max_results": 4}),
+                        ("tavily", "tavily-search", {"query": query, "max_results": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
                     ],
                     "fetch_url": [
                         ("firecrawl", "firecrawl_scrape", {"url": query}),
+                        ("tavily", "tavily-extract", {"urls": [query]}),
                         ("exa", "web_fetch_exa", {"url": query}),
                     ],
                     "market_data": [
-                        # Massive's tool names are unknown until a key connects it;
-                        # research search is the honest keyless fallback.
+                        # Massive uses a discovery chain (search_endpoints ->
+                        # get_endpoint_docs -> call_api) that can't be driven
+                        # in one bounded call and can't be verified until a
+                        # key connects it — wired then. Research search is the
+                        # honest keyless fallback meanwhile.
                         ("exa", "web_search_exa", {"query": query, "numResults": 4}),
                         ("firecrawl", "firecrawl_search", {"query": query, "limit": 4}),
                     ],

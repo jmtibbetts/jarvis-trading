@@ -16,8 +16,15 @@ Transport facts verified live against all four servers while building this:
       exa        works keyless (initialize 200)
       firecrawl  works keyless with usage limits ("Search, Scrape, and
                  Parse"); a bearer key unlocks account tools
-      massive    401 without Authorization
-      tavily     401 without Authorization
+      massive    401 without Authorization. NOTE: Massive's current MCP
+                 uses a 4-tool DISCOVERY architecture (search_endpoints ->
+                 get_endpoint_docs -> call_api, plus query_data for SQL over
+                 fetched results) instead of exposing dozens of endpoint
+                 tools. The analyst's market-data chain for it is wired
+                 AFTER a key lands, so it can be verified against the live
+                 server rather than built blind.
+      tavily     401 without Authorization. Official tool names are
+                 hyphenated: tavily-search, tavily-extract.
     Keys are read from env (MASSIVE_API_KEY, TAVILY_API_KEY, EXA_API_KEY,
     FIRECRAWL_API_KEY) and sent as Authorization: Bearer. A 401 server is
     reported as unavailable, never retried in a loop.
@@ -42,7 +49,7 @@ HTTP_TIMEOUT = 30.0
 MCP_SERVERS: dict[str, dict] = {
     "massive": {"url": "https://mcp.massive.com/", "key_env": "MASSIVE_API_KEY"},
     "tavily": {"url": "https://mcp.tavily.com/mcp/", "key_env": "TAVILY_API_KEY"},
-    "exa": {"url": "https://mcp.exa.ai", "key_env": "EXA_API_KEY"},
+    "exa": {"url": "https://mcp.exa.ai/mcp", "key_env": "EXA_API_KEY"},  # /mcp per official Exa docs (verified live)
     "firecrawl": {"url": "https://mcp.firecrawl.dev/v2/mcp", "key_env": "FIRECRAWL_API_KEY"},
 }
 

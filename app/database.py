@@ -19,6 +19,16 @@ engine = create_engine(
     f"sqlite:///{DB_PATH}",
     connect_args={"check_same_thread": False, "timeout": 30},
     echo=False,
+    # SQLite connections are just file handles — the default pool (5+10) is
+    # pure downside here: 10 scheduler workers + API requests each hold a
+    # connection for up to busy_timeout (30s) when a writer has the lock, so
+    # a write burst exhausted the pool and starved the whole API (observed
+    # in production: QueuePool limit reached, UI hung). Size the pool above
+    # worst-case concurrency and let stragglers wait longer than one full
+    # busy_timeout cycle.
+    pool_size=25,
+    max_overflow=25,
+    pool_timeout=60,
 )
 
 @event.listens_for(engine, "connect")
@@ -344,6 +354,16 @@ class CongressTrade(Base):
     amount_text       = Column(String)
     pdf_url           = Column(String)
     created_date      = Column(String, default=now_iso)
+
+
+class ApiCacheEntry(Base):
+    """Last-known payload for panel routes backed by slow external APIs —
+    served instantly after a restart while a background refresh runs
+    (lib/api_cache.py). One row per route key."""
+    __tablename__ = "api_cache"
+    key        = Column(String, primary_key=True)
+    payload    = Column(Text, nullable=False)
+    fetched_at = Column(String, nullable=False)
 
 
 class ProcessedCongressFiling(Base):

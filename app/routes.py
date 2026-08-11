@@ -597,22 +597,10 @@ def get_mcp_status():
     }
 
 
-_fx_panel_cache = {"at": None, "data": None}
-_cg_panel_cache = {"at": None, "data": None}
-_provider_status_cache = {"at": None, "data": None}
-
-
-@router.get("/status/providers")
-def get_provider_status():
-    """Per-provider connectivity for the HUD header. Every check is either a
-    lightweight live ping or a cached-result read; the whole response is
-    cached 120s so header polling costs nothing."""
+def _build_provider_status() -> dict:
     from datetime import datetime as _dt, timezone as _tz
     import os as _os
     now = _dt.now(_tz.utc)
-    if _provider_status_cache["at"] and (now - _provider_status_cache["at"]).total_seconds() < 120 and _provider_status_cache["data"]:
-        return _provider_status_cache["data"]
-
     providers = []
 
     def add(name, ok, detail):
@@ -669,30 +657,51 @@ def get_provider_status():
     except Exception:
         pass
 
-    data = {"providers": providers, "checked_at": now.isoformat()}
-    _provider_status_cache["at"] = now
-    _provider_status_cache["data"] = data
-    return data
+    return {"providers": providers, "checked_at": now.isoformat()}
 
 
-@router.get("/fx/rates")
-def get_fx_rates():
-    """Live interbank FX rates + 7d daily history for the majors Jarvis
-    trades (AllRatesToday). Cached 15 min to respect the unknown quota —
-    same TTL the underlying lib uses, so this adds no extra API calls."""
+@router.get("/status/providers")
+def get_provider_status():
+    """Per-provider connectivity for the HUD header. Serve-stale-while-
+    revalidate: the header renders instantly from the last persisted check
+    (even right after a restart) while a background sweep refreshes it."""
+    from lib.api_cache import serve_with_refresh
+    payload, stale = serve_with_refresh("provider_status", 120, _build_provider_status)
+    if payload is None:
+        return {"providers": [], "checked_at": None}
+    return {**payload, "stale": stale}
+
+
+def _build_fx_rates() -> dict | None:
+    """Full FX payload build — 24 upstream calls, run in parallel and mostly
+    from lib-level cache. Called inline only on true first run; afterwards
+    lib/api_cache serves the persisted payload instantly and refreshes in a
+    background thread."""
     from datetime import datetime as _dt, timezone as _tz
     now = _dt.now(_tz.utc)
-    if _fx_panel_cache["at"] and (now - _fx_panel_cache["at"]).total_seconds() < 900 and _fx_panel_cache["data"]:
-        return _fx_panel_cache["data"]
-    from lib.allrates_data import fx_pair_from_symbol, get_fx_rate, get_fx_history
+    from lib.allrates_data import get_fx_rate, get_fx_history
+    # Majors Jarvis trades first, then the crosses and EM pairs that give
+    # macro context. Each pair costs 2 calls per 15-min cache window.
+    fx_pairs = [
+        ("EUR", "USD"), ("USD", "JPY"), ("GBP", "USD"), ("USD", "CHF"),
+        ("AUD", "USD"), ("NZD", "USD"), ("USD", "CAD"), ("EUR", "GBP"),
+        ("EUR", "JPY"), ("GBP", "JPY"), ("USD", "CNY"), ("USD", "MXN"),
+    ]
+    # 24 upstream calls cold — sequential took ~13s and stalled the macro
+    # page; parallel across 8 workers lands ~1.5s. Cache hits skip all of it.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch_pair(pt):
+        src, tgt = pt
+        return (pt, get_fx_rate(src, tgt),
+                get_fx_history(src, tgt, "30d") or get_fx_history(src, tgt, "7d"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        fetched = list(pool.map(fetch_pair, fx_pairs))
+
     pairs_out = []
-    for sym in ["EURUSD=X", "JPY=X", "GBPUSD=X", "CHF=X", "AUDUSD=X"]:
-        pair = fx_pair_from_symbol(sym)
-        if not pair:
-            continue
-        src, tgt = pair
-        rate = get_fx_rate(src, tgt)
-        hist = get_fx_history(src, tgt, "30d") or get_fx_history(src, tgt, "7d")
+    for (src, tgt), rate, hist in fetched:
+        sym = f"{src}{tgt}=X"
         points = [
             {"date": p.get("date"), "rate": p.get("rate")}
             for p in ((hist or {}).get("data") or [])
@@ -707,26 +716,29 @@ def get_fx_rates():
             "rate_source": (rate or {}).get("source"),
             "history": points, "change_pct": round(chg_pct, 3) if chg_pct is not None else None,
         })
-    data = {
+    if not any(p["rate"] is not None for p in pairs_out):
+        return None
+    return {
         "pairs": pairs_out,
         "as_of": now.isoformat(),
-        "note": "Live interbank rates via AllRatesToday; history is daily closes. Cached 15 min.",
+        "note": "Live interbank rates via AllRatesToday; history is daily closes. Cached 15 min; stale payloads serve instantly while refreshing.",
     }
-    if any(p["rate"] is not None for p in pairs_out):
-        _fx_panel_cache["at"] = now
-        _fx_panel_cache["data"] = data
-    return data
 
 
-@router.get("/crypto/markets")
-def get_crypto_markets():
-    """CoinGecko market structure for every mapped tracked coin — price,
-    1h/24h/7d change, volume, market cap, distance from ATH. One MCP call,
-    cached 5 min (demo tier is 30 req/min; this uses ~1 per 5 min)."""
+@router.get("/fx/rates")
+def get_fx_rates():
+    """Live interbank FX rates + 30d history (AllRatesToday). Serve-stale-
+    while-revalidate: instant from the persisted cache even right after a
+    restart; a background refresh keeps it within 15 min of live."""
+    from lib.api_cache import serve_with_refresh
+    payload, stale = serve_with_refresh("fx_rates", 900, _build_fx_rates)
+    if payload is None:
+        return {"pairs": [], "as_of": None, "note": "FX rates unavailable (no key or upstream down)"}
+    return {**payload, "stale": stale}
+
+
+def _build_crypto_markets() -> dict | None:
     from datetime import datetime as _dt, timezone as _tz
-    now = _dt.now(_tz.utc)
-    if _cg_panel_cache["at"] and (now - _cg_panel_cache["at"]).total_seconds() < 300 and _cg_panel_cache["data"]:
-        return _cg_panel_cache["data"]
     from lib.mcp_client import coingecko_snapshot, COINGECKO_IDS
     raw = coingecko_snapshot([f"{base}/USD" for base in COINGECKO_IDS])
     rows = []
@@ -736,15 +748,26 @@ def get_crypto_markets():
             rows = parsed.get("result") or []
         except Exception as e:
             logger.debug(f"[CryptoMarkets] parse failed: {e}")
-    data = {
+    if not rows:
+        return None
+    return {
         "coins": rows,
-        "as_of": now.isoformat(),
-        "note": "Live CoinGecko market data (keyless MCP + demo key). Cached 5 min.",
+        "as_of": _dt.now(_tz.utc).isoformat(),
+        "note": "Live CoinGecko market data (keyless MCP + demo key). Cached 5 min; stale payloads serve instantly while refreshing.",
     }
-    if rows:
-        _cg_panel_cache["at"] = now
-        _cg_panel_cache["data"] = data
-    return data
+
+
+@router.get("/crypto/markets")
+def get_crypto_markets():
+    """CoinGecko market structure for every mapped tracked coin — price,
+    1h/24h/7d change, volume, market cap, distance from ATH. Serve-stale-
+    while-revalidate via the persisted cache (demo tier 30 req/min; this
+    costs ~1 call per 5 min)."""
+    from lib.api_cache import serve_with_refresh
+    payload, stale = serve_with_refresh("crypto_markets", 300, _build_crypto_markets)
+    if payload is None:
+        return {"coins": [], "as_of": None, "note": "CoinGecko unavailable"}
+    return {**payload, "stale": stale}
 
 
 @router.get("/news/web")

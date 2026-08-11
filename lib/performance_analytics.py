@@ -5,7 +5,8 @@ equity snapshots and closed trade outcomes), not placeholders."""
 from __future__ import annotations
 
 import math
-from statistics import mean, pstdev
+from datetime import date
+from statistics import mean, stdev
 
 
 def daily_equity_curve(snapshots: list[dict]) -> list[tuple[str, float]]:
@@ -55,20 +56,44 @@ def compute_max_drawdown(equity_curve: list[tuple[str, float]]) -> dict:
     }
 
 
+MIN_SHARPE_RETURNS = 5
+
+
+def _days_between(d1: str, d2: str) -> int | None:
+    try:
+        return (date.fromisoformat(d2[:10]) - date.fromisoformat(d1[:10])).days
+    except ValueError:
+        return None
+
+
 def compute_sharpe_ratio(equity_curve: list[tuple[str, float]], periods_per_year: float = 365.0) -> float | None:
     """Annualized Sharpe ratio from day-over-day equity curve returns
-    (risk-free rate assumed 0). Returns None when there isn't enough data
-    to compute a meaningful ratio (fewer than 3 points, or zero variance)."""
-    if len(equity_curve) < 3:
-        return None
+    (risk-free rate assumed 0).
+
+    Statistical honesty guards — each one fixed a real bad number this
+    produced in production (a displayed Sharpe of -837.91):
+    - Returns spanning a gap of more than 3 calendar days are DROPPED: the
+      bot being offline for months must not turn a cumulative move into one
+      fake "daily" return.
+    - Fewer than MIN_SHARPE_RETURNS usable daily returns -> None. Two or
+      three near-identical returns make the variance estimate meaningless
+      and the ratio explodes; no number beats a wrong number.
+    - Sample stdev (n-1), not population — small-n curves are exactly where
+      pstdev's underestimated variance inflates the ratio most.
+    - Near-zero variance -> None (float rounding, not real signal).
+    """
     returns = []
-    for (_, prev), (_, curr) in zip(equity_curve, equity_curve[1:]):
-        if prev:
-            returns.append((curr - prev) / prev)
-    if len(returns) < 2:
+    for (d_prev, prev), (d_curr, curr) in zip(equity_curve, equity_curve[1:]):
+        if not prev:
+            continue
+        gap = _days_between(d_prev, d_curr)
+        if gap is not None and gap > 3:
+            continue  # offline stretch — not a daily return
+        returns.append((curr - prev) / prev)
+    if len(returns) < MIN_SHARPE_RETURNS:
         return None
-    std = pstdev(returns)
-    if std < 1e-9:  # effectively zero variance — float rounding, not real signal
+    std = stdev(returns)
+    if std < 1e-9:
         return None
     sharpe = (mean(returns) / std) * math.sqrt(periods_per_year)
     return round(sharpe, 3)

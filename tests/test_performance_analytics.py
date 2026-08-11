@@ -49,7 +49,8 @@ class SharpeRatioTests(unittest.TestCase):
         self.assertIsNone(compute_sharpe_ratio(curve))
 
     def test_positive_for_a_steadily_rising_curve_with_variance(self):
-        curve = [("d1", 100.0), ("d2", 102.0), ("d3", 101.0), ("d4", 104.0), ("d5", 106.0)]
+        # 6 points -> 5 returns, the statistical minimum for a computed ratio
+        curve = [("d1", 100.0), ("d2", 102.0), ("d3", 101.0), ("d4", 104.0), ("d5", 106.0), ("d6", 107.5)]
         sharpe = compute_sharpe_ratio(curve)
         self.assertIsNotNone(sharpe)
         self.assertGreater(sharpe, 0)

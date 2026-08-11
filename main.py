@@ -84,10 +84,15 @@ async def lifespan(app_: FastAPI):
     from app.ws import manager as ws_manager
     ws_manager.bind_loop(asyncio.get_running_loop())
 
-    from app.scheduler import create_scheduler
-    scheduler = create_scheduler()
-    scheduler.start()
-    logger.info("[Server] APScheduler started — jobs firing immediately")
+    # JARVIS_DISABLE_SCHEDULER=1 runs the API/UI without any background jobs —
+    # for dev/debug instances that must never fetch data or place orders.
+    if os.getenv("JARVIS_DISABLE_SCHEDULER") == "1":
+        logger.warning("[Server] Scheduler DISABLED (JARVIS_DISABLE_SCHEDULER=1) — UI/API only")
+    else:
+        from app.scheduler import create_scheduler
+        scheduler = create_scheduler()
+        scheduler.start()
+        logger.info("[Server] APScheduler started — jobs firing immediately")
 
     # Crypto L2 order book streams (Binance + Coinbase, free public WS feeds).
     # Unlike APScheduler jobs these are long-lived connections, so they're

@@ -255,24 +255,42 @@ _web_headlines_cache = {"at": None, "text": ""}
 
 
 def _mcp_market_headlines() -> str:
-    """One MCP web search per ~30 min across ALL generation runs — broad
-    market-moving headlines compressed to one prompt line. Empty string on
-    any failure; signal generation never depends on it."""
+    """One MCP web search per ~30 min across ALL generation runs — fresh
+    market-moving news injected into every LLM prompt. Tavily first (keyed,
+    structured JSON with title+content snippets); exa fallback (keyless).
+    Empty string on any failure; signal generation never depends on it."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     at = _web_headlines_cache["at"]
     if at is not None and (now - at).total_seconds() < 1800:
         return _web_headlines_cache["text"]
     _web_headlines_cache["at"] = now
+    _web_headlines_cache["text"] = ""
+    from lib.mcp_client import call_tool
+    query = "biggest stock and crypto market moving news today"
+    # Tavily returns structured JSON: title + a content snippet per result —
+    # inject BOTH so the model sees the substance, not just headlines.
     try:
-        from lib.mcp_client import call_tool
-        raw = call_tool("exa", "web_search_exa", {
-            "query": "biggest stock and crypto market moving news today",
-            "numResults": 4,
+        import json as _json
+        raw = call_tool("tavily", "tavily_search", {
+            "query": query, "max_results": 5, "topic": "news",
         })
         if raw:
-            # Titles are on lines starting "Title:" in exa's text payload;
-            # fall back to the first few non-empty lines.
+            data = _json.loads(raw) if isinstance(raw, str) else raw
+            lines = []
+            for r in (data.get("results") or [])[:5]:
+                title = str(r.get("title") or "").strip()[:110]
+                content = str(r.get("content") or "").strip()[:220]
+                if title:
+                    lines.append(f"- {title}: {content}" if content else f"- {title}")
+            if lines:
+                _web_headlines_cache["text"] = "\n".join(lines)[:1400]
+                return _web_headlines_cache["text"]
+    except Exception as e:
+        logger.debug(f"[Signals] Tavily headlines unavailable: {e}")
+    try:
+        raw = call_tool("exa", "web_search_exa", {"query": query, "numResults": 4})
+        if raw:
             titles = [ln.split(":", 1)[1].strip() for ln in raw.splitlines()
                       if ln.lower().startswith("title:")][:4]
             if not titles:
@@ -280,7 +298,6 @@ def _mcp_market_headlines() -> str:
             _web_headlines_cache["text"] = " | ".join(t[:80] for t in titles)
     except Exception as e:
         logger.debug(f"[Signals] MCP headlines unavailable: {e}")
-        _web_headlines_cache["text"] = ""
     return _web_headlines_cache["text"]
 
 
@@ -679,7 +696,7 @@ def run():
     # context, not verified system data.
     web_ctx = _mcp_market_headlines()
     if web_ctx:
-        news_ctx = f"{news_ctx} || WEB (unverified, fresh): {web_ctx}"
+        news_ctx = (news_ctx + "\n\nFRESH WEB NEWS (unverified, live search — weigh against TA):\n" + web_ctx)
 
     sys_p = "You are an expert quantitative trader. Output only valid JSON arrays. No commentary, no markdown — start with '[' end with ']'."
     directional_rule = horizon_rule + " " + (

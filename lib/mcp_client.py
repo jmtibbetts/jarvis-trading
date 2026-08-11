@@ -51,7 +51,46 @@ MCP_SERVERS: dict[str, dict] = {
     "tavily": {"url": "https://mcp.tavily.com/mcp/", "key_env": "TAVILY_API_KEY"},
     "exa": {"url": "https://mcp.exa.ai/mcp", "key_env": "EXA_API_KEY"},  # /mcp per official Exa docs (verified live)
     "firecrawl": {"url": "https://mcp.firecrawl.dev/v2/mcp", "key_env": "FIRECRAWL_API_KEY"},
+    # Keyless (verified live) — code-execution server: the `execute` tool runs
+    # JS against the CoinGecko SDK. COINGECKO_API_KEY optional for pro tiers.
+    "coingecko": {"url": "https://mcp.api.coingecko.com/mcp", "key_env": "COINGECKO_API_KEY"},
 }
+
+# Prebuilt JS for coingecko's execute tool — one snapshot call for a list of
+# coin ids. Kept here so callers don't scatter JS strings around the codebase.
+COINGECKO_SNAPSHOT_JS = """
+async function run(client) {
+  const r = await client.coins.markets.get({ vs_currency: 'usd', ids: IDS,
+    price_change_percentage: '1h,24h,7d' });
+  return r.map(c => ({ id: c.id, symbol: c.symbol, price: c.current_price,
+    market_cap: c.market_cap, volume_24h: c.total_volume,
+    chg_1h: c.price_change_percentage_1h_in_currency,
+    chg_24h: c.price_change_percentage_24h_in_currency,
+    chg_7d: c.price_change_percentage_7d_in_currency,
+    ath: c.ath, ath_chg_pct: c.ath_change_percentage }));
+}
+"""
+
+# Common Jarvis symbols -> coingecko ids (base-symbol keyed, extend as needed)
+COINGECKO_IDS = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
+    "BNB": "binancecoin", "AVAX": "avalanche-2", "LINK": "chainlink",
+    "DOGE": "dogecoin", "ADA": "cardano", "AAVE": "aave", "DOT": "polkadot",
+    "ATOM": "cosmos", "SUI": "sui", "RENDER": "render-token", "INJ": "injective-protocol",
+    "NEAR": "near", "OP": "optimism", "ARB": "arbitrum",
+}
+
+
+def coingecko_snapshot(symbols: list[str]) -> str | None:
+    """Market snapshot (price, 24h/7d change, volume, mcap, ATH distance) for
+    Jarvis crypto symbols via the keyless CoinGecko MCP. Returns the raw JSON
+    text or None. Verified live: prices match OKX within basis points."""
+    ids = [COINGECKO_IDS[s.split("/")[0].upper()]
+           for s in symbols if s.split("/")[0].upper() in COINGECKO_IDS]
+    if not ids:
+        return None
+    code = COINGECKO_SNAPSHOT_JS.replace("IDS", repr(",".join(ids)))
+    return call_tool("coingecko", "execute", {"code": code, "intent": "market snapshot for trade verification"})
 
 _sessions: dict[str, str] = {}          # server -> Mcp-Session-Id
 _tool_cache: dict[str, list[dict]] = {}  # server -> tools

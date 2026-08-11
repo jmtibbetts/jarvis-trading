@@ -919,12 +919,25 @@ def ask_analyst(body: dict):
                 # isn't a resolvable symbol.
                 handled = False
                 if intent == "market_data":
-                    from lib.massive_data import get_market_summary
                     sym_guess = query.split()[0].upper().strip(",.")
-                    summary = get_market_summary(sym_guess)
-                    if summary:
-                        context_blocks["market_data"] = summary
-                        handled = True
+                    # Crypto → CoinGecko keyless MCP first (live prices,
+                    # verified within basis points of OKX); equity → Massive
+                    # REST (the user's own subscription).
+                    try:
+                        from lib.mcp_client import coingecko_snapshot, COINGECKO_IDS
+                        if sym_guess.split("/")[0] in COINGECKO_IDS:
+                            cg = coingecko_snapshot([sym_guess])
+                            if cg:
+                                context_blocks["market_data"] = {"provider": "coingecko", "live": True, "data": str(cg)[:2000]}
+                                handled = True
+                    except Exception as e:
+                        logger.debug(f"[Analyst] CoinGecko lookup failed: {e}")
+                    if not handled:
+                        from lib.massive_data import get_market_summary
+                        summary = get_market_summary(sym_guess)
+                        if summary:
+                            context_blocks["market_data"] = summary
+                            handled = True
 
                 if not handled:
                     choice = _first_connected(routes_by_intent.get(intent, []))

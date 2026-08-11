@@ -205,11 +205,21 @@ def _market_data_block(symbol: str, asset_class: str | None) -> str | None:
     is_crypto = "/" in (symbol or "") or (asset_class or "").lower() == "crypto"
     try:
         if is_crypto:
+            parts = []
             from lib.crypto_derivatives import fetch_derivatives_snapshot
             snap = fetch_derivatives_snapshot(symbol)
             if snap:
                 import json as _json
-                return "CRYPTO DERIVATIVES (live, free exchange APIs):\n" + _json.dumps(snap, default=str)[:1500]
+                parts.append("CRYPTO DERIVATIVES (live, free exchange APIs):\n" + _json.dumps(snap, default=str)[:1200])
+            try:
+                from lib.mcp_client import coingecko_snapshot
+                cg = coingecko_snapshot([symbol])
+                if cg:
+                    parts.append("COINGECKO MARKET DATA (live, keyless MCP):\n" + str(cg)[:1000])
+            except Exception as e:
+                logger.debug(f"[DeepVerify] CoinGecko snapshot failed for {symbol}: {e}")
+            if parts:
+                return "\n\n".join(parts)
         else:
             from lib.massive_data import get_market_summary
             summary = get_market_summary(symbol, days=5)

@@ -126,3 +126,60 @@ class TestPaperMarginSizing:
         from lib.paper_engine import size_position
         assert size_position(0, 100.0, 99.0, 5, 100_000)["ok"] is False      # no equity
         assert size_position(100_000, 0, 99.0, 5, 100_000)["ok"] is False    # no entry
+
+
+class TestPortfolioCapacityLimits:
+    """Per-trade sizing does not bound a portfolio — 1% each x 86 trades
+    committed 99.7% of the paper account. These are the portfolio caps."""
+
+    def test_paper_caps_are_sane(self):
+        from lib.paper_engine import MAX_DEPLOYED_PCT, MAX_OPEN_POSITIONS, TRADE_MARGIN_PCT
+        assert 0 < MAX_DEPLOYED_PCT <= 100
+        assert MAX_OPEN_POSITIONS > 0
+        # Neither cap may be decorative: at the per-trade size, the position
+        # count must reach the deployment ceiling rather than trip first.
+        assert MAX_OPEN_POSITIONS * TRADE_MARGIN_PCT >= MAX_DEPLOYED_PCT
+        # ...and the account must never be fully committed.
+        assert MAX_DEPLOYED_PCT < 100
+
+    def test_autosim_caps_are_sane(self):
+        from lib.auto_simulator import MAX_DEPLOYED_PCT, MAX_OPEN_POSITIONS, MARGIN_PER_SIGNAL
+        assert 0 < MAX_DEPLOYED_PCT <= 100
+        # 60 positions x $1,000 = $60,000 = exactly the 60% ceiling on $100k,
+        # so neither limit is decorative.
+        assert MAX_OPEN_POSITIONS * MARGIN_PER_SIGNAL >= 100_000 * (MAX_DEPLOYED_PCT / 100)
+
+    def test_paper_refuses_beyond_deployment_cap(self, monkeypatch):
+        """A book already at the ceiling must reject new entries with a
+        reason, not silently drain to zero cash."""
+        import lib.paper_engine as pe
+
+        class _Row:
+            status = "Open"
+            margin_used = 60_000.0
+
+        class _Q:
+            def filter(self, *a, **k): return self
+            def all(self): return [_Row()]
+            def first(self): return None
+
+        class _DB:
+            def query(self, *a, **k): return _Q()
+            def add(self, *a, **k): pass
+            def flush(self): pass
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def _fake_db():
+            yield _DB()
+
+        monkeypatch.setattr(pe, "get_db", _fake_db)
+        monkeypatch.setattr(pe, "_get_portfolio_cash", lambda db: type("P", (), {"cash": 40_000.0})())
+        res = pe.open_paper_position(
+            {"asset_symbol": "TEST", "direction": "Long", "entry_price": 100.0,
+             "stop_loss": 98.0, "target_price": 106.0, "composite_score": 70},
+            current_price=100.0,
+        )
+        assert "error" in res
+        assert "cap" in res["error"].lower() or "full" in res["error"].lower()

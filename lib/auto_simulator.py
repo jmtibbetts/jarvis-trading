@@ -14,6 +14,13 @@ from app.database import (
 )
 
 MARGIN_PER_SIGNAL = 1000.0
+# Auto Sim followed EVERY signal with no capital check whatsoever: 228 open
+# positions x $1,000 committed $228,000 of margin against a $100,000 account.
+# A book that can deploy 2.28x the money it has cannot be compared against
+# the broker account, which is the whole point of running it. Bound it the
+# same way the paper engine is bounded.
+MAX_DEPLOYED_PCT   = 60.0    # total committed margin, % of starting capital
+MAX_OPEN_POSITIONS = 60
 ELIGIBLE_STATUSES = {"Active", "PendingApproval"}
 _AUTO_SIM_LOCK = threading.Lock()
 
@@ -239,7 +246,23 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                 updated += 1
 
         candidates = _unseen_candidates(all_signals.values(), seen_signal_ids)
+        # Capacity is measured ONCE against the positions that survived the
+        # management pass above, then decremented as this run opens more.
+        live_rows = [p for p in positions if p.status == "Open"]
+        deployed = sum(float(p.margin_used or MARGIN_PER_SIGNAL) for p in live_rows)
+        slots_left = MAX_OPEN_POSITIONS - len(live_rows)
+        capital = float(portfolio.starting_cash or 100_000.0)
+        deploy_cap = capital * (MAX_DEPLOYED_PCT / 100.0)
+        if slots_left <= 0 or deployed >= deploy_cap:
+            logger.info(
+                f"[AutoSim] At capacity ({len(live_rows)}/{MAX_OPEN_POSITIONS} positions, "
+                f"${deployed:,.0f}/${deploy_cap:,.0f} deployed) — {len(candidates)} signal(s) not followed"
+            )
+            candidates = []
         for signal in candidates:
+            if slots_left <= 0 or deployed + MARGIN_PER_SIGNAL > deploy_cap:
+                skipped += 1
+                continue
             entry = prices.get(signal.asset_symbol, float(signal.entry_price or 0))
             recorded_entry = float(signal.entry_price or 0)
             if entry <= 0 or recorded_entry <= 0:
@@ -264,6 +287,8 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                 updated_at=now.isoformat(),
             ))
             opened += 1
+            deployed += MARGIN_PER_SIGNAL
+            slots_left -= 1
         return {"opened": opened, "closed": closed, "updated": updated, "skipped": skipped}
 
 

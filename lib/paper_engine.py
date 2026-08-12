@@ -34,6 +34,17 @@ DEFAULT_POSITION_SIZE  = 3_000.0      # legacy fallback when risk sizing is impo
 # equity, let conviction (2x-20x) decide how far that slice reaches, and
 # let the stop govern the loss WITHIN it.
 TRADE_MARGIN_PCT       = 1.0    # % of equity COMMITTED per position
+# Per-trade sizing alone does not bound a portfolio: 1% each x 86 positions
+# committed 99.7% of the account and left $281 of cash, after which every
+# new entry failed on funds. These are the PORTFOLIO-level limits that were
+# missing — deployed capital and position count, checked before opening.
+# The two limits are set to bind at the SAME point: at 1% per trade, 60
+# positions is exactly 60% deployed. A count cap that trips first would make
+# the deployment cap decorative (and vice versa) — matching them means
+# whichever runs out first is the one that genuinely matters, and a
+# cash-capped smaller position lets a few more trades through honestly.
+MAX_DEPLOYED_PCT       = 60.0   # total margin across open positions, % of equity
+MAX_OPEN_POSITIONS     = 60
 MAX_MARGIN_PCT_OF_CASH = 15.0   # one position may tie up at most this % of free cash
 MIN_LEVERAGE           = 2.0
 LEVERAGE_AT_MAX_SCORE  = 20.0
@@ -390,7 +401,23 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 return {"error": f"Paper position already open for {sym}"}
 
             portfolio = _get_portfolio_cash(db)
-            logger.info(f"[Paper] Cash available: ${portfolio.cash:.2f} | margin required: ${margin:.2f}")
+
+            # ── Portfolio-level capacity checks ──────────────────────────
+            open_rows = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
+            deployed = sum(float(r.margin_used or 0) for r in open_rows)
+            equity_now = float(portfolio.cash or 0) + deployed
+            if len(open_rows) >= MAX_OPEN_POSITIONS:
+                return {"error": (f"Paper book full: {len(open_rows)}/{MAX_OPEN_POSITIONS} positions open. "
+                                  f"Close something before adding risk.")}
+            deploy_cap = equity_now * (MAX_DEPLOYED_PCT / 100.0)
+            if deployed + margin > deploy_cap:
+                return {"error": (f"Paper deployment cap reached: ${deployed:,.0f} of ${deploy_cap:,.0f} "
+                                  f"({MAX_DEPLOYED_PCT:.0f}% of ${equity_now:,.0f} equity) already committed.")}
+
+            logger.info(
+                f"[Paper] Cash ${portfolio.cash:,.2f} | deployed ${deployed:,.0f}/${deploy_cap:,.0f} "
+                f"({len(open_rows)}/{MAX_OPEN_POSITIONS} slots) | this trade ${margin:,.2f}"
+            )
             if portfolio.cash < margin:
                 logger.warning(f"[Paper] Insufficient cash — have ${portfolio.cash:.2f}, need ${margin:.2f}")
                 return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin:.0f}. Use /api/paper/reset to restore $100k."}

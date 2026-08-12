@@ -30,9 +30,9 @@ class PositionSymbolSafetyTests(unittest.TestCase):
         self.assertEqual(_safe_qty(24, is_crypto=False), 24)
 
     def test_nested_bracket_legs_are_discovered(self):
-        stop = SimpleNamespace(side="sell", order_type="stop", stop_price=90, limit_price=None, legs=[])
-        target = SimpleNamespace(side="sell", order_type="limit", stop_price=None, limit_price=120, legs=[])
-        parent = SimpleNamespace(side="buy", order_type="limit", stop_price=None, limit_price=100,
+        stop = SimpleNamespace(symbol="RTX", side="sell", order_type="stop", stop_price=90, limit_price=None, legs=[])
+        target = SimpleNamespace(symbol="RTX", side="sell", order_type="limit", stop_price=None, limit_price=120, legs=[])
+        parent = SimpleNamespace(symbol="RTX", side="buy", order_type="limit", stop_price=None, limit_price=100,
                                  legs=[stop, target])
         client = SimpleNamespace(get_orders=lambda request: [parent])
         self.assertEqual(_open_exit_orders(client, "RTX", "sell"), (stop, target))
@@ -91,3 +91,36 @@ class PositionSymbolSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CryptoOrderSymbolFormatTests(unittest.TestCase):
+    """Alpaca stores crypto POSITIONS as 'ARBUSD' and crypto ORDERS as
+    'ARB/USD'. The lookup must bridge that, or the sweep believes every
+    crypto position is unprotected and submits duplicate stops."""
+
+    def _client(self, order_symbol):
+        stop = SimpleNamespace(symbol=order_symbol, side="sell", order_type="stop",
+                               stop_price=0.07, limit_price=None, legs=[])
+        return SimpleNamespace(get_orders=lambda request: [stop]), stop
+
+    def test_slashed_order_matches_unslashed_position(self):
+        client, stop = self._client("ARB/USD")
+        found_stop, _ = _open_exit_orders(client, "ARBUSD", "sell")
+        self.assertIs(found_stop, stop)
+
+    def test_unslashed_order_still_matches(self):
+        client, stop = self._client("ARBUSD")
+        found_stop, _ = _open_exit_orders(client, "ARBUSD", "sell")
+        self.assertIs(found_stop, stop)
+
+    def test_other_symbols_are_not_matched(self):
+        client, _ = self._client("ETH/USD")
+        self.assertEqual(_open_exit_orders(client, "ARBUSD", "sell"), (None, None))
+
+    def test_malformed_order_does_not_blind_the_lookup(self):
+        good = SimpleNamespace(symbol="ARB/USD", side="sell", order_type="stop",
+                               stop_price=0.07, limit_price=None, legs=[])
+        broken = SimpleNamespace(side="sell", order_type="stop")  # no symbol at all
+        client = SimpleNamespace(get_orders=lambda request: [broken, good])
+        found_stop, _ = _open_exit_orders(client, "ARBUSD", "sell")
+        self.assertIs(found_stop, good)

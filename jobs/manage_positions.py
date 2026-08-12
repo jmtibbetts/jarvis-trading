@@ -363,10 +363,12 @@ def _open_exit_orders(client, sym: str, exit_side: str) -> tuple[object | None, 
         # the coins were already reserved by the stop it could not see.
         # Query unfiltered and match on the normalized symbol instead.
         sym_clean = sym.upper().replace("/", "")
+        # getattr, not o.symbol: an order missing the attribute must be
+        # skipped, not raise and take every other order down with it.
         orders = [
             o for o in (client.get_orders(GetOrdersRequest(
                 status=QueryOrderStatus.OPEN, nested=True)) or [])
-            if str(o.symbol).upper().replace("/", "") == sym_clean
+            if str(getattr(o, "symbol", "") or "").upper().replace("/", "") == sym_clean
         ]
     except Exception as e:
         logger.debug(f"[Positions] Open order lookup failed for {sym}: {e}")

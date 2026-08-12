@@ -130,7 +130,8 @@ def score_leverage(score: float | None, *, asset_class: str | None = None,
 
 
 def size_position(equity: float, entry: float, stop: float, leverage: float,
-                  free_cash: float, margin_override: float = 0.0) -> dict:
+                  free_cash: float, margin_override: float = 0.0,
+                  symbol: str = "") -> dict:
     """Margin-first sizing.
 
         margin   = equity * TRADE_MARGIN_PCT   (or an explicit override)
@@ -153,9 +154,48 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         return {"ok": False, "reason": "no free cash to commit"}
 
     notional = margin * max(1.0, leverage)
-    qty = notional / entry
+    # One unit of a futures contract is price * MULTIPLIER, not price. Using
+    # price alone produced 0.37-contract positions that no venue can fill and
+    # notional figures wrong by up to 1000x.
+    from lib.instruments import (get_spec, is_futures, whole_contracts,
+                                 margin_required, suggest_micro)
+    spec = get_spec(symbol) if symbol else None
+    unit_value = entry * (spec.multiplier if spec else 1.0)
+    qty = notional / unit_value if unit_value > 0 else 0.0
+
+    if symbol and is_futures(symbol):
+        # Futures size by RISK PER CONTRACT, not by a margin percentage.
+        # Margin is set by the exchange in dollars and has nothing to do with
+        # how much the trade can lose; what bounds the loss is the stop:
+        #
+        #     risk per contract = stop distance x multiplier
+        #     contracts         = risk budget / risk per contract
+        #
+        # Sizing futures off a 1%-of-equity margin slice instead produced
+        # zero contracts for every instrument — even a Micro E-mini needs
+        # $1,320 of margin against a $1,000 slice — which is why the futures
+        # track could never open a position.
+        risk_budget = margin                      # the 1% slice IS the risk budget
+        risk_per_contract = stop_distance_for_futures = abs(entry - stop) * spec.multiplier
+        if risk_per_contract <= 0:
+            return {"ok": False, "reason": f"{symbol}: no stop distance, cannot size by risk"}
+        qty = whole_contracts(symbol, risk_budget / risk_per_contract)
+        if qty < 1:
+            micro = suggest_micro(symbol)
+            hint = f" Try {micro}." if micro else ""
+            return {"ok": False,
+                    "reason": (f"{symbol}: one contract risks ${risk_per_contract:,.0f} at this stop, "
+                               f"over the ${risk_budget:,.0f} budget.{hint}")}
+        needed_margin = margin_required(symbol, qty)
+        if needed_margin > free_cash * (MAX_MARGIN_PCT_OF_CASH / 100.0):
+            return {"ok": False,
+                    "reason": (f"{symbol}: {qty:.0f} contract(s) need ${needed_margin:,.0f} margin, "
+                               f"over the {MAX_MARGIN_PCT_OF_CASH:.0f}% free-cash cap")}
+        margin = needed_margin
+        notional = entry * qty * spec.multiplier
+
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
-    loss_at_stop = qty * stop_distance
+    loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)
     return {
         "ok": True,
         "qty": qty,
@@ -295,14 +335,22 @@ def _get_portfolio_cash(db):
     return p
 
 
-def _calc_pnl(entry: float, close_price: float, qty: float, side: int, leverage: float, margin: float):
+def _calc_pnl(entry: float, close_price: float, qty: float, side: int, leverage: float,
+              margin: float, symbol: str = ""):
     """
     Unified P&L calculation.
     - qty = notional / entry  (notional = margin * leverage)
-    - raw_pnl = price_move * qty * side  →  already reflects full leveraged exposure
+    - raw_pnl = price_move * qty * MULTIPLIER * side
     - pnl_pct uses MARGIN (capital at risk) as the base, which gives the correct ROI
+
+    The multiplier is why this needed changing: one point of ES is $50 per
+    contract, not $1. Without it every futures P&L in the learning data was
+    understated by 5x (YM) to 1000x (CL). Shares and coins have a
+    multiplier of 1.0, so this is a no-op for them.
     """
-    raw_pnl = (close_price - entry) * qty * side
+    from lib.instruments import get_spec
+    multiplier = get_spec(symbol).multiplier if symbol else 1.0
+    raw_pnl = (close_price - entry) * qty * side * multiplier
     pnl_pct = (raw_pnl / margin) * 100 if margin else 0.0
     return raw_pnl, pnl_pct
 
@@ -424,7 +472,7 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 for r in _db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
             )
             sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
-                                   margin_override=override_margin)
+                                   margin_override=override_margin, symbol=sym)
     except Exception as e:
         logger.warning(f"[Paper] Risk sizing unavailable ({e}) — falling back to flat margin")
 
@@ -574,7 +622,7 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
             )
             return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
 
-        pnl, pnl_pct = _calc_pnl(entry, close_price, qty, side, lev, pos_margin)
+        pnl, pnl_pct = _calc_pnl(entry, close_price, qty, side, lev, pos_margin, symbol=pos_symbol)
 
         portfolio = _get_portfolio_cash(db)
         portfolio.cash         += pos_margin + pnl
@@ -706,7 +754,7 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
             )
             return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
 
-        pnl, pnl_pct = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin)
+        pnl, pnl_pct = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin, symbol=pos_symbol)
 
         portfolio = _get_portfolio_cash(db)
         portfolio.cash        += close_margin + pnl
@@ -841,7 +889,7 @@ def mark_to_market(prices: dict) -> dict:
             )
             continue
 
-        pnl, pct = _calc_pnl(entry, price, qty, side, lev, margin)
+        pnl, pct = _calc_pnl(entry, price, qty, side, lev, margin, symbol=sym)
 
         # Trigger checks — MUST respect side direction:
         # LONG:  stop when price falls BELOW stop_loss, profit when price rises ABOVE target

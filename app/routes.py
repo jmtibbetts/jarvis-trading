@@ -648,7 +648,7 @@ def get_signal_sizing(signal_id: str):
         explicit = float(m.group(1))
     leverage = explicit or score_leverage(score)
 
-    sizing = size_position(equity, entry, stop, leverage, cash)
+    sizing = size_position(equity, entry, stop, leverage, cash, symbol=sig.asset_symbol)
     if not sizing.get("ok"):
         return {"ok": False, "reason": sizing.get("reason"), "leverage": leverage}
 

@@ -110,8 +110,18 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
     # Half-spread per side, crossed on both entry and exit for market orders.
     spread_cost_pct = spread_pct * crossing
 
-    per_side_fee = fee_pct(symbol, maker=maker)
-    fee_cost_pct = per_side_fee * 2.0          # in and out
+    # Futures charge a FLAT fee per contract, not a percentage of notional.
+    # Applying the percentage model to an ES contract charged $1,942 instead
+    # of $4.50 — a 430x overcharge that would reject every futures trade.
+    from lib.instruments import is_futures, get_spec
+    if is_futures(symbol):
+        spec = get_spec(symbol)
+        contract_notional_value = entry * spec.multiplier
+        fee_cost_pct = ((spec.commission * 2.0) / contract_notional_value
+                        if contract_notional_value > 0 else 0.0)
+    else:
+        per_side_fee = fee_pct(symbol, maker=maker)
+        fee_cost_pct = per_side_fee * 2.0          # in and out
 
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else float(slippage_pct)
     slip_cost_pct = abs(slip) * 2.0            # both sides

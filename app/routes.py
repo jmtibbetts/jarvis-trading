@@ -851,6 +851,68 @@ def _build_provider_status() -> dict:
     return {"providers": providers, "checked_at": now.isoformat()}
 
 
+@router.get("/venue/kraken")
+def get_kraken_venue():
+    """Everything the desk knows about the Kraken venue, for the UI.
+
+    Deliberately one endpoint rather than four: these numbers only make
+    sense together. A tight spread means little without the fee that also
+    has to be paid, and leverage limits mean little without knowing what a
+    round trip costs at that leverage.
+    """
+    import os
+    out = {"venue": "kraken", "paper_venue": os.getenv("PAPER_VENUE", "kraken")}
+
+    # Account connection and the fee actually charged
+    try:
+        from lib.kraken_account import check_connection, is_configured
+        out["account"] = check_connection() if is_configured() else {
+            "connected": False, "reason": "no credentials configured"}
+    except Exception as e:
+        out["account"] = {"connected": False, "reason": str(e)[:80]}
+
+    try:
+        from lib.venues import fee_for, account_fee
+        measured = account_fee("kraken")
+        taker, why = fee_for("kraken")
+        maker, _ = fee_for("kraken", maker=True)
+        out["fees"] = {
+            "taker_pct": round(taker * 100, 4),
+            "maker_pct": round(maker * 100, 4),
+            "source": "measured from account" if measured else "published schedule",
+            "volume_30d": measured.get("volume_30d") if measured else None,
+            "note": why,
+        }
+    except Exception as e:
+        out["fees"] = {"error": str(e)[:80]}
+
+    # Live book + tape, per streamed symbol
+    try:
+        from lib.kraken_stream import status as stream_status, live_spread_pct, trade_flow
+        st = stream_status()
+        rows = []
+        for sym in st.get("symbols", []):
+            spread, spread_why = live_spread_pct(sym)
+            flow = trade_flow(sym)
+            rows.append({
+                "symbol": sym,
+                "spread_pct": round(spread * 100, 5) if spread is not None else None,
+                "spread_age": spread_why,
+                "flow_imbalance": flow["flow_imbalance"] if flow else None,
+                "prints": flow["prints"] if flow else 0,
+                "buy_count": flow["buy_count"] if flow else 0,
+                "sell_count": flow["sell_count"] if flow else 0,
+                "largest_print": flow["largest"] if flow else None,
+            })
+        rows.sort(key=lambda r: abs(r["flow_imbalance"] or 0), reverse=True)
+        out["stream"] = {"connected": st.get("connected"), "error": st.get("error"),
+                         "since": st.get("since"), "symbols": rows}
+    except Exception as e:
+        out["stream"] = {"connected": False, "error": str(e)[:80], "symbols": []}
+
+    return out
+
+
 @router.get("/status/providers")
 def get_provider_status():
     """Per-provider connectivity for the HUD header. Serve-stale-while-

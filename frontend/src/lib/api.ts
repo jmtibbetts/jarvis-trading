@@ -984,6 +984,20 @@ export const api = {
       purchases: number; sales: number; other: number; trade_count: number;
       range_low_total: number; range_high_total: number; trades: CongressTrade[];
     }[]; note: string }>(`/congress/by-official?days=${days}&limit=${limit}`),
+  krakenVenue: () =>
+    get<{
+      venue: string; paper_venue: string;
+      account: { connected: boolean; granted_scopes?: string[]; missing_scopes?: string[]; reason?: string };
+      fees: { taker_pct?: number; maker_pct?: number; source?: string; volume_30d?: number | null; note?: string; error?: string };
+      stream: {
+        connected: boolean; error: string | null; since: string | null;
+        symbols: {
+          symbol: string; spread_pct: number | null; spread_age: string;
+          flow_imbalance: number | null; prints: number;
+          buy_count: number; sell_count: number; largest_print: number | null;
+        }[];
+      };
+    }>(`/venue/kraken`),
   focusList: () =>
     get<{
       focus: {

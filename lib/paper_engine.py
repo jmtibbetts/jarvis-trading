@@ -129,6 +129,50 @@ def score_leverage(score: float | None, *, asset_class: str | None = None,
     return result if explain else result["leverage"]
 
 
+def venue_round_trip_fee(symbol: str, notional: float) -> tuple[float, str]:
+    """Dollar cost of opening AND closing this position at the real venue.
+
+    Paper trading charged nothing, so every simulated result was optimistic
+    by the full fee. At the fee this account actually pays on Kraken (0.8%
+    taker, measured from the account rather than the published table) a
+    round trip costs 1.6% of NOTIONAL — and notional is leveraged, so a 10x
+    position pays 16% of the committed margin before the thesis is tested.
+    Practice that ignores this teaches the wrong lesson.
+    """
+    # The paper book rehearses a venue that may not be the one live orders
+    # go to. Alpaca fills the live account today while the practice target
+    # is Kraken, and pricing rehearsal at Alpaca's cheaper fee would teach
+    # a trade that does not survive at the real destination.
+    import os
+    venue = os.getenv("PAPER_VENUE") or os.getenv("DEFAULT_CRYPTO_VENUE") or "kraken"
+    try:
+        from lib.venues import fee_for
+        rate, why = fee_for(venue, maker=False, asset_class="crypto")
+        return abs(notional) * rate * 2.0, why
+    except Exception:
+        return 0.0, "fee lookup unavailable"
+
+
+def venue_max_leverage(symbol: str, notional: float) -> tuple[float, str]:
+    """The most leverage the real venue would permit for this position.
+
+    Practising at 20x on a pair the venue caps at 5x is rehearsing a trade
+    that cannot be placed. Kraken publishes both: spot margin limits per
+    pair, and tiered futures margin where the cap FALLS as size grows.
+    """
+    try:
+        from lib.venues import kraken_pair_specs, max_leverage_at_size
+        futures_lev, why = max_leverage_at_size(symbol, notional)
+        if futures_lev > 1.0:
+            return futures_lev, why
+        spec = kraken_pair_specs(symbol)
+        if spec and spec.get("max_leverage", 0) > 1:
+            return float(spec["max_leverage"]), f"kraken spot margin caps {symbol} at {spec['max_leverage']}x"
+    except Exception:
+        pass
+    return float("inf"), "no venue leverage limit known"
+
+
 def size_position(equity: float, entry: float, stop: float, leverage: float,
                   free_cash: float, margin_override: float = 0.0,
                   symbol: str = "") -> dict:
@@ -152,6 +196,13 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         capped = True
     if margin <= 0:
         return {"ok": False, "reason": "no free cash to commit"}
+
+    # Clamp to the venue's real limit BEFORE computing notional, so the
+    # practice position is one that could actually be placed.
+    venue_cap, cap_why = venue_max_leverage(symbol, margin * max(1.0, leverage))
+    leverage_capped = False
+    if venue_cap < leverage:
+        leverage, leverage_capped = venue_cap, True
 
     notional = margin * max(1.0, leverage)
     # One unit of a futures contract is price * MULTIPLIER, not price. Using
@@ -196,12 +247,18 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
 
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
     loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)
+    fees, fee_why = venue_round_trip_fee(symbol, notional)
     return {
         "ok": True,
         "qty": qty,
         "margin": margin,
         "notional": notional,
         "leverage": leverage,
+        "leverage_capped_by_venue": leverage_capped,
+        "leverage_cap_reason": cap_why if leverage_capped else None,
+        "round_trip_fees": round(fees, 2),
+        "fees_pct_of_margin": round(fees / margin * 100, 2) if margin else 0.0,
+        "fee_basis": fee_why,
         "loss_at_stop": loss_at_stop,
         "loss_pct_of_margin": (loss_at_stop / margin * 100) if margin else 0.0,
         "capped_by_cash": capped,

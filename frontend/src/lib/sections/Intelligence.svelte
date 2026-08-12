@@ -41,6 +41,7 @@
   let institutional = $state<InstitutionalAccumulation | null>(null);
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
+  let kraken = $state<Awaited<ReturnType<typeof api.krakenVenue>> | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
   let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
   let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
@@ -160,6 +161,7 @@
     institutional = inst;
     congress = cg;
     congressActivity = cga;
+    if (CD) api.krakenVenue().then((r) => (kraken = r)).catch(() => {});
     if (SM) {
       api.congressByOfficial(365, 40).then((r) => (congressOfficials = r)).catch(() => {});
     }
@@ -1009,6 +1011,67 @@
 
   {#if view === "cryptodesk"}
   <div class="span-12">
+    <Panel
+      title="Kraken Venue"
+      dotColor={kraken?.stream.connected ? "var(--good)" : "var(--warm)"}
+      meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : "—"}
+    >
+      {#if kraken}
+        <div class="kv-head">
+          <span class="kv-stat">
+            <i>taker</i> <b class="num">{kraken.fees.taker_pct ?? "—"}%</b>
+          </span>
+          <span class="kv-stat">
+            <i>maker</i> <b class="num">{kraken.fees.maker_pct ?? "—"}%</b>
+          </span>
+          <span class="kv-src dim">{kraken.fees.source}</span>
+          <span class="kv-acct {kraken.account.connected ? 'ok' : 'off'}">
+            {kraken.account.connected
+              ? `account read-only · ${kraken.account.granted_scopes?.length ?? 0} scopes`
+              : `not connected — ${kraken.account.reason ?? ""}`}
+          </span>
+        </div>
+
+        {#if kraken.stream.symbols.length}
+          <table class="tbl kv-tbl">
+            <thead>
+              <tr>
+                <th>Symbol</th><th class="num">Live spread</th>
+                <th class="num">Flow</th><th class="num">Prints</th><th>Tape</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each kraken.stream.symbols as r (r.symbol)}
+                <tr>
+                  <td class="sym">{r.symbol}</td>
+                  <td class="num">{r.spread_pct != null ? `${r.spread_pct}%` : "—"}</td>
+                  <td class="num {(r.flow_imbalance ?? 0) > 0.15 ? 'pl-up' : (r.flow_imbalance ?? 0) < -0.15 ? 'pl-down' : 'dim'}">
+                    {r.flow_imbalance != null ? (r.flow_imbalance >= 0 ? "+" : "") + r.flow_imbalance.toFixed(2) : "—"}
+                  </td>
+                  <td class="num dim">{r.prints}</td>
+                  <td class="num dim">{r.buy_count}B / {r.sell_count}S</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="kv-foot dim">
+            Flow is VOLUME imbalance (+1 all buying, −1 all selling), which can disagree with the
+            buy/sell counts beside it — many small buys against few large sells reads as buying by
+            count and selling by weight. The volume figure is the one that moves money.
+          </div>
+        {:else}
+          <div class="empty">
+            Stream not connected{kraken.stream.error ? ` — ${kraken.stream.error}` : ""}. Spreads
+            fall back to cached REST measurements; nothing breaks.
+          </div>
+        {/if}
+      {:else}
+        <div class="empty">Loading venue data…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-12">
     <Panel title="Market Structure" meta={cryptoMarkets ? `${cryptoMarkets.coins.length} coins · CoinGecko live` : "—"}>
       {#snippet children()}
         {#if cryptoMarkets && cryptoMarkets.coins.length}
@@ -1744,6 +1807,49 @@
     height: 100%;
     background: var(--accent);
     border-radius: 3px;
+  }
+  .kv-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .kv-stat i {
+    font-style: normal;
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    margin-right: 4px;
+  }
+  .kv-stat b {
+    font-size: 13px;
+  }
+  .kv-src {
+    font-size: 10px;
+  }
+  .kv-acct {
+    margin-left: auto;
+    font-size: 10px;
+  }
+  .kv-acct.ok {
+    color: var(--good);
+  }
+  .kv-acct.off {
+    color: var(--warm);
+  }
+  .kv-tbl {
+    font-size: 11.5px;
+  }
+  .kv-foot {
+    font-size: 9.5px;
+    line-height: 1.5;
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
   }
   .cap-h {
     max-height: 420px;

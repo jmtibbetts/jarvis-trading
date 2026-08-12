@@ -614,6 +614,65 @@ def reverse_signal(signal_id: str, body: ReverseSignalRequest):
     }
 
 
+@router.get("/signals/{signal_id}/sizing")
+def get_signal_sizing(signal_id: str):
+    """What this signal would actually trade: capital committed, leverage,
+    resulting exposure, and what a stop-out costs. Read-only preview — the
+    same maths open_paper_position uses, so the card can't disagree with
+    the engine."""
+    from lib.paper_engine import score_leverage, size_position, TRADE_MARGIN_PCT
+    from app.database import PaperPosition, PaperPortfolio
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404, "Signal not found")
+        entry = float(sig.entry_price or 0)
+        stop = float(sig.stop_loss or 0)
+        target = float(sig.target_price or 0)
+        score = sig.composite_score or sig.confidence
+        direction = sig.direction or "Long"
+
+        pf = db.query(PaperPortfolio).first()
+        cash = float(pf.cash if pf else 100_000.0)
+        equity = cash + sum(
+            float(r.margin_used or 0)
+            for r in db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
+        )
+
+    # An explicit 5x/10x/20x in the direction is an instruction, not a guess.
+    explicit = None
+    import re as _re
+    m = _re.search(r"(\d+)x", str(direction), _re.I)
+    if m:
+        explicit = float(m.group(1))
+    leverage = explicit or score_leverage(score)
+
+    sizing = size_position(equity, entry, stop, leverage, cash)
+    if not sizing.get("ok"):
+        return {"ok": False, "reason": sizing.get("reason"), "leverage": leverage}
+
+    gain_at_target = sizing["qty"] * abs(target - entry) if target > 0 else None
+    return {
+        "ok": True,
+        "leverage": leverage,
+        "leverage_source": "explicit in direction" if explicit else f"conviction score {float(score or 0):.0f}",
+        "margin": round(sizing["margin"], 2),
+        "notional": round(sizing["notional"], 2),
+        "qty": round(sizing["qty"], 8),
+        "loss_at_stop": round(sizing["loss_at_stop"], 2),
+        "loss_pct_of_margin": round(sizing["loss_pct_of_margin"], 1),
+        "gain_at_target": round(gain_at_target, 2) if gain_at_target is not None else None,
+        "gain_pct_of_margin": round(gain_at_target / sizing["margin"] * 100, 1) if gain_at_target and sizing["margin"] else None,
+        "capped_by_cash": sizing["capped_by_cash"],
+        "equity_basis": round(equity, 2),
+        "note": (
+            f"{TRADE_MARGIN_PCT}% of equity committed per position. Leverage multiplies "
+            f"exposure, not the capital at risk — the committed amount is the most that can be lost."
+        ),
+    }
+
+
 @router.post("/signals/{signal_id}/verify")
 def verify_signal_route(signal_id: str, apply_update: bool = False, deep: bool = False):
     """User-initiated double-check of a signal against fresh data —

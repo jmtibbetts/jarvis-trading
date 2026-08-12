@@ -7,19 +7,18 @@ open position is an UPDATE, not a new trade.
 
 Decisions, in order of how much they touch the account:
 
-  AMEND     same direction, better levels -> move the protective orders.
-            Stops are RATCHET-ONLY (tighter or unchanged, never looser),
-            matching the discipline used everywhere else in this system.
-            A looser stop from a newer signal is deliberately ignored.
+  HOLD      same direction. The position is already expressing this view,
+            so the working order is LEFT ALONE — re-signalling a direction
+            is not new information worth churning broker orders for. The
+            trailing/tier logic in manage_positions keeps adjusting stops
+            and take-profits on its own schedule; that is where ongoing
+            level management belongs.
 
-  CONFLICT  opposite direction. Never acted on blind: the caller runs a
-            deep verify on the EXISTING position first, and only closes it
-            when the evidence says the position itself is failing
-            (INVALIDATED, or the AI disagreeing at high confidence).
-            Otherwise it stays and an alert is raised for the operator —
-            a contradicting signal is not proof the position is wrong.
-
-  NOOP      nothing materially better to do.
+  FLIP      the direction SWAPPED. This is the one case that changes the
+            order: close the open position and let the opposite-side signal
+            enter. Gated by a fast deterministic re-check of the position
+            (not the 60-90s deep verify — this runs inside the execution
+            loop) so a stale price can't trigger a pointless flip.
 
 Everything here is pure decision logic over plain dicts so it can be
 tested without a broker.
@@ -49,12 +48,10 @@ def _pct_diff(a: float, b: float) -> float:
 
 
 def classify(signal: dict, position: dict) -> str:
-    """AMEND / CONFLICT / NOOP for a new signal against an open position."""
+    """FLIP when the new signal is the opposite side, HOLD otherwise."""
     pos_short = float(position.get("qty") or 0) < 0 or _is_short(position.get("direction"))
     sig_short = _is_short(signal.get("direction"))
-    if pos_short != sig_short:
-        return "CONFLICT"
-    return "AMEND"
+    return "FLIP" if pos_short != sig_short else "HOLD"
 
 
 def plan_amendment(signal: dict, position: dict) -> dict | None:
@@ -103,26 +100,17 @@ def plan_amendment(signal: dict, position: dict) -> dict | None:
     }
 
 
-def evaluate_conflict(verification: dict | None) -> dict:
-    """Given a deep verify of the EXISTING position, decide whether a
-    contradicting signal is allowed to close it."""
+def evaluate_flip(verification: dict | None) -> dict:
+    """Should a direction swap actually flip the position?
+
+    Yes by default — a swapped signal IS the trigger to change the order.
+    The only refusal is a verdict that says the re-check itself was blind
+    (no price available), because flipping on unknown data is guessing.
+    """
     v = verification or {}
     verdict = str(v.get("verdict") or "").upper()
-    ai = v.get("llm_assessment") or {}
-    stance = str(ai.get("assessment") or "").upper()
-    try:
-        conf = float(ai.get("confidence") or 0)
-    except (TypeError, ValueError):
-        conf = 0.0
-
+    if verdict == "DATA_UNAVAILABLE":
+        return {"flip": False, "reason": "no fresh price to verify against — position left alone"}
     if verdict == "INVALIDATED":
-        return {"close": True, "reason": "position already invalidated at current price"}
-    if stance == "DISAGREE" and conf >= CONFLICT_CLOSE_CONFIDENCE:
-        return {"close": True, "reason": f"AI rejects the open position at {conf:.0f}% confidence"}
-    return {
-        "close": False,
-        "reason": (
-            f"contradicting signal, but the open position still verifies "
-            f"({verdict or 'unknown'}{f', AI {stance} {conf:.0f}%' if stance else ''}) — keeping it"
-        ),
-    }
+        return {"flip": True, "reason": "position already invalidated at the current price"}
+    return {"flip": True, "reason": f"signal direction swapped (position re-check: {verdict or 'ok'})"}

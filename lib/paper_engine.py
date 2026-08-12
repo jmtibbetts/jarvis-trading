@@ -25,15 +25,15 @@ MAX_LEVERAGE           = 20.0         # Max leverage multiplier (5x/10x/20x supp
 MARGIN_CALL_THRESHOLD  = 0.15         # Liquidate if equity < 15% of margin (lost 85% of capital)
 DEFAULT_POSITION_SIZE  = 3_000.0      # legacy fallback when risk sizing is impossible
 
-# ── Risk-based sizing (the signal decides the quantity) ──────────────────
-# A flat $3k margin per trade ignored the setup entirely and drained the
-# account: 33 positions x $3k consumed $99k and every later entry failed on
-# funds. Now the SIGNAL sizes the trade — risk a fixed slice of equity per
-# position and let the stop distance determine quantity, so a tight stop
-# buys a bigger position for the SAME dollar risk and a wide stop a smaller
-# one. Leverage then scales with conviction (2x-20x) and only affects how
-# much margin that position ties up, never how much is at risk.
-RISK_PCT_PER_TRADE     = 1.0    # % of portfolio equity risked per position
+# ── Margin-first sizing (the trade amount IS the committed capital) ──────
+# A $10 trade at 10x controls $100 of exposure but is still a $10 trade:
+# $10 leaves the account and $10 is the most that can be lost. An earlier
+# risk-first version inverted this — it solved for the notional needed to
+# risk 1% at the stop, which produced a $125,000 position on a $100,000
+# account. Exposure is now bounded by construction: commit a fixed slice of
+# equity, let conviction (2x-20x) decide how far that slice reaches, and
+# let the stop govern the loss WITHIN it.
+TRADE_MARGIN_PCT       = 1.0    # % of equity COMMITTED per position
 MAX_MARGIN_PCT_OF_CASH = 15.0   # one position may tie up at most this % of free cash
 MIN_LEVERAGE           = 2.0
 LEVERAGE_AT_MAX_SCORE  = 20.0
@@ -53,42 +53,41 @@ def score_leverage(score: float | None) -> float:
     return float(round(lev))
 
 
-def size_from_risk(equity: float, entry: float, stop: float, leverage: float,
-                   free_cash: float) -> dict:
-    """Position size from the setup's own risk, not a flat dollar amount.
+def size_position(equity: float, entry: float, stop: float, leverage: float,
+                  free_cash: float, margin_override: float = 0.0) -> dict:
+    """Margin-first sizing.
 
-    qty = (equity * RISK_PCT) / |entry - stop|  — the loss if the stop hits
-    is the same fixed slice of equity regardless of instrument or stop
-    width. Margin is then notional/leverage, capped so a single position
-    cannot monopolise the account.
+        margin   = equity * TRADE_MARGIN_PCT   (or an explicit override)
+        notional = margin * leverage
+        qty      = notional / entry
+
+    The returned loss_at_stop says what a stop-out actually costs out of
+    that committed margin — the number that matters once leverage is high.
     """
-    risk_per_unit = abs(entry - stop)
-    if entry <= 0 or risk_per_unit <= 0 or equity <= 0:
-        return {"ok": False, "reason": "cannot size: missing entry, stop, or equity"}
+    if entry <= 0 or equity <= 0:
+        return {"ok": False, "reason": "cannot size: missing entry or equity"}
 
-    risk_budget = equity * (RISK_PCT_PER_TRADE / 100.0)
-    qty = risk_budget / risk_per_unit
-    notional = qty * entry
-    margin = notional / max(1.0, leverage)
-
+    margin = margin_override if margin_override > 0 else equity * (TRADE_MARGIN_PCT / 100.0)
     cap = free_cash * (MAX_MARGIN_PCT_OF_CASH / 100.0)
     capped = False
     if cap > 0 and margin > cap:
-        scale = cap / margin
-        qty *= scale
-        notional *= scale
         margin = cap
         capped = True
+    if margin <= 0:
+        return {"ok": False, "reason": "no free cash to commit"}
 
-    if qty <= 0 or margin <= 0:
-        return {"ok": False, "reason": "sizing produced a zero position"}
+    notional = margin * max(1.0, leverage)
+    qty = notional / entry
+    stop_distance = abs(entry - stop) if stop > 0 else 0.0
+    loss_at_stop = qty * stop_distance
     return {
         "ok": True,
         "qty": qty,
         "margin": margin,
         "notional": notional,
-        "risk_amount": min(risk_budget, qty * risk_per_unit),
-        "risk_per_unit": risk_per_unit,
+        "leverage": leverage,
+        "loss_at_stop": loss_at_stop,
+        "loss_pct_of_margin": (loss_at_stop / margin * 100) if margin else 0.0,
         "capped_by_cash": capped,
     }
 
@@ -343,18 +342,19 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 float(r.margin_used or 0)
                 for r in _db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
             )
-            sizing = size_from_risk(_equity, entry, stop, leverage, float(_pf.cash or 0))
+            sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
+                                   margin_override=override_margin)
     except Exception as e:
         logger.warning(f"[Paper] Risk sizing unavailable ({e}) — falling back to flat margin")
 
-    if sizing.get("ok") and override_margin <= 0:
+    if sizing.get("ok"):
         qty = round(sizing["qty"], 6)
         margin = round(sizing["margin"], 2)
         notional = sizing["notional"]
         logger.info(
-            f"[Paper] {sym} sized from risk: qty={qty:g} @ {leverage:g}x | "
-            f"margin=${margin:,.0f} notional=${notional:,.0f} | "
-            f"risk=${sizing['risk_amount']:,.0f} ({RISK_PCT_PER_TRADE}% of equity)"
+            f"[Paper] {sym}: ${margin:,.0f} committed @ {leverage:g}x = ${notional:,.0f} exposure | "
+            f"qty={qty:g} | stop-out costs ${sizing['loss_at_stop']:,.0f} "
+            f"({sizing['loss_pct_of_margin']:.0f}% of the ${margin:,.0f} committed)"
             + (" [capped by free cash]" if sizing.get("capped_by_cash") else "")
         )
     else:

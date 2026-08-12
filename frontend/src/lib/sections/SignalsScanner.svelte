@@ -36,6 +36,23 @@
   let classFilter = $state("");
   let busyIds = $state<Set<string>>(new Set());
   let verifyResults = $state<Record<string, VerifyResult>>({});
+  let sizings = $state<Record<string, Awaited<ReturnType<typeof api.signalSizing>>>>({});
+
+  /** Trade economics per card: capital committed, leverage, resulting
+   * exposure. Fetched lazily for the signals actually on screen. */
+  async function loadSizings(list: Signal[]) {
+    const missing = list.filter((s) => !sizings[s.id]).slice(0, 40);
+    await Promise.all(
+      missing.map(async (s) => {
+        try {
+          const r = await api.signalSizing(s.id);
+          sizings = { ...sizings, [s.id]: r };
+        } catch {
+          /* a card without sizing simply omits the line */
+        }
+      }),
+    );
+  }
 
   async function doReverse(sig: Signal) {
     const p = verifyResults[sig.id]?.reversal_proposal;
@@ -132,6 +149,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   async function loadSignals() {
     try {
       signals = await api.signals(statusFilter || undefined, 200);
+      loadSizings(signals);
     } catch (e) {
       toastStore.err(`Failed to load signals: ${e}`);
     }
@@ -630,6 +648,17 @@ The original signal will be superseded. Levels are recomputed server-side at sub
                 <div><span class="dim">stop</span> {sig.stop_loss ?? "—"}</div>
               </div>
               <div class="sc-src dim">{sig.signal_source}</div>
+              {#if sizings[sig.id]?.ok}
+                {@const z = sizings[sig.id]}
+                <div class="sc-size">
+                  <span class="sz-amt num">${z.margin?.toLocaleString()}</span>
+                  <span class="sz-lev">{z.leverage}x</span>
+                  <span class="dim num">= ${z.notional?.toLocaleString()} exposure</span>
+                  <span class="num pl-down">stop &minus;${z.loss_at_stop?.toLocaleString()}</span>
+                  {#if z.gain_at_target}<span class="num pl-up">target +${z.gain_at_target.toLocaleString()}</span>{/if}
+                  {#if z.capped_by_cash}<span class="sz-cap">capped by cash</span>{/if}
+                </div>
+              {/if}
               <div class="sc-actions" role="group" aria-label="Signal actions">
                 {#if isPending(sig) && !sig.paper_mode}
                   <button class="btn tiny good" disabled={busyIds.has(sig.id)} onclick={(e) => { e.stopPropagation(); doAction(sig, "approve"); }}>Approve</button>
@@ -974,6 +1003,32 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   }
   .vb-rev .btn {
     margin-top: 6px;
+  }
+  .sc-size {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 10.5px;
+    padding: 6px 0 2px;
+    border-top: 1px solid var(--line);
+    margin-top: 6px;
+  }
+  .sz-amt {
+    font-weight: 700;
+    font-size: 12px;
+  }
+  .sz-lev {
+    background: rgba(124, 154, 255, 0.16);
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-weight: 700;
+    font-size: 10px;
+  }
+  .sz-cap {
+    color: var(--warm);
   }
   .verify-box {
     grid-column: 1 / -1;

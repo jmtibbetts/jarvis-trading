@@ -57,12 +57,15 @@ def _symbols_with_pending_entries(client) -> set:
 def _reconcile_existing(sig: dict, sym: str, sym_raw: str, now_utc) -> None:
     """A signal arrived for a symbol already held or pending.
 
-    Same direction -> tighten/refresh the protective orders (never loosen a
-    stop). Opposite direction -> deep-verify the OPEN position and close it
-    only when the evidence says the position itself is failing; otherwise
-    keep it and alert. See lib/position_reconciler.py for the rules."""
-    from lib.position_reconciler import classify, plan_amendment, evaluate_conflict
-    from lib.alpaca_client import get_trading_client, cancel_open_orders_for_symbol
+    Same direction -> leave the working order completely alone (ongoing
+    stop/target management belongs to manage_positions, not to a repeated
+    signal). Direction SWAPPED -> close the position so the opposite side
+    can enter; that is the only case allowed to change an order.
+
+    Uses the FAST deterministic verify, not deep verify: this runs inside
+    the execution loop and a 60-90s LLM round trip there would stall it."""
+    from lib.position_reconciler import classify, evaluate_flip
+    from lib.alpaca_client import get_trading_client, cancel_open_orders_for_symbol, close_position
 
     client = get_trading_client()
     position = None
@@ -72,110 +75,70 @@ def _reconcile_existing(sig: dict, sym: str, sym_raw: str, now_utc) -> None:
             break
 
     if position is None:
-        # Held only by an unfilled entry order — nothing to amend yet.
         logger.info(f"[Execute] {sym}: entry already working, new signal noted (no duplicate placed)")
         return
 
     qty = float(position.qty or 0)
-    pos_dict = {
-        "qty": qty,
-        "direction": "Short" if qty < 0 else "Long",
-        "stop_loss": None,     # broker-side; read from working orders below
-        "target_price": None,
-        "avg_entry_price": float(position.avg_entry_price or 0),
-        "current_price": float(position.current_price or 0),
-    }
-    # Recover current protective levels from the working orders.
-    try:
-        from alpaca.trading.requests import GetOrdersRequest
-        from alpaca.trading.enums import QueryOrderStatus
-        for o in client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[position.symbol])) or []:
-            otype = str(getattr(o, "order_type", "")).lower()
-            if "stop" in otype and getattr(o, "stop_price", None):
-                pos_dict["stop_loss"] = float(o.stop_price)
-            elif "limit" in otype and getattr(o, "limit_price", None) and "stop" not in otype:
-                pos_dict["target_price"] = float(o.limit_price)
-    except Exception as e:
-        logger.debug(f"[Execute] Could not read protective orders for {sym}: {e}")
+    pos_dir = "Short" if qty < 0 else "Long"
+    decision = classify(sig, {"qty": qty, "direction": pos_dir})
 
-    decision = classify(sig, pos_dict)
-
-    if decision == "CONFLICT":
-        from lib.signal_verification import deep_verify_signal
-        verification = deep_verify_signal({
-            "asset_symbol": sym, "asset_class": sig.get("asset_class"),
-            "direction": pos_dict["direction"],
-            "entry_price": pos_dict["avg_entry_price"],
-            "target_price": pos_dict["target_price"] or pos_dict["avg_entry_price"] * (1.05 if qty > 0 else 0.95),
-            "stop_loss": pos_dict["stop_loss"] or pos_dict["avg_entry_price"] * (0.97 if qty > 0 else 1.03),
-            "timeframe": sig.get("timeframe"),
-        })
-        outcome = evaluate_conflict(verification)
-        logger.warning(
-            f"[Execute] {sym}: new {sig.get('direction')} contradicts open {pos_dict['direction']} — "
-            f"{'CLOSING' if outcome['close'] else 'keeping'}: {outcome['reason']}"
+    if decision == "HOLD":
+        logger.info(
+            f"[Execute] {sym}: new {sig.get('direction')} matches the open {pos_dir} — "
+            f"order left as is (stops/targets are managed by the position sweep)"
         )
-        try:
-            from lib.alert_engine import raise_alert
-            raise_alert(
-                source="execution",
-                severity="ACTIONABLE" if outcome["close"] else "WATCH",
-                title=f"Signal conflict on {sym}",
-                detail=(f"New {sig.get('direction')} signal against an open {pos_dict['direction']} "
-                        f"position. {outcome['reason']}."),
-                dedup_key=f"conflict:{sym}:{pos_dict['direction']}",
-                extra={"symbol": sym},
-            )
-        except Exception:
-            pass
-        if outcome["close"]:
-            from lib.alpaca_client import close_position
-            cancel_open_orders_for_symbol(position.symbol)
-            close_position(position.symbol)
-            logger.warning(f"[Execute] {sym}: position closed on verified conflict — new signal may enter next run")
         return
 
-    plan = plan_amendment(sig, pos_dict)
-    if not plan:
-        logger.info(f"[Execute] {sym}: new signal offers no better levels — position left as is")
-        return
-
-    changes = plan["changes"]
-    if plan.get("notes"):
-        logger.info(f"[Execute] {sym}: {plan['notes']}")
-
-    # Re-issue protection at the improved levels: cancel the old legs, then
-    # place the new stop (the sweep in manage_positions re-adds a take-profit).
-    new_stop = changes.get("stop_loss")
-    if new_stop:
-        try:
-            from jobs.manage_positions import _set_crypto_limit_stop, _set_trailing_stop_equity
-            price = pos_dict["current_price"] or pos_dict["avg_entry_price"]
-            cancel_open_orders_for_symbol(position.symbol)
-            is_c = "/" in str(position.symbol) or str(position.symbol).upper().endswith("USD")
-            if is_c and price > 0:
-                stop_pct = abs(price - new_stop) / price * 100
-                ok = _set_crypto_limit_stop(client, position.symbol, abs(qty), price, stop_pct)
-            else:
-                stop_pct = abs(price - new_stop) / price * 100 if price else 2.0
-                ok = _set_trailing_stop_equity(client, position.symbol, abs(qty), stop_pct)
-            logger.info(
-                f"[Execute] {sym}: stop {'tightened' if ok else 'tighten FAILED'} to {new_stop:g} "
-                f"from a fresh {sig.get('direction')} signal"
-            )
-        except Exception as e:
-            logger.warning(f"[Execute] {sym}: stop amendment failed: {e}")
-
-    # Record the amendment on the signal so the UI shows what happened.
+    # ── Direction swapped: close the position, let the new side enter ────
+    from lib.signal_verification import verify_signal
+    avg_entry = float(position.avg_entry_price or 0)
+    verification = verify_signal({
+        "asset_symbol": sym, "asset_class": sig.get("asset_class"),
+        "direction": pos_dir,
+        "entry_price": avg_entry,
+        "target_price": avg_entry * (1.05 if qty > 0 else 0.95),
+        "stop_loss": avg_entry * (0.97 if qty > 0 else 1.03),
+    })
+    outcome = evaluate_flip(verification)
+    logger.warning(
+        f"[Execute] {sym}: signal flipped {pos_dir} -> {sig.get('direction')} — "
+        f"{'CLOSING to reverse' if outcome['flip'] else 'holding'}: {outcome['reason']}"
+    )
     try:
+        from lib.alert_engine import raise_alert
+        raise_alert(
+            source="execution",
+            severity="ACTIONABLE" if outcome["flip"] else "WATCH",
+            title=f"Direction flip on {sym}",
+            detail=(f"Open {pos_dir} position; new signal says {sig.get('direction')}. "
+                    f"{outcome['reason']}."),
+            dedup_key=f"flip:{sym}:{sig.get('direction')}",
+            extra={"symbol": sym},
+        )
+    except Exception:
+        pass
+
+    if not outcome["flip"]:
+        return
+
+    try:
+        n = cancel_open_orders_for_symbol(position.symbol)
+        if n:
+            import time as _t
+            _t.sleep(1.5)   # let the broker release the reserved balance
+        close_position(position.symbol)
+        logger.warning(
+            f"[Execute] {sym}: {pos_dir} closed for reversal — the {sig.get('direction')} "
+            f"signal enters on the next run once the close settles"
+        )
         with get_db() as db:
             row = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
             if row:
-                row.status = "Merged"
-                row.notes = ((row.notes or "") + "\n[reconcile] amended open position: {}".format(changes)).strip()
+                row.notes = ((row.notes or "") +
+                             "\n[flip] opposite position closed; awaiting entry").strip()
                 row.updated_date = now_utc.isoformat()
     except Exception as e:
-        logger.debug(f"[Execute] Could not annotate signal {sig['id']}: {e}")
+        logger.error(f"[Execute] {sym}: flip close failed: {e}")
 
 
 def run():

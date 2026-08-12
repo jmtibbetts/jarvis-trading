@@ -78,9 +78,9 @@ class TestLeverageLadder:
         assert leverage_capped_stop(100.0, 105.0, "short", 5, "15m") == 103.0
 
 
-class TestPaperRiskSizing:
-    """The signal sizes the trade: same dollar risk regardless of stop
-    width, leverage scaled 2x-20x by conviction (paper engine)."""
+class TestPaperMarginSizing:
+    """Margin-first sizing: the trade amount IS the committed capital.
+    A $10 trade at 10x controls $100 but is still a $10 trade."""
 
     def test_leverage_ladder_2_to_20(self):
         from lib.paper_engine import score_leverage
@@ -93,22 +93,36 @@ class TestPaperRiskSizing:
             assert lev >= prev and 2 <= lev <= 20
             prev = lev
 
-    def test_same_risk_regardless_of_stop_width(self):
-        from lib.paper_engine import size_from_risk
-        tight = size_from_risk(100_000, 100.0, 99.0, 10, 100_000)   # 1% stop
-        wide = size_from_risk(100_000, 100.0, 97.0, 10, 100_000)    # 3% stop
-        assert tight["ok"] and wide["ok"]
-        # identical dollar risk, 3x the quantity on the tighter stop
-        assert round(tight["risk_amount"]) == round(wide["risk_amount"]) == 1000
-        assert round(tight["qty"] / wide["qty"]) == 3
+    def test_ten_dollars_at_ten_x_is_a_ten_dollar_trade(self):
+        from lib.paper_engine import size_position
+        r = size_position(equity=1000, entry=100.0, stop=98.0, leverage=10,
+                          free_cash=1000, margin_override=10)
+        assert r["ok"]
+        assert r["margin"] == 10                 # $10 committed, not $100
+        assert r["notional"] == 100              # $100 of exposure
+        assert r["qty"] == 1.0
+        assert r["loss_at_stop"] == 2.0          # a 2% move costs 20% of the $10
+
+    def test_leverage_scales_exposure_not_committed_capital(self):
+        from lib.paper_engine import size_position
+        low = size_position(100_000, 100.0, 98.0, 2, 100_000)
+        high = size_position(100_000, 100.0, 98.0, 20, 100_000)
+        assert low["margin"] == high["margin"] == 1000     # same capital committed
+        assert high["notional"] == low["notional"] * 10    # 10x the exposure
+        assert high["loss_at_stop"] == low["loss_at_stop"] * 10
+
+    def test_notional_never_exceeds_committed_times_leverage(self):
+        from lib.paper_engine import size_position
+        r = size_position(100_000, 250.0, 245.0, 15, 100_000)
+        assert r["notional"] <= r["margin"] * r["leverage"] + 1e-6
 
     def test_margin_capped_by_free_cash(self):
-        from lib.paper_engine import size_from_risk
-        r = size_from_risk(100_000, 100.0, 99.9, 2, 10_000)  # very tight stop, low cash
+        from lib.paper_engine import size_position
+        r = size_position(1_000_000, 100.0, 99.0, 5, 10_000)   # big equity, little cash
         assert r["ok"] and r["capped_by_cash"]
         assert r["margin"] <= 10_000 * 0.15 + 0.01
 
     def test_rejects_impossible_sizing(self):
-        from lib.paper_engine import size_from_risk
-        assert size_from_risk(100_000, 100.0, 100.0, 5, 100_000)["ok"] is False  # no stop distance
-        assert size_from_risk(0, 100.0, 99.0, 5, 100_000)["ok"] is False         # no equity
+        from lib.paper_engine import size_position
+        assert size_position(0, 100.0, 99.0, 5, 100_000)["ok"] is False      # no equity
+        assert size_position(100_000, 0, 99.0, 5, 100_000)["ok"] is False    # no entry

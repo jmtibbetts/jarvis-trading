@@ -1022,6 +1022,14 @@ export const api = {
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
     get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
+  signalSizing: (id: string) =>
+    get<{
+      ok: boolean; reason?: string; leverage: number; leverage_source?: string;
+      margin?: number; notional?: number; qty?: number;
+      loss_at_stop?: number; loss_pct_of_margin?: number;
+      gain_at_target?: number | null; gain_pct_of_margin?: number | null;
+      capped_by_cash?: boolean; note?: string;
+    }>(`/signals/${id}/sizing`),
   reverseSignal: (id: string, supersedeOriginal = true) =>
     fetch(`/api/signals/${id}/reverse`, {
       method: "POST", headers: { "Content-Type": "application/json" },

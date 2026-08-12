@@ -361,3 +361,37 @@ class TestBatchInterleaving:
     def test_discovery_only_is_untouched(self):
         batches = [(f"A{i}",) for i in range(3)]
         assert self._interleave(batches) == batches
+
+
+class TestFocusList:
+    """The focus tier: tiny, always analysed first, and only allowed to
+    speak when the setup is genuinely ready."""
+
+    def test_focus_bar_is_far_above_the_persist_floor(self):
+        from jobs.generate_signals import FOCUS_MIN_SCORE, FOCUS_MAX_SYMBOLS
+        assert FOCUS_MIN_SCORE >= 70          # "very good signals only"
+        assert FOCUS_MAX_SYMBOLS <= 10        # a focus list is small by definition
+
+    def test_behaviour_summary_reports_measured_facts_only(self):
+        from lib.focus_profile import behaviour_summary
+        stats = {
+            "sessions_observed": 252, "daily_move_avg_pct": 11.7,
+            "daily_volatility_pct": 16.9, "big_move_frequency_pct": 39.0,
+            "last_24h_swing_pct": 68.5, "volume_trend_pct": 1164.0,
+        }
+        out = behaviour_summary(stats)
+        assert "252 sessions" in out and "11.7%/day" in out and "39% of days" in out
+
+    def test_empty_stats_admit_ignorance(self):
+        from lib.focus_profile import behaviour_summary
+        assert "no measurable history" in behaviour_summary({})
+
+    def test_profile_staleness(self):
+        from lib.focus_profile import profile_is_stale, PROFILE_REFRESH_HOURS
+        from datetime import datetime, timedelta, timezone
+        assert profile_is_stale(None) is True
+        assert profile_is_stale("not-a-date") is True
+        fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(hours=PROFILE_REFRESH_HOURS + 1)).isoformat()
+        assert profile_is_stale(fresh) is False
+        assert profile_is_stale(old) is True

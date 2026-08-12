@@ -440,6 +440,19 @@ class NewsItem(Base):
     created_date    = Column(String, default=now_iso)
     updated_date    = Column(String, default=now_iso)
 
+class FocusProfile(Base):
+    """Accumulated behavioural knowledge for a focus symbol — see
+    lib/focus_profile.py. stats_json holds MEASURED numbers from real bars;
+    narrative holds the LLM's character sketch, which is interpretation and
+    is labelled as such wherever it is shown."""
+    __tablename__ = "focus_profiles"
+    symbol      = Column(String, primary_key=True)
+    stats_json  = Column(Text)
+    summary     = Column(Text)
+    narrative   = Column(Text)
+    updated_at  = Column(String, default=now_iso)
+
+
 class MarketAsset(Base):
     __tablename__ = "market_assets"
     id            = Column(String, primary_key=True, default=new_id)
@@ -452,6 +465,15 @@ class MarketAsset(Base):
     market_cap    = Column(Float)
     region        = Column(String)
     last_updated  = Column(String)
+    # ── Focus list ("coins to watch") ────────────────────────────────────
+    # A deliberately tiny set the desk watches CONTINUOUSLY and patiently:
+    # analysed every cycle regardless of budget, across the full timeframe
+    # ladder, and allowed to emit a signal ONLY when conviction clears a
+    # much higher bar than the normal floor. Distinct from the watchlist,
+    # which gets ordinary treatment.
+    is_focus      = Column(Boolean, default=False)
+    focus_note    = Column(String)      # why the operator is watching it
+    focus_added   = Column(String)
     created_date  = Column(String, default=now_iso)
     updated_date  = Column(String, default=now_iso)
 
@@ -1033,6 +1055,11 @@ def _migrate_columns():
             ("setup_state", "TEXT"),
             ("message_id", "TEXT"),
             ("updated_at", "TEXT"),
+        ],
+        "market_assets": [
+            ("is_focus", "INTEGER DEFAULT 0"),
+            ("focus_note", "TEXT"),
+            ("focus_added", "TEXT"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),

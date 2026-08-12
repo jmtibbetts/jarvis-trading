@@ -1038,6 +1038,75 @@ class WatchlistAdd(BaseModel):
     symbol: str
 
 
+class FocusRequest(BaseModel):
+    symbol: str
+    focus: bool = True
+    note: Optional[str] = None
+
+
+@router.get("/watchlist/focus")
+def list_focus():
+    """The "coins to watch" list, with each symbol's accumulated profile."""
+    from app.database import MarketAsset
+    out = []
+    with get_db() as db:
+        rows = db.query(MarketAsset).filter(MarketAsset.is_focus == True).all()  # noqa: E712
+        symbols = [(r.symbol, r.focus_note, r.focus_added, r.price, r.change_percent) for r in rows]
+    for sym, note, added, price, chg in symbols:
+        profile = None
+        try:
+            from lib.focus_profile import get_or_build as _gob
+            profile = _gob(sym)
+        except Exception as e:
+            logger.debug(f"[Focus] profile load failed for {sym}: {e}")
+        out.append({
+            "symbol": sym, "note": note, "added": added,
+            "price": price, "change_percent": chg,
+            "profile": profile,
+        })
+    from jobs.generate_signals import FOCUS_MIN_SCORE
+    return {
+        "focus": out,
+        "min_score": FOCUS_MIN_SCORE,
+        "note": (
+            "Focus symbols are analysed every cycle ahead of everything else, across the "
+            f"full indicator set, and only emit a signal at composite score >= {FOCUS_MIN_SCORE:.0f}. "
+            "Silence means no setup was ready — that is the intended behaviour, not a failure."
+        ),
+    }
+
+
+@router.post("/watchlist/focus")
+def set_focus(body: FocusRequest):
+    """Add or remove a symbol from the focus list. The symbol must already
+    be a tracked asset (add it to the watchlist first) so prices exist."""
+    from app.database import MarketAsset
+    sym = body.symbol.upper().strip()
+    with get_db() as db:
+        row = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
+        if not row:
+            raise HTTPException(404, f"{sym} is not tracked — add it to the watchlist first")
+        current = db.query(MarketAsset).filter(MarketAsset.is_focus == True).count()  # noqa: E712
+        from jobs.generate_signals import FOCUS_MAX_SYMBOLS
+        if body.focus and not row.is_focus and current >= FOCUS_MAX_SYMBOLS:
+            raise HTTPException(
+                400,
+                f"Focus list is full ({current}/{FOCUS_MAX_SYMBOLS}). It is deliberately small — "
+                f"remove one before adding another.",
+            )
+        row.is_focus = bool(body.focus)
+        row.focus_note = body.note if body.focus else None
+        row.focus_added = datetime.now(timezone.utc).isoformat() if body.focus else None
+    # Build the profile immediately so the UI has something to show.
+    if body.focus:
+        try:
+            from lib.focus_profile import get_or_build
+            get_or_build(sym, force=True)
+        except Exception as e:
+            logger.debug(f"[Focus] initial profile build failed for {sym}: {e}")
+    return {"ok": True, "symbol": sym, "focus": bool(body.focus)}
+
+
 @router.post("/watchlist/add")
 def add_watchlist_symbol(body: WatchlistAdd):
     """Add a ticker to the tracked universe (Watchlist 2.0 source). Crypto in

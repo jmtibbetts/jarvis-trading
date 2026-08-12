@@ -573,6 +573,35 @@ def select_llm_batches(all_batches, max_batches):
     return selected
 
 
+FOCUS_MIN_SCORE = 75.0   # focus setups must be genuinely strong, not merely valid
+FOCUS_MAX_SYMBOLS = 5    # a focus list is small by definition
+
+
+def focus_symbols() -> list:
+    """The tiny "coins to watch" set, watched patiently and continuously.
+
+    Different from the watchlist in three ways, all deliberate:
+      - analysed EVERY cycle and placed first, exempt from the batch cap,
+        so a focus name is never skipped because the budget ran out;
+      - given the full timeframe ladder rather than the standard slice;
+      - held to FOCUS_MIN_SCORE before a signal is emitted at all, so the
+        output is "this setup is ready" rather than "here is today's best
+        guess". Silence on a focus symbol is a real answer.
+    """
+    from app.database import get_db, MarketAsset
+    try:
+        with get_db() as db:
+            rows = db.query(MarketAsset).filter(MarketAsset.is_focus == True).all()  # noqa: E712
+            syms = [(r.symbol or "").upper().strip() for r in rows if r.symbol and float(r.price or 0) > 0]
+    except Exception as e:
+        logger.warning(f"[Signals] Focus list load failed: {e}")
+        return []
+    if syms:
+        logger.info(f"[Signals] FOCUS watch ({len(syms)}): {', '.join(syms)} "
+                    f"— every cycle, full ladder, only emits at score >= {FOCUS_MIN_SCORE:.0f}")
+    return syms[:FOCUS_MAX_SYMBOLS]
+
+
 def watchlist_symbols(limit: int = 25) -> list:
     """Symbols the OPERATOR tracks, which the hardcoded tracks never covered.
 
@@ -588,6 +617,7 @@ def watchlist_symbols(limit: int = 25) -> list:
     """
     from app.database import get_db, MarketAsset
     fixed = set(TRACK_A) | set(TRACK_B) | set(TRACK_C) | set(TRACK_E_PAPER)
+    fixed |= set(focus_symbols())   # focus names have their own dedicated track
     rows = []
     try:
         with get_db() as db:
@@ -767,6 +797,41 @@ def run():
         """Yield successive n-sized chunks from list."""
         for i in range(0, len(lst), n):
             yield lst[i:i + n]
+
+    # Track FOCUS — "coins to watch": first, always, and held to a higher bar.
+    focus = focus_symbols()
+    _focus_set = set(focus)
+    for i, batch in enumerate(_chunk(focus, BATCH_SIZE)):
+        focus_rule = (
+            " These symbols are under CONTINUOUS focused watch. Do not force a setup: "
+            "return an EMPTY array unless the confluence is genuinely strong, because "
+            "silence is an acceptable and expected answer here. When you do return one, "
+            "it must be a high-conviction setup with confidence >= 80. "
+            "Evaluate bullish and bearish equally. direction='Long', 'Bounce', or 'Short'. "
+            "Long/Bounce: stop BELOW entry, target ABOVE. Short: stop ABOVE entry, target BELOW. "
+            "Size stops from ATR - these are volatile names. R:R>=2.\n"
+        )
+        # Each focus symbol carries an accumulated behavioural profile:
+        # measured volatility/range/swing statistics plus a written sketch of
+        # how it trades. Especially valuable for newly listed names that have
+        # no win-rate history but plenty of observable behaviour.
+        profiles = []
+        for fsym in batch:
+            try:
+                from lib.focus_profile import profile_prompt_block
+                blk = profile_prompt_block(fsym)
+                if blk:
+                    profiles.append(blk)
+            except Exception as e:
+                logger.debug(f"[Signals] Focus profile unavailable for {fsym}: {e}")
+        focus_ctx = ("\n\n" + "\n".join(profiles)) if profiles else ""
+        prompt = make_batch_prompt(
+            batch, "FOCUS WATCH",
+            "Continuously monitored focus list. Patience is correct: only a strong, "
+            "ready setup should produce a signal. Analyze TA for each symbol." + focus_ctx,
+            threat_ctx, news_ctx, regime, held_ctx, focus_rule, SIGNAL_SCHEMA
+        )
+        all_batches.append((f"F{i}", batch, prompt, False))
 
     # Track W — the operator's own watchlist, analysed BEFORE the fixed
     # tracks so their budget is never consumed by hardcoded tickers.
@@ -975,8 +1040,9 @@ def run():
     # deadline on a slow model — trading one blind spot for another.
     # Interleaving gives the watchlist the FIRST slot of every pair while
     # guaranteeing discovery batches run early enough to matter.
+    _focus = [b for b in all_batches if b[0].startswith("F") and not b[0].startswith("FUT")]
     _wl = [b for b in all_batches if b[0].startswith("W")]
-    _rest = [b for b in all_batches if not b[0].startswith("W")]
+    _rest = [b for b in all_batches if b not in _focus and not b[0].startswith("W")]
     if _wl and _rest:
         interleaved = []
         wi = ri = 0
@@ -985,7 +1051,7 @@ def run():
                 interleaved.append(_wl[wi]); wi += 1
             if ri < len(_rest):
                 interleaved.append(_rest[ri]); ri += 1
-        all_batches = interleaved
+        all_batches = _focus + interleaved   # focus always leads
         logger.info(
             f"[Signals] Batch order interleaved: {len(_wl)} watchlist + {len(_rest)} discovery "
             f"— watchlist first in each pair, neither track starves the other"
@@ -1095,9 +1161,24 @@ def run():
                 # instead of letting them die slowly. Floor sits well under
                 # both the live gate (55) and paper auto-trade behavior.
                 MIN_PERSIST_SCORE = 45.0
-                if float(scored.get("composite_score") or 0) < MIN_PERSIST_SCORE:
+                score_now = float(scored.get("composite_score") or 0)
+                if score_now < MIN_PERSIST_SCORE:
                     skipped += 1
                     continue
+
+                # Focus names are held to a much higher bar, enforced HERE in
+                # code rather than trusted to the prompt: the instruction to
+                # stay silent is guidance, this is the guarantee. A focus
+                # symbol producing nothing is the system working, not failing.
+                if sym in _focus_set and score_now < FOCUS_MIN_SCORE:
+                    logger.info(
+                        f"[Signals] FOCUS {sym}: setup scored {score_now:.0f}, below the "
+                        f"{FOCUS_MIN_SCORE:.0f} focus bar — holding watch, no signal"
+                    )
+                    skipped += 1
+                    continue
+                if sym in _focus_set:
+                    scored["signal_source"] = "focus"
 
                 target_status = _target_status_for_signal(scored, is_paper, market_open)
 

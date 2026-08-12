@@ -32,6 +32,43 @@ CACHE_TTL_SECONDS = 3600          # ECB publishes daily; hourly refresh is gener
 _cache: dict[str, tuple[datetime, dict | None]] = {}
 _allrates_disabled_reason: str | None = None
 
+# The AllRatesToday free cap is a LIFETIME 300 requests ("resets_at":"never"),
+# so an exhausted key stays exhausted. Remember that across restarts instead
+# of optimistically reporting the spare healthy every boot — but key the
+# memory to the API key itself, so swapping in an upgraded key clears it.
+_QUOTA_FLAG_PREFIX = "allrates_exhausted:"
+
+
+def _key_fingerprint() -> str:
+    import hashlib
+    key = os.getenv("ALLRATES_API_KEY") or ""
+    return hashlib.sha256(key.encode()).hexdigest()[:16] if key else ""
+
+
+def _load_persisted_disable() -> str | None:
+    fp = _key_fingerprint()
+    if not fp:
+        return None
+    try:
+        from lib.api_cache import _get_row
+        payload, _ = _get_row(f"{_QUOTA_FLAG_PREFIX}{fp}")
+        if isinstance(payload, dict):
+            return payload.get("reason")
+    except Exception:
+        pass
+    return None
+
+
+def _persist_disable(reason: str) -> None:
+    fp = _key_fingerprint()
+    if not fp:
+        return
+    try:
+        from lib.api_cache import put_cached
+        put_cached(f"{_QUOTA_FLAG_PREFIX}{fp}", {"reason": reason})
+    except Exception:
+        pass
+
 _FIAT = {
     "USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "CNY", "HKD",
     "SGD", "SEK", "NOK", "DKK", "INR", "MXN", "BRL", "ZAR", "KRW", "TRY",
@@ -106,8 +143,11 @@ def fetch_series(base: str, symbols: list[str], days: int = 30) -> dict | None:
 
 def allrates_quota_state() -> dict:
     """Whether the optional AllRatesToday provider is usable, and why not."""
+    global _allrates_disabled_reason
     if not os.getenv("ALLRATES_API_KEY"):
         return {"configured": False, "usable": False, "reason": "no ALLRATES_API_KEY set"}
+    if _allrates_disabled_reason is None:
+        _allrates_disabled_reason = _load_persisted_disable()
     if _allrates_disabled_reason:
         return {"configured": True, "usable": False, "reason": _allrates_disabled_reason}
     return {"configured": True, "usable": True, "reason": None}
@@ -131,6 +171,7 @@ def allrates_rate(source: str, target: str) -> dict | None:
                 f"{body.get('plan', 'free')} plan, resets: {body.get('resets_at', 'never')})"
             )
             logger.warning(f"[FX] AllRatesToday disabled — {_allrates_disabled_reason}")
+            _persist_disable(_allrates_disabled_reason)
             return None
         if r.status_code == 200:
             return r.json()

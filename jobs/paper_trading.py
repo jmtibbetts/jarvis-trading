@@ -19,7 +19,25 @@ from app.database import (
 
 logger = logging.getLogger(__name__)
 
-PAPER_MIN_CONFIDENCE = 55   # skip new entries scoring below this
+PAPER_MIN_CONFIDENCE = 55   # fallback when no criteria are configured
+
+
+def _criteria() -> dict:
+    """Operator-configured execution criteria (Ops -> Execution Criteria).
+
+    The paper book used a hardcoded 55 while the live book read these
+    settings, so raising the bar in the UI silently did nothing to the
+    book doing most of the trading. Both now read the same knobs."""
+    try:
+        from lib.trading_preferences import get_user_preference
+        pref = get_user_preference()
+        return {
+            "min_score": float(pref.get("live_min_score") or PAPER_MIN_CONFIDENCE),
+            "min_rr": float(pref.get("live_min_rr") or 0),
+            "min_confidence": float(pref.get("live_min_confidence") or 0),
+        }
+    except Exception:
+        return {"min_score": PAPER_MIN_CONFIDENCE, "min_rr": 0.0, "min_confidence": 0.0}
 SCALE_OUT_ENABLED = os.getenv("SCALE_OUT_ENABLED", "true").lower() in ("1", "true", "yes")
 SCALE_OUT_FRACTION = 0.5
 SCALE_OUT_TP1_PCT_OF_TARGET = 0.5
@@ -603,7 +621,10 @@ def _evaluate_entry_with_ai(sig: dict, current_price: float, threat_ctx: str, ne
     from lib.futures_data import FUTURES_UNIVERSE
     sym = sig["asset_symbol"]
     is_futures = sym in FUTURES_UNIVERSE
-    min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
+    crit = _criteria()
+    # Futures keep their lower macro-driven bar unless the operator has set
+    # a HIGHER one — their setting always wins upward, never downward.
+    min_conf = max(FUTURES_MIN_CONFIDENCE, crit["min_score"]) if is_futures else crit["min_score"]
     ta_data = _fetch_ta(sym)
     try:
         from lib.ta_engine import build_ta_prompt_block
@@ -660,13 +681,23 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
         approved = bool(result.get("approved", False))
         score = float(result.get("score", 50))
         reasoning = result.get("reasoning", "")
-        min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
+        crit = _criteria()
+        min_conf = max(FUTURES_MIN_CONFIDENCE, crit["min_score"]) if is_futures else crit["min_score"]
         if score < min_conf:
             approved = False
+        # R:R and raw-confidence gates from the same panel.
+        rr = float(sig.get("rr_ratio") or 0)
+        if crit["min_rr"] > 0 and rr > 0 and rr < crit["min_rr"]:
+            approved = False
+            reasoning = f"R:R {rr:.2f} below the configured minimum {crit['min_rr']:.2f}"
+        if crit["min_confidence"] > 0 and float(sig.get("confidence") or 0) < crit["min_confidence"]:
+            approved = False
+            reasoning = f"confidence {float(sig.get('confidence') or 0):.0f} below the configured minimum {crit['min_confidence']:.0f}"
         return {"approved": approved, "score": score, "reasoning": reasoning}
     except Exception as e:
         logger.warning(f"[PaperTrading] Entry LLM eval failed for {sym}: {e} — using original confidence")
-        min_conf = FUTURES_MIN_CONFIDENCE if is_futures else PAPER_MIN_CONFIDENCE
+        crit = _criteria()
+        min_conf = max(FUTURES_MIN_CONFIDENCE, crit["min_score"]) if is_futures else crit["min_score"]
         approved = sig["confidence"] >= min_conf
         return {"approved": approved, "score": sig["confidence"], "reasoning": "LLM unavailable — using original confidence"}
 

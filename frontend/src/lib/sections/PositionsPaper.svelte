@@ -469,6 +469,30 @@ Type FLATTEN to confirm:`,
     <KpiTile label="Win Rate" value={paper ? `${paper.portfolio.win_rate}%` : "—"} />
     <KpiTile label="Margin In Use" value={paper ? fmtUsd(paper.portfolio.margin_in_use) : "—"} />
   </div>
+  {#if paper}
+    {@const startCash = paper.portfolio.starting_capital || 100000}
+    {@const unrealized = paper.portfolio.open_pnl ?? 0}
+    {@const realized = (paper.portfolio.equity ?? startCash) - startCash - unrealized}
+    <div class="pnl-row">
+      <span class="pnl-label">P&amp;L</span>
+      <span class="pnl-cell">
+        <i>realized</i>
+        <b class="num {realized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(realized)}</b>
+        <em class="num {realized >= 0 ? 'pl-up' : 'pl-down'}">{startCash ? fmtPct((realized / startCash) * 100) : "—"}</em>
+      </span>
+      <span class="pnl-cell">
+        <i>unrealized</i>
+        <b class="num {unrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(unrealized)}</b>
+        <em class="num {unrealized >= 0 ? 'pl-up' : 'pl-down'}">{startCash ? fmtPct((unrealized / startCash) * 100) : "—"}</em>
+      </span>
+      <span class="pnl-cell total">
+        <i>total</i>
+        <b class="num {realized + unrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(realized + unrealized)}</b>
+        <em class="num {realized + unrealized >= 0 ? 'pl-up' : 'pl-down'}">{startCash ? fmtPct(((realized + unrealized) / startCash) * 100) : "—"}</em>
+      </span>
+      <span class="pnl-note dim">percentages are against the {fmtUsd(startCash)} starting capital</span>
+    </div>
+  {/if}
   <div class="stack">
   <Panel title="Paper Positions" meta="{paper?.positions.length ?? 0} open">
     {#snippet children()}
@@ -535,6 +559,30 @@ Type FLATTEN to confirm:`,
     <KpiTile label="Win Rate" value={autosim ? `${autosim.summary.win_rate}%` : "—"} />
     <KpiTile label="Total Trades" value={String(autosim?.summary.total_trades ?? "—")} />
   </div>
+  {#if autosim}
+    {@const aRealized = autosim.summary.realized_pnl ?? 0}
+    {@const aUnrealized = autosim.summary.unrealized_pnl ?? 0}
+    {@const aStart = autosim.summary.starting_cash || 100000}
+    <div class="pnl-row">
+      <span class="pnl-label">P&amp;L</span>
+      <span class="pnl-cell">
+        <i>realized</i>
+        <b class="num {aRealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(aRealized)}</b>
+        <em class="num {aRealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct((aRealized / aStart) * 100)}</em>
+      </span>
+      <span class="pnl-cell">
+        <i>unrealized</i>
+        <b class="num {aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(aUnrealized)}</b>
+        <em class="num {aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct((aUnrealized / aStart) * 100)}</em>
+      </span>
+      <span class="pnl-cell total">
+        <i>total</i>
+        <b class="num {aRealized + aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(aRealized + aUnrealized)}</b>
+        <em class="num {aRealized + aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(((aRealized + aUnrealized) / aStart) * 100)}</em>
+      </span>
+      <span class="pnl-note dim">percentages are against the {fmtUsd(aStart)} starting capital</span>
+    </div>
+  {/if}
   <div class="stack">
   <div class="two-col">
   <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}">
@@ -604,6 +652,51 @@ Type FLATTEN to confirm:`,
 {/if}
 
 <style>
+  .pnl-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 22px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm, 8px);
+    background: var(--surface);
+  }
+  .pnl-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--ink-faint);
+    font-weight: 700;
+  }
+  .pnl-cell {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+  }
+  .pnl-cell i {
+    font-style: normal;
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+  }
+  .pnl-cell b {
+    font-size: 15px;
+    font-weight: 650;
+  }
+  .pnl-cell em {
+    font-style: normal;
+    font-size: 11px;
+  }
+  .pnl-cell.total b {
+    font-size: 17px;
+  }
+  .pnl-note {
+    margin-left: auto;
+    font-size: 9.5px;
+  }
+
   .page-head {
     margin-bottom: 16px;
   }

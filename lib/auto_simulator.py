@@ -52,19 +52,23 @@ LEVERAGE_STEPS = [5, 10, 15, 20, 30, 40, 50, 65, 80, 100]
 MAX_MARGIN_LOSS_FRAC = 0.9
 
 
-def score_leverage(composite_score: float | None) -> float:
-    """Map signal strength to leverage: 55 -> 5x ... 100 -> 100x, stepped."""
-    score = float(composite_score or 0)
-    if score <= 55:
-        return float(LEVERAGE_STEPS[0])
-    frac = min(1.0, (score - 55.0) / 45.0)
-    idx = min(len(LEVERAGE_STEPS) - 1, int(round(frac * (len(LEVERAGE_STEPS) - 1))))
-    return float(LEVERAGE_STEPS[idx])
+def score_leverage(composite_score: float | None, asset_class: str | None = None,
+                   direction: str | None = None) -> float:
+    """Same policy the paper engine uses — 1x at the operator's configured
+    floor up to 25x, reduced by regime, realized win rate, losing streak and
+    volatility. Auto Sim previously ran its own 5x-100x ladder, which made
+    its results incomparable with the book it exists to be measured against."""
+    try:
+        from lib.paper_engine import score_leverage as _policy
+        return float(_policy(composite_score, asset_class=asset_class, direction=direction))
+    except Exception as e:
+        logger.debug(f"[AutoSim] Leverage policy unavailable ({e}) — defaulting to 2x")
+        return 2.0
 
 
-# Max stop distance as a fraction of entry, by trade horizon (user spec):
-# scalps get a tight 3% ceiling, longer trades up to 10%. The leverage
-# liquidation cap can only tighten these further, never widen them.
+# Max stop distance as a fraction of entry, by trade horizon: scalps get a
+# tight 3% ceiling, longer trades up to 10%. The leverage liquidation cap
+# can only tighten these further, never widen them.
 HORIZON_STOP_CAP = {"scalp": 0.03, "longer": 0.10, "all": 0.10}
 
 
@@ -273,7 +277,8 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                 skipped += 1
                 continue
             side = _side(signal.direction)
-            leverage = score_leverage(signal.composite_score or signal.confidence)
+            leverage = score_leverage(signal.composite_score or signal.confidence,
+                                      asset_class=signal.asset_class, direction=signal.direction)
             stop = leverage_capped_stop(entry, signal.stop_loss, side, leverage, signal.timeframe)
             qty = MARGIN_PER_SIGNAL * leverage / entry
             db.add(AutoSimPosition(

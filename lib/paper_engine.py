@@ -46,22 +46,87 @@ TRADE_MARGIN_PCT       = 1.0    # % of equity COMMITTED per position
 MAX_DEPLOYED_PCT       = 60.0   # total margin across open positions, % of equity
 MAX_OPEN_POSITIONS     = 60
 MAX_MARGIN_PCT_OF_CASH = 15.0   # one position may tie up at most this % of free cash
-MIN_LEVERAGE           = 2.0
-LEVERAGE_AT_MAX_SCORE  = 20.0
-SCORE_FLOOR            = 55.0   # signals below this never reach execution anyway
+DEFAULT_SCORE_FLOOR    = 55.0   # used only when no criteria are configured
 
 
-def score_leverage(score: float | None) -> float:
-    """Conviction -> leverage, 55 -> 2x rising to 100 -> 20x, in whole steps."""
+def _configured_floor() -> float:
+    """The operator's own minimum score, from Ops -> Execution Criteria.
+
+    The leverage curve is anchored to THIS, not a constant: raise the floor
+    to 70 and a 70 becomes 1x while 100 still earns the maximum, so the
+    ladder always spans the range actually being traded."""
     try:
-        sc = float(score or 0)
-    except (TypeError, ValueError):
-        sc = 0.0
-    if sc <= SCORE_FLOOR:
-        return MIN_LEVERAGE
-    frac = min(1.0, (sc - SCORE_FLOOR) / (100.0 - SCORE_FLOOR))
-    lev = MIN_LEVERAGE + frac * (LEVERAGE_AT_MAX_SCORE - MIN_LEVERAGE)
-    return float(round(lev))
+        from lib.trading_preferences import get_user_preference
+        return float(get_user_preference().get("live_min_score") or DEFAULT_SCORE_FLOOR)
+    except Exception:
+        return DEFAULT_SCORE_FLOOR
+
+
+def _historical_edge(score: float | None, asset_class: str | None,
+                     direction: str | None) -> tuple[float | None, int]:
+    """Realized win rate for this score band / class / direction bucket."""
+    try:
+        from lib.ev_model import compute_ev_buckets, _score_band
+        from app.database import get_db, SignalEvaluation
+        with get_db() as db:
+            rows = [
+                {"composite_score": r.composite_score, "asset_class": r.asset_class,
+                 "direction": r.direction, "outcome": r.outcome,
+                 "entry_price": r.entry_price, "exit_price": getattr(r, "exit_price", None)}
+                for r in db.query(SignalEvaluation).limit(4000).all()
+            ]
+        band = _score_band(score)
+        for b in compute_ev_buckets(rows):
+            if (b["score_band"] == band
+                    and str(b["asset_class"]).lower() == str(asset_class or "").lower()
+                    and str(b["direction"]).lower() == str(direction or "").lower()):
+                decided = int(b.get("decided") or 0)
+                if decided:
+                    return (int(b.get("wins") or 0) / decided), decided
+                return None, 0
+    except Exception as e:
+        logger.debug(f"[Paper] Historical edge lookup failed: {e}")
+    return None, 0
+
+
+def _consecutive_losses() -> int:
+    """Losing streak on the paper book — the account's own warning signal."""
+    try:
+        from app.database import get_db, PaperTrade
+        with get_db() as db:
+            recent = db.query(PaperTrade).order_by(PaperTrade.closed_at.desc()).limit(20).all()
+        streak = 0
+        for t in recent:
+            if float(t.realized_pnl or 0) < 0:
+                streak += 1
+            else:
+                break
+        return streak
+    except Exception:
+        return 0
+
+
+def score_leverage(score: float | None, *, asset_class: str | None = None,
+                   direction: str | None = None, atr_pct: float | None = None,
+                   explain: bool = False):
+    """Leverage for a signal: 1x at the configured floor rising to 25x at
+    100, then reduced by regime, realized win rate, losing streak, and
+    volatility. See lib/leverage_policy.py — nothing can raise it above
+    what conviction alone earned."""
+    from lib.leverage_policy import decide
+    regime = None
+    try:
+        from lib.market_regime import get_regime
+        regime = get_regime()
+    except Exception:
+        pass
+    win_rate, sample = _historical_edge(score, asset_class, direction)
+    result = decide(
+        score, _configured_floor(),
+        regime=regime, win_rate=win_rate, sample=sample,
+        consecutive_losses=_consecutive_losses(), atr_pct=atr_pct,
+    )
+    return result if explain else result["leverage"]
 
 
 def size_position(equity: float, entry: float, stop: float, leverage: float,
@@ -316,7 +381,9 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
         _horizon = "all"
     _horizon_cap = 0.03 if _horizon == "scalp" else 0.10
     _prelim_lev = leverage if leverage > 1.0 else score_leverage(
-        signal.get("composite_score") or signal.get("confidence"))
+        signal.get("composite_score") or signal.get("confidence"),
+        asset_class=asset_class, direction=dir_key,
+        atr_pct=float(signal.get("atr_pct") or 0) or None)
     _liq_cap = 0.80 / max(1.0, _prelim_lev)          # 80% of margin, never 100%
     _max_stop_frac = min(_horizon_cap, _liq_cap)
     _max_move = entry * _max_stop_frac
@@ -343,7 +410,10 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
     explicit_leverage = leverage > 1.0
     conviction = signal.get("composite_score") or signal.get("confidence")
     if not explicit_leverage:
-        leverage = score_leverage(conviction)
+        leverage = score_leverage(
+            conviction, asset_class=asset_class, direction=dir_key,
+            atr_pct=float(signal.get("atr_pct") or 0) or None,
+        )
 
     sizing = {"ok": False}
     try:

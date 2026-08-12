@@ -368,7 +368,7 @@ Save anyway?`)) return;
   </div>
 
   <div class="span-12">
-    <Panel title="Execution Criteria" meta="which approved signals reach the broker account">
+    <Panel title="Execution Criteria" meta="governs the broker account AND the paper book">
       {#if execPrefs}
         <div class="exec-grid">
           <label class="exec-field">

@@ -305,3 +305,46 @@ class AccountFeeTests(unittest.TestCase):
             self.skipTest("no Kraken credentials configured")
         measured = min_viable_stop_pct("BTC/USD", venue="kraken")
         self.assertGreater(measured, 0.02)   # 0.8% taker demands a wide stop
+
+
+class FlowInPromptTests(unittest.TestCase):
+    """Order flow reaches the LLM, but only when the sample justifies it."""
+
+    def _seed(self, symbol, buys, sells, buy_qty=0.01, sell_qty=0.01):
+        from lib import kraken_stream
+        from collections import deque
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        kraken_stream._trades[symbol] = deque(
+            [{"price": 100.0, "qty": buy_qty, "side": "buy", "at": now} for _ in range(buys)]
+            + [{"price": 100.0, "qty": sell_qty, "side": "sell", "at": now} for _ in range(sells)],
+            maxlen=500)
+
+    def tearDown(self):
+        from lib import kraken_stream
+        for s in ("FLOWTEST/USD",):
+            kraken_stream._trades.pop(s, None)
+
+    def test_thin_tape_stays_silent_rather_than_guessing(self):
+        from jobs.generate_signals import _flow_line
+        self._seed("FLOWTEST/USD", 3, 2)
+        self.assertEqual(_flow_line("FLOWTEST/USD"), "")
+
+    def test_sufficient_tape_renders_a_flow_line(self):
+        from jobs.generate_signals import _flow_line
+        self._seed("FLOWTEST/USD", 20, 10)
+        line = _flow_line("FLOWTEST/USD")
+        self.assertIn("FLOW", line)
+        self.assertIn("volume imbalance", line)
+
+    def test_line_reports_the_volume_read_not_just_the_count(self):
+        """The case that motivated it: many small buys, few large sells."""
+        from jobs.generate_signals import _flow_line
+        self._seed("FLOWTEST/USD", 11, 2, buy_qty=0.01, sell_qty=0.50)
+        line = _flow_line("FLOWTEST/USD")
+        self.assertIn("selling", line)      # weighted read wins
+        self.assertIn("11B/2S", line)       # count still shown
+
+    def test_no_tape_at_all_degrades_silently(self):
+        from jobs.generate_signals import _flow_line
+        self.assertEqual(_flow_line("NEVERSTREAMED/USD"), "")

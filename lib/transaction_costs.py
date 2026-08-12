@@ -70,14 +70,27 @@ def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
         return DEFAULT_ILLIQUID_SPREAD_PCT, "default_illiquid"
 
     if is_crypto_symbol(symbol):
+        # 1. The live book, if the stream has it. This is the current
+        #    spread, not a snapshot from up to five minutes ago — which
+        #    matters most in exactly the fast conditions where a stale
+        #    quote is least like the fill you will get.
         try:
-            from lib.venues import measured_spread_pct, DEFAULT_VENUE
-            live, why = measured_spread_pct(symbol, venue or DEFAULT_VENUE)
+            from lib.kraken_stream import live_spread_pct
+            live, why = live_spread_pct(symbol)
             if live is not None and live >= 0:
-                # Never let a suspiciously tight read make a trade look free.
-                return max(live, 0.00001), why
+                return max(live, 0.00001), f"live: {why}"
         except Exception:
             pass
+        # 2. A REST measurement, cached briefly.
+        try:
+            from lib.venues import measured_spread_pct, DEFAULT_VENUE
+            measured, why = measured_spread_pct(symbol, venue or DEFAULT_VENUE)
+            if measured is not None and measured >= 0:
+                return max(measured, 0.00001), why
+        except Exception:
+            pass
+        # 3. The conservative default. Every failure lands HERE, never on
+        #    a number that makes the trade look cheaper.
         return DEFAULT_CRYPTO_SPREAD_PCT, "default_crypto"
     return DEFAULT_EQUITY_SPREAD_PCT, "default_equity"
 

@@ -108,10 +108,34 @@ async def lifespan(app_: FastAPI):
     orderbook_tasks = start_orderbook_streams(on_update=_broadcast_orderbook_update)
     logger.info(f"[Server] Order book streams started — {len(orderbook_tasks)} connections (Binance + Coinbase)")
 
+    # Kraken WebSocket: live bid/ask and the trade tape. Runs in its own
+    # daemon thread rather than on this loop, because it self-heals across
+    # reconnects and must never be able to stall request handling. Symbols
+    # are the ones the desk actually prices most often.
+    try:
+        from lib.kraken_stream import start as start_kraken_stream
+        ks = start_kraken_stream([
+            "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "LINK/USD",
+            "DOT/USD", "ARB/USD", "AVAX/USD",
+        ])
+        if ks.get("ok"):
+            logger.info(f"[Server] Kraken stream started — {len(ks.get('streaming', []))} symbols "
+                        f"(live spreads + trade flow)")
+        else:
+            logger.info(f"[Server] Kraken stream unavailable: {ks.get('reason')}")
+    except Exception as e:
+        logger.warning(f"[Server] Kraken stream failed to start: {e}")
+
     yield  # ← App runs here
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("[Server] Shutdown initiated...")
+
+    try:
+        from lib.kraken_stream import stop as stop_kraken_stream
+        stop_kraken_stream()
+    except Exception:
+        pass
 
     for task in orderbook_tasks:
         task.cancel()

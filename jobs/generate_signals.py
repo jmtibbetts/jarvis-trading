@@ -509,6 +509,33 @@ def _target_status_for_signal(signal: dict, is_paper: bool, market_open: bool) -
     return "Active" if market_open else "PendingApproval"
 
 
+def _flow_line(sym: str) -> str:
+    """One line of ORDER FLOW for the prompt, when the tape is streaming.
+
+    Everything else in this prompt derives from candles, which can only say
+    that price moved. The tape says whether it moved on real buying. Volume
+    imbalance is reported alongside the print counts because the two can
+    disagree, and when they do the volume is the truer read — observed live
+    on BTC at 11 buys vs 2 sells by count but -0.800 by weight.
+
+    Returns an empty string when no tape is available, so the prompt
+    degrades to candles-only rather than claiming flow it does not have.
+    """
+    try:
+        from lib.kraken_stream import trade_flow
+        f = trade_flow(sym)
+        if not f or f["prints"] < 10:
+            return ""
+        imb = f["flow_imbalance"]
+        lean = "buying" if imb > 0.15 else ("selling" if imb < -0.15 else "balanced")
+        return (f"  FLOW (live tape, {f['prints']} prints): {lean} "
+                f"| volume imbalance {imb:+.2f} (+1=all buys, -1=all sells) "
+                f"| {f['buy_count']}B/{f['sell_count']}S by count "
+                f"| largest print {f['largest']:g}")
+    except Exception:
+        return ""
+
+
 def ta_block(syms, futures_profiles=None):
     blocks = []
     for s in syms:
@@ -519,6 +546,9 @@ def ta_block(syms, futures_profiles=None):
             fu_meta = FUTURES_UNIVERSE.get(s, {})
             name = asset_map_global.get(s, {}).get("name") or fu_meta.get("name") or s
             ta_txt = build_ta_prompt_block(s, profile, name)
+            flow = _flow_line(s)
+            if flow:
+                ta_txt = f"{ta_txt}\n{flow}"
             blocks.append(ta_txt)
     return "\n".join(blocks) or "No TA data available."
 

@@ -55,6 +55,8 @@ VENUE_FEES = {
                       (25_000_000, 0.0002), (50_000_000, 0.0002),
                       (100_000_000, 0.0000)],
         },
+        # Commission-free, but commission is not the whole cost — see
+        # equity_regulatory_fee() for the SEC/FINRA charges on the sell side.
         "equity": {"taker": [(0, 0.0)], "maker": [(0, 0.0)]},
     },
     # Verified live from Kraken's AssetPairs endpoint (XXBTZUSD), 2026-08.
@@ -520,6 +522,35 @@ US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
     "MES=F": 0.39, "MNQ=F": 0.39,     # CME micros
     "ES=F": 1.29,  "NQ=F": 1.29,      # CME e-minis
 }
+
+
+# ── US equity regulatory fees ───────────────────────────────────────────────
+# "Commission-free" is not "free". Both charges below apply to the SELL side
+# only, so a round trip pays them once. They are small, but a cost model that
+# rounds them to zero is making the same class of error as one that ignores
+# the spread — and on a small, frequently churned position they are not
+# negligible relative to the edge.
+#
+# RATES CHANGE. The SEC sets its Section 31 rate annually (and sometimes
+# mid-year); FINRA adjusts the TAF. These are the rates effective 2024-05-22,
+# carried forward. Treat them as a documented vintage, not a live feed — the
+# explanation string says so, so a stale rate is visible rather than silent.
+SEC_SECTION_31_RATE = 0.0000278       # of sell PROCEEDS ($27.80 per $1M)
+FINRA_TAF_PER_SHARE = 0.000166        # per share sold
+FINRA_TAF_CAP       = 8.30            # per trade
+EQUITY_FEE_VINTAGE  = "rates effective 2024-05-22"
+
+
+def equity_regulatory_fee(proceeds: float, shares: float) -> tuple[float, str]:
+    """(dollars, explanation) of SEC + FINRA charges on an equity SELL.
+
+    Applies once per round trip — you are not charged to buy.
+    """
+    sec = abs(float(proceeds or 0)) * SEC_SECTION_31_RATE
+    taf = min(abs(float(shares or 0)) * FINRA_TAF_PER_SHARE, FINRA_TAF_CAP)
+    total = sec + taf
+    return total, (f"$0 commission + SEC ${sec:,.2f} + FINRA TAF ${taf:,.2f} "
+                   f"on the sell side ({EQUITY_FEE_VINTAGE})")
 
 
 def us_perpetual_fee(contracts: float = 1.0) -> tuple[float, str]:

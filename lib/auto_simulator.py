@@ -93,11 +93,62 @@ def leverage_capped_stop(entry: float, signal_stop: float | None, side: str,
     return max(sig, cap) if sig > 0 else cap
 
 
-def _pnl(position, price: float) -> float:
+# ── Transaction costs ───────────────────────────────────────────────────────
+# Auto Sim used to price every trade as free — `_pnl` was the raw price move,
+# and nothing charged a fee or crossed a spread. That is not a small
+# understatement: over 166 trades under the current leverage policy the book
+# showed +$128 while the venue fees it never paid came to $6,864. The sign of
+# the result was decided entirely by the missing side of the ledger.
+#
+# Costs are charged the way they are actually incurred:
+#   entry  — you cross half the spread getting in (fill worse than mid)
+#   exit   — you cross the other half getting out
+#   fees   — the full round trip is reserved at OPEN, so an untouched
+#            position immediately shows what it would cost to unwind. That
+#            keeps unrealized and realized P&L on one basis; a position is
+#            never allowed to look flat when closing it would lose money.
+
+def _fill_price(symbol: str, price: float, side: str, *, entering: bool) -> tuple[float, float]:
+    """(fill, half_spread_pct). The spread always moves against the trade:
+    buying fills above mid, selling fills below."""
+    try:
+        from lib.transaction_costs import estimate_spread_pct
+        spread, _ = estimate_spread_pct(symbol)
+    except Exception:
+        return float(price), 0.0
+    half = float(spread or 0.0) / 2.0
+    buying = (side != "short") if entering else (side == "short")
+    return float(price) * (1.0 + half if buying else 1.0 - half), half
+
+
+def _round_trip_fee(symbol: str, notional: float, leverage: float,
+                    price: float) -> tuple[float, str]:
+    """Venue cost of opening AND closing. A lookup failure charges the
+    conservative default rather than zero — a failed measurement must never
+    make a trade look cheaper than it is."""
+    try:
+        from lib.paper_engine import venue_round_trip_fee
+        fee, why = venue_round_trip_fee(symbol, notional, leverage, price)
+        if fee is not None and fee >= 0:
+            return float(fee), str(why)
+    except Exception as e:
+        logger.debug(f"[AutoSim] fee lookup failed for {symbol} ({e})")
+    from lib.transaction_costs import fee_pct
+    return abs(notional) * fee_pct(symbol) * 2.0, "fallback: default taker fee, both sides"
+
+
+def _gross_pnl(position, price: float) -> float:
+    """Price move only, before costs."""
     move = price - float(position.entry_price or 0)
     if position.side == "short":
         move *= -1
     return move * float(position.qty or 0)
+
+
+def _pnl(position, price: float) -> float:
+    """Net of the round-trip fee reserved at open. This is the number the
+    portfolio, the stop/liquidation checks and the UI all use."""
+    return _gross_pnl(position, price) - float(getattr(position, "fees", 0.0) or 0.0)
 
 
 def _unseen_candidates(signals, seen_signal_ids: set[str]):
@@ -118,17 +169,25 @@ def _ensure_portfolio(db, user_id: str) -> AutoSimPortfolio:
 
 def _close(db, position: AutoSimPosition, price: float, reason: str,
            portfolio: AutoSimPortfolio) -> None:
-    pnl = _pnl(position, price)
+    # The trigger is evaluated at the market price; the FILL crosses the
+    # spread. A stop does not fill at the stop.
+    exit_price, _ = _fill_price(position.symbol, price, position.side, entering=False)
+    gross = _gross_pnl(position, exit_price)
+    fees = float(position.fees or 0.0)
+    pnl = gross - fees
     margin = float(position.margin_used or MARGIN_PER_SIGNAL)
     pnl_pct = pnl / margin * 100 if margin else 0.0
     db.add(AutoSimTrade(
         id=new_id(), user_id=position.user_id, signal_id=position.signal_id,
         symbol=position.symbol, asset_class=position.asset_class,
         direction=position.direction, side=position.side, leverage=position.leverage,
-        qty=position.qty, entry_price=position.entry_price, exit_price=price,
+        qty=position.qty, entry_price=position.entry_price, exit_price=exit_price,
+        gross_pnl=round(gross, 6), fees=round(fees, 6),
+        fee_basis=position.fee_basis,
         realized_pnl=round(pnl, 6), pnl_pct=round(pnl_pct, 4),
         close_reason=reason, opened_at=position.opened_at, closed_at=now_iso(),
     ))
+    price = exit_price
     position.current_price = price
     position.unrealized_pnl = 0.0
     position.status = "Closed"
@@ -283,15 +342,21 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
             side = _side(signal.direction)
             leverage = score_leverage(signal.composite_score or signal.confidence,
                                       asset_class=signal.asset_class, direction=signal.direction)
+            # Fill crosses half the spread; the stop is measured from the price
+            # actually paid, not from mid.
+            entry, half_spread = _fill_price(signal.asset_symbol, entry, side, entering=True)
             stop = leverage_capped_stop(entry, signal.stop_loss, side, leverage, signal.timeframe)
             qty = MARGIN_PER_SIGNAL * leverage / entry
+            fees, fee_basis = _round_trip_fee(signal.asset_symbol, qty * entry, leverage, entry)
             db.add(AutoSimPosition(
                 id=new_id(), user_id=user_id, signal_id=signal.id,
                 symbol=signal.asset_symbol, asset_class=signal.asset_class,
                 direction=signal.direction, side=side, leverage=leverage,
                 qty=qty, entry_price=entry, current_price=entry,
                 target_price=signal.target_price, stop_loss=stop,
-                margin_used=MARGIN_PER_SIGNAL, unrealized_pnl=0.0,
+                margin_used=MARGIN_PER_SIGNAL, fees=round(fees, 6),
+                fee_basis=fee_basis, entry_slippage_pct=round(half_spread, 8),
+                unrealized_pnl=round(-fees, 6),
                 signal_updated_at=signal.updated_date, opened_at=now.isoformat(),
                 updated_at=now.isoformat(),
             ))
@@ -318,6 +383,11 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
         starting = float(portfolio.starting_cash or 100000)
         gross_profit = sum(max(0, float(row.realized_pnl or 0)) for row in trades)
         gross_loss = sum(min(0, float(row.realized_pnl or 0)) for row in trades)
+        # Costs are reported, not just netted out. The gap between these two
+        # numbers is what the book used to keep for free.
+        fees_closed = sum(float(row.fees or 0) for row in trades)
+        fees_open = sum(float(row.fees or 0) for row in positions)
+        pnl_before_costs = realized + unrealized + fees_closed + fees_open
         return {
             "paper_only": True,
             "summary": {
@@ -328,6 +398,13 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "win_rate": round(wins / decided * 100, 2) if decided else 0.0,
                 "gross_profit": gross_profit, "gross_loss": gross_loss,
                 "open_positions": len(positions),
+                "total_fees": round(fees_closed + fees_open, 2),
+                "fees_realized": round(fees_closed, 2),
+                "fees_reserved_open": round(fees_open, 2),
+                "pnl_before_costs": round(pnl_before_costs, 2),
+                "cost_drag_pct": round(
+                    (fees_closed + fees_open) / abs(pnl_before_costs) * 100, 1
+                ) if abs(pnl_before_costs) > 1e-9 else None,
             },
             "positions": [{
                 "id": row.id, "signal_id": row.signal_id, "symbol": row.symbol,
@@ -335,6 +412,8 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "leverage": row.leverage, "entry_price": row.entry_price,
                 "current_price": row.current_price, "target_price": row.target_price,
                 "stop_loss": row.stop_loss, "unrealized_pnl": row.unrealized_pnl,
+                "fees": row.fees, "fee_basis": row.fee_basis,
+                "entry_slippage_pct": row.entry_slippage_pct,
                 "opened_at": row.opened_at,
             } for row in positions],
             "trades": [{
@@ -342,6 +421,7 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "asset_class": row.asset_class, "direction": row.direction,
                 "leverage": row.leverage, "entry_price": row.entry_price,
                 "exit_price": row.exit_price, "realized_pnl": row.realized_pnl,
+                "gross_pnl": row.gross_pnl, "fees": row.fees, "fee_basis": row.fee_basis,
                 "pnl_pct": row.pnl_pct, "close_reason": row.close_reason,
                 "opened_at": row.opened_at, "closed_at": row.closed_at,
             } for row in trades[:200]],

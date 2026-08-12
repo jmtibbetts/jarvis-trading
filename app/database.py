@@ -734,7 +734,10 @@ class AutoSimPosition(Base):
     target_price      = Column(Float)
     stop_loss         = Column(Float)
     margin_used       = Column(Float, default=1000.0)
-    unrealized_pnl    = Column(Float, default=0.0)
+    fees              = Column(Float, default=0.0)   # round-trip venue cost, charged at open
+    fee_basis         = Column(String)
+    entry_slippage_pct = Column(Float, default=0.0)
+    unrealized_pnl    = Column(Float, default=0.0)   # NET of fees
     status            = Column(String, default="Open")
     signal_updated_at = Column(String)
     opened_at         = Column(String, default=now_iso)
@@ -754,7 +757,10 @@ class AutoSimTrade(Base):
     qty          = Column(Float)
     entry_price  = Column(Float)
     exit_price   = Column(Float)
-    realized_pnl = Column(Float, default=0.0)
+    gross_pnl    = Column(Float, default=0.0)   # price move only
+    fees         = Column(Float, default=0.0)   # venue round trip
+    fee_basis    = Column(String)
+    realized_pnl = Column(Float, default=0.0)   # NET = gross - fees
     pnl_pct      = Column(Float, default=0.0)
     close_reason = Column(String)
     opened_at    = Column(String)
@@ -1077,6 +1083,20 @@ def _migrate_columns():
             ("live_min_score", "REAL DEFAULT 55.0"),
             ("live_min_rr", "REAL DEFAULT 0.0"),
             ("live_min_confidence", "REAL DEFAULT 0.0"),
+        ],
+        # Auto Sim priced every trade as free: no fee, no spread. A book that
+        # cannot lose money to costs will always look profitable, so its P&L
+        # could not be compared against the paper book (which does charge
+        # venue fees). These columns carry the cost side of the ledger.
+        "auto_sim_positions": [
+            ("fees",       "REAL DEFAULT 0.0"),   # round trip, reserved at open
+            ("fee_basis",  "TEXT"),
+            ("entry_slippage_pct", "REAL DEFAULT 0.0"),
+        ],
+        "auto_sim_trades": [
+            ("gross_pnl",  "REAL DEFAULT 0.0"),   # before costs
+            ("fees",       "REAL DEFAULT 0.0"),
+            ("fee_basis",  "TEXT"),
         ],
     }
     try:

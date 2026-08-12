@@ -862,6 +862,14 @@ export type AutoSimSummary = {
     wins: number;
     losses: number;
     win_rate: number;
+    open_positions: number;
+    // Costs are reported, not merely netted out. Auto Sim used to charge
+    // nothing at all, so its P&L could not be compared with the paper book.
+    total_fees: number;
+    fees_realized: number;
+    fees_reserved_open: number;
+    pnl_before_costs: number;
+    cost_drag_pct: number | null;
   };
 };
 export type AnalyzeResult = {

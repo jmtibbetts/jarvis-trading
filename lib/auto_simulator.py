@@ -402,9 +402,13 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "fees_realized": round(fees_closed, 2),
                 "fees_reserved_open": round(fees_open, 2),
                 "pnl_before_costs": round(pnl_before_costs, 2),
+                # Only meaningful when the book made money before costs —
+                # "costs are 573% of gross" against a NEGATIVE gross reads as
+                # a ratio but means nothing. When gross is a loss, costs
+                # simply deepened it, and the two figures beside it say so.
                 "cost_drag_pct": round(
-                    (fees_closed + fees_open) / abs(pnl_before_costs) * 100, 1
-                ) if abs(pnl_before_costs) > 1e-9 else None,
+                    (fees_closed + fees_open) / pnl_before_costs * 100, 1
+                ) if pnl_before_costs > 1e-9 else None,
             },
             "positions": [{
                 "id": row.id, "signal_id": row.signal_id, "symbol": row.symbol,

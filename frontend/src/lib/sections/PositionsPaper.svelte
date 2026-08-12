@@ -558,6 +558,7 @@ Type FLATTEN to confirm:`,
     <KpiTile label="Realized P&L" value={autosim ? fmtUsd(autosim.summary.realized_pnl) : "—"} trend={autosim && autosim.summary.realized_pnl >= 0 ? "up" : "down"} />
     <KpiTile label="Win Rate" value={autosim ? `${autosim.summary.win_rate}%` : "—"} />
     <KpiTile label="Total Trades" value={String(autosim?.summary.total_trades ?? "—")} />
+    <KpiTile label="Costs Paid" value={autosim ? fmtUsd(autosim.summary.total_fees ?? 0) : "—"} trend="down" />
   </div>
   {#if autosim}
     {@const aRealized = autosim.summary.realized_pnl ?? 0}
@@ -581,6 +582,33 @@ Type FLATTEN to confirm:`,
         <em class="num {aRealized + aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(((aRealized + aUnrealized) / aStart) * 100)}</em>
       </span>
       <span class="pnl-note dim">percentages are against the {fmtUsd(aStart)} starting capital</span>
+    </div>
+    {@const aFees = autosim.summary.total_fees ?? 0}
+    {@const aBefore = autosim.summary.pnl_before_costs ?? 0}
+    <div class="pnl-row cost-row">
+      <span class="pnl-label">Costs</span>
+      <span class="pnl-cell">
+        <i>before costs</i>
+        <b class="num {aBefore >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(aBefore)}</b>
+      </span>
+      <span class="pnl-cell">
+        <i>fees &amp; spread</i>
+        <b class="num pl-down">−{fmtUsd(aFees)}</b>
+        <em class="dim">{fmtUsd(autosim.summary.fees_reserved_open ?? 0)} reserved on open</em>
+      </span>
+      <span class="pnl-cell total">
+        <i>after costs</i>
+        <b class="num {aRealized + aUnrealized >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(aRealized + aUnrealized)}</b>
+        {#if autosim.summary.cost_drag_pct != null}
+          <em class="num dim">costs took {autosim.summary.cost_drag_pct}% of gross</em>
+        {:else if aFees > 0}
+          <em class="num dim">costs deepened a losing book</em>
+        {/if}
+      </span>
+      <span class="pnl-note dim">
+        the round trip is charged when a position opens, so an untouched
+        position shows what it would cost to unwind
+      </span>
     </div>
   {/if}
   <div class="stack">
@@ -668,6 +696,20 @@ Type FLATTEN to confirm:`,
     letter-spacing: 0.1em;
     color: var(--ink-faint);
     font-weight: 700;
+  }
+  /* The cost row sits directly under P&L and reads as its subordinate: the
+     same grid, quieter ground, so the gap between gross and net is legible
+     at a glance rather than something you have to compute. */
+  .cost-row {
+    margin-top: -6px;
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+    border-top: none;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+  .cost-row .pnl-cell em {
+    font-size: 9.5px;
+    font-style: normal;
   }
   .pnl-cell {
     display: flex;

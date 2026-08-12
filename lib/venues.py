@@ -577,7 +577,7 @@ US_PERP_CONTRACTS = {
     "HBAR": [("PHBRUK", 5_000.0)],
     "LTC":  [("PLTCUS", 5.0)],
     "DOT":  [("PDOTUH", 500.0)],
-    "SHIB": [("PSHBUN", 100_000.0)],
+    "SHIB": [("PSHBUN", 1_000_000.0)],   # one buy of 1M SHIB is ONE contract
     "XLM":  [("PXLMUK", 5_000.0)],
     "XTZ":  [("PXTZUK", 1_000.0)],
     "TRX":  [("PTRXUK", 1_000.0)],
@@ -586,10 +586,13 @@ US_PERP_CONTRACTS = {
 US_PERP_FEE_PER_SIDE = 0.15           # all-in, per contract, per side
 US_PERP_SCHEDULE_VINTAGE = "Kraken US schedule, updated 2026-06-15"
 
-# No exchange lists a contract worth less than this. A configured size that
-# implies one is wrong by orders of magnitude — the arithmetic below turns a
-# bad size straight into a bad fee, so it is checked rather than trusted.
-MIN_PLAUSIBLE_CONTRACT_NOTIONAL = 50.0
+# When a round trip costs more than this share of the contract's own value,
+# the instrument is expensive at EVERY position size — per-contract cost is
+# scale-invariant, so buying more contracts cannot dilute it. Surfaced as a
+# warning, never as a refusal: the sizes are from the rulebook, and the
+# decision about whether such a trade is worth taking belongs to the cost
+# gate at signal construction, not to a lookup function.
+EXPENSIVE_CONTRACT_RATIO = 0.01
 
 
 def _underlying(symbol: str) -> str:
@@ -626,12 +629,21 @@ def us_perp_contracts(symbol: str, notional: float,
         # SHIB at 100,000/contract is $0.45 at $0.00000447, which would need
         # 19,910 contracts and bill $5,973 to trade $8,900.
         one = price * size
-        if one < MIN_PLAUSIBLE_CONTRACT_NOTIONAL:
-            return None, (
-                f"{symbol}: {name} at {size:g} {base}/contract is only "
-                f"${one:,.2f} of notional at ${price:,.8g} — implausible for a "
-                f"listed contract, so the size on file is wrong by orders of "
-                f"magnitude and is not being used")
+        # These sizes come from the exchange rulebook, so the arithmetic on
+        # them is a measurement, not a guess — it is not second-guessed by a
+        # heuristic. But a contract whose round trip is a large share of its
+        # own value makes the instrument expensive at EVERY size (per-contract
+        # cost is scale-invariant), and that deserves to be visible rather
+        # than buried. Refusing to price it would be worse: the caller would
+        # fall back to a percentage stand-in that is less accurate, not more.
+        round_trip = US_PERP_FEE_PER_SIDE * 2.0
+        if one > 0 and round_trip / one > EXPENSIVE_CONTRACT_RATIO:
+            logger.warning(
+                f"[Venues] {name} ({size:g} {base}/contract) is ${one:,.2f} at "
+                f"${price:,.8g}, and costs ${round_trip:.2f} to trade — "
+                f"{round_trip / one * 100:.1f}% of the contract. Per-contract "
+                f"cost does not scale away, so this is the cost at any size."
+            )
         contracts = math.ceil(abs(notional) / one)
         if contracts >= 1:
             return float(contracts), (

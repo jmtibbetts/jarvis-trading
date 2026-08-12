@@ -177,6 +177,15 @@ def venue_round_trip_fee(symbol: str, notional: float, leverage: float = 1.0,
     # One backstop over every path. Each schedule below has now been wrong in
     # BOTH directions at least once, so the ceiling is enforced here rather
     # than inside whichever branch happened to fail last.
+    #
+    # EXCEPT for exact per-contract arithmetic on a rulebook contract size.
+    # That is a measurement, and capping a measurement UNDERSTATES cost —
+    # the one direction this model must never fail in. A genuinely expensive
+    # instrument (SHIB's contract is $4.47 and costs $0.30 to trade, 6.7%)
+    # has to report its real cost so the gate at signal construction can
+    # refuse the trade on economics rather than be handed a flattering number.
+    if "/side all-in" in why and "ESTIMATED" not in why:
+        return fee, why
     ceiling = abs(notional) * FEE_SANITY_CEILING
     if fee > ceiling > 0:
         logger.warning(

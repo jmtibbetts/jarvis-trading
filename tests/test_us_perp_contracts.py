@@ -11,9 +11,10 @@ unit price:
     OP/USD   $0.089    20,157 "contracts" -> $6,047 on $1,800  (336%)
     BTC/USD  $95,000    0.0937 "contracts" ->   $0.03 on $8,900 (0.0003%)
 
-Bitnomial contracts are sized in units of the UNDERLYING (BUI = 0.1 BTC,
-BUS = 1 BTC), and futures trade in WHOLE contracts. Counting them properly
-gives $0.30 on a $8,900 position, which is what the operator observes.
+Bitnomial PERPETUAL contracts are sized in units of the UNDERLYING
+(PBTCUC = 0.01 BTC, PSHBUN = 1,000,000 SHIB), and futures trade in WHOLE
+contracts. Counting them properly puts a $8,900 round trip at a few dollars
+on every listed instrument, which is what the operator observes paying.
 """
 import os
 import unittest
@@ -74,9 +75,9 @@ class FeeFormulaTests(unittest.TestCase):
         self.assertGreater(small / 50.0, large / 950_000.0)
 
     def test_a_sub_contract_position_still_pays_a_full_contract(self):
-        """$500 of BTC cannot be expressed in less than one BUI, so it pays
-        the same $0.30 as a $9,500 position. That is a real cost floor, and
-        it is what makes tiny leveraged positions inefficient."""
+        """$50 of BTC cannot be expressed in less than one PBTCUC, so it
+        pays the same $0.30 as a $950 position. That is a real cost floor,
+        and it is what makes tiny leveraged positions inefficient."""
         tiny, _ = us_perp_fee("BTC/USD", 50.0, 95_000.0)
         full, _ = us_perp_fee("BTC/USD", 950.0, 95_000.0)
         self.assertAlmostEqual(tiny, full)
@@ -153,23 +154,56 @@ class RegressionTests(unittest.TestCase):
 
 
 class ContractSizePlausibilityTests(unittest.TestCase):
-    """A configured contract size turns straight into a fee, so it is
-    checked rather than trusted.
+    """A configured contract size turns straight into a fee.
 
-    Bitnomial sizes contracts so that one is a few hundred to a few thousand
-    dollars across a five-order-of-magnitude price range -- 0.01 BTC and
-    5,000 ADA are both roughly $1,000. That property is what makes the fee
-    sane; a size that violates it is wrong by orders of magnitude and would
-    recreate the original bug from the other side.
+    Most Bitnomial contracts are sized so one is a few hundred to a few
+    thousand dollars across a five-order-of-magnitude price range -- 0.01
+    BTC and 5,000 ADA are both roughly $1,000. That property is what keeps
+    the per-contract fee negligible, and losing it is what made "one
+    contract = one token" so destructive.
+
+    Where an instrument genuinely breaks the pattern, the model reports the
+    real number rather than smoothing it: the decision about whether such a
+    trade is worth taking belongs to the cost gate, not to a lookup.
     """
 
-    def test_an_implausibly_small_contract_is_refused(self):
-        """SHIB at 100,000/contract is $0.45 of notional at $0.00000447.
-        No exchange lists that. Using it would need 19,910 contracts and
-        bill $5,973 to trade $8,900."""
+    def test_one_buy_of_a_million_shib_is_one_contract(self):
+        """PSHBUN is 1,000,000 SHIB. Treating it as 100,000 turned a single
+        1M buy into ten contracts and multiplied its fee by ten."""
+        n, why = us_perp_contracts("SHIB/USD", 1_000_000 * 0.00000447, 0.00000447)
+        self.assertEqual(n, 1, why)
+
+    def test_a_rulebook_size_is_never_refused_by_a_heuristic(self):
+        """These sizes are measurements. Refusing to price one would push
+        the caller onto a percentage stand-in that is LESS accurate, and
+        second-guessing a measurement with a guess is the error this whole
+        model has been unwinding."""
         n, why = us_perp_contracts("SHIB/USD", 8_900.0, 0.00000447)
-        self.assertIsNone(n)
-        self.assertIn("implausible", why)
+        self.assertIsNotNone(n, why)
+
+    def test_a_costly_contract_reports_its_real_cost_uncapped(self):
+        """SHIB's contract is $4.47 and costs $0.30 to trade -- 6.7%, above
+        the 5% sanity ceiling. Capping it would UNDERSTATE cost, the one
+        direction this model must never fail in. The gate at signal
+        construction should refuse the trade on economics, not be handed a
+        flattering number."""
+        import os
+        from unittest import mock as _m
+        with _m.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+            fee, why = venue_round_trip_fee("SHIB/USD", 8_900.0, 8.9, 0.00000447)
+        self.assertNotIn("CAPPED", why)
+        self.assertGreater(fee / 8_900.0, 0.05)
+
+    def test_per_contract_cost_does_not_scale_away(self):
+        """Buying more contracts cannot dilute a per-contract fee -- the
+        ratio is identical at every size. That is what makes an expensive
+        contract expensive at ANY size."""
+        rates = []
+        for tokens in (1_000_000, 10_000_000, 100_000_000, 1_000_000_000):
+            notional = tokens * 0.00000447
+            fee, _ = us_perp_fee("SHIB/USD", notional, 0.00000447)
+            rates.append(round(fee / notional, 6))
+        self.assertEqual(len(set(rates)), 1, rates)
 
     def test_every_other_configured_size_is_plausible_at_a_real_price(self):
         prices = {"BTC": 95_000.0, "ETH": 3_200.0, "SOL": 180.0, "XRP": 2.1,

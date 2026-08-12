@@ -1067,6 +1067,19 @@ def _migrate_columns():
         "paper_portfolio": [
             ("user_id",          "TEXT DEFAULT 'local'"),
         ],
+        # The paper book computed venue fees in size_position for DISPLAY but
+        # never charged them: `cash += margin + pnl`. Same omission Auto Sim
+        # had — a book whose costs are optional cannot be compared against
+        # one whose costs are real.
+        "paper_positions": [
+            ("fees",      "REAL DEFAULT 0.0"),
+            ("fee_basis", "TEXT"),
+        ],
+        "paper_trades": [
+            ("gross_pnl", "REAL DEFAULT 0.0"),
+            ("fees",      "REAL DEFAULT 0.0"),
+            ("fee_basis", "TEXT"),
+        ],
         "telegram_deliveries": [
             ("setup_key", "TEXT"),
             ("setup_state", "TEXT"),
@@ -1273,6 +1286,8 @@ class PaperPosition(Base):
     stop_loss     = Column(Float)
     notional      = Column(Float)           # total exposure = qty * entry_price * leverage
     margin_used   = Column(Float)           # cash reserved = notional / leverage
+    fees          = Column(Float, default=0.0)   # venue round trip, reserved at open
+    fee_basis     = Column(String)
     unrealized_pnl= Column(Float, default=0.0)
     unrealized_pct= Column(Float, default=0.0)
     signal_id     = Column(String)          # FK to trading_signals.id (optional)
@@ -1298,7 +1313,10 @@ class PaperTrade(Base):
     entry_price   = Column(Float)
     exit_price    = Column(Float)
     notional      = Column(Float)
-    realized_pnl  = Column(Float)
+    gross_pnl     = Column(Float, default=0.0)   # price move only
+    fees          = Column(Float, default=0.0)   # venue round trip
+    fee_basis     = Column(String)
+    realized_pnl  = Column(Float)                # NET = gross - fees
     pnl_pct       = Column(Float)
     close_reason  = Column(String)          # stop_loss | take_profit | manual | margin_call
     signal_id     = Column(String)

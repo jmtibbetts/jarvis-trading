@@ -548,12 +548,112 @@ def _calc_pnl(entry: float, close_price: float, qty: float, side: int, leverage:
     contract, not $1. Without it every futures P&L in the learning data was
     understated by 5x (YM) to 1000x (CL). Shares and coins have a
     multiplier of 1.0, so this is a no-op for them.
+
+    UNITS CONVENTION — the multiplier makes this load-bearing. For futures,
+    `qty` MUST be CONTRACTS, because the multiplier converts contracts to
+    underlying units. Passing units instead double-counts by the whole
+    multiplier. That is not theoretical: a single HG=F position sized the
+    units way (749.57 = notional/price, rather than 0.03 contracts) recorded
+    -$440,371 on a -0.35% copper move. The true loss was -$17.61. That one
+    trade was 104% of the paper book's entire -$422,504 deficit, and it took
+    the account to -$341,681 cash, which then made every signal card refuse
+    to size.
+
+    So the arithmetic is bounded by what the position could actually lose.
     """
     from lib.instruments import get_spec
     multiplier = get_spec(symbol).multiplier if symbol else 1.0
+    multiplier = _effective_multiplier(multiplier, entry, qty, margin, leverage, symbol)
     raw_pnl = (close_price - entry) * qty * side * multiplier
+    raw_pnl = _bound_loss_to_margin(raw_pnl, margin, symbol, qty, multiplier)
     pnl_pct = (raw_pnl / margin) * 100 if margin else 0.0
     return raw_pnl, pnl_pct
+
+
+def _effective_multiplier(multiplier: float, entry: float, qty: float,
+                          margin: float, leverage: float, symbol: str) -> float:
+    """Apply the contract multiplier only when `qty` is actually CONTRACTS.
+
+    The multiplier converts contracts to underlying units, so it is correct
+    for a contract-sized qty and catastrophic for a unit-sized one. Which
+    convention a stored position uses is recoverable from its own numbers,
+    because notional is margin x leverage:
+
+        qty x entry              ~ notional  ->  qty is UNITS
+        qty x entry x multiplier ~ notional  ->  qty is CONTRACTS
+
+    Every futures position in the paper book turned out to be unit-sized
+    while P&L multiplied anyway, and the damage ran BOTH ways — the bound on
+    losses alone would have left the winners inflated:
+
+        SI=F  +0.07% move  ->  recorded +$17,028   true +$3.41
+        HG=F  -0.35% move  ->  recorded -$440,371  true -$17.61
+
+    Reading the convention off the position is better than bounding the
+    result, because it gives the right number rather than a survivable one.
+    """
+    if multiplier <= 1 or entry <= 0 or qty <= 0:
+        return multiplier
+    notional = abs(margin) * (leverage or 1.0)
+    if notional <= 0:
+        return multiplier
+    # Only an EXACT units match disarms the multiplier — not merely "closer
+    # than the contract reading". The affected rows were sized as
+    # notional/price, so qty x entry reproduces the notional to the cent.
+    # Demanding that precision means ambiguous or synthetic data keeps the
+    # declared convention: a heuristic that fires on a maybe would corrupt
+    # correctly-sized positions to fix incorrectly-sized ones, which is a
+    # worse trade than leaving the bad rows to the margin bound.
+    if abs(qty * entry - notional) / notional <= UNITS_MATCH_TOLERANCE:
+        logger.warning(
+            f"[Paper] {symbol}: qty={qty:g} is UNITS of the underlying "
+            f"(qty x entry = ${qty * entry:,.0f} = the notional), not contracts. "
+            f"Not applying the {multiplier:g}x contract multiplier — doing so "
+            f"would overstate this position's P&L by {multiplier:g}x."
+        )
+        return 1.0
+    return multiplier
+
+
+# A position cannot lose more than the capital committed to it — that is what
+# liquidation means, and it is a property of the instrument, not a risk
+# preference. The broker closes you out when margin is exhausted; it does not
+# hand you a bill for 440x the position.
+#
+# This is the backstop for the units/contracts mismatch above. Sizing and P&L
+# are two code paths that must agree about what `qty` means, and when they
+# disagree the error is silent and enormous. Bounding here means the worst a
+# disagreement can cost is the margin, and the log names the likely cause.
+LOSS_MISMATCH_FACTOR = 1.5   # above this multiple of margin, suspect a unit bug
+
+# How exactly `qty x entry` must reproduce the notional before the position is
+# declared unit-sized. The affected rows match to the cent because they were
+# sized as notional/price; anything looser is ambiguous and keeps the declared
+# convention.
+UNITS_MATCH_TOLERANCE = 0.001   # 0.1%
+
+
+def _bound_loss_to_margin(raw_pnl: float, margin: float, symbol: str,
+                          qty: float, multiplier: float) -> float:
+    if margin <= 0 or raw_pnl >= -margin:
+        return raw_pnl
+    # A loss slightly past margin is ordinary — the position gapped through
+    # its stop and liquidated. Only a loss that dwarfs the margin indicates
+    # the sizing and P&L paths disagree about what qty means, and only then
+    # is the multiplier worth naming.
+    overshoot = abs(raw_pnl) / margin
+    if overshoot >= LOSS_MISMATCH_FACTOR:
+        cause = (
+            f" qty={qty:g}, multiplier={multiplier:g} — for futures qty must be "
+            f"CONTRACTS, and passing units double-counts by the multiplier."
+            if multiplier > 1 else ""
+        )
+        logger.error(
+            f"[Paper] {symbol or '?'}: computed P&L {raw_pnl:,.2f} against "
+            f"${margin:,.2f} of margin — {overshoot:,.0f}x the capital at risk, "
+            f"which is not possible.{cause} Bounding at the margin (liquidation)."
+        )
+    return -margin
 
 
 def open_paper_position(signal: dict, current_price: float = None) -> dict:
@@ -756,6 +856,12 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 stop_loss     = stop,
                 notional      = notional,
                 margin_used   = margin,
+                # The round trip is reserved at OPEN, so an untouched position
+                # immediately shows what unwinding it costs. size_position
+                # already computed this; it was only ever displayed, never
+                # charged — `cash -= margin` alone let the book trade free.
+                fees          = round(float(sizing.get("round_trip_fees") or 0.0), 6),
+                fee_basis     = sizing.get("fee_basis"),
                 unrealized_pnl= 0.0,
                 unrealized_pct= 0.0,
                 signal_id     = signal.get("id"),
@@ -823,7 +929,12 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
             )
             return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
 
-        pnl, pnl_pct = _calc_pnl(entry, close_price, qty, side, lev, pos_margin, symbol=pos_symbol)
+        gross, _ = _calc_pnl(entry, close_price, qty, side, lev, pos_margin, symbol=pos_symbol)
+        # The round trip reserved at open is charged here. Without it the book
+        # kept the losing side of the ledger optional.
+        pos_fees = float(getattr(pos, "fees", 0.0) or 0.0)
+        pnl = gross - pos_fees
+        pnl_pct = (pnl / pos_margin * 100) if pos_margin else 0.0
 
         portfolio = _get_portfolio_cash(db)
         portfolio.cash         += pos_margin + pnl
@@ -846,6 +957,9 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
             entry_price  = entry,
             exit_price   = close_price,
             notional     = pos_notional,
+            gross_pnl    = round(gross, 6),
+            fees         = round(pos_fees, 6),
+            fee_basis    = getattr(pos, "fee_basis", None),
             realized_pnl = pnl,
             pnl_pct      = pnl_pct,
             close_reason = reason,
@@ -955,7 +1069,15 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
             )
             return {"error": f"Rejected implausible close price for {pos_symbol}: ${close_price:.6g} vs entry ${entry:.6g}"}
 
-        pnl, pnl_pct = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin, symbol=pos_symbol)
+        gross, _ = _calc_pnl(entry, close_price, close_qty, side, lev, close_margin, symbol=pos_symbol)
+        # Only the fraction being closed pays its share of the round trip;
+        # the remainder keeps its reserve for when the runner is closed.
+        total_qty = float(pos.qty or 0) or close_qty
+        pos_fees_all = float(getattr(pos, "fees", 0.0) or 0.0)
+        share = (close_qty / total_qty) if total_qty else 1.0
+        close_fees = pos_fees_all * share
+        pnl = gross - close_fees
+        pnl_pct = (pnl / close_margin * 100) if close_margin else 0.0
 
         portfolio = _get_portfolio_cash(db)
         portfolio.cash        += close_margin + pnl
@@ -978,6 +1100,9 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
             entry_price  = entry,
             exit_price   = close_price,
             notional     = close_notional,
+            gross_pnl    = round(gross, 6),
+            fees         = round(close_fees, 6),
+            fee_basis    = getattr(pos, "fee_basis", None),
             realized_pnl = pnl,
             pnl_pct      = pnl_pct,
             close_reason = reason,
@@ -989,6 +1114,10 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
         pos.qty            = remain_qty
         pos.notional        = remain_notional
         pos.margin_used     = remain_margin
+        # The closed fraction's share of the round trip has been paid; the
+        # runner carries only what is left, or closing it would charge the
+        # same fee twice.
+        pos.fees             = round(max(0.0, pos_fees_all - close_fees), 6)
         pos.scaled_out       = True
         pos.scaled_out_qty   = close_qty
         pos.updated_at       = _now()

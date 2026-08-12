@@ -537,128 +537,190 @@ US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
 # perpetual futures at a flat $0.15 per contract PER SIDE, all-in — $0.30 the
 # round trip. The rate was never the problem; the CONTRACT COUNT was.
 #
-# The count must come from the BITNOMIAL contract, not from Kraken's
-# international flexible futures. Those are different instruments: PF_XBTUSD
-# uses contractSize 1 meaning one TOKEN, so deriving contracts that way made
-# a $0.089 coin need 20,157 "contracts" and billed $6,047 to trade $1,800.
+# THE TRAP THIS TABLE EXISTS TO PREVENT
+# Fixed futures sit directly beside perpetuals in the rulebook, under similar
+# names, with radically different multipliers:
 #
-# Bitnomial PERPETUAL contracts, sized in units of the UNDERLYING, from the
-# exchange rulebook. Note these are the P-prefixed perpetual products, NOT
-# the BUI/BUS Bitcoin futures — those are a different instrument and using
-# them put the BTC contract out by 10x.
+#     SOL   perpetual      5 SOL        fixed future    100 SOL
+#     ETH   perpetual    0.5 ETH        fixed future    0.1 ETH
+#     XRP   perpetual    500 XRP        fixed future    100 XRP
+#     DOGE  perpetual  5,000 DOGE       fixed future  100,000 DOGE
 #
-# Everything listed on the Kraken US exchange is a US perpetual and is
-# priced this way. What varies per instrument — and what this table exists
-# to hold — is the CONTRACT SIZE, the only input the fee formula needs
-# beyond the rate.
+# Grabbing the neighbouring row is a 5x to 20x error that looks completely
+# reasonable in isolation. So each entry carries its PRODUCT CODE, and the
+# code is what proves the row is a perpetual — a bare {"SOL": 5.0} cannot be
+# audited against the rulebook, and a wrong number in it is invisible.
 #
-# Sizes are deliberately spread so a contract is economically comparable
-# across a five-order-of-magnitude price range: 0.01 BTC and 100,000 SHIB
-# are both roughly the same notional. That is exactly why assuming "one
-# contract = one token" was so destructive — it made contract count a
-# function of unit price, and billed $6,047 to trade $1,800 of a $0.089
-# coin.
+# The earlier failures here were all the same shape: contract count taken
+# from the wrong instrument. Kraken's INTERNATIONAL flexible futures use
+# contractSize 1 meaning one TOKEN, which made a $0.089 coin need 20,157
+# "contracts" and billed $6,047 to trade $1,800. Then BUI/BUS — Bitnomial's
+# Bitcoin FIXED futures — put BTC out by 10x the other way.
 #
-# Only sizes confirmed from a published spec belong here. A symbol absent
-# from the table has an UNKNOWN contract size, not an ineligible one:
-# us_perp_contracts() returns None so the caller prices it some other way
-# and labels it, rather than inventing a size.
+# `verified` marks a row confirmed against the perpetual rows of the rulebook
+# rather than inferred. Only verified rows are priced exactly; anything else
+# is labelled an estimate, because a guessed contract size converts directly
+# into a wrong fee.
 US_PERP_CONTRACTS = {
-    "BTC":  [("PBTCUC", 0.01)],
-    "ETH":  [("PETHUI", 0.5)],
-    "SOL":  [("PSOLUS", 5.0)],
-    "XRP":  [("PXRPUH", 500.0)],
-    "AAVE": [("PAVEUS", 5.0)],
-    "AVAX": [("PAVXUD", 50.0)],
-    "BCH":  [("PBCHUS", 1.0)],
-    "ADA":  [("PADAUK", 5_000.0)],
-    "LINK": [("PLNKUD", 50.0)],
-    "DOGE": [("PDOGUK", 5_000.0)],
-    "HBAR": [("PHBRUK", 5_000.0)],
-    "LTC":  [("PLTCUS", 5.0)],
-    "DOT":  [("PDOTUH", 500.0)],
-    "SHIB": [("PSHBUN", 1_000_000.0)],   # one buy of 1M SHIB is ONE contract
-    "XLM":  [("PXLMUK", 5_000.0)],
-    "XTZ":  [("PXTZUK", 1_000.0)],
-    "TRX":  [("PTRXUK", 1_000.0)],
+    "BTC":  {"product_code": "PBTCUC", "contract_size": 0.01,      "underlying": "BTC",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "ETH":  {"product_code": "PETHUI", "contract_size": 0.5,       "underlying": "ETH",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "SOL":  {"product_code": "PSOLUS", "contract_size": 5.0,       "underlying": "SOL",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "XRP":  {"product_code": "PXRPUH", "contract_size": 500.0,     "underlying": "XRP",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "AAVE": {"product_code": "PAVEUS", "contract_size": 5.0,       "underlying": "AAVE", "fee_per_contract_per_side": 0.15, "verified": True},
+    "AVAX": {"product_code": "PAVXUD", "contract_size": 50.0,      "underlying": "AVAX", "fee_per_contract_per_side": 0.15, "verified": True},
+    "BCH":  {"product_code": "PBCHUS", "contract_size": 1.0,       "underlying": "BCH",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "ADA":  {"product_code": "PADAUK", "contract_size": 5_000.0,   "underlying": "ADA",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "LINK": {"product_code": "PLNKUD", "contract_size": 50.0,      "underlying": "LINK", "fee_per_contract_per_side": 0.15, "verified": True},
+    "DOGE": {"product_code": "PDOGUK", "contract_size": 5_000.0,   "underlying": "DOGE", "fee_per_contract_per_side": 0.15, "verified": True},
+    "HBAR": {"product_code": "PHBRUK", "contract_size": 5_000.0,   "underlying": "HBAR", "fee_per_contract_per_side": 0.15, "verified": True},
+    "LTC":  {"product_code": "PLTCUS", "contract_size": 5.0,       "underlying": "LTC",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "DOT":  {"product_code": "PDOTUH", "contract_size": 500.0,     "underlying": "DOT",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "SHIB": {"product_code": "PSHBUN", "contract_size": 100_000.0, "underlying": "SHIB", "fee_per_contract_per_side": 0.15, "verified": True},
+    "XLM":  {"product_code": "PXLMUK", "contract_size": 5_000.0,   "underlying": "XLM",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "XTZ":  {"product_code": "PXTZUK", "contract_size": 1_000.0,   "underlying": "XTZ",  "fee_per_contract_per_side": 0.15, "verified": True},
+    "TRX":  {"product_code": "PTRXUK", "contract_size": 1_000.0,   "underlying": "TRX",  "fee_per_contract_per_side": 0.15, "verified": True},
 }
 
 US_PERP_FEE_PER_SIDE = 0.15           # all-in, per contract, per side
 US_PERP_SCHEDULE_VINTAGE = "Kraken US schedule, updated 2026-06-15"
 
-# When a round trip costs more than this share of the contract's own value,
-# the instrument is expensive at EVERY position size — per-contract cost is
-# scale-invariant, so buying more contracts cannot dilute it. Surfaced as a
-# warning, never as a refusal: the sizes are from the rulebook, and the
-# decision about whether such a trade is worth taking belongs to the cost
-# gate at signal construction, not to a lookup function.
-EXPENSIVE_CONTRACT_RATIO = 0.01
+# A round trip costing more than this share of the contract's own value makes
+# the instrument uneconomic at EVERY position size. Per-contract cost is
+# scale-invariant — buying more contracts buys more fees, not cheaper ones —
+# so unlike a percentage schedule there is no size at which this dilutes.
+# SHIB's contract is $0.45 and costs $0.30 to trade: 67%, at any size.
+MAX_VIABLE_FEE_PCT_OF_NOTIONAL = 1.0     # percent
 
 
 def _underlying(symbol: str) -> str:
     return str(symbol or "").upper().split("/")[0].replace("XBT", "BTC").strip()
 
 
+def us_perp_venue_applies(venue: str | None = None) -> bool:
+    """Whether the per-contract US perpetual schedule applies at all.
+
+    KRAKEN PRO ONLY. Everything in this section — the $0.15/contract/side
+    rate, the Bitnomial contract sizes, the NO_TRADE viability gate — is
+    Kraken's US derivatives pricing and describes no other venue. Alpaca
+    charges a percentage on spot; BTCC has its own schedule entirely.
+    Applying a per-contract model to any of them would repeat, at a
+    different address, exactly the mistake that started this: pricing an
+    instrument against a schedule that was written for a different product.
+    """
+    import os
+    v = (venue or os.getenv("PAPER_VENUE") or
+         os.getenv("DEFAULT_CRYPTO_VENUE") or DEFAULT_VENUE)
+    region = (os.getenv("VENUE_REGION") or "international").lower()
+    return str(v).lower() == "kraken" and region == "us"
+
+
+def us_perp_spec(symbol: str, venue: str | None = None) -> dict | None:
+    """The Bitnomial PERPETUAL row for this underlying, or None.
+
+    Carries the product code so a row can be audited against the rulebook.
+    Fixed futures sit beside perpetuals under similar names with multipliers
+    that differ by 5x to 20x (SOL perp 5, SOL fixed 100), and a bare number
+    gives no way to tell which one was copied.
+    """
+    if not us_perp_venue_applies(venue):
+        return None
+    return US_PERP_CONTRACTS.get(_underlying(symbol))
+
+
+def us_perp_viability(symbol: str, price: float) -> dict:
+    """Can this instrument be traded economically AT ALL?
+
+    Answered before position size is even considered, because a fixed
+    per-contract cost does not scale away:
+
+        contract_notional    = contract_size * market_price
+        round_trip_fee_pct   = (fee_per_contract * 2) / contract_notional * 100
+
+    A trade whose transaction costs eat an unacceptable share of notional is
+    NO_TRADE regardless of conviction — the edge would have to exceed the fee
+    before it earned anything, and no signal scores that highly.
+    """
+    spec = us_perp_spec(symbol)
+    if not spec:
+        return {"tradeable": None, "reason": f"{symbol}: no perpetual spec on file"}
+    if price <= 0:
+        return {"tradeable": None, "reason": f"{symbol}: no price"}
+    size = float(spec["contract_size"])
+    per_side = float(spec["fee_per_contract_per_side"])
+    contract_notional = size * price
+    round_trip = per_side * 2.0
+    fee_pct = round_trip / contract_notional * 100 if contract_notional else float("inf")
+    ok = fee_pct <= MAX_VIABLE_FEE_PCT_OF_NOTIONAL
+    return {
+        "tradeable": ok,
+        "decision": "TRADEABLE" if ok else "NO_TRADE",
+        "product_code": spec["product_code"],
+        "contract_size": size,
+        "contract_notional": round(contract_notional, 6),
+        "round_trip_fee_per_contract": round(round_trip, 4),
+        "round_trip_fee_pct": round(fee_pct, 4),
+        "limit_pct": MAX_VIABLE_FEE_PCT_OF_NOTIONAL,
+        "reason": (
+            f"{spec['product_code']}: {size:g} {spec['underlying']}/contract = "
+            f"${contract_notional:,.2f} at ${price:,.8g}; ${round_trip:.2f} round "
+            f"trip = {fee_pct:.2f}% of notional"
+            + ("" if ok else
+               f" — exceeds {MAX_VIABLE_FEE_PCT_OF_NOTIONAL:g}%. Fixed "
+               f"per-contract transaction costs consume an unacceptable "
+               f"percentage of position notional, at ANY size.")
+        ),
+    }
+
+
 def us_perp_contracts(symbol: str, notional: float,
                       price: float) -> tuple[float | None, str]:
     """(whole contracts needed, explanation) for a US perpetual, or None when
-    the symbol has no listed Bitnomial contract.
+    no verified perpetual spec is on file.
+
+    contracts = ceil(requested_underlying / contract_size)
 
     Futures trade in WHOLE contracts — you cannot buy 0.0937 of one — so the
-    count rounds UP, and the smallest listed contract that can express the
-    position is chosen. Returning None rather than guessing a contract size
-    is the whole point: a fabricated size is what produced every absurd fee
-    this model has emitted.
+    count rounds UP. Returning None rather than guessing a contract size is
+    the whole point: a fabricated size is what produced every absurd fee this
+    model has emitted.
     """
-    listed = US_PERP_CONTRACTS.get(_underlying(symbol))
-    if not listed:
+    spec = us_perp_spec(symbol)
+    if not spec:
         return None, (f"{symbol}: contract size not on file, so contracts "
                       f"cannot be counted — add it to US_PERP_CONTRACTS to "
                       f"price this per contract")
+    if not spec.get("verified"):
+        return None, f"{symbol}: {spec['product_code']} is unverified"
     if price <= 0:
         return None, f"{symbol}: cannot count contracts without a price"
     import math
-    base = _underlying(symbol)
-    for name, size in listed:
-        # A contract's notional is the real check on whether the size is
-        # right. Bitnomial sizes them so one contract is a few hundred to a
-        # few thousand dollars across a five-order-of-magnitude price range
-        # (0.01 BTC and 5,000 ADA are both ~$1,000). A size that implies a
-        # sub-$50 contract is off by orders of magnitude, and passing it
-        # through would recreate the original bug from the opposite side:
-        # SHIB at 100,000/contract is $0.45 at $0.00000447, which would need
-        # 19,910 contracts and bill $5,973 to trade $8,900.
-        one = price * size
-        # These sizes come from the exchange rulebook, so the arithmetic on
-        # them is a measurement, not a guess — it is not second-guessed by a
-        # heuristic. But a contract whose round trip is a large share of its
-        # own value makes the instrument expensive at EVERY size (per-contract
-        # cost is scale-invariant), and that deserves to be visible rather
-        # than buried. Refusing to price it would be worse: the caller would
-        # fall back to a percentage stand-in that is less accurate, not more.
-        round_trip = US_PERP_FEE_PER_SIDE * 2.0
-        if one > 0 and round_trip / one > EXPENSIVE_CONTRACT_RATIO:
-            logger.warning(
-                f"[Venues] {name} ({size:g} {base}/contract) is ${one:,.2f} at "
-                f"${price:,.8g}, and costs ${round_trip:.2f} to trade — "
-                f"{round_trip / one * 100:.1f}% of the contract. Per-contract "
-                f"cost does not scale away, so this is the cost at any size."
-            )
-        contracts = math.ceil(abs(notional) / one)
-        if contracts >= 1:
-            return float(contracts), (
-                f"{contracts:g} x {name} ({size:g} {base}/contract) at "
-                f"${US_PERP_FEE_PER_SIDE:.2f}/side all-in "
-                f"({US_PERP_SCHEDULE_VINTAGE})")
-    return None, f"{symbol}: no listed contract can express ${abs(notional):,.0f}"
+    size = float(spec["contract_size"])
+    # requested_underlying, derived from the notional the caller wants
+    requested_underlying = abs(notional) / price
+    contracts = max(1.0, float(math.ceil(requested_underlying / size)))
+    return contracts, (
+        f"{contracts:g} x {spec['product_code']} ({size:g} "
+        f"{spec['underlying']}/contract) at "
+        f"${float(spec['fee_per_contract_per_side']):.2f}/side all-in "
+        f"({US_PERP_SCHEDULE_VINTAGE})")
 
 
 def us_perp_fee(symbol: str, notional: float, price: float) -> tuple[float | None, str]:
-    """Round-trip cost: contracts x per-contract all-in fee x 2 sides."""
+    """Round-trip cost.
+
+        contracts  = ceil(requested_underlying / contract_size)
+        entry_fee  = contracts * fee_per_contract_per_side
+        exit_fee   = contracts * fee_per_contract_per_side
+        round_trip = contracts * fee_per_contract_per_side * 2
+    """
     contracts, why = us_perp_contracts(symbol, notional, price)
     if contracts is None:
         return None, why
-    return contracts * US_PERP_FEE_PER_SIDE * 2.0, why
+    spec = us_perp_spec(symbol) or {}
+    per_side = float(spec.get("fee_per_contract_per_side", US_PERP_FEE_PER_SIDE))
+    entry_fee = contracts * per_side
+    exit_fee = contracts * per_side
+    return entry_fee + exit_fee, why
 
 
 # ── US equity regulatory fees ───────────────────────────────────────────────

@@ -251,7 +251,14 @@ def _round_trip_fee_uncapped(symbol: str, notional: float, leverage: float,
             # units of the underlying (BUI = 0.1 BTC, BUS = 1 BTC), and
             # us_perp_contracts() returns None rather than inventing a size
             # for a symbol Bitnomial does not list.
-            if (os.getenv("VENUE_REGION") or "").lower() == "us":
+            # KRAKEN PRO US ONLY. The per-contract schedule, the Bitnomial
+            # contract sizes and the NO_TRADE gate are Kraken's US
+            # derivatives pricing and describe no other venue — Alpaca
+            # charges a percentage on spot, BTCC has its own schedule.
+            # Applying a per-contract model elsewhere would repeat, at a
+            # different address, the mistake that started all of this.
+            from lib.venues import us_perp_venue_applies
+            if us_perp_venue_applies(venue):
                 from lib.venues import us_perp_fee
                 fee, why = us_perp_fee(symbol, abs(notional), entry_price)
                 if fee is not None:

@@ -70,6 +70,26 @@ def clamp_stop_to_atr(signal: dict, atr_pct: float | None) -> tuple[dict, bool, 
     stop_distance_pct = abs(entry - stop) / entry * 100.0
     max_distance_pct = atr_pct * MAX_STOP_ATR_MULT
 
+    # Instrument viability comes BEFORE any stop arithmetic, because a fixed
+    # per-contract fee does not scale away. A percentage fee is diluted by a
+    # wider stop; $0.30 on a $0.45 SHIB contract is 67% of notional at every
+    # size and every stop distance, so no stop can rescue it. Rejecting here
+    # rather than in sizing means the signal is never built at all.
+    # Kraken Pro US only — us_perp_viability returns tradeable=None anywhere
+    # else, so no other venue is judged by Kraken's per-contract schedule.
+    try:
+        from lib.venues import us_perp_viability
+        viability = us_perp_viability(signal.get("asset_symbol") or "", entry)
+    except Exception:
+        viability = {}
+    if viability.get("tradeable") is False:
+        signal["stop_source"] = LevelSource.COST_FLOOR
+        signal["untradeable_reason"] = (
+            f"NO_TRADE — fixed per-contract transaction costs consume an "
+            f"unacceptable percentage of position notional. {viability['reason']}"
+        )
+        return signal, False, signal["untradeable_reason"]
+
     # A stop must clear TWO floors, whichever is higher:
     #   1. volatility  — at least MIN_STOP_ATR_MULT of the symbol's own ATR,
     #      so it is not sitting inside normal noise;

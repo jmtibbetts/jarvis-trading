@@ -25,7 +25,23 @@ from lib.venues import (us_perp_contracts, us_perp_fee, US_PERP_CONTRACTS,
                         US_PERP_FEE_PER_SIDE)
 
 
+# Every test here exercises Kraken Pro US pricing, which is scoped to that
+# venue by design — the per-contract schedule describes no other venue. The
+# environment is therefore stated rather than inherited from a developer's
+# .env, so these do not silently pass or fail on local configuration.
+_KRAKEN_US = {"VENUE_REGION": "us", "PAPER_VENUE": "kraken"}
+
+
+def _kraken_us(testcase):
+    patch = mock.patch.dict(os.environ, _KRAKEN_US)
+    patch.start()
+    testcase.addCleanup(patch.stop)
+
+
 class ContractCountTests(unittest.TestCase):
+
+    def setUp(self):
+        _kraken_us(self)
     def test_contracts_are_whole(self):
         """You cannot buy 0.0937 of a futures contract."""
         n, _ = us_perp_contracts("BTC/USD", 8_900.0, 95_000.0)
@@ -53,6 +69,9 @@ class ContractCountTests(unittest.TestCase):
 
 class FeeFormulaTests(unittest.TestCase):
     """cost = contracts * per_contract_all_in_fee, both sides."""
+
+    def setUp(self):
+        _kraken_us(self)
 
     def test_the_formula_is_exactly_that(self):
         for notional in (1_000.0, 9_500.0, 95_000.0, 950_000.0):
@@ -98,6 +117,9 @@ class UnknownContractSizeTests(unittest.TestCase):
     number this model has emitted, so the lookup declines instead.
     """
 
+    def setUp(self):
+        _kraken_us(self)
+
     def test_an_unknown_size_returns_none_rather_than_guessing(self):
         for sym in ("OP/USD", "ISEK/USD", "VELVET/USD", "KAITO/USD"):
             n, why = us_perp_contracts(sym, 8_900.0, 1.0)
@@ -107,12 +129,12 @@ class UnknownContractSizeTests(unittest.TestCase):
     def test_the_estimate_is_labelled_not_passed_off_as_exact(self):
         """A stand-in that looks like a measurement is worse than one that
         announces itself."""
-        with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+        with mock.patch.dict(os.environ, _KRAKEN_US):
             _, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)
             self.assertIn("ESTIMATED", why)
 
     def test_an_estimated_symbol_still_costs_something_sane(self):
-        with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+        with mock.patch.dict(os.environ, _KRAKEN_US):
             fee, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)
             self.assertGreater(fee, 0.0)
             self.assertLess(fee / 8_900.0, 0.05, why)
@@ -120,7 +142,7 @@ class UnknownContractSizeTests(unittest.TestCase):
     def test_a_listed_symbol_is_priced_exactly_not_estimated(self):
         """SOL is on file now — it must use the real formula, not the
         stand-in."""
-        with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+        with mock.patch.dict(os.environ, _KRAKEN_US):
             _, why = venue_round_trip_fee("SOL/USD", 8_900.0, 8.9, 180.0)
             self.assertNotIn("ESTIMATED", why)
             self.assertIn("PSOLUS", why)
@@ -138,9 +160,7 @@ class RegressionTests(unittest.TestCase):
     """The two numbers that started this."""
 
     def setUp(self):
-        self._p = mock.patch.dict(os.environ, {"VENUE_REGION": "us"})
-        self._p.start()
-        self.addCleanup(self._p.stop)
+        _kraken_us(self)
 
     def test_a_cheap_coin_no_longer_costs_thousands(self):
         fee, _ = venue_round_trip_fee("OP/USD", 1_800.0, 5.0, 0.0893)
@@ -167,11 +187,17 @@ class ContractSizePlausibilityTests(unittest.TestCase):
     trade is worth taking belongs to the cost gate, not to a lookup.
     """
 
-    def test_one_buy_of_a_million_shib_is_one_contract(self):
-        """PSHBUN is 1,000,000 SHIB. Treating it as 100,000 turned a single
-        1M buy into ten contracts and multiplied its fee by ten."""
+    def setUp(self):
+        _kraken_us(self)
+
+    def test_shib_is_one_hundred_thousand_per_contract(self):
+        """Confirmed against the PERPETUAL rows of the rulebook. A million
+        SHIB is therefore ten contracts, and the resulting 67% effective fee
+        is real -- see test_perp_viability.py, where it becomes NO_TRADE
+        rather than a number to be argued down."""
         n, why = us_perp_contracts("SHIB/USD", 1_000_000 * 0.00000447, 0.00000447)
-        self.assertEqual(n, 1, why)
+        self.assertEqual(n, 10, why)
+        self.assertIn("100000 SHIB/contract", why)
 
     def test_a_rulebook_size_is_never_refused_by_a_heuristic(self):
         """These sizes are measurements. Refusing to price one would push
@@ -182,14 +208,14 @@ class ContractSizePlausibilityTests(unittest.TestCase):
         self.assertIsNotNone(n, why)
 
     def test_a_costly_contract_reports_its_real_cost_uncapped(self):
-        """SHIB's contract is $4.47 and costs $0.30 to trade -- 6.7%, above
+        """SHIB's contract is $0.447 and costs $0.30 to trade -- 67%, above
         the 5% sanity ceiling. Capping it would UNDERSTATE cost, the one
         direction this model must never fail in. The gate at signal
         construction should refuse the trade on economics, not be handed a
         flattering number."""
         import os
         from unittest import mock as _m
-        with _m.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+        with _m.patch.dict(os.environ, _KRAKEN_US):
             fee, why = venue_round_trip_fee("SHIB/USD", 8_900.0, 8.9, 0.00000447)
         self.assertNotIn("CAPPED", why)
         self.assertGreater(fee / 8_900.0, 0.05)

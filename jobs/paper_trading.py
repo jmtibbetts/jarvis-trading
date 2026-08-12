@@ -379,7 +379,11 @@ def _manage_open_positions(prices: dict) -> dict:
         direction = pos["direction"].lower()
         side = -1 if direction == "short" else 1
         plpc = ((current_price - entry) / entry) * 100 * side
-        pl_dollar = (current_price - entry) * pos["qty"] * side * pos["leverage"]
+        # qty ALREADY carries the leveraged exposure (qty = margin*leverage/entry),
+        # so multiplying by leverage again squared it — a 10x position reported
+        # 100x the real P&L. Harmless when everything was 1-2x; badly wrong now
+        # that conviction sizing runs to 20x.
+        pl_dollar = (current_price - entry) * pos["qty"] * side
         r["evaluated"] += 1
         ta_data = _fetch_ta(sym)
 

@@ -76,3 +76,39 @@ class TestLeverageLadder:
         assert leverage_capped_stop(100.0, 95.0, "long", 5, "4H") == 95.0
         # short side mirrors
         assert leverage_capped_stop(100.0, 105.0, "short", 5, "15m") == 103.0
+
+
+class TestPaperRiskSizing:
+    """The signal sizes the trade: same dollar risk regardless of stop
+    width, leverage scaled 2x-20x by conviction (paper engine)."""
+
+    def test_leverage_ladder_2_to_20(self):
+        from lib.paper_engine import score_leverage
+        assert score_leverage(55) == 2
+        assert score_leverage(100) == 20
+        assert score_leverage(0) == 2           # floor
+        prev = 0
+        for sc in range(55, 101):
+            lev = score_leverage(sc)
+            assert lev >= prev and 2 <= lev <= 20
+            prev = lev
+
+    def test_same_risk_regardless_of_stop_width(self):
+        from lib.paper_engine import size_from_risk
+        tight = size_from_risk(100_000, 100.0, 99.0, 10, 100_000)   # 1% stop
+        wide = size_from_risk(100_000, 100.0, 97.0, 10, 100_000)    # 3% stop
+        assert tight["ok"] and wide["ok"]
+        # identical dollar risk, 3x the quantity on the tighter stop
+        assert round(tight["risk_amount"]) == round(wide["risk_amount"]) == 1000
+        assert round(tight["qty"] / wide["qty"]) == 3
+
+    def test_margin_capped_by_free_cash(self):
+        from lib.paper_engine import size_from_risk
+        r = size_from_risk(100_000, 100.0, 99.9, 2, 10_000)  # very tight stop, low cash
+        assert r["ok"] and r["capped_by_cash"]
+        assert r["margin"] <= 10_000 * 0.15 + 0.01
+
+    def test_rejects_impossible_sizing(self):
+        from lib.paper_engine import size_from_risk
+        assert size_from_risk(100_000, 100.0, 100.0, 5, 100_000)["ok"] is False  # no stop distance
+        assert size_from_risk(0, 100.0, 99.0, 5, 100_000)["ok"] is False         # no equity

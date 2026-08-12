@@ -43,6 +43,12 @@
   let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
   let equity = $state<EquityPoint[]>([]);
+  let equityHours = $state(24 * 7);
+
+  async function setEquityRange(hours: number) {
+    equityHours = hours;
+    equity = await api.equity(hours).catch(() => equity);
+  }
   let jobs = $state<JobStatusMap>({});
   let regime = $state<Regime | null>(null);
   let winRate = $state<number | null>(null);
@@ -63,7 +69,7 @@
         api.signals("Active", 8),
         api.threats(8),
         api.positions().catch(() => null), // Alpaca may be unreachable/unconfigured — degrade gracefully
-        api.equity(24 * 7),
+        api.equity(equityHours),
         api.jobStatus(),
         api.regime().catch(() => null),
         api.performanceAnalytics(30).catch(() => null),
@@ -206,8 +212,8 @@
   </div>
 
   <div class="span-8">
-    <Panel title="Equity Curve" meta="{equity.length} snapshots &middot; 7d">
-      <EquityChart points={equity} />
+    <Panel title="Equity Curve" meta="{equity.length} snapshots">
+      <EquityChart points={equity} rangeHours={equityHours} onRange={setEquityRange} />
     </Panel>
   </div>
   <div class="span-4">

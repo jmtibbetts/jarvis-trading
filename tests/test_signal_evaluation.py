@@ -103,3 +103,56 @@ class EvidenceScoringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReversalProposal:
+    """A confidently-rejected thesis becomes the opposite-side setup, with
+    levels computed from ATR — never invented by the model."""
+
+    SIG = {"direction": "Long", "timeframe": "15m", "asset_symbol": "OP/USD"}
+    TA = {"1H": {"atr": {"value": 0.000861}}}
+
+    def _agree(self, **kw):
+        base = {"assessment": "AGREE", "confidence": 95}
+        base.update(kw)
+        return base
+
+    def test_no_proposal_when_ai_agrees(self):
+        from lib.signal_verification import propose_reversal
+        assert propose_reversal(self.SIG, 0.09144, self.TA, self._agree()) is None
+
+    def test_no_proposal_on_low_confidence_disagree(self):
+        from lib.signal_verification import propose_reversal
+        weak = {"assessment": "DISAGREE", "confidence": 55}
+        assert propose_reversal(self.SIG, 0.09144, self.TA, weak) is None
+
+    def test_no_proposal_without_atr(self):
+        from lib.signal_verification import propose_reversal
+        strong = {"assessment": "DISAGREE", "confidence": 90}
+        assert propose_reversal(self.SIG, 0.09144, {}, strong) is None
+
+    def test_long_flips_to_short_with_valid_geometry(self):
+        from lib.signal_verification import propose_reversal
+        strong = {"assessment": "DISAGREE", "confidence": 90}
+        p = propose_reversal(self.SIG, 0.09144, self.TA, strong)
+        assert p["direction"] == "Short"
+        # short geometry: stop ABOVE entry, target BELOW
+        assert p["stop_loss"] > p["entry_price"] > p["target_price"]
+        risk = p["stop_loss"] - p["entry_price"]
+        reward = p["entry_price"] - p["target_price"]
+        assert round(reward / risk, 1) == 2.0
+
+    def test_short_flips_to_long(self):
+        from lib.signal_verification import propose_reversal
+        sig = dict(self.SIG, direction="Short_Leveraged")
+        p = propose_reversal(sig, 100.0, {"1H": {"atr": {"value": 1.0}}},
+                             {"assessment": "DISAGREE", "confidence": 80})
+        assert p["direction"] == "Long"
+        assert p["target_price"] > p["entry_price"] > p["stop_loss"]
+
+    def test_scalp_stop_never_exceeds_three_percent(self):
+        from lib.signal_verification import propose_reversal
+        # ATR is huge (20% of price) — the scalp cap must clamp the risk
+        p = propose_reversal(self.SIG, 100.0, {"1H": {"atr": {"value": 20.0}}},
+                             {"assessment": "DISAGREE", "confidence": 90})
+        assert p["risk_per_unit"] == 3.0   # 3% of 100, not the 20 ATR

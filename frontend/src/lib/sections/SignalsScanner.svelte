@@ -37,6 +37,37 @@
   let busyIds = $state<Set<string>>(new Set());
   let verifyResults = $state<Record<string, VerifyResult>>({});
 
+  async function doReverse(sig: Signal) {
+    const p = verifyResults[sig.id]?.reversal_proposal;
+    if (!p) return;
+    const ok = confirm(
+      `Flip ${sig.asset_symbol} from ${sig.direction} to ${p.direction}?
+
+` +
+      `entry ${p.entry_price}
+stop ${p.stop_loss}
+target ${p.target_price}  (R:R ${p.rr_ratio}:1)
+
+` +
+      `${p.basis}
+
+${p.warning}
+
+The original signal will be superseded. Levels are recomputed server-side at submit.`,
+    );
+    if (!ok) return;
+    setBusy(sig.id, true);
+    try {
+      const res = await api.reverseSignal(sig.id);
+      toastStore.ok(`${sig.asset_symbol}: flipped to ${res.proposal.direction} @ ${res.proposal.entry_price}`);
+      await loadSignals();
+    } catch (e) {
+      toastStore.err(`Reverse failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(sig.id, false);
+    }
+  }
+
   async function doVerify(sig: Signal, deep = false) {
     setBusy(sig.id, true);
     if (deep) toastStore.ok(`${sig.asset_symbol}: deep verify — fresh TA + web news + LLM, ~30-90s`);
@@ -562,6 +593,22 @@
                           context: {Object.entries(a.context_used).filter(([, v]) => v).map(([k]) => k.replaceAll("_", " ")).join(", ") || "none"}
                         </div>
                       {/if}
+                      {#if vr.reversal_proposal}
+                        {@const rp = vr.reversal_proposal}
+                        <div class="vb-rev">
+                          <div class="vb-rev-head">
+                            Suggested play: <b>{rp.direction}</b>
+                            <span class="num dim">entry {rp.entry_price} · stop {rp.stop_loss} · target {rp.target_price} · R:R {rp.rr_ratio}:1</span>
+                          </div>
+                          <div class="vb-reason dim">{rp.basis}</div>
+                          <div class="vb-reason vb-warn">{rp.warning}</div>
+                          <button
+                            class="btn tiny"
+                            disabled={busyIds.has(sig.id)}
+                            onclick={(e) => { e.stopPropagation(); doReverse(sig); }}
+                          >Flip to {rp.direction}</button>
+                        </div>
+                      {/if}
                     {:else}
                       <div class="vb-reason dim">{a.reasoning}</div>
                     {/if}
@@ -908,6 +955,25 @@
     cursor: pointer;
     font-size: 10px;
     padding: 0;
+  }
+  .vb-rev {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line-bright);
+  }
+  .vb-rev-head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+  .vb-warn {
+    color: var(--warm);
+  }
+  .vb-rev .btn {
+    margin-top: 6px;
   }
   .verify-box {
     grid-column: 1 / -1;

@@ -291,6 +291,11 @@ def deep_verify_signal(signal: dict) -> dict:
             "key_change": parsed.get("key_change"),
             "context_used": context_used,
         }
+        # A confidently-rejected thesis is a tradeable observation: offer the
+        # flipped setup with computed levels (never model-invented prices).
+        base["reversal_proposal"] = propose_reversal(
+            signal, base.get("current_price") or 0.0, ta, base["llm_assessment"]
+        )
     except Exception as e:
         base["llm_assessment"] = {
             "assessment": "UNAVAILABLE",
@@ -298,3 +303,96 @@ def deep_verify_signal(signal: dict) -> dict:
             "context_used": context_used,
         }
     return base
+
+
+# --------------------------------------------------------------------------
+# Reversal proposals — when deep verify's AI DISAGREES with a live signal,
+# the setup failing is itself information: the thesis broke, and the
+# opposite side often has the better odds. This proposes the flipped trade
+# with DETERMINISTIC levels (ATR-derived, horizon-capped) so the LLM never
+# invents a price. It is a PROPOSAL only — nothing trades until the user
+# accepts it.
+# --------------------------------------------------------------------------
+
+REVERSAL_MIN_CONFIDENCE = 70   # AI must be this sure the original is wrong
+DEFAULT_RR = 2.0
+
+
+def _atr_from_ta(ta: dict | None, timeframe: str | None) -> float | None:
+    """ATR for the signal's own timeframe, falling back to any available."""
+    if not isinstance(ta, dict):
+        return None
+    order = [timeframe] if timeframe else []
+    order += ["1H", "4H", "1D"]
+    for tf in order:
+        block = ta.get(tf) if tf else None
+        if isinstance(block, dict):
+            atr = (block.get("atr") or {}).get("value")
+            if atr and float(atr) > 0:
+                return float(atr)
+    return None
+
+
+def propose_reversal(signal: dict, current_price: float, ta: dict | None,
+                     assessment: dict | None) -> dict | None:
+    """Build the opposite-direction setup from the same symbol.
+
+    Levels are computed, never generated: stop sits one ATR beyond entry
+    (clamped by the horizon cap — 3% scalp / 10% longer), target at
+    DEFAULT_RR times that risk. Returns None when the AI did not clearly
+    reject the original, or when no ATR is available to size risk honestly.
+    """
+    a = assessment or {}
+    if str(a.get("assessment", "")).upper() != "DISAGREE":
+        return None
+    try:
+        conf = float(a.get("confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < REVERSAL_MIN_CONFIDENCE:
+        return None
+    if not current_price or current_price <= 0:
+        return None
+
+    was_short = str(signal.get("direction") or "").lower().startswith("short")
+    new_direction = "Long" if was_short else "Short"
+
+    atr = _atr_from_ta(ta, signal.get("timeframe"))
+    if not atr:
+        return None
+
+    from lib.trading_preferences import horizon_for_timeframe
+    horizon = horizon_for_timeframe(signal.get("timeframe"))
+    cap_frac = 0.03 if horizon == "scalp" else 0.10
+    risk = min(atr, current_price * cap_frac)
+    if risk <= 0:
+        return None
+
+    entry = current_price
+    if new_direction == "Short":
+        stop = entry + risk
+        target = entry - risk * DEFAULT_RR
+    else:
+        stop = entry - risk
+        target = entry + risk * DEFAULT_RR
+
+    digits = 8 if entry < 1 else 4
+    return {
+        "direction": new_direction,
+        "entry_price": round(entry, digits),
+        "stop_loss": round(stop, digits),
+        "target_price": round(target, digits),
+        "rr_ratio": DEFAULT_RR,
+        "risk_per_unit": round(risk, digits),
+        "basis": (
+            f"Reversal of a failing {signal.get('direction')} setup. Entry at the checked price; "
+            f"stop one ATR ({atr:.6g}) away, capped at {cap_frac:.0%} for a {horizon} horizon; "
+            f"target at {DEFAULT_RR:g}x risk. Levels are computed from ATR, not model output."
+        ),
+        "ai_reasoning": a.get("reasoning"),
+        "ai_confidence": conf,
+        "warning": (
+            "A failing thesis does not guarantee the opposite works — the market may simply "
+            "be ranging. This is a proposal; review it before accepting."
+        ),
+    }

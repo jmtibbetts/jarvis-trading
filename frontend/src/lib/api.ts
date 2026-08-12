@@ -476,7 +476,21 @@ export type MacroSnapshot = {
   } | null;
 };
 
+export type ReversalProposal = {
+  direction: string;
+  entry_price: number;
+  stop_loss: number;
+  target_price: number;
+  rr_ratio: number;
+  risk_per_unit: number;
+  basis: string;
+  ai_reasoning?: string | null;
+  ai_confidence?: number | null;
+  warning: string;
+};
+
 export type VerifyResult = {
+  reversal_proposal?: ReversalProposal | null;
   llm_assessment?: {
     assessment: string;
     confidence?: number | null;
@@ -1008,6 +1022,15 @@ export const api = {
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
     get<InstitutionalAccumulation>(`/institutional/accumulation/top?limit=${limit}`),
+  reverseSignal: (id: string, supersedeOriginal = true) =>
+    fetch(`/api/signals/${id}/reverse`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ supersede_original: supersedeOriginal }),
+    }).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail ?? `reverse ${r.status}`);
+      return body as { ok: boolean; new_signal_id: string; proposal: ReversalProposal; original_superseded: boolean };
+    }),
   verifySignal: (id: string, applyUpdate = false, deep = false) =>
     fetch(`/api/signals/${id}/verify?apply_update=${applyUpdate}&deep=${deep}`, { method: "POST" }).then((r) => {
       if (!r.ok) throw new Error(`verify ${r.status}`);

@@ -514,6 +514,106 @@ def get_top_squeeze(limit: int = 25, min_days_to_cover: float = 3.0, exclude_fun
     return result
 
 
+class ReverseSignalRequest(BaseModel):
+    """Accepting a reversal proposal. Levels are re-derived server-side from
+    a fresh deep verify — the client cannot dictate prices."""
+    supersede_original: bool = True
+
+
+@router.post("/signals/{signal_id}/reverse")
+def reverse_signal(signal_id: str, body: ReverseSignalRequest):
+    """Turn a failing signal into its opposite-side trade.
+
+    Runs a fresh deep verify; only proceeds when the AI DISAGREES with the
+    original at >= REVERSAL_MIN_CONFIDENCE and an ATR-derived level set can
+    be computed. The new signal enters as a normal candidate (Active for
+    crypto, PendingApproval for equities) so every downstream gate — score
+    floor, execution criteria, risk sizing — still applies."""
+    from lib.signal_verification import deep_verify_signal
+
+    with get_db() as db:
+        sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404, "Signal not found")
+        if sig.status not in ("Active", "PendingApproval"):
+            raise HTTPException(400, f"Signal is {sig.status} — only live signals can be reversed")
+        sig_dict = {
+            "asset_symbol": sig.asset_symbol, "asset_class": sig.asset_class,
+            "direction": sig.direction, "entry_price": sig.entry_price,
+            "target_price": sig.target_price, "stop_loss": sig.stop_loss,
+            "status": sig.status, "timeframe": sig.timeframe, "reasoning": sig.reasoning,
+            "asset_name": sig.asset_name, "confidence": sig.confidence,
+            "composite_score": sig.composite_score, "paper_mode": sig.paper_mode,
+        }
+
+    result = deep_verify_signal(sig_dict)
+    proposal = result.get("reversal_proposal")
+    if not proposal:
+        a = result.get("llm_assessment") or {}
+        raise HTTPException(
+            400,
+            f"No reversal justified right now (AI says {a.get('assessment', 'UNKNOWN')}"
+            f"{f" at {a.get('confidence')}%" if a.get('confidence') else ''}). "
+            "A reversal needs a confident DISAGREE plus an ATR to size risk.",
+        )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _, is_crypto_sym = normalize_symbol(sig_dict["asset_symbol"] or "")
+    new_id_val = str(uuid.uuid4())
+    with get_db() as db:
+        original = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if not original or original.status not in ("Active", "PendingApproval"):
+            raise HTTPException(409, "Signal changed state while the reversal was being computed")
+
+        db.add(TradingSignal(
+            id=new_id_val,
+            asset_symbol=original.asset_symbol,
+            asset_name=original.asset_name,
+            asset_class=original.asset_class,
+            direction=proposal["direction"],
+            confidence=proposal.get("ai_confidence") or original.confidence,
+            composite_score=original.composite_score,
+            timeframe=original.timeframe,
+            entry_price=proposal["entry_price"],
+            target_price=proposal["target_price"],
+            stop_loss=proposal["stop_loss"],
+            rr_ratio=proposal["rr_ratio"],
+            reasoning=(
+                f"REVERSAL of failing {original.direction} setup. "
+                f"{proposal.get('ai_reasoning') or ''} [{proposal['basis']}]"
+            )[:2000],
+            key_risks=proposal["warning"],
+            signal_source="reversal",
+            setup_type="reversal",
+            trade_horizon=original.trade_horizon,
+            signal_version=original.signal_version,
+            paper_mode=bool(original.paper_mode),
+            paper_direction=proposal["direction"] if original.paper_mode else None,
+            status="Active" if is_crypto_sym else "PendingApproval",
+            generated_at=now_iso,
+            market_data_at=now_iso,
+            trigger_event=f"Deep verify reversal of {signal_id[:8]}",
+            trigger_event_id=signal_id,
+        ))
+        if body.supersede_original:
+            original.status = "Superseded"
+            note_line = "\n[reversal] flipped to {} at {}".format(proposal["direction"], now_iso)
+            original.notes = ((original.notes or "") + note_line).strip()
+            original.updated_date = now_iso
+
+    logger.info(
+        f"[Reverse] {sig_dict['asset_symbol']} {sig_dict['direction']} -> {proposal['direction']} "
+        f"@ {proposal['entry_price']} (new signal {new_id_val[:8]})"
+    )
+    return {
+        "ok": True,
+        "new_signal_id": new_id_val,
+        "proposal": proposal,
+        "original_superseded": body.supersede_original,
+        "verification": {k: result.get(k) for k in ("verdict", "current_price", "price_asof", "llm_assessment")},
+    }
+
+
 @router.post("/signals/{signal_id}/verify")
 def verify_signal_route(signal_id: str, apply_update: bool = False, deep: bool = False):
     """User-initiated double-check of a signal against fresh data —

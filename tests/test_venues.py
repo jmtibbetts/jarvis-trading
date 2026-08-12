@@ -348,3 +348,50 @@ class FlowInPromptTests(unittest.TestCase):
     def test_no_tape_at_all_degrades_silently(self):
         from jobs.generate_signals import _flow_line
         self.assertEqual(_flow_line("NEVERSTREAMED/USD"), "")
+
+
+class FuturesFeeScheduleTests(unittest.TestCase):
+    """Derivatives are priced on a different scale from spot — 0.05% taker
+    against 0.80%. Charging spot fees on a perpetual overstates its cost
+    16x, which in a system that rejects above 0.50R refuses viable trades."""
+
+    def test_futures_taker_is_far_below_spot(self):
+        from lib.venues import futures_fee_for, fee_for
+        fut, _ = futures_fee_for("BTC/USD")
+        spot, _ = fee_for("kraken")
+        self.assertIsNotNone(fut)
+        self.assertLess(fut, spot / 5)
+
+    def test_schedule_is_resolved_per_instrument_not_assumed(self):
+        from lib.venues import futures_fee_for
+        _, why = futures_fee_for("BTC/USD")
+        self.assertIn("PF_XBTUSD", why)
+
+    def test_tiers_step_down_with_volume(self):
+        from lib.venues import futures_fee_for
+        rates = [futures_fee_for("BTC/USD", volume_30d=v)[0]
+                 for v in (0, 5_000_000, 25_000_000, 100_000_000)]
+        self.assertEqual(rates, sorted(rates, reverse=True))
+
+    def test_maker_rebates_can_be_negative(self):
+        """Top tiers PAY for liquidity; the model must represent that."""
+        from lib.venues import futures_fee_for
+        rate, _ = futures_fee_for("BTC/USD", maker=True, volume_30d=500_000_000)
+        self.assertIsNotNone(rate)
+        self.assertLessEqual(rate, 0.0002)
+
+    def test_non_perpetual_returns_none_so_callers_fall_back_to_spot(self):
+        from lib.venues import futures_fee_for
+        rate, why = futures_fee_for("NOTACOIN/USD")
+        self.assertIsNone(rate)
+        self.assertIn("not a listed", why)
+
+    def test_leveraged_flag_selects_the_futures_schedule(self):
+        from lib.transaction_costs import fee_pct
+        self.assertLess(fee_pct("BTC/USD", leveraged=True),
+                        fee_pct("BTC/USD", leveraged=False))
+
+    def test_leverage_makes_a_tighter_stop_viable(self):
+        from lib.transaction_costs import min_viable_stop_pct
+        self.assertLess(min_viable_stop_pct("BTC/USD", venue="kraken", leveraged=True),
+                        min_viable_stop_pct("BTC/USD", venue="kraken"))

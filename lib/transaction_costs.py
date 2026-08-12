@@ -95,7 +95,8 @@ def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
     return DEFAULT_EQUITY_SPREAD_PCT, "default_equity"
 
 
-def fee_pct(symbol: str, maker: bool = False, venue: str | None = None) -> float:
+def fee_pct(symbol: str, maker: bool = False, venue: str | None = None,
+            leveraged: bool = False) -> float:
     """Per-side fee as a fraction of notional, for the venue that will fill it.
 
     Venue matters more than it looks: Kraken's base taker fee is 0.40% against
@@ -106,6 +107,19 @@ def fee_pct(symbol: str, maker: bool = False, venue: str | None = None) -> float
     """
     if not is_crypto_symbol(symbol):
         return EQUITY_FEE_PCT
+    # A LEVERAGED position is a perpetual, and perpetuals are priced on a
+    # different schedule entirely — 0.05% taker against spot's 0.80%, a 16x
+    # difference. Charging spot fees on a derivative overstates its cost by
+    # that factor, which in a system that rejects above 0.50R means refusing
+    # setups that are comfortably viable.
+    if leveraged:
+        try:
+            from lib.venues import futures_fee_for
+            rate, _ = futures_fee_for(symbol, maker=maker)
+            if rate is not None:
+                return rate
+        except Exception:
+            pass
     try:
         from lib.venues import fee_for, DEFAULT_VENUE
         rate, _ = fee_for(venue or DEFAULT_VENUE, maker=maker, asset_class="crypto")
@@ -174,7 +188,8 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
                    illiquid: bool = False,
                    borrow_rate_annual: float | None = None,
                    hard_to_borrow: bool = False,
-                   venue: str | None = None) -> dict:
+                   venue: str | None = None,
+                   leveraged: bool = False) -> dict:
     """Full round-trip cost estimate, in both percent and R."""
     entry = float(entry or 0)
     risk_distance = abs(entry - float(stop or 0))
@@ -197,7 +212,7 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         fee_cost_pct = ((spec.commission * 2.0) / contract_notional_value
                         if contract_notional_value > 0 else 0.0)
     else:
-        per_side_fee = fee_pct(symbol, maker=maker, venue=venue)
+        per_side_fee = fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged)
         fee_cost_pct = per_side_fee * 2.0          # in and out
 
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else float(slippage_pct)
@@ -275,7 +290,8 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
                         quoted_spread_pct: float | None = None,
                         slippage_pct: float | None = None,
                         illiquid: bool = False,
-                        venue: str | None = None) -> float:
+                        venue: str | None = None,
+                        leveraged: bool = False) -> float:
     """The tightest stop, as a fraction of entry, that can still pay for itself.
 
     This is the inverse of estimate_costs. Cost in R is
@@ -298,7 +314,7 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else abs(float(slippage_pct))
-    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker, venue=venue) * 2.0 + slip * 2.0
+    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged) * 2.0 + slip * 2.0
     if max_cost_r <= 0:
         return float("inf")
     return total_cost_pct / max_cost_r

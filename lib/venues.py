@@ -41,8 +41,20 @@ _pair_cache: dict[str, tuple[datetime, dict]] = {}
 # Percentages are FRACTIONS of notional, per side. Volume tiers are
 # (30-day USD volume, fee) pairs, ascending, exactly as the venue lists them.
 VENUE_FEES = {
+    # Alpaca crypto, full 30-day volume schedule. The base tier was already
+    # correct here but the ladder was flat, so any volume discount was
+    # invisible to the cost model.
     "alpaca": {
-        "crypto": {"taker": [(0, 0.0025)], "maker": [(0, 0.0015)]},
+        "crypto": {
+            "taker": [(0, 0.0025), (100_000, 0.0022), (500_000, 0.0020),
+                      (1_000_000, 0.0018), (10_000_000, 0.0015),
+                      (25_000_000, 0.0013), (50_000_000, 0.0012),
+                      (100_000_000, 0.0010)],
+            "maker": [(0, 0.0015), (100_000, 0.0012), (500_000, 0.0010),
+                      (1_000_000, 0.0008), (10_000_000, 0.0005),
+                      (25_000_000, 0.0002), (50_000_000, 0.0002),
+                      (100_000_000, 0.0000)],
+        },
         "equity": {"taker": [(0, 0.0)], "maker": [(0, 0.0)]},
     },
     # Verified live from Kraken's AssetPairs endpoint (XXBTZUSD), 2026-08.
@@ -395,3 +407,73 @@ def max_leverage_at_size(symbol: str, notional_usd: float) -> tuple[float, str]:
     lev = (1.0 / im) if im else 1.0
     return lev, (f"{spec['symbol']} at ${notional_usd:,.0f}: {im:.1%} initial margin "
                  f"-> {lev:.0f}x max")
+
+
+# ── Futures fee schedules (live, keyless) ────────────────────────────────
+# Derivatives are priced on a completely different scale from spot. Verified
+# against Kraken's own /feeschedules endpoint:
+#
+#   spot  (this account, measured)   taker 0.80%   maker 0.40%
+#   futures tier 1                   taker 0.05%   maker 0.02%
+#
+# Sixteen times cheaper on the taker side. Pricing a leveraged perpetual at
+# the spot fee overstates its cost by that factor, which in a system that
+# rejects trades above 0.50R means refusing setups that are comfortably
+# viable. Each instrument names its own schedule via feeScheduleUid, so this
+# resolves the real one rather than assuming a tier.
+#
+# Note the top tiers carry NEGATIVE maker fees — a rebate for providing
+# liquidity. The model must be able to represent being PAID to trade.
+_fee_schedule_cache: dict[str, tuple[datetime, dict]] = {}
+
+
+def kraken_futures_fee_schedules() -> dict:
+    """All schedules keyed by uid, cached 12h."""
+    now = datetime.now(timezone.utc)
+    hit = _fee_schedule_cache.get("all")
+    if hit and (now - hit[0]) < _SPEC_TTL:
+        return hit[1]
+    try:
+        r = httpx.get(f"{KRAKEN_FUTURES}/feeschedules", timeout=25)
+        if r.status_code != 200:
+            return hit[1] if hit else {}
+        data = {s["uid"]: s for s in (r.json().get("feeSchedules") or []) if s.get("uid")}
+        _fee_schedule_cache["all"] = (now, data)
+        return data
+    except Exception as e:
+        logger.debug(f"[Venues] futures fee schedules failed: {e}")
+        return hit[1] if hit else {}
+
+
+def futures_fee_for(symbol: str, *, maker: bool = False,
+                    volume_30d: float | None = None) -> tuple[float | None, str]:
+    """(fee as a fraction of notional, explanation) for a perpetual.
+
+    Resolves the instrument's OWN schedule by uid, then the tier for the
+    given 30-day volume. Returns None when the symbol is not a listed
+    future, so callers fall back to spot pricing rather than silently
+    applying derivative fees to a spot trade.
+    """
+    want = _to_kraken_futures_symbol(symbol)
+    inst = kraken_futures_instruments().get(want)
+    if not inst:
+        return None, f"{symbol} is not a listed kraken perpetual"
+
+    uid = inst.get("feeScheduleUid")
+    sched = kraken_futures_fee_schedules().get(uid)
+    if not sched or not sched.get("tiers"):
+        return None, f"no fee schedule for {want}"
+
+    vol = configured_volume_tier() if volume_30d is None else float(volume_30d)
+    tiers = sorted(sched["tiers"], key=lambda t: float(t.get("usdVolume") or 0))
+    chosen = tiers[0]
+    for t in tiers:
+        if vol >= float(t.get("usdVolume") or 0):
+            chosen = t
+        else:
+            break
+    pct = float(chosen.get("makerFee" if maker else "takerFee") or 0) / 100.0
+    side = "maker" if maker else "taker"
+    rebate = " (REBATE — paid to provide liquidity)" if pct < 0 else ""
+    return pct, (f"{want} {sched.get('name')} {side} {pct * 100:.4g}% "
+                 f"at ${float(chosen.get('usdVolume') or 0):,.0f}+ volume{rebate}")

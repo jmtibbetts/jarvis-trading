@@ -129,7 +129,8 @@ def score_leverage(score: float | None, *, asset_class: str | None = None,
     return result if explain else result["leverage"]
 
 
-def venue_round_trip_fee(symbol: str, notional: float) -> tuple[float, str]:
+def venue_round_trip_fee(symbol: str, notional: float,
+                         leverage: float = 1.0) -> tuple[float, str]:
     """Dollar cost of opening AND closing this position at the real venue.
 
     Paper trading charged nothing, so every simulated result was optimistic
@@ -146,6 +147,12 @@ def venue_round_trip_fee(symbol: str, notional: float) -> tuple[float, str]:
     import os
     venue = os.getenv("PAPER_VENUE") or os.getenv("DEFAULT_CRYPTO_VENUE") or "kraken"
     try:
+        # Above 1x this is a perpetual, not a spot trade — price it that way.
+        if leverage > 1.0:
+            from lib.venues import futures_fee_for
+            rate, why = futures_fee_for(symbol, maker=False)
+            if rate is not None:
+                return abs(notional) * rate * 2.0, why
         from lib.venues import fee_for
         rate, why = fee_for(venue, maker=False, asset_class="crypto")
         return abs(notional) * rate * 2.0, why
@@ -247,7 +254,7 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
 
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
     loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)
-    fees, fee_why = venue_round_trip_fee(symbol, notional)
+    fees, fee_why = venue_round_trip_fee(symbol, notional, leverage)
     return {
         "ok": True,
         "qty": qty,

@@ -233,7 +233,16 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     from lib.signal_levels import validate_signal_levels, clamp_stop_to_atr
     s, atr_clamped, atr_reason = clamp_stop_to_atr(s, atr_pct)
     if atr_clamped:
-        logger.debug(f"[Signals] {sym} stop ATR-clamped: {atr_reason}")
+        logger.debug(f"[Signals] {sym} stop clamped: {atr_reason}")
+
+    # No stop can be both economically viable and structurally sane for this
+    # symbol at this volatility — the spread and fees exceed the move on
+    # offer. Drop it rather than repair it into a trade that cannot pay for
+    # itself; the ATR repair block below would otherwise manufacture levels
+    # that look fine and lose money by construction.
+    if s.get("untradeable_reason"):
+        logger.info(f"[Signals] {sym} dropped — {s['untradeable_reason']}")
+        return None
 
     levels_ok, _ = validate_signal_levels(s)
     if not levels_ok:

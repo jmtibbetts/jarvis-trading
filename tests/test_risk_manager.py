@@ -184,3 +184,53 @@ class CostCeilingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MinimumViableStopTests(unittest.TestCase):
+    """A stop must be wide enough to pay for the round trip, or the trade
+    is unprofitable by construction no matter how good the signal is."""
+
+    def test_min_viable_stop_is_higher_for_crypto_than_equity(self):
+        from lib.transaction_costs import min_viable_stop_pct
+        self.assertGreater(min_viable_stop_pct("SOL/USD"), min_viable_stop_pct("NVDA"))
+
+    def test_maker_orders_need_a_less_wide_stop(self):
+        from lib.transaction_costs import min_viable_stop_pct
+        taker = min_viable_stop_pct("SOL/USD", order_type="market")
+        maker = min_viable_stop_pct("SOL/USD", order_type="limit", maker=True)
+        self.assertLess(maker, taker)
+
+    def test_a_stop_at_the_floor_lands_exactly_on_the_ceiling(self):
+        from lib.transaction_costs import min_viable_stop_pct, estimate_costs
+        floor = min_viable_stop_pct("SOL/USD", max_cost_r=MAX_COST_R)
+        costs = estimate_costs("SOL/USD", 100.0, 100.0 * (1 - floor))
+        self.assertAlmostEqual(costs["total_r"], MAX_COST_R, places=2)
+
+    def test_widening_preserves_reward_to_risk(self):
+        from lib.signal_levels import clamp_stop_to_atr
+        sig = {"asset_symbol": "SOL/USD", "direction": "Long", "entry_price": 100.0,
+               "stop_loss": 99.7, "target_price": 100.9, "timeframe": "1H"}
+        before = abs(sig["target_price"] - 100.0) / abs(100.0 - sig["stop_loss"])
+        out, clamped, _ = clamp_stop_to_atr(sig, atr_pct=2.0)
+        after = abs(out["target_price"] - 100.0) / abs(100.0 - out["stop_loss"])
+        self.assertTrue(clamped)
+        self.assertAlmostEqual(before, after, places=2)
+
+    def test_widening_works_for_shorts(self):
+        from lib.signal_levels import clamp_stop_to_atr
+        sig = {"asset_symbol": "SOL/USD", "direction": "Short", "entry_price": 100.0,
+               "stop_loss": 100.3, "target_price": 99.1, "timeframe": "1H"}
+        out, clamped, _ = clamp_stop_to_atr(sig, atr_pct=2.0)
+        self.assertTrue(clamped)
+        self.assertGreater(out["stop_loss"], 100.0)      # short stop stays ABOVE
+        self.assertLess(out["target_price"], 100.0)      # target stays BELOW
+
+    def test_impossible_combination_is_refused_not_stretched(self):
+        """Cost floor above the ATR ceiling means no viable stop exists."""
+        from lib.signal_levels import clamp_stop_to_atr
+        sig = {"asset_symbol": "SOL/USD", "direction": "Long", "entry_price": 100.0,
+               "stop_loss": 99.7, "target_price": 100.9, "timeframe": "5m"}
+        out, clamped, reason = clamp_stop_to_atr(sig, atr_pct=0.4)
+        self.assertFalse(clamped)
+        self.assertTrue(out.get("untradeable_reason"))
+        self.assertIn("no viable stop", reason)

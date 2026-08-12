@@ -173,3 +173,36 @@ def net_expected_r(gross_expected_r: float, costs: dict) -> dict:
             f"{net:.3f}R survives after {cost_r:.3f}R of costs"
         ),
     }
+
+
+def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
+                        order_type: str = "market", maker: bool = False,
+                        quoted_spread_pct: float | None = None,
+                        slippage_pct: float | None = None,
+                        illiquid: bool = False) -> float:
+    """The tightest stop, as a fraction of entry, that can still pay for itself.
+
+    This is the inverse of estimate_costs. Cost in R is
+
+        cost_r = total_cost_pct * entry / risk_distance
+               = total_cost_pct / stop_distance_fraction
+
+    so requiring cost_r <= max_cost_r gives
+
+        stop_distance_fraction >= total_cost_pct / max_cost_r
+
+    Measured against the live book, this is why tight-stop crypto scalping
+    could not work: a 0.3% stop against ~1.0% round-trip cost is 3.4R of
+    cost before the trade has any chance to be right. Rather than generate
+    those signals and reject them downstream, the level builder widens the
+    stop to this floor — or the signal is dropped if that floor breaks its
+    timeframe's structure.
+    """
+    spread_pct, _ = estimate_spread_pct(symbol, quoted_spread_pct, illiquid)
+    crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
+                if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
+    slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else abs(float(slippage_pct))
+    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker) * 2.0 + slip * 2.0
+    if max_cost_r <= 0:
+        return float("inf")
+    return total_cost_pct / max_cost_r

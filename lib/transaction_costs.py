@@ -89,6 +89,37 @@ def funding_cost_pct(symbol: str, hold_hours: float,
     return (-paid if is_short else paid), "measured"
 
 
+# Equity short borrow. Selling a stock short means borrowing it, and the
+# lender charges an annualised fee that accrues daily. General-collateral
+# names are cheap; hard-to-borrow names are not, and a squeeze candidate —
+# exactly the setup a short-interest signal surfaces — can cost more per
+# year than the trade expects to make. Treating borrow as free made every
+# equity short look cheaper than it is.
+DEFAULT_BORROW_RATE_ANNUAL = 0.0050      # 50 bps, typical general collateral
+HARD_TO_BORROW_RATE_ANNUAL = 0.30        # 30%, a genuinely tight name
+TRADING_DAYS_PER_YEAR = 252
+
+
+def borrow_cost_pct(symbol: str, hold_hours: float, *, is_short: bool,
+                    borrow_rate_annual: float | None = None,
+                    hard_to_borrow: bool = False) -> tuple[float, str]:
+    """Stock-borrow cost over the expected hold, as a fraction of notional.
+
+    Longs never pay it. Crypto is excluded because this system's crypto
+    shorts are perpetual-swap positions, whose carry is funding — already
+    modelled separately, and double-counting it would reject valid trades.
+    """
+    if not is_short or is_crypto_symbol(symbol) or not hold_hours or hold_hours <= 0:
+        return 0.0, "not_applicable"
+    if borrow_rate_annual is None:
+        rate = HARD_TO_BORROW_RATE_ANNUAL if hard_to_borrow else DEFAULT_BORROW_RATE_ANNUAL
+        source = "default_hard_to_borrow" if hard_to_borrow else "default_general_collateral"
+    else:
+        rate, source = float(borrow_rate_annual), "measured"
+    # Borrow accrues on calendar days, including weekends.
+    return rate * (float(hold_hours) / 24.0) / 365.0, source
+
+
 def estimate_costs(symbol: str, entry: float, stop: float, *,
                    quoted_spread_pct: float | None = None,
                    slippage_pct: float | None = None,
@@ -97,7 +128,9 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
                    hold_hours: float = 0.0,
                    funding_rate_8h: float | None = None,
                    is_short: bool = False,
-                   illiquid: bool = False) -> dict:
+                   illiquid: bool = False,
+                   borrow_rate_annual: float | None = None,
+                   hard_to_borrow: bool = False) -> dict:
     """Full round-trip cost estimate, in both percent and R."""
     entry = float(entry or 0)
     risk_distance = abs(entry - float(stop or 0))
@@ -127,8 +160,11 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
     slip_cost_pct = abs(slip) * 2.0            # both sides
 
     fund_pct, fund_src = funding_cost_pct(symbol, hold_hours, funding_rate_8h, is_short)
+    borrow_pct, borrow_src = borrow_cost_pct(
+        symbol, hold_hours, is_short=is_short,
+        borrow_rate_annual=borrow_rate_annual, hard_to_borrow=hard_to_borrow)
 
-    total_pct = spread_cost_pct + fee_cost_pct + slip_cost_pct + fund_pct
+    total_pct = spread_cost_pct + fee_cost_pct + slip_cost_pct + fund_pct + borrow_pct
 
     # Convert to R. Without a risk distance there is no R to speak of.
     def to_r(pct: float) -> float | None:
@@ -146,6 +182,9 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         "slippage_source": "measured" if slippage_pct is not None else "default_from_measured_median",
         "funding_pct": round(fund_pct, 6),
         "funding_source": fund_src,
+        "borrow_pct": round(borrow_pct, 6),
+        "borrow_source": borrow_src,
+        "borrow_r": round(to_r(borrow_pct), 4) if to_r(borrow_pct) is not None else None,
         "total_pct": round(total_pct, 6),
         "total_r": round(to_r(total_pct), 4) if to_r(total_pct) is not None else None,
         "spread_r": round(to_r(spread_cost_pct), 4) if to_r(spread_cost_pct) is not None else None,

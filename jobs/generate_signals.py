@@ -52,9 +52,29 @@ TRACK_C = ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","AVAX/USD","LINK/US
 # Track E: paper-only universe — best candidates for leveraged/short plays
 TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","SPXU","BTC/USD","ETH/USD","SOL/USD","QQQ","SPY","SMCI","META","GOOGL","AMZN","MSFT"]
 
-# Track F: paper-only futures / forex / commodities
-TRACK_F_FUTURES = [sym for sym in PAPER_FUTURES
-                   if sym not in ["^VIX","^TNX","^TYX"]]  # exclude pure reference indices
+# Track F: paper-only futures / forex / commodities.
+#
+# Signals are generated for the contract the account can actually TRADE.
+# A $100k book cannot take an E-mini — one ES contract risks $7,767 at a 2%
+# stop against a $1,000 risk budget — so generating ES signals only produced
+# setups that sizing then refused. Where CME lists a micro, the micro is
+# what gets analysed; the full-size contract stays out of the universe.
+# Instruments with no micro remain at full size and are refused by sizing
+# on their own merits, which is the honest outcome rather than a hidden one.
+def _tradeable_contract(sym: str) -> str:
+    """Substitute the micro when one exists — that is the contract a retail
+    account can size."""
+    try:
+        from lib.instruments import suggest_micro
+        return suggest_micro(sym) or sym
+    except Exception:
+        return sym
+
+
+TRACK_F_FUTURES = [
+    _tradeable_contract(sym) for sym in PAPER_FUTURES
+    if sym not in ["^VIX", "^TNX", "^TYX"]        # pure reference indices
+]
 
 FUTURES_PAPER_DIRECTIONS = {"Long", "Short", "Long_Leveraged", "Short_Leveraged",
                              "Long_5x", "Short_5x", "Long_10x", "Short_10x",

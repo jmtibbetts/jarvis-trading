@@ -144,3 +144,59 @@ class PnlTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MicroUniverseTests(unittest.TestCase):
+    """Signals must be generated for the contract the account can trade."""
+
+    def test_universe_substitutes_micros_where_they_exist(self):
+        from jobs.generate_signals import TRACK_F_FUTURES
+        for full, micro in (("ES=F", "MES=F"), ("NQ=F", "MNQ=F"),
+                            ("CL=F", "MCL=F"), ("GC=F", "MGC=F")):
+            self.assertNotIn(full, TRACK_F_FUTURES, f"{full} should be replaced by {micro}")
+            self.assertIn(micro, TRACK_F_FUTURES)
+
+    def test_instruments_without_a_micro_stay_full_size(self):
+        from jobs.generate_signals import TRACK_F_FUTURES
+        for sym in ("NG=F", "ZC=F", "ZW=F"):
+            self.assertIn(sym, TRACK_F_FUTURES)
+
+    def test_forex_is_untouched(self):
+        from jobs.generate_signals import TRACK_F_FUTURES
+        self.assertIn("EURUSD=X", TRACK_F_FUTURES)
+
+
+class ShortBorrowTests(unittest.TestCase):
+    """Selling a stock short means borrowing it, and borrow is not free."""
+
+    def _cost(self, **kw):
+        from lib.transaction_costs import estimate_costs
+        return estimate_costs("GME", 100.0, 105.0, hold_hours=120, **kw)
+
+    def test_longs_never_pay_borrow(self):
+        self.assertEqual(self._cost(is_short=False)["borrow_pct"], 0.0)
+
+    def test_shorts_pay_borrow(self):
+        self.assertGreater(self._cost(is_short=True)["borrow_pct"], 0)
+
+    def test_hard_to_borrow_costs_far_more(self):
+        cheap = self._cost(is_short=True)["borrow_pct"]
+        dear = self._cost(is_short=True, hard_to_borrow=True)["borrow_pct"]
+        self.assertGreater(dear, cheap * 10)
+
+    def test_borrow_accrues_linearly_with_holding_time(self):
+        """Tested on the raw function: estimate_costs rounds to 6dp, which
+        quantises a one-day borrow enough to skew the ratio."""
+        from lib.transaction_costs import borrow_cost_pct
+        day, _ = borrow_cost_pct("GME", 24, is_short=True)
+        month, _ = borrow_cost_pct("GME", 24 * 30, is_short=True)
+        self.assertAlmostEqual(month / day, 30, places=6)
+
+    def test_crypto_shorts_are_excluded_to_avoid_double_counting_funding(self):
+        from lib.transaction_costs import estimate_costs
+        c = estimate_costs("SOL/USD", 100.0, 105.0, hold_hours=120, is_short=True)
+        self.assertEqual(c["borrow_source"], "not_applicable")
+
+    def test_borrow_raises_total_cost_never_lowers_it(self):
+        self.assertGreaterEqual(self._cost(is_short=True, hard_to_borrow=True)["total_r"],
+                                self._cost(is_short=False)["total_r"])

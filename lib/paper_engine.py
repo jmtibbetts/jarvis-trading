@@ -232,24 +232,35 @@ def _round_trip_fee_uncapped(symbol: str, notional: float, leverage: float,
         # trip instead of 0.10%, a 16x overcharge on a perp book.
         prod = (product or os.getenv("CRYPTO_PRODUCT") or "perp").lower()
         if leverage > 1.0 or prod == "perp":
-            # Crypto perps are priced as a PERCENTAGE of notional, not per
-            # contract. The US per-contract figure ($0.15/side) does not
-            # survive contact with Kraken's flexible futures, which use
-            # contract_size 1.0 — one contract IS one token — so the same
-            # rate lands at opposite absurdities depending only on unit price:
+            # A US account trades Bitnomial-listed perpetuals, priced per
+            # contract:  cost = contracts x per_contract_all_in_fee x 2 sides.
             #
-            #   OP/USD   $0.089   20,157 contracts -> $6,047 on $1,800  (336%)
-            #   BTC/USD  $95,000   0.0937 contracts ->   $0.03 on $8,900 (0.0003%)
-            #
-            # No venue charges either. The percentage schedule gives $8.90 on
-            # $8,900 at every unit price, which is both what Kraken publishes
-            # for perps (0.05%/side) and what the operator observes paying in
-            # practice. Per-contract pricing is kept ONLY for CME products
-            # above, where the contract is genuinely standardised.
-            #
-            # That figure was quoted for standardised US perpetual contracts;
-            # carrying it over to a per-token instrument was the assumption,
-            # and it is now retired rather than guarded.
+            # The rate was never wrong. The CONTRACT COUNT was: it came from
+            # Kraken's INTERNATIONAL flexible futures, where contractSize 1
+            # means one TOKEN, so a $0.089 coin needed 20,157 "contracts" and
+            # billed $6,047 to trade $1,800. Bitnomial contracts are sized in
+            # units of the underlying (BUI = 0.1 BTC, BUS = 1 BTC), and
+            # us_perp_contracts() returns None rather than inventing a size
+            # for a symbol Bitnomial does not list.
+            if (os.getenv("VENUE_REGION") or "").lower() == "us":
+                from lib.venues import us_perp_fee
+                fee, why = us_perp_fee(symbol, abs(notional), entry_price)
+                if fee is not None:
+                    return fee, why
+                # Contract size not on file, so contracts cannot be counted.
+                # Everything on the Kraken US exchange IS a US perpetual and
+                # is priced per contract; what is missing here is the size,
+                # not the eligibility. Price it at the percentage schedule
+                # and SAY the basis is estimated, so the gap is visible
+                # rather than hidden inside a plausible-looking number.
+                from lib.venues import futures_fee_for
+                rate, irate_why = futures_fee_for(symbol, maker=False,
+                                                  region="international")
+                if rate is None:
+                    rate, irate_why = perp_base_rate()
+                return (abs(notional) * rate * 2.0,
+                        f"ESTIMATED — {why}. Using a percentage stand-in "
+                        f"({irate_why}) until the contract size is known")
             from lib.venues import futures_fee_for
             rate, why = futures_fee_for(symbol, maker=False,
                                         region="international")

@@ -532,6 +532,80 @@ US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
 }
 
 
+# ── US perpetuals: Bitnomial-listed contracts ───────────────────────────────
+# Kraken's US fee schedule (updated 2026-06-15) prices Bitnomial-listed US
+# perpetual futures at a flat $0.15 per contract PER SIDE, all-in — $0.30 the
+# round trip. The rate was never the problem; the CONTRACT COUNT was.
+#
+# The count must come from the BITNOMIAL contract, not from Kraken's
+# international flexible futures. Those are different instruments: PF_XBTUSD
+# uses contractSize 1 meaning one TOKEN, so deriving contracts that way made
+# a $0.089 coin need 20,157 "contracts" and billed $6,047 to trade $1,800.
+#
+# Bitnomial contracts are sized in units of the UNDERLYING:
+#   BUS  1 BTC          per contract
+#   BUI  0.1 BTC        per contract  (Deci)
+#
+# Everything listed on the Kraken US exchange is a US perpetual and is
+# priced this way. What varies per instrument — and what this table exists
+# to hold — is the CONTRACT SIZE, which is the only input the fee formula
+# needs beyond the rate.
+#
+# Only sizes confirmed from a published spec belong here. A symbol absent
+# from the table is one whose contract size is UNKNOWN, not one that cannot
+# be traded: us_perp_contracts() returns None so the caller prices it some
+# other way and says so, rather than inventing a size. Inventing one is
+# what produced every absurd number this model has emitted — a $0.089 coin
+# assumed to be 1 token per contract billed $6,047 to trade $1,800.
+US_PERP_CONTRACTS = {
+    "BTC": [("BUI", 0.1), ("BUS", 1.0)],   # ascending size; prefer the smallest that fits
+}
+
+US_PERP_FEE_PER_SIDE = 0.15           # all-in, per contract, per side
+US_PERP_SCHEDULE_VINTAGE = "Kraken US schedule, updated 2026-06-15"
+
+
+def _underlying(symbol: str) -> str:
+    return str(symbol or "").upper().split("/")[0].replace("XBT", "BTC").strip()
+
+
+def us_perp_contracts(symbol: str, notional: float,
+                      price: float) -> tuple[float | None, str]:
+    """(whole contracts needed, explanation) for a US perpetual, or None when
+    the symbol has no listed Bitnomial contract.
+
+    Futures trade in WHOLE contracts — you cannot buy 0.0937 of one — so the
+    count rounds UP, and the smallest listed contract that can express the
+    position is chosen. Returning None rather than guessing a contract size
+    is the whole point: a fabricated size is what produced every absurd fee
+    this model has emitted.
+    """
+    listed = US_PERP_CONTRACTS.get(_underlying(symbol))
+    if not listed:
+        return None, (f"{symbol}: contract size not on file, so contracts "
+                      f"cannot be counted — add it to US_PERP_CONTRACTS to "
+                      f"price this per contract")
+    if price <= 0:
+        return None, f"{symbol}: cannot count contracts without a price"
+    import math
+    for name, size in listed:
+        contracts = math.ceil(abs(notional) / (price * size))
+        if contracts >= 1:
+            return float(contracts), (
+                f"{contracts:g} x {name} ({size:g} BTC/contract) at "
+                f"${US_PERP_FEE_PER_SIDE:.2f}/side all-in "
+                f"({US_PERP_SCHEDULE_VINTAGE})")
+    return None, f"{symbol}: no listed contract can express ${abs(notional):,.0f}"
+
+
+def us_perp_fee(symbol: str, notional: float, price: float) -> tuple[float | None, str]:
+    """Round-trip cost: contracts x per-contract all-in fee x 2 sides."""
+    contracts, why = us_perp_contracts(symbol, notional, price)
+    if contracts is None:
+        return None, why
+    return contracts * US_PERP_FEE_PER_SIDE * 2.0, why
+
+
 # ── US equity regulatory fees ───────────────────────────────────────────────
 # "Commission-free" is not "free". Both charges below apply to the SELL side
 # only, so a round trip pays them once. They are small, but a cost model that

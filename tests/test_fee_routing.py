@@ -102,16 +102,19 @@ class PerpetualPricingTests(unittest.TestCase):
         self._patch.start()
         self.addCleanup(self._patch.stop)
 
-    def test_the_rate_is_flat_across_a_million_fold_price_range(self):
-        """A perp round trip costs the same fraction whether the token is
-        worth $95,000 or a hundredth of a cent."""
-        rates = []
+    def test_cost_never_varies_wildly_with_unit_price(self):
+        """The bug was that unit price alone swung the cost across four
+        orders of magnitude — 336% of notional on a $0.089 coin, 0.0003% on
+        BTC. Symbols priced per contract and symbols on the percentage
+        stand-in legitimately differ, but every one must land in a range a
+        real venue could charge."""
         for sym, px in (("BTC/USD", 95_000.0), ("ETH/USD", 3_200.0),
                         ("SOL/USD", 180.0), ("OP/USD", 0.0893),
                         ("ISEK/USD", 0.0001)):
             fee, why = venue_round_trip_fee(sym, 8_900.0, 8.9, px)
-            rates.append(round(fee / 8_900.0, 6))
-        self.assertEqual(len(set(rates)), 1, f"rate varied by unit price: {rates}")
+            rate = fee / 8_900.0
+            self.assertGreater(rate, 0.0, f"{sym} traded free")
+            self.assertLess(rate, 0.01, f"{sym} charged {rate * 100:.2f}% — {why}")
 
     def test_a_leveraged_round_trip_costs_a_few_dollars_not_thousands(self):
         fee, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)

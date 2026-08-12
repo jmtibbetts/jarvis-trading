@@ -542,27 +542,54 @@ US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
 # uses contractSize 1 meaning one TOKEN, so deriving contracts that way made
 # a $0.089 coin need 20,157 "contracts" and billed $6,047 to trade $1,800.
 #
-# Bitnomial contracts are sized in units of the UNDERLYING:
-#   BUS  1 BTC          per contract
-#   BUI  0.1 BTC        per contract  (Deci)
+# Bitnomial PERPETUAL contracts, sized in units of the UNDERLYING, from the
+# exchange rulebook. Note these are the P-prefixed perpetual products, NOT
+# the BUI/BUS Bitcoin futures — those are a different instrument and using
+# them put the BTC contract out by 10x.
 #
 # Everything listed on the Kraken US exchange is a US perpetual and is
 # priced this way. What varies per instrument — and what this table exists
-# to hold — is the CONTRACT SIZE, which is the only input the fee formula
-# needs beyond the rate.
+# to hold — is the CONTRACT SIZE, the only input the fee formula needs
+# beyond the rate.
+#
+# Sizes are deliberately spread so a contract is economically comparable
+# across a five-order-of-magnitude price range: 0.01 BTC and 100,000 SHIB
+# are both roughly the same notional. That is exactly why assuming "one
+# contract = one token" was so destructive — it made contract count a
+# function of unit price, and billed $6,047 to trade $1,800 of a $0.089
+# coin.
 #
 # Only sizes confirmed from a published spec belong here. A symbol absent
-# from the table is one whose contract size is UNKNOWN, not one that cannot
-# be traded: us_perp_contracts() returns None so the caller prices it some
-# other way and says so, rather than inventing a size. Inventing one is
-# what produced every absurd number this model has emitted — a $0.089 coin
-# assumed to be 1 token per contract billed $6,047 to trade $1,800.
+# from the table has an UNKNOWN contract size, not an ineligible one:
+# us_perp_contracts() returns None so the caller prices it some other way
+# and labels it, rather than inventing a size.
 US_PERP_CONTRACTS = {
-    "BTC": [("BUI", 0.1), ("BUS", 1.0)],   # ascending size; prefer the smallest that fits
+    "BTC":  [("PBTCUC", 0.01)],
+    "ETH":  [("PETHUI", 0.5)],
+    "SOL":  [("PSOLUS", 5.0)],
+    "XRP":  [("PXRPUH", 500.0)],
+    "AAVE": [("PAVEUS", 5.0)],
+    "AVAX": [("PAVXUD", 50.0)],
+    "BCH":  [("PBCHUS", 1.0)],
+    "ADA":  [("PADAUK", 5_000.0)],
+    "LINK": [("PLNKUD", 50.0)],
+    "DOGE": [("PDOGUK", 5_000.0)],
+    "HBAR": [("PHBRUK", 5_000.0)],
+    "LTC":  [("PLTCUS", 5.0)],
+    "DOT":  [("PDOTUH", 500.0)],
+    "SHIB": [("PSHBUN", 100_000.0)],
+    "XLM":  [("PXLMUK", 5_000.0)],
+    "XTZ":  [("PXTZUK", 1_000.0)],
+    "TRX":  [("PTRXUK", 1_000.0)],
 }
 
 US_PERP_FEE_PER_SIDE = 0.15           # all-in, per contract, per side
 US_PERP_SCHEDULE_VINTAGE = "Kraken US schedule, updated 2026-06-15"
+
+# No exchange lists a contract worth less than this. A configured size that
+# implies one is wrong by orders of magnitude — the arithmetic below turns a
+# bad size straight into a bad fee, so it is checked rather than trusted.
+MIN_PLAUSIBLE_CONTRACT_NOTIONAL = 50.0
 
 
 def _underlying(symbol: str) -> str:
@@ -588,11 +615,27 @@ def us_perp_contracts(symbol: str, notional: float,
     if price <= 0:
         return None, f"{symbol}: cannot count contracts without a price"
     import math
+    base = _underlying(symbol)
     for name, size in listed:
-        contracts = math.ceil(abs(notional) / (price * size))
+        # A contract's notional is the real check on whether the size is
+        # right. Bitnomial sizes them so one contract is a few hundred to a
+        # few thousand dollars across a five-order-of-magnitude price range
+        # (0.01 BTC and 5,000 ADA are both ~$1,000). A size that implies a
+        # sub-$50 contract is off by orders of magnitude, and passing it
+        # through would recreate the original bug from the opposite side:
+        # SHIB at 100,000/contract is $0.45 at $0.00000447, which would need
+        # 19,910 contracts and bill $5,973 to trade $8,900.
+        one = price * size
+        if one < MIN_PLAUSIBLE_CONTRACT_NOTIONAL:
+            return None, (
+                f"{symbol}: {name} at {size:g} {base}/contract is only "
+                f"${one:,.2f} of notional at ${price:,.8g} — implausible for a "
+                f"listed contract, so the size on file is wrong by orders of "
+                f"magnitude and is not being used")
+        contracts = math.ceil(abs(notional) / one)
         if contracts >= 1:
             return float(contracts), (
-                f"{contracts:g} x {name} ({size:g} BTC/contract) at "
+                f"{contracts:g} x {name} ({size:g} {base}/contract) at "
                 f"${US_PERP_FEE_PER_SIDE:.2f}/side all-in "
                 f"({US_PERP_SCHEDULE_VINTAGE})")
     return None, f"{symbol}: no listed contract can express ${abs(notional):,.0f}"

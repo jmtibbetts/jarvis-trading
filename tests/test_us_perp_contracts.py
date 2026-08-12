@@ -37,16 +37,17 @@ class ContractCountTests(unittest.TestCase):
         self.assertEqual(n, 1)
 
     def test_count_scales_with_notional(self):
-        small, _ = us_perp_contracts("BTC/USD", 9_500.0, 95_000.0)
-        large, _ = us_perp_contracts("BTC/USD", 95_000.0, 95_000.0)
+        small, _ = us_perp_contracts("BTC/USD", 950.0, 95_000.0)
+        large, _ = us_perp_contracts("BTC/USD", 9_500.0, 95_000.0)
         self.assertEqual(small, 1)
         self.assertEqual(large, 10)
 
-    def test_the_smallest_listed_contract_is_preferred(self):
-        """BUI (0.1 BTC) expresses a small position; BUS (1 BTC) would force
-        a 10x larger minimum."""
+    def test_the_bitcoin_contract_is_the_perpetual_not_the_future(self):
+        """PBTCUC is 0.01 BTC. BUI/BUS are Bitnomial's Bitcoin FUTURES, a
+        different instrument -- using them put the contract out by 10x."""
         _, why = us_perp_contracts("BTC/USD", 9_500.0, 95_000.0)
-        self.assertIn("BUI", why)
+        self.assertIn("PBTCUC", why)
+        self.assertIn("0.01 BTC/contract", why)
 
 
 class FeeFormulaTests(unittest.TestCase):
@@ -59,7 +60,7 @@ class FeeFormulaTests(unittest.TestCase):
             self.assertAlmostEqual(fee, contracts * US_PERP_FEE_PER_SIDE * 2.0)
 
     def test_a_round_trip_costs_thirty_cents_per_contract(self):
-        fee, _ = us_perp_fee("BTC/USD", 9_500.0, 95_000.0)
+        fee, _ = us_perp_fee("BTC/USD", 950.0, 95_000.0)
         self.assertAlmostEqual(fee, 0.30)
 
     def test_cost_is_regressive_in_percentage_terms(self):
@@ -68,16 +69,16 @@ class FeeFormulaTests(unittest.TestCase):
         multiples of the contract size the rate is flat; the regressive
         step comes from the whole-contract MINIMUM, which a small position
         pays in full."""
-        small, _ = us_perp_fee("BTC/USD", 500.0, 95_000.0)      # « 1 contract
-        large, _ = us_perp_fee("BTC/USD", 950_000.0, 95_000.0)  # 100 contracts
-        self.assertGreater(small / 500.0, large / 950_000.0)
+        small, _ = us_perp_fee("BTC/USD", 50.0, 95_000.0)       # « 1 contract
+        large, _ = us_perp_fee("BTC/USD", 950_000.0, 95_000.0)  # 1,000 contracts
+        self.assertGreater(small / 50.0, large / 950_000.0)
 
     def test_a_sub_contract_position_still_pays_a_full_contract(self):
         """$500 of BTC cannot be expressed in less than one BUI, so it pays
         the same $0.30 as a $9,500 position. That is a real cost floor, and
         it is what makes tiny leveraged positions inefficient."""
-        tiny, _ = us_perp_fee("BTC/USD", 500.0, 95_000.0)
-        full, _ = us_perp_fee("BTC/USD", 9_500.0, 95_000.0)
+        tiny, _ = us_perp_fee("BTC/USD", 50.0, 95_000.0)
+        full, _ = us_perp_fee("BTC/USD", 950.0, 95_000.0)
         self.assertAlmostEqual(tiny, full)
 
     def test_the_explanation_names_the_contract_and_the_vintage(self):
@@ -97,7 +98,7 @@ class UnknownContractSizeTests(unittest.TestCase):
     """
 
     def test_an_unknown_size_returns_none_rather_than_guessing(self):
-        for sym in ("OP/USD", "SOL/USD", "DOGE/USD", "ISEK/USD"):
+        for sym in ("OP/USD", "ISEK/USD", "VELVET/USD", "KAITO/USD"):
             n, why = us_perp_contracts(sym, 8_900.0, 1.0)
             self.assertIsNone(n, sym)
             self.assertIn("contract size not on file", why)
@@ -106,14 +107,22 @@ class UnknownContractSizeTests(unittest.TestCase):
         """A stand-in that looks like a measurement is worse than one that
         announces itself."""
         with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
-            _, why = venue_round_trip_fee("SOL/USD", 8_900.0, 8.9, 180.0)
+            _, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)
             self.assertIn("ESTIMATED", why)
 
     def test_an_estimated_symbol_still_costs_something_sane(self):
         with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
-            fee, why = venue_round_trip_fee("SOL/USD", 8_900.0, 8.9, 180.0)
+            fee, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)
             self.assertGreater(fee, 0.0)
             self.assertLess(fee / 8_900.0, 0.05, why)
+
+    def test_a_listed_symbol_is_priced_exactly_not_estimated(self):
+        """SOL is on file now — it must use the real formula, not the
+        stand-in."""
+        with mock.patch.dict(os.environ, {"VENUE_REGION": "us"}):
+            _, why = venue_round_trip_fee("SOL/USD", 8_900.0, 8.9, 180.0)
+            self.assertNotIn("ESTIMATED", why)
+            self.assertIn("PSOLUS", why)
 
     def test_bitcoin_is_listed(self):
         self.assertIn("BTC", US_PERP_CONTRACTS)
@@ -137,10 +146,48 @@ class RegressionTests(unittest.TestCase):
         self.assertLess(fee, 25.0)
 
     def test_bitcoin_no_longer_costs_three_cents_on_nine_thousand(self):
-        """0.0937 token-"contracts" x $0.15 gave $0.03. One real BUI
-        contract gives $0.30 -- an order of magnitude, and correct."""
+        """0.0937 token-"contracts" x $0.15 gave $0.03. Ten real PBTCUC
+        contracts give $3.00 -- two orders of magnitude, and correct."""
         fee, _ = venue_round_trip_fee("BTC/USD", 8_900.0, 8.9, 95_000.0)
-        self.assertAlmostEqual(fee, 0.30)
+        self.assertAlmostEqual(fee, 3.00)
+
+
+class ContractSizePlausibilityTests(unittest.TestCase):
+    """A configured contract size turns straight into a fee, so it is
+    checked rather than trusted.
+
+    Bitnomial sizes contracts so that one is a few hundred to a few thousand
+    dollars across a five-order-of-magnitude price range -- 0.01 BTC and
+    5,000 ADA are both roughly $1,000. That property is what makes the fee
+    sane; a size that violates it is wrong by orders of magnitude and would
+    recreate the original bug from the other side.
+    """
+
+    def test_an_implausibly_small_contract_is_refused(self):
+        """SHIB at 100,000/contract is $0.45 of notional at $0.00000447.
+        No exchange lists that. Using it would need 19,910 contracts and
+        bill $5,973 to trade $8,900."""
+        n, why = us_perp_contracts("SHIB/USD", 8_900.0, 0.00000447)
+        self.assertIsNone(n)
+        self.assertIn("implausible", why)
+
+    def test_every_other_configured_size_is_plausible_at_a_real_price(self):
+        prices = {"BTC": 95_000.0, "ETH": 3_200.0, "SOL": 180.0, "XRP": 2.1,
+                  "AAVE": 260.0, "AVAX": 22.0, "BCH": 520.0, "ADA": 0.62,
+                  "LINK": 18.0, "DOGE": 0.16, "HBAR": 0.19, "LTC": 95.0,
+                  "DOT": 4.1, "XLM": 0.31, "XTZ": 0.75, "TRX": 0.29}
+        for asset, px in prices.items():
+            n, why = us_perp_contracts(f"{asset}/USD", 8_900.0, px)
+            self.assertIsNotNone(n, f"{asset} refused: {why}")
+
+    def test_a_round_trip_costs_single_digit_dollars_across_the_board(self):
+        """The operator's actual observation, as a property."""
+        prices = {"BTC": 95_000.0, "ETH": 3_200.0, "SOL": 180.0, "XRP": 2.1,
+                  "ADA": 0.62, "DOGE": 0.16, "TRX": 0.29, "LTC": 95.0}
+        for asset, px in prices.items():
+            fee, why = us_perp_fee(f"{asset}/USD", 8_900.0, px)
+            self.assertLess(fee, 15.0, f"{asset}: ${fee:,.2f} -- {why}")
+            self.assertGreater(fee, 0.0, asset)
 
 
 if __name__ == "__main__":

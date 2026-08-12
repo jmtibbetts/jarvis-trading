@@ -13,3 +13,8 @@ venv/
 frontend/node_modules/
 static/dist/
 .mcp.json
+
+# Local DB backups and vendored wheels — never belong in git
+backups/
+backup-*/
+*.whl

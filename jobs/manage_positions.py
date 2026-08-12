@@ -458,7 +458,11 @@ def _submit_stop(client, sym: str, qty: float, exit_side, stop_price: float,
     only. Sending the wrong type left positions unprotected while the log
     merely said "Stop sync failed". The limit leg sits 1% through the stop
     so a normal stop-out still fills."""
-    from alpaca.trading.requests import StopLimitOrderRequest
+    # These are imported per-call throughout this module (the caller does the
+    # same); importing them here too keeps the helper self-contained rather
+    # than relying on a name that only exists inside the caller's scope.
+    from alpaca.trading.requests import StopLimitOrderRequest, StopOrderRequest
+    from alpaca.trading.enums import TimeInForce
     if is_crypto:
         return client.submit_order(StopLimitOrderRequest(
             symbol=sym, qty=qty, side=exit_side, time_in_force=TimeInForce.GTC,

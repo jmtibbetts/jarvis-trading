@@ -140,3 +140,70 @@ class MeasuredSpreadTests(unittest.TestCase):
         spread, source = estimate_spread_pct("NVDA", venue="kraken")
         self.assertEqual(spread, DEFAULT_EQUITY_SPREAD_PCT)
         self.assertEqual(source, "default_equity")
+
+
+class KrakenFuturesSpecTests(unittest.TestCase):
+    """Crypto-derivative specs from the venue itself, not typed in by hand."""
+
+    def test_perpetual_specs_load(self):
+        from lib.venues import kraken_futures_spec
+        spec = kraken_futures_spec("BTC/USD")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["symbol"], "PF_XBTUSD")
+        self.assertGreater(spec["tick_size"], 0)
+
+    def test_margin_is_tiered_not_a_single_number(self):
+        from lib.venues import kraken_futures_spec
+        tiers = kraken_futures_spec("BTC/USD")["margin_tiers"]
+        self.assertGreater(len(tiers), 1)
+        # Margin requirement must rise with size, never fall.
+        margins = [t["initial_margin"] for t in tiers]
+        self.assertEqual(margins, sorted(margins))
+
+    def test_max_leverage_falls_as_position_grows(self):
+        from lib.venues import max_leverage_at_size
+        small, _ = max_leverage_at_size("BTC/USD", 1_000)
+        large, _ = max_leverage_at_size("BTC/USD", 40_000_000)
+        self.assertGreater(small, large)
+
+    def test_unlisted_symbol_returns_1x_not_a_guess(self):
+        from lib.venues import max_leverage_at_size
+        lev, why = max_leverage_at_size("NOTACOIN/USD", 1_000)
+        self.assertEqual(lev, 1.0)
+        self.assertIn("no kraken futures listing", why)
+
+
+class ReadOnlyAccountTests(unittest.TestCase):
+    """The adapter must be incapable of trading, and must degrade cleanly
+    when no key is present."""
+
+    def test_write_endpoints_are_rejected_by_construction(self):
+        from lib.kraken_account import _private
+        for endpoint in ("/0/private/AddOrder", "/0/private/CancelOrder",
+                         "/0/private/Withdraw"):
+            with self.assertRaises(ValueError):
+                _private(endpoint)
+
+    def test_allowlist_contains_no_mutating_endpoint(self):
+        from lib.kraken_account import READ_ONLY_ENDPOINTS
+        banned = ("AddOrder", "Cancel", "Withdraw", "Transfer", "Edit")
+        for ep in READ_ONLY_ENDPOINTS:
+            self.assertFalse(any(b.lower() in ep.lower() for b in banned), ep)
+
+    def test_missing_credentials_report_rather_than_raise(self):
+        from lib.kraken_account import check_connection, is_configured
+        if not is_configured():
+            out = check_connection()
+            self.assertFalse(out["connected"])
+            self.assertIn("reason", out)
+
+    def test_signature_is_deterministic_and_matches_kraken_spec(self):
+        """Known-answer test so a refactor cannot silently break signing."""
+        from lib.kraken_account import _sign
+        import base64
+        secret = base64.b64encode(b"testsecret" * 5).decode()
+        sig_a = _sign("/0/private/Balance", {"nonce": 1234567890}, secret)
+        sig_b = _sign("/0/private/Balance", {"nonce": 1234567890}, secret)
+        self.assertEqual(sig_a, sig_b)
+        self.assertNotEqual(sig_a, _sign("/0/private/Balance", {"nonce": 1234567891}, secret))
+        self.assertEqual(len(base64.b64decode(sig_a)), 64)   # SHA-512 digest

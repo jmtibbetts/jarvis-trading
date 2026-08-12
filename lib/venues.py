@@ -244,3 +244,96 @@ def measured_spread_pct(symbol: str, venue: str = "kraken") -> tuple[float | Non
         logger.debug(f"[Venues] spread fetch failed for {symbol}: {e}")
         _spread_cache[key] = (now, None)
         return None, f"fetch failed: {str(e)[:60]}"
+
+
+# ── Kraken Futures instrument specs (live, keyless) ──────────────────────
+# lib/instruments.py holds CME futures specs I typed in from published
+# contract documents. This is the same data for crypto derivatives, except
+# fetched from the venue itself, so it cannot silently go stale.
+#
+# The important structure here is TIERED MARGIN: Kraken requires more margin
+# as a position grows, so maximum leverage is a function of size, not a
+# constant. PF_XBTUSD allows 100x on a small position and 2x above $150m.
+# A model that treats max leverage as one number is wrong at both ends.
+KRAKEN_FUTURES = "https://futures.kraken.com/derivatives/api/v3"
+_futures_cache: dict[str, tuple[datetime, dict]] = {}
+
+
+def kraken_futures_instruments() -> dict:
+    """All tradeable futures keyed by symbol, cached 12h."""
+    now = datetime.now(timezone.utc)
+    hit = _futures_cache.get("all")
+    if hit and (now - hit[0]) < _SPEC_TTL:
+        return hit[1]
+    try:
+        r = httpx.get(f"{KRAKEN_FUTURES}/instruments", timeout=25)
+        if r.status_code != 200:
+            logger.info(f"[Venues] Kraken Futures instruments -> {r.status_code}")
+            return (hit[1] if hit else {})
+        data = {i["symbol"]: i for i in (r.json().get("instruments") or [])
+                if i.get("tradeable")}
+        _futures_cache["all"] = (now, data)
+        return data
+    except Exception as e:
+        logger.debug(f"[Venues] Kraken Futures fetch failed: {e}")
+        return (hit[1] if hit else {})
+
+
+def _to_kraken_futures_symbol(symbol: str) -> str:
+    """'BTC/USD' -> 'PF_XBTUSD' (perpetual). Kraken prefixes perpetuals with
+    PF_ and still calls bitcoin XBT."""
+    base = str(symbol or "").upper().split("/")[0].replace("USD", "")
+    if base == "BTC":
+        base = "XBT"
+    return f"PF_{base}USD"
+
+
+def kraken_futures_spec(symbol: str) -> dict | None:
+    """Contract spec for the perpetual matching a spot symbol, or None."""
+    want = _to_kraken_futures_symbol(symbol)
+    inst = kraken_futures_instruments().get(want)
+    if not inst:
+        return None
+    tiers = [
+        {"from_units": float(t.get("numNonContractUnits") or 0),
+         "initial_margin": float(t.get("initialMargin") or 0),
+         "maintenance_margin": float(t.get("maintenanceMargin") or 0)}
+        for t in (inst.get("marginLevels") or [])
+    ]
+    tiers.sort(key=lambda t: t["from_units"])
+    first = tiers[0]["initial_margin"] if tiers else 0
+    return {
+        "venue": "kraken_futures",
+        "symbol": want,
+        "type": inst.get("type"),
+        "tick_size": float(inst.get("tickSize") or 0),
+        "contract_size": float(inst.get("contractSize") or 1),
+        "qty_precision": int(inst.get("contractValueTradePrecision") or 0),
+        "max_position": float(inst.get("maxPositionSize") or 0),
+        "funding_periods_per_day": float(inst.get("fundingRateCoefficient") or 0),
+        "margin_tiers": tiers,
+        "max_leverage_small": (1.0 / first) if first else 1.0,
+    }
+
+
+def max_leverage_at_size(symbol: str, notional_usd: float) -> tuple[float, str]:
+    """Maximum leverage Kraken permits for a position of THIS size.
+
+    Leverage is not a property of the instrument alone — a $500 position on
+    PF_XBTUSD may use 100x while a $10m position is capped at 10x. Sizing
+    that assumes the headline number would be rejected by the venue at
+    scale, so the tier is resolved against the actual notional.
+    """
+    spec = kraken_futures_spec(symbol)
+    if not spec or not spec["margin_tiers"]:
+        return 1.0, f"no kraken futures listing for {symbol}"
+    tier = spec["margin_tiers"][0]
+    for t in spec["margin_tiers"]:
+        if notional_usd >= t["from_units"]:
+            tier = t
+        else:
+            break
+    im = tier["initial_margin"]
+    lev = (1.0 / im) if im else 1.0
+    return lev, (f"{spec['symbol']} at ${notional_usd:,.0f}: {im:.1%} initial margin "
+                 f"-> {lev:.0f}x max")

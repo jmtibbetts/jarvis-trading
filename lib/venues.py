@@ -446,14 +446,31 @@ def kraken_futures_fee_schedules() -> dict:
 
 
 def futures_fee_for(symbol: str, *, maker: bool = False,
-                    volume_30d: float | None = None) -> tuple[float | None, str]:
+                    volume_30d: float | None = None,
+                    region: str | None = None) -> tuple[float | None, str]:
     """(fee as a fraction of notional, explanation) for a perpetual.
+
+    REGION MATTERS. Kraken states that the cross-platform Futures tiers
+    (0.020% maker / 0.050% taker) do NOT apply to US customers, whose
+    perpetuals list through Bitnomial at a flat $0.15/contract/side. Using
+    the international ladder for a US account understates cost on small
+    positions and overstates it on large ones, because the two schedules
+    have opposite shapes. Set VENUE_REGION=us to price per contract.
 
     Resolves the instrument's OWN schedule by uid, then the tier for the
     given 30-day volume. Returns None when the symbol is not a listed
     future, so callers fall back to spot pricing rather than silently
     applying derivative fees to a spot trade.
     """
+    import os
+    reg = (region or os.getenv("VENUE_REGION") or "international").lower()
+    if reg == "us":
+        # Per-contract, not per-cent: the caller needs notional and contract
+        # count to convert, which percentage-shaped callers do not have.
+        return None, ("US account: perpetuals are priced PER CONTRACT "
+                      "($0.15/side all-in) — use us_perpetual_fee(), not a "
+                      "percentage schedule")
+
     want = _to_kraken_futures_symbol(symbol)
     inst = kraken_futures_instruments().get(want)
     if not inst:
@@ -477,3 +494,69 @@ def futures_fee_for(symbol: str, *, maker: bool = False,
     rebate = " (REBATE — paid to provide liquidity)" if pct < 0 else ""
     return pct, (f"{want} {sched.get('name')} {side} {pct * 100:.4g}% "
                  f"at ${float(chosen.get('usdVolume') or 0):,.0f}+ volume{rebate}")
+
+
+# ── Kraken Pro US: PER-CONTRACT pricing ──────────────────────────────────
+# US customers are explicitly excluded from the international Futures
+# maker/taker tiers (0.020%/0.050%). US perpetuals list through Bitnomial
+# and CME products clear as real futures, both priced PER CONTRACT rather
+# than as a percentage of notional.
+#
+# That inverts the optimisation. A percentage fee is scale-neutral — 0.05%
+# costs the same proportion whether the position is $100 or $100,000. A
+# flat per-contract fee is REGRESSIVE: $0.30 round trip is 0.30% of a $100
+# position and 0.003% of a $10,000 one. Small positions are punished and
+# large ones are nearly free, which is the opposite of what the percentage
+# model assumed.
+#
+# Source: Kraken Pro US fee documentation as supplied by the operator.
+# Exchange, NFA and clearing components are included where Kraken publishes
+# them all-in; for CME products Kraken publishes only its own commission
+# and shows the full estimate in the order form, so the values here are
+# LOWER BOUNDS and marked as such.
+US_PERPETUAL_FEE_PER_SIDE = 0.15      # all-in: 0.03 Kraken + 0.10 exchange/clearing + 0.02 NFA
+
+US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
+    "MES=F": 0.39, "MNQ=F": 0.39,     # CME micros
+    "ES=F": 1.29,  "NQ=F": 1.29,      # CME e-minis
+}
+
+
+def us_perpetual_fee(contracts: float = 1.0) -> tuple[float, str]:
+    """Round-trip cost of a US perpetual, in dollars.
+
+    No maker/taker distinction exists in this schedule. Funding is separate
+    and settles as a daily cash adjustment at 15:00 CT for open positions,
+    so it is NOT included here — see funding_cost_pct.
+    """
+    total = abs(float(contracts)) * US_PERPETUAL_FEE_PER_SIDE * 2.0
+    return total, (f"US perpetual: ${US_PERPETUAL_FEE_PER_SIDE:.2f}/contract/side all-in "
+                   f"(Kraken 0.03 + exchange/clearing 0.10 + NFA 0.02), "
+                   f"${total:.2f} round trip on {contracts:g} contract(s)")
+
+
+def us_futures_fee(symbol: str, contracts: float = 1.0) -> tuple[float | None, str]:
+    """Round-trip Kraken commission for a CME product, in dollars.
+
+    This is a LOWER BOUND: exchange, NFA and clearing charges are added on
+    top and Kraken publishes the complete figure only in the order form.
+    Treating this as the full cost would understate it, so callers should
+    label it as a floor rather than an estimate.
+    """
+    sym = str(symbol or "").upper()
+    rate = US_FUTURES_COMMISSION.get(sym)
+    if rate is None:
+        return None, f"no published Kraken commission for {sym}"
+    total = abs(float(contracts)) * rate * 2.0
+    return total, (f"{sym}: ${rate:.2f}/side Kraken commission, ${total:.2f} round trip "
+                   f"— EXCLUDES exchange/NFA/clearing, so this is a lower bound")
+
+
+def us_fee_as_pct_of_notional(notional: float, fee_dollars: float) -> float:
+    """Convert a per-contract fee to the percentage the cost model speaks.
+
+    This is where the regressiveness becomes visible: the same dollar fee
+    is a large percentage on a small position and a negligible one on a
+    large position.
+    """
+    return (fee_dollars / abs(notional)) if notional else 0.0

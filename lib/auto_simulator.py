@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from app.database import (
     AutoSimPortfolio, AutoSimPosition, AutoSimTrade, DEFAULT_USER_ID,
     MarketAsset, TradingSignal, UserPreference, get_db, new_id, now_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 MARGIN_PER_SIGNAL = 1000.0
 # Auto Sim followed EVERY signal with no capital check whatsoever: 228 open
@@ -37,13 +40,13 @@ def _leverage(direction: str | None) -> float:
     return 2.0 if "leverag" in value.lower() else 1.0
 
 
-# ── Score-scaled leverage (virtual books only) ──────────────────────────────
-# The stronger the signal, the more leverage the sim takes: composite score
-# 55 (the persistence floor) maps to 5x, 100 maps to 100x, stepped so ledger
-# rows read cleanly. This NEVER applies to the broker account — Alpaca caps
-# equities at 2x and crypto at 1x; this is how the virtual book expresses
-# conviction.
-LEVERAGE_STEPS = [5, 10, 15, 20, 30, 40, 50, 65, 80, 100]
+# ── Leverage (virtual books only) ───────────────────────────────────────────
+# Never applies to the broker account — Alpaca caps equities at 2x and crypto
+# at 1x. The ladder itself now lives in lib/leverage_policy.py and is shared
+# with the paper engine; the old 5x-100x step list here was removed because
+# two books on different leverage scales cannot be compared, which is the
+# entire reason Auto Sim exists.
+#
 # A position is liquidated when the price moves margin/notional against it —
 # i.e. a 1/L move at leverage L. The sim enforces the stop BEFORE that point:
 # max loss per position is capped at this fraction of margin, and the stop

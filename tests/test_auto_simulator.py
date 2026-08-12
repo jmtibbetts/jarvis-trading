@@ -245,3 +245,24 @@ class TestLeveragePolicy:
         d = decide(56, 55, regime={"risk": "high"}, win_rate=0.1, sample=200,
                    consecutive_losses=9, atr_pct=20.0)
         assert d["leverage"] >= 1.0
+
+
+class TestModuleHygiene:
+    """A module that calls logger.* but never defines one raises NameError
+    only when that branch executes — which is how a scheduler job died in
+    production after passing every import check."""
+
+    def test_every_module_using_logger_defines_one(self):
+        import pathlib, re
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders = []
+        for folder in ("lib", "jobs", "app"):
+            for path in (root / folder).glob("*.py"):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if not re.search(r"\blogger\.\w+\(", text):
+                    continue
+                defines = re.search(r"^\s*logger\s*=", text, re.M)
+                imports = re.search(r"^\s*from .* import .*\blogger\b", text, re.M)
+                if not (defines or imports):
+                    offenders.append(str(path.relative_to(root)))
+        assert offenders == [], f"modules use logger without defining it: {offenders}"

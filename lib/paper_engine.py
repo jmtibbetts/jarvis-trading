@@ -47,11 +47,30 @@ MAX_DEPLOYED_PCT       = 60.0   # total margin across open positions, % of equit
 MAX_OPEN_POSITIONS     = 60
 MAX_MARGIN_PCT_OF_CASH = 15.0   # one position may tie up at most this % of free cash
 
-# A per-contract fee this large a share of notional means the contract count
-# is wrong for the instrument, not that the venue is expensive. Round-trip
-# costs above ~5% of notional do not exist on any venue this desk trades.
-PER_CONTRACT_SANITY_CEILING = 0.05
-US_PER_CONTRACT_SIDE = 0.15
+# A round trip costing this much of notional does not exist on any venue this
+# desk trades, so a fee above it means the model is misapplied rather than the
+# venue expensive. Kept as a backstop over whatever schedule is selected.
+FEE_SANITY_CEILING = 0.05
+
+
+def perp_base_rate() -> tuple[float, str]:
+    """Fallback rate for a LEVERAGED position, per side.
+
+    A leveraged crypto position is a perpetual, and perps are a different
+    PRODUCT from spot with a different fee schedule — not a variant of it.
+    Kraken's measured spot taker is 0.80%/side; the perp taker is
+    0.05%/side. Falling back to spot when a perp schedule was missing
+    therefore billed 16x the real cost, which is what made a $1,000-margin
+    position at 8.9x look like it cost $142 to trade instead of ~$9.
+
+    Overcharging by 16x is not the safe direction. It vetoes sound trades
+    and teaches the model that leverage is unaffordable, which is exactly
+    the wrong lesson for a desk whose whole plan is leveraged perps.
+    """
+    from lib.venues import KRAKEN_PERP_BASE_TAKER
+    return (KRAKEN_PERP_BASE_TAKER,
+            f"kraken perpetual base taker {KRAKEN_PERP_BASE_TAKER * 100:.3g}% "
+            f"- no live schedule for this symbol")
 DEFAULT_SCORE_FLOOR    = 55.0   # used only when no criteria are configured
 
 
@@ -136,16 +155,41 @@ def score_leverage(score: float | None, *, asset_class: str | None = None,
 
 
 def venue_round_trip_fee(symbol: str, notional: float, leverage: float = 1.0,
-                         entry_price: float = 0.0) -> tuple[float, str]:
+                         entry_price: float = 0.0,
+                         product: str | None = None) -> tuple[float, str]:
     """Dollar cost of opening AND closing this position at the real venue.
 
     Paper trading charged nothing, so every simulated result was optimistic
-    by the full fee. At the fee this account actually pays on Kraken (0.8%
-    taker, measured from the account rather than the published table) a
-    round trip costs 1.6% of NOTIONAL — and notional is leveraged, so a 10x
-    position pays 16% of the committed margin before the thesis is tested.
-    Practice that ignores this teaches the wrong lesson.
+    by the full fee. Practice that ignores cost teaches the wrong lesson.
+
+    PRODUCT, not leverage, selects the schedule. Spot and perpetuals are
+    different products — you trade one or the other — and a perpetual at 1x
+    is still a perpetual. Inferring the product from `leverage > 1` meant
+    that whenever the conviction ladder bottomed out at 1x, the position was
+    billed as a spot trade: 1.6% round trip instead of 0.10%, a 16x
+    overcharge on a book whose entire premise is leveraged perps.
+
+    Pass product="spot" or "perp" to state it. When omitted it resolves from
+    CRYPTO_PRODUCT, which defaults to perp for this desk.
     """
+    fee, why = _round_trip_fee_uncapped(symbol, notional, leverage,
+                                        entry_price, product)
+    # One backstop over every path. Each schedule below has now been wrong in
+    # BOTH directions at least once, so the ceiling is enforced here rather
+    # than inside whichever branch happened to fail last.
+    ceiling = abs(notional) * FEE_SANITY_CEILING
+    if fee > ceiling > 0:
+        logger.warning(
+            f"[Fees] ${fee:,.2f} on ${abs(notional):,.2f} notional for {symbol} "
+            f"exceeds {FEE_SANITY_CEILING:.0%} — capping. Basis was: {why}"
+        )
+        return ceiling, f"CAPPED at {FEE_SANITY_CEILING:.0%} of notional — {why}"
+    return fee, why
+
+
+def _round_trip_fee_uncapped(symbol: str, notional: float, leverage: float,
+                             entry_price: float,
+                             product: str | None) -> tuple[float, str]:
     # The paper book rehearses a venue that may not be the one live orders
     # go to. Alpaca fills the live account today while the practice target
     # is Kraken, and pricing rehearsal at Alpaca's cheaper fee would teach
@@ -180,60 +224,38 @@ def venue_round_trip_fee(symbol: str, notional: float, leverage: float = 1.0,
             if fee is not None:
                 contracts = max(1.0, round(abs(notional) / entry_price)) if entry_price else 1.0
                 return fee * contracts, why
-        # Above 1x this is a perpetual, not a spot trade — price it that way.
-        if leverage > 1.0:
-            import os
-            if (os.getenv("VENUE_REGION") or "").lower() == "us":
-                # US perpetuals are PER CONTRACT, and contracts are counted
-                # in units of the contract size — not in dollars of notional.
-                # Falling back to a spot percentage here would overstate the
-                # cost of a leveraged trade by two orders of magnitude.
-                from lib.venues import us_perpetual_fee, kraken_futures_spec
-                spec = kraken_futures_spec(symbol)
-                contract_size = float((spec or {}).get("contract_size") or 1) or 1.0
-                contracts = max(1.0, abs(notional) / (entry_price * contract_size))                     if entry_price else 1.0
-                fee, why = us_perpetual_fee(contracts)
-                # SANITY GUARD. Kraken's flexible futures use contract_size
-                # 1.0 — one contract IS one token — so a $0.089 coin needs
-                # ~20,000 contracts to build a $1,800 position, and charging
-                # $0.15 per contract per side bills $6,000 to trade $1,800.
-                # A fee several times the notional is not an expensive trade,
-                # it is a misapplied model: the flat per-contract rate is
-                # quoted for standardised contracts, not per token-unit.
-                #
-                # Being wrong by 3400% in the EXPENSIVE direction is the same
-                # class of failure as charging nothing — it would veto every
-                # sound low-priced trade. Fall back to the percentage
-                # schedule and say so, rather than pass the number through.
-                if fee > abs(notional) * PER_CONTRACT_SANITY_CEILING:
-                    logger.warning(
-                        f"[Fees] Per-contract model rejected for {symbol}: "
-                        f"{contracts:,.0f} contracts x ${US_PER_CONTRACT_SIDE:.2f}/side "
-                        f"= ${fee:,.2f} on ${abs(notional):,.2f} notional."
-                    )
-                    from lib.venues import futures_fee_for
-                    rate, prate_why = futures_fee_for(symbol, maker=False,
-                                                      region="international")
-                    if rate is None:
-                        # No perp schedule for this symbol either. Once the
-                        # per-contract number is rejected it must never be
-                        # returned — a guard that falls through to the value
-                        # it just refused is not a guard. ISEK/USD reached
-                        # $2,037,632 of "fees" on $1,000 of margin this way.
-                        # Land on the crypto spot rate: conservative, real,
-                        # and bounded.
-                        from lib.venues import fee_for
-                        rate, prate_why = fee_for(venue, maker=False,
-                                                  asset_class="crypto")
-                    return (abs(notional) * rate * 2.0,
-                            f"{prate_why} - per-contract rate not applicable at "
-                            f"this unit price ({contracts:,.0f} contracts would "
-                            f"cost ${fee:,.0f} on ${abs(notional):,.0f})")
-                return fee, why
+        # Perpetual or spot — the PRODUCT decides, not the leverage.
+        # These are different products, not variants of one: you trade spot
+        # OR you trade perps with leverage. Inferring the product from
+        # `leverage > 1` meant that whenever the conviction ladder bottomed
+        # out at 1x, the position was billed as a spot trade — 1.6% round
+        # trip instead of 0.10%, a 16x overcharge on a perp book.
+        prod = (product or os.getenv("CRYPTO_PRODUCT") or "perp").lower()
+        if leverage > 1.0 or prod == "perp":
+            # Crypto perps are priced as a PERCENTAGE of notional, not per
+            # contract. The US per-contract figure ($0.15/side) does not
+            # survive contact with Kraken's flexible futures, which use
+            # contract_size 1.0 — one contract IS one token — so the same
+            # rate lands at opposite absurdities depending only on unit price:
+            #
+            #   OP/USD   $0.089   20,157 contracts -> $6,047 on $1,800  (336%)
+            #   BTC/USD  $95,000   0.0937 contracts ->   $0.03 on $8,900 (0.0003%)
+            #
+            # No venue charges either. The percentage schedule gives $8.90 on
+            # $8,900 at every unit price, which is both what Kraken publishes
+            # for perps (0.05%/side) and what the operator observes paying in
+            # practice. Per-contract pricing is kept ONLY for CME products
+            # above, where the contract is genuinely standardised.
+            #
+            # That figure was quoted for standardised US perpetual contracts;
+            # carrying it over to a per-token instrument was the assumption,
+            # and it is now retired rather than guarded.
             from lib.venues import futures_fee_for
-            rate, why = futures_fee_for(symbol, maker=False)
-            if rate is not None:
-                return abs(notional) * rate * 2.0, why
+            rate, why = futures_fee_for(symbol, maker=False,
+                                        region="international")
+            if rate is None:
+                rate, why = perp_base_rate()
+            return abs(notional) * rate * 2.0, why
         from lib.venues import fee_for
         rate, why = fee_for(venue, maker=False, asset_class="crypto")
         return abs(notional) * rate * 2.0, why

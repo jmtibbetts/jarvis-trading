@@ -73,79 +73,95 @@ class FuturesRoutingTests(unittest.TestCase):
 
 class CryptoStillWorksTests(unittest.TestCase):
     def test_crypto_spot_still_pays_the_venue_rate(self):
-        rate, _ = pct("BTC/USD", 2_000.0, 1.0, 95_000.0)
-        self.assertGreater(rate, 0.1, "crypto spot should be expensive")
+        """Spot must stay expensive — the measured account rate is 0.8%/side.
+        Requires product="spot", since the desk's default product is perp."""
+        fee, _ = venue_round_trip_fee("BTC/USD", 2_000.0, 1.0, 95_000.0,
+                                      product="spot")
+        self.assertGreater(fee / 2_000.0 * 100, 0.1, "crypto spot should be expensive")
 
 
-class PerContractSanityTests(unittest.TestCase):
-    """Kraken flexible futures use contract_size 1.0 — one contract IS one
-    token. A $0.089 coin therefore needs ~20,000 contracts to build a $1,800
-    position, and a flat $0.15/contract/side bills $6,047 to trade $1,800.
+class PerpetualPricingTests(unittest.TestCase):
+    """Perps are priced as a PERCENTAGE of notional, not per contract.
 
-    That is a misapplied model, not an expensive venue. Being wrong by 3400%
-    in the EXPENSIVE direction vetoes every sound low-priced trade, which is
-    the same class of failure as charging nothing at all.
+    The US per-contract figure ($0.15/side) was quoted for standardised
+    contracts. Kraken's flexible futures use contract_size 1.0 -- one
+    contract IS one token -- so carrying that rate over lands at opposite
+    absurdities depending only on unit price:
+
+        OP/USD   $0.089    20,157 contracts -> $6,047 on $1,800  (336%)
+        BTC/USD  $95,000    0.0937 contracts ->   $0.03 on $8,900 (0.0003%)
+
+    No venue charges either. The percentage schedule gives $8.90 on $8,900
+    at every unit price -- what Kraken publishes for perps (0.05%/side) and
+    what the operator observes paying. Per-contract pricing is kept only for
+    CME products, where the contract is genuinely standardised.
     """
 
-    # The per-contract schedule only applies to a US account, so these tests
-    # state the region instead of inheriting whatever .env happens to hold —
-    # a test that passes only when the developer's environment is configured
-    # is not testing the guard.
     def setUp(self):
         self._patch = mock.patch.dict(os.environ, {"VENUE_REGION": "us"})
         self._patch.start()
         self.addCleanup(self._patch.stop)
 
-    def test_a_cheap_coin_is_not_charged_more_than_the_position(self):
-        fee, why = venue_round_trip_fee("OP/USD", 1_800.0, 5.0, 0.0893)
-        self.assertLess(fee, 1_800.0, f"fee exceeded notional — {why}")
-
-    def test_the_fallback_is_labelled_not_silent(self):
-        _, why = venue_round_trip_fee("OP/USD", 1_800.0, 5.0, 0.0893)
-        self.assertIn("not applicable", why)
-
-    def test_cost_stays_bounded_across_a_million_fold_price_range(self):
-        """BTC at $95,000 and OP at $0.089 must both land on a plausible
-        round-trip cost. The old path spanned 0.017% to 336%."""
+    def test_the_rate_is_flat_across_a_million_fold_price_range(self):
+        """A perp round trip costs the same fraction whether the token is
+        worth $95,000 or a hundredth of a cent."""
+        rates = []
         for sym, px in (("BTC/USD", 95_000.0), ("ETH/USD", 3_200.0),
-                        ("SOL/USD", 180.0), ("SUI/USD", 0.686), ("OP/USD", 0.0893)):
-            fee, why = venue_round_trip_fee(sym, 1_800.0, 5.0, px)
-            rate = fee / 1_800.0
-            self.assertGreater(rate, 0.0, f"{sym} traded free")
-            self.assertLess(rate, 0.05, f"{sym} charged {rate * 100:.1f}% — {why}")
+                        ("SOL/USD", 180.0), ("OP/USD", 0.0893),
+                        ("ISEK/USD", 0.0001)):
+            fee, why = venue_round_trip_fee(sym, 8_900.0, 8.9, px)
+            rates.append(round(fee / 8_900.0, 6))
+        self.assertEqual(len(set(rates)), 1, f"rate varied by unit price: {rates}")
 
-    def test_expensive_instruments_still_price_per_contract(self):
-        """The guard must not swallow the per-contract model where it DOES
-        apply — BTC and ETH stay on it."""
-        for sym, px in (("BTC/USD", 95_000.0), ("ETH/USD", 3_200.0)):
-            _, why = venue_round_trip_fee(sym, 1_800.0, 5.0, px)
-            self.assertIn("/contract/side", why.lower(), sym)
-
-    def test_a_symbol_with_no_perp_schedule_is_still_bounded(self):
-        """The guard used to fall through to the very number it rejected when
-        no percentage schedule existed for the symbol. ISEK/USD reached
-        $2,037,632 of 'fees' on $1,000 of margin that way."""
-        fee, why = venue_round_trip_fee("ISEK/USD", 8_900.0, 8.9, 0.0001)
-        self.assertLess(fee, 8_900.0 * 0.05, f"guard returned its own reject — {why}")
+    def test_a_leveraged_round_trip_costs_a_few_dollars_not_thousands(self):
+        fee, why = venue_round_trip_fee("OP/USD", 8_900.0, 8.9, 0.0893)
+        self.assertLess(fee, 25.0, f"${fee:,.2f} to trade $8,900 -- {why}")
         self.assertGreater(fee, 0.0)
 
-    def test_no_position_in_a_broad_symbol_sweep_exceeds_the_ceiling(self):
-        """Whatever the symbol, whatever the unit price."""
-        for sym in ("ISEK/USD", "ALT/USD", "DOGE/USD", "OP/USD", "ARC/USD",
-                    "VIRTUAL/USD", "NOTAREALCOIN/USD"):
+    def test_a_symbol_with_no_listed_schedule_still_pays_the_perp_rate(self):
+        """Not the SPOT rate. That fallback billed 16x."""
+        fee, why = venue_round_trip_fee("ISEK/USD", 8_900.0, 8.9, 0.0001)
+        self.assertNotIn("kraken taker", why.lower())
+        self.assertIn("perpetual", why.lower())
+        self.assertLess(fee / 8_900.0, 0.01)
+
+
+class ProductNotLeverageTests(unittest.TestCase):
+    """Spot and perpetuals are different PRODUCTS -- you trade one or the
+    other. Selecting the schedule with `leverage > 1` meant that whenever
+    the conviction ladder bottomed out at 1x, a perp was billed as a spot
+    trade: 1.6% round trip instead of 0.10%, on a book whose whole premise
+    is leveraged perps.
+    """
+
+    def test_a_perp_at_1x_is_still_a_perp(self):
+        fee, why = venue_round_trip_fee("BTC/USD", 1_000.0, 1.0, 95_000.0)
+        self.assertLess(fee / 1_000.0, 0.005, f"1x perp billed as spot -- {why}")
+
+    def test_an_explicit_spot_trade_still_pays_the_spot_schedule(self):
+        """The fix must not make real spot trading look cheap."""
+        fee, _ = venue_round_trip_fee("BTC/USD", 1_000.0, 1.0, 95_000.0,
+                                      product="spot")
+        self.assertGreater(fee / 1_000.0, 0.005)
+
+    def test_spot_costs_much_more_than_a_perp(self):
+        spot, _ = venue_round_trip_fee("BTC/USD", 1_000.0, 1.0, 95_000.0, product="spot")
+        perp, _ = venue_round_trip_fee("BTC/USD", 1_000.0, 1.0, 95_000.0, product="perp")
+        self.assertGreater(spot, perp * 5)
+
+
+class CeilingBackstopTests(unittest.TestCase):
+    """Every schedule here has now been wrong in BOTH directions at least
+    once, so the ceiling is enforced over all of them rather than inside
+    whichever branch failed last."""
+
+    def test_no_symbol_at_any_price_exceeds_the_ceiling(self):
+        for sym in ("ISEK/USD", "ALT/USD", "DOGE/USD", "OP/USD",
+                    "NOTAREALCOIN/USD", "GOOGL", "MES=F"):
             for px in (0.00001, 0.0893, 1.0, 180.0, 95_000.0):
                 fee, why = venue_round_trip_fee(sym, 5_000.0, 8.0, px)
-                self.assertLess(fee / 5_000.0, 0.05,
-                                f"{sym} @ {px}: {fee / 50:.1f}% — {why}")
-
-    def test_the_international_schedule_is_bounded_too(self):
-        """Outside the US there is no per-contract path at all — the
-        percentage schedule must still produce a sane cost everywhere."""
-        with mock.patch.dict(os.environ, {"VENUE_REGION": "international"}):
-            for sym, px in (("BTC/USD", 95_000.0), ("OP/USD", 0.0893)):
-                fee, why = venue_round_trip_fee(sym, 1_800.0, 5.0, px)
-                self.assertGreater(fee, 0.0, sym)
-                self.assertLess(fee / 1_800.0, 0.05, f"{sym} — {why}")
+                self.assertLessEqual(fee / 5_000.0, 0.05,
+                                     f"{sym} @ {px}: {fee / 50:.1f}% -- {why}")
 
 
 class NoFreeLunchTests(unittest.TestCase):

@@ -128,7 +128,12 @@ def _round_trip_fee(symbol: str, notional: float, leverage: float,
     make a trade look cheaper than it is."""
     try:
         from lib.paper_engine import venue_round_trip_fee
-        fee, why = venue_round_trip_fee(symbol, notional, leverage, price)
+        # This book trades perpetuals, including when the conviction ladder
+        # bottoms out at 1x. Leaving the product to be inferred from leverage
+        # billed those positions as SPOT — 1.6% round trip against a perp's
+        # 0.10%, on 14 of the 27 crypto positions open at the time.
+        fee, why = venue_round_trip_fee(symbol, notional, leverage, price,
+                                        product="perp")
         if fee is not None and fee >= 0:
             return float(fee), str(why)
     except Exception as e:

@@ -518,6 +518,14 @@ def futures_fee_for(symbol: str, *, maker: bool = False,
 # LOWER BOUNDS and marked as such.
 US_PERPETUAL_FEE_PER_SIDE = 0.15      # all-in: 0.03 Kraken + 0.10 exchange/clearing + 0.02 NFA
 
+# Kraken's published cross-platform perpetual base tier, used ONLY when a
+# symbol has no live schedule of its own. A leveraged crypto position is a
+# perpetual, which is a different PRODUCT from spot with its own schedule —
+# not a variant of it. Spot taker measures 0.80%/side on this account; the
+# perp taker is 0.05%/side, so falling back to spot bills 16x the real cost.
+KRAKEN_PERP_BASE_TAKER = 0.0005
+KRAKEN_PERP_BASE_MAKER = 0.0002
+
 US_FUTURES_COMMISSION = {             # Kraken commission per side; NOT all-in
     "MES=F": 0.39, "MNQ=F": 0.39,     # CME micros
     "ES=F": 1.29,  "NQ=F": 1.29,      # CME e-minis

@@ -19,6 +19,57 @@
   let analystBusy = $state(false);
   let analystAnswer = $state<AnalystAnswer | null>(null);
   let analystError = $state<string | null>(null);
+  let focus = $state<Awaited<ReturnType<typeof api.focusList>> | null>(null);
+  let focusSym = $state("");
+  let focusNote = $state("");
+  let focusBusy = $state(false);
+  let expandedFocus = $state<string | null>(null);
+
+  async function loadFocus() {
+    focus = await api.focusList().catch(() => focus);
+  }
+
+  async function addFocus() {
+    const sym = focusSym.trim().toUpperCase();
+    if (!sym || focusBusy) return;
+    focusBusy = true;
+    try {
+      const { toastStore } = await import("../stores/toast.svelte");
+      // A focus symbol must already be tracked so prices exist; add it to the
+      // watchlist first when it is not, rather than failing in the user's face.
+      try {
+        await api.setFocus(sym, true, focusNote.trim() || undefined);
+      } catch (e) {
+        if (String(e).includes("not tracked")) {
+          await api.watchlistAdd(sym);
+          await api.setFocus(sym, true, focusNote.trim() || undefined);
+        } else {
+          throw e;
+        }
+      }
+      focusSym = ""; focusNote = "";
+      toastStore.ok(`${sym} added to focus watch — profile building`);
+      await loadFocus();
+    } catch (e) {
+      const { toastStore } = await import("../stores/toast.svelte");
+      toastStore.err(`Focus add failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      focusBusy = false;
+    }
+  }
+
+  async function removeFocus(sym: string) {
+    try {
+      await api.setFocus(sym, false);
+      const { toastStore } = await import("../stores/toast.svelte");
+      toastStore.ok(`${sym} removed from focus watch`);
+      await loadFocus();
+    } catch (e) {
+      const { toastStore } = await import("../stores/toast.svelte");
+      toastStore.err(`Remove failed: ${e}`);
+    }
+  }
+
   let newTicker = $state("");
   let addingTicker = $state(false);
 
@@ -85,11 +136,13 @@
         api.cryptoMarkets().catch(() => null),
         api.webNews().catch(() => null),
         fetch("/api/learning/postmortems?days=30").then((r) => r.json()).catch(() => null),
-      ]).then(([fx, cg, wn, pm]) => {
+        api.focusList().catch(() => null),
+      ]).then(([fx, cg, wn, pm, fc]) => {
         fxRates = fx ?? fxRates;
         cryptoMarkets = cg ?? cryptoMarkets;
         webNews = wn ?? webNews;
         postmortems = pm ?? postmortems;
+        focus = fc ?? focus;
       });
       signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
       opportunities = oppRes;
@@ -433,6 +486,59 @@
     </Panel>
   </div>
   <div class="span-8">
+    <Panel
+      title="Coins to Watch"
+      dotColor="var(--warm)"
+      meta={focus ? `${focus.focus.length} under focus · signals only at score ${focus.min_score}+` : "—"}
+    >
+      <form class="wl-add" onsubmit={(e) => { e.preventDefault(); addFocus(); }}>
+        <input placeholder="Symbol (BEAT/USD)" bind:value={focusSym} disabled={focusBusy} />
+        <input placeholder="Why watch it? (optional)" bind:value={focusNote} disabled={focusBusy} />
+        <button class="ask-btn" type="submit" disabled={focusBusy || !focusSym.trim()}>
+          {focusBusy ? "Adding…" : "+ Watch"}
+        </button>
+      </form>
+
+      {#if focus && focus.focus.length}
+        {#each focus.focus as f (f.symbol)}
+          <div class="fc-row">
+            <div class="fc-head">
+              <button class="fc-sym" onclick={() => { linkStore.link(f.symbol); sectionStore.go("signals"); }}>{f.symbol}</button>
+              {#if f.price != null}<span class="num dim">${f.price < 1 ? f.price.toPrecision(3) : f.price.toLocaleString()}</span>{/if}
+              {#if f.change_percent != null}
+                <span class="num {f.change_percent >= 0 ? 'pl-up' : 'pl-down'}">{f.change_percent >= 0 ? "+" : ""}{f.change_percent.toFixed(1)}%</span>
+              {/if}
+              <button class="fc-more" onclick={() => (expandedFocus = expandedFocus === f.symbol ? null : f.symbol)}>
+                {expandedFocus === f.symbol ? "hide profile" : "profile"}
+              </button>
+              <button class="fc-rm" title="Stop watching" onclick={() => removeFocus(f.symbol)}>×</button>
+            </div>
+            {#if f.note}<div class="fc-note dim">{f.note}</div>{/if}
+            {#if f.profile?.summary}
+              <div class="fc-measured num">{f.profile.summary}</div>
+            {/if}
+            {#if expandedFocus === f.symbol}
+              <div class="fc-detail">
+                {#if f.profile?.narrative}
+                  <div class="fc-narr">{f.profile.narrative}</div>
+                  <div class="fc-tag dim">AI interpretation — measured statistics above are from real bars</div>
+                {:else}
+                  <div class="dim">No written profile yet — it builds on the next cycle.</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/each}
+        <div class="fc-foot dim">{focus.note}</div>
+      {:else}
+        <div class="empty">
+          Nothing under focus watch. Add a symbol and it gets analysed every cycle, ahead of
+          everything else — but only speaks when a setup is genuinely ready.
+        </div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-8">
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
       <form
         class="wl-add"
@@ -663,6 +769,85 @@
   }
   .sig:last-child {
     border-bottom: none;
+  }
+  .fc-row {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .fc-row:last-of-type {
+    border-bottom: none;
+  }
+  .fc-head {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+  }
+  .fc-sym {
+    background: none;
+    border: none;
+    color: var(--ink);
+    font: inherit;
+    font-weight: 700;
+    font-size: 12.5px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .fc-sym:hover {
+    color: var(--accent);
+  }
+  .fc-more,
+  .fc-rm {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--ink-faint);
+    font: inherit;
+    font-size: 9.5px;
+    border-radius: 5px;
+    padding: 1px 6px;
+    cursor: pointer;
+  }
+  .fc-rm {
+    margin-left: auto;
+    font-size: 12px;
+    line-height: 1;
+    padding: 1px 7px;
+  }
+  .fc-more:hover,
+  .fc-rm:hover {
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+  .fc-note {
+    font-size: 10.5px;
+    margin-top: 2px;
+    font-style: italic;
+  }
+  .fc-measured {
+    font-size: 10.5px;
+    color: var(--ink-dim);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .fc-detail {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--surface-raised);
+    border-radius: var(--radius-sm);
+  }
+  .fc-narr {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .fc-tag {
+    font-size: 9px;
+    margin-top: 5px;
+  }
+  .fc-foot {
+    font-size: 9.5px;
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
+    line-height: 1.4;
   }
   .wl-add {
     display: flex;

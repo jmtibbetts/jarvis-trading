@@ -984,6 +984,28 @@ export const api = {
       purchases: number; sales: number; other: number; trade_count: number;
       range_low_total: number; range_high_total: number; trades: CongressTrade[];
     }[]; note: string }>(`/congress/by-official?days=${days}&limit=${limit}`),
+  focusList: () =>
+    get<{
+      focus: {
+        symbol: string; note: string | null; added: string | null;
+        price: number | null; change_percent: number | null;
+        profile: {
+          summary: string | null; narrative: string | null; updated_at: string | null;
+          stats: Record<string, number | string | null>;
+        } | null;
+      }[];
+      min_score: number;
+      note: string;
+    }>(`/watchlist/focus`),
+  setFocus: (symbol: string, focus: boolean, note?: string) =>
+    fetch(`/api/watchlist/focus`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol, focus, note }),
+    }).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail ?? `focus ${r.status}`);
+      return body as { ok: boolean; symbol: string; focus: boolean };
+    }),
   watchlistAdd: (symbol: string) =>
     fetch(`/api/watchlist/add`, {
       method: "POST", headers: { "Content-Type": "application/json" },

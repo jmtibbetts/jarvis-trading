@@ -639,7 +639,13 @@ def _build_provider_status() -> dict:
         clock = get_trading_client().get_clock()
         add("Alpaca", True, "market open" if clock.is_open else "market closed")
     except Exception as e:
-        add("Alpaca", False, str(e)[:60])
+        try:
+            from lib.alpaca_client import describe_cred_source
+            src = describe_cred_source()
+        except Exception:
+            src = "unknown source"
+        detail = " ".join(str(e)[:60].split())
+        add("Alpaca", False, f"{detail} — creds from {src}")
 
     # Massive REST — key presence only; a live call would burn the 5/min budget
     add("Massive", bool(_os.getenv("MASSIVE_API_KEY")), "REST (key set)" if _os.getenv("MASSIVE_API_KEY") else "no key")

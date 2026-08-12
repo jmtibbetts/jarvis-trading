@@ -120,6 +120,30 @@ def get_alpaca_creds():
         logger.warning("[Alpaca] No credentials found in DB or .env")
     return key, secret, paper
 
+def describe_cred_source() -> str:
+    """Which credentials get_alpaca_creds() will actually use, and whether a
+    DIFFERENT key sits in .env. The DB config silently shadows .env, so after
+    an Alpaca paper-account reset (which regenerates keys) a stale DB row
+    401s every job while the working key sits unused in .env — exactly the
+    failure this reports."""
+    import os as _os
+    env_key = _os.getenv("ALPACA_API_KEY") or ""
+    try:
+        from app.database import get_db, PlatformConfig
+        with get_db() as db:
+            cfgs = [c for c in db.query(PlatformConfig).filter(PlatformConfig.is_active == True).all()
+                    if c.platform and "alpaca" in c.platform.lower()]
+            cfg = next((c for c in cfgs if c.is_default), None) or (cfgs[0] if cfgs else None)
+            if cfg and cfg.api_key:
+                src = f"DB config '{cfg.platform}'"
+                if env_key and env_key != cfg.api_key:
+                    return f"{src} (NOTE: .env holds a DIFFERENT key — DB wins; update the provider in Ops if the DB key is stale)"
+                return src
+    except Exception:
+        pass
+    return ".env" if env_key else "none configured"
+
+
 def get_trading_client() -> TradingClient:
     key, secret, paper = get_alpaca_creds()
     if not key or not secret:

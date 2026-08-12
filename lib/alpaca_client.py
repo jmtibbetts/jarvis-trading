@@ -422,21 +422,39 @@ def partial_close_position(symbol: str, qty: float):
 
 
 def cancel_open_orders_for_symbol(symbol: str):
-    """Cancel all open orders for a symbol — needed before closing a position that has bracket legs."""
+    """Cancel all open orders for a symbol — needed before closing a position
+    that has bracket legs.
+
+    CRITICAL symbol-format detail: Alpaca stores crypto POSITIONS as "ARBUSD"
+    but crypto ORDERS as "ARB/USD". This function used to strip the slash and
+    filter the order query by "ARBUSD", which matched nothing — so it silently
+    cancelled 0 orders and returned 0. Every "cancel before close" caller was
+    therefore a no-op for crypto, and the close that followed failed with
+    40310000 "insufficient balance for ARB (available: 0.000000175)" because
+    the stop-limit still reserved the entire holding.
+
+    Fixed by listing open orders unfiltered and matching on the normalized
+    (slash-stripped) symbol, which is format-agnostic in both directions.
+    """
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
         client = get_trading_client()
-        s = symbol.upper().strip().replace("/", "")
-        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[s]))
+        want = symbol.upper().strip().replace("/", "")
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)) or []
         cancelled = 0
         for o in open_orders:
+            if str(o.symbol).upper().replace("/", "") != want:
+                continue
             try:
                 client.cancel_order_by_id(o.id)
                 cancelled += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[Alpaca] Could not cancel order {o.id} for {symbol}: {e}")
+        if cancelled:
+            logger.info(f"[Alpaca] Cancelled {cancelled} open order(s) for {symbol}")
         return cancelled
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[Alpaca] cancel_open_orders_for_symbol({symbol}) failed: {e}")
         return 0
 

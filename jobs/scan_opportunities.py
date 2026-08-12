@@ -653,34 +653,21 @@ def _save_signals(signals: list, scan_mode: str):
 
 
 def _send_telegram_alerts(high_conf_signals: list, scan_mode: str):
-    """Send Telegram alerts for high-confidence scanner hits."""
-    if not high_conf_signals:
-        return
-    try:
-        from html import escape
-        from jobs.telegram_bot import send, get_cfg
-        token, chat_id = get_cfg()
-        if not token or not chat_id:
-            logger.debug("[Scanner] Telegram alert skipped — no bot token/chat id configured")
-            return
-        for sig in high_conf_signals[:5]:  # max 5 alerts per scan
-            emoji = "🚀" if sig["direction"] == "Long" else "🔄" if sig["direction"] == "Bounce" else "⚡"
-            # send() defaults to parse_mode="HTML" (matches every other alert in
-            # jobs/telegram_bot.py) — the previous *bold*/_italic_ markdown-style
-            # markup was never rendered under HTML mode; it just printed literal
-            # asterisks/underscores. reasoning is freeform LLM text and must be
-            # escaped so a stray '<' or '&' can't break the HTML parser.
-            msg = (
-                f"{emoji} <b>SCANNER ALERT [{scan_mode}]</b>\n"
-                f"<b>{escape(str(sig['asset_symbol']))}</b> — {escape(str(sig['direction']))}\n"
-                f"Entry: ${sig['entry_price']:,.4f} | Target: ${sig['target_price']:,.4f} | Stop: ${sig['stop_loss']:,.4f}\n"
-                f"Confidence: {sig['confidence']}% | R:R {sig.get('rr_ratio','?')}x\n"
-                f"<i>{escape(str(sig.get('reasoning',''))[:120])}</i>"
-            )
-            send(token, chat_id, msg)
-            time.sleep(0.5)
-    except Exception as e:
-        logger.warning(f"[Scanner] Telegram alert failed: {e}")
+    """Deliberately does nothing — kept so the four call sites stay readable.
+
+    Scanner hits are saved as ordinary TradingSignal rows (see above), which
+    means jobs/telegram_bot.py ALREADY delivers them as interactive cards
+    with Approve / Reject / Approve-LIVE buttons. This function used to send
+    a SECOND, plain-text "SCANNER ALERT" for the same setup: no buttons, no
+    signal id, nothing to act on — pure noise duplicating a message the user
+    had already received. Removed rather than made interactive, because the
+    interactive version already exists.
+    """
+    if high_conf_signals:
+        logger.debug(
+            f"[Scanner] {len(high_conf_signals)} {scan_mode} hit(s) saved as signals — "
+            f"Telegram delivery handled by the interactive signal push"
+        )
 
 
 def _scan_symbols(symbols: list, scan_mode: str, meta_map: dict = None):

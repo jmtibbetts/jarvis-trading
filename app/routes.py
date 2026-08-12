@@ -2415,10 +2415,29 @@ def get_positions_live():
 
 @router.post("/positions/{symbol}/close")
 def close_pos(symbol: str):
+    """Close a position, cancelling its protective orders first.
+
+    A working stop-limit SELL RESERVES the entire holding at the broker, so
+    a bare close request fails with 40310000 "insufficient balance for ARB
+    (requested: 12437.65, available: 0.000000175)" — the coins are all
+    committed to the stop. Cancel, let the release settle, then sell."""
+    import time as _t
+    from lib.alpaca_client import close_position, cancel_open_orders_for_symbol
     try:
-        from lib.alpaca_client import close_position
-        close_position(symbol)
-        return {"ok":True,"symbol":symbol}
+        cancelled = cancel_open_orders_for_symbol(symbol)
+        if cancelled:
+            _t.sleep(1.5)   # broker needs a beat to release the reserved qty
+        try:
+            close_position(symbol)
+        except Exception as first_error:
+            # Occasionally the release is slower than 1.5s; one patient retry
+            # beats handing the user a raw balance error.
+            if "insufficient balance" not in str(first_error).lower():
+                raise
+            logger.info(f"[Close] {symbol} balance still reserved — retrying in 3s")
+            _t.sleep(3.0)
+            close_position(symbol)
+        return {"ok": True, "symbol": symbol, "orders_cancelled": cancelled}
     except Exception as e:
         raise HTTPException(500, str(e))
 

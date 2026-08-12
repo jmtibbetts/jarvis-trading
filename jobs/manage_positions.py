@@ -460,6 +460,23 @@ def _safe_qty(qty: float, is_crypto: bool) -> float:
     return max(0, int(math.floor(qty + 1e-9)))
 
 
+def _round_price(px: float, sig_figs: int = 8) -> float:
+    """Round a price by SIGNIFICANT FIGURES, not fixed decimals.
+
+    A flat round(px, 8) is fine for dollars but destroys sub-cent coins: a
+    price of 0.0000000123 becomes 0.00000001, an 18.7% error, which would
+    place a stop nowhere near where it was calculated. Keeping 8 significant
+    figures preserves precision across the whole range this desk trades,
+    from 12,991.9 down to 1.23e-08. Capped at 12 decimals, which is beyond
+    any venue's tick."""
+    import math
+    if not px or px <= 0:
+        return px
+    exponent = math.floor(math.log10(abs(px)))
+    decimals = max(2, min(12, sig_figs - exponent - 1))
+    return round(px, decimals)
+
+
 def _replace_price_only(client, order_id: str, *, stop_price: float = None,
                         limit_price: float = None):
     """Re-price an existing protective order WITHOUT touching its quantity.
@@ -473,9 +490,9 @@ def _replace_price_only(client, order_id: str, *, stop_price: float = None,
     from alpaca.trading.requests import ReplaceOrderRequest
     kwargs = {}
     if stop_price is not None:
-        kwargs["stop_price"] = round(stop_price, 8)
+        kwargs["stop_price"] = _round_price(stop_price)
     if limit_price is not None:
-        kwargs["limit_price"] = round(limit_price, 8)
+        kwargs["limit_price"] = _round_price(limit_price)
     return client.replace_order_by_id(order_id, ReplaceOrderRequest(**kwargs))
 
 
@@ -496,12 +513,12 @@ def _submit_stop(client, sym: str, qty: float, exit_side, stop_price: float,
     if is_crypto:
         return client.submit_order(StopLimitOrderRequest(
             symbol=sym, qty=qty, side=exit_side, time_in_force=TimeInForce.GTC,
-            stop_price=round(stop_price, 8),
-            limit_price=round(stop_price * 0.99, 8),
+            stop_price=_round_price(stop_price),
+            limit_price=_round_price(stop_price * 0.99),
         ))
     return client.submit_order(StopOrderRequest(
         symbol=sym, qty=qty, side=exit_side,
-        time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 8),
+        time_in_force=TimeInForce.GTC, stop_price=_round_price(stop_price),
     ))
 
 
@@ -584,7 +601,7 @@ def _replace_or_submit_target(client, sym: str, qty: float, exit_side, target_pr
                 return True
             client.submit_order(LimitOrderRequest(
                 symbol=sym, qty=qty_safe, side=exit_side,
-                time_in_force=TimeInForce.GTC, limit_price=round(target_price, 8)
+                time_in_force=TimeInForce.GTC, limit_price=_round_price(target_price)
             ))
             logger.info(f"[Positions] Submitted target {sym} -> ${target_price:.6g}")
         return True

@@ -148,8 +148,8 @@ class ReplacePriceOnlyTests(unittest.TestCase):
         _replace_price_only(_C(), "abc", stop_price=8.512345678901)
         self.assertEqual(captured["id"], "abc")
         self.assertIsNone(captured["req"].qty)
-        # rounded to 8dp, the precision Alpaca accepts for crypto
-        self.assertEqual(captured["req"].stop_price, 8.51234568)
+        # 8 SIGNIFICANT figures, not 8 decimals - see _round_price
+        self.assertEqual(captured["req"].stop_price, 8.5123457)
 
     def test_price_only_replace_handles_targets(self):
         from jobs.manage_positions import _replace_price_only
@@ -163,3 +163,30 @@ class ReplacePriceOnlyTests(unittest.TestCase):
         _replace_price_only(_C(), "abc", limit_price=12.5)
         self.assertIsNone(captured["req"].qty)
         self.assertEqual(captured["req"].limit_price, 12.5)
+
+
+class PriceRoundingTests(unittest.TestCase):
+    """Prices must round by significant figures. A flat 8-decimal round
+    turns 0.0000000123 into 0.00000001 - an 18.7% error that would place a
+    stop nowhere near where it was calculated."""
+
+    def test_cheap_coins_keep_their_precision(self):
+        from jobs.manage_positions import _round_price
+        for px in (1.23e-08, 8.91e-06, 3.9e-05, 0.0001234567):
+            out = _round_price(px)
+            self.assertLess(abs(out - px) / px * 100, 0.01, f"lossy for {px}")
+
+    def test_dollar_prices_are_sane(self):
+        from jobs.manage_positions import _round_price
+        self.assertEqual(_round_price(12991.9), 12991.9)
+        self.assertAlmostEqual(_round_price(8.512345678), 8.5123457, places=7)
+
+    def test_never_exceeds_twelve_decimals(self):
+        from jobs.manage_positions import _round_price
+        out = _round_price(1.23456789e-15)
+        self.assertEqual(out, round(out, 12))
+
+    def test_zero_and_negative_pass_through(self):
+        from jobs.manage_positions import _round_price
+        self.assertEqual(_round_price(0), 0)
+        self.assertEqual(_round_price(-5), -5)

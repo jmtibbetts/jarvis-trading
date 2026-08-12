@@ -11,8 +11,13 @@ import pandas as pd
 from typing import Optional
 from dataclasses import dataclass, field
 from lib.market_regime import get_regime
+from lib import trade_side
 
 logger = logging.getLogger(__name__)
+
+# Round-trip cost ceiling as a multiple of the risk taken. Above this the
+# trade is structurally unprofitable: costs alone eat half the risk budget.
+MAX_COST_R = 0.50
 
 @dataclass
 class SizedSignal:
@@ -29,6 +34,11 @@ class SizedSignal:
     risk_reward: float
     regime_adjusted: bool
     rejection_reason: Optional[str] = None
+    # ── Added by the profitability refactor (P0) ─────────────────────────
+    decision: str = "TRADE"            # TRADE | NO_TRADE
+    loss_at_stop: float = 0.0          # dollars lost if the stop fills
+    max_allowed_loss: float = 0.0      # the risk budget it was checked against
+    side: str = "long"
 
 # ── Kelly Criterion ────────────────────────────────────────────────────────────
 
@@ -62,19 +72,29 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
     stop    = float(signal['stop_loss'] or 0)
     conf    = float(signal['confidence'] or 65)
     
-    if not entry or not target or not stop or stop >= entry or target <= entry:
+    direction = signal.get('direction', 'Long')
+    side = trade_side.normalize_side(direction)
+
+    # Direction-aware validation. The previous test (`stop >= entry or
+    # target <= entry`) encodes LONG geometry, so every short was rejected
+    # here as "Invalid price levels" before its R:R was ever computed —
+    # shorts could not be sized at all.
+    ok, why = trade_side.validate_levels(direction, entry, stop, target)
+    if not ok:
         return SizedSignal(
-            symbol=sym, direction=signal.get('direction','Long'),
+            symbol=sym, direction=direction,
             confidence=conf, entry=entry, target=target, stop=stop,
             kelly_fraction=0, kelly_capped=0, dollar_size=0, shares=0,
             risk_reward=0, regime_adjusted=False,
-            rejection_reason='Invalid price levels'
+            rejection_reason=f'Invalid price levels: {why}',
+            decision="NO_TRADE", side=side,
         )
-    
-    # Risk/Reward
-    risk_per_share   = entry - stop
-    reward_per_share = target - entry
-    rr_ratio         = reward_per_share / risk_per_share if risk_per_share > 0 else 0
+
+    # Distances are absolute — correct for both sides once the layout above
+    # has been validated.
+    risk_per_share   = trade_side.risk_distance(entry, stop)
+    reward_per_share = trade_side.reward_distance(entry, target)
+    rr_ratio         = trade_side.rr_ratio(entry, stop, target)
     
     # Crypto gets a lower R:R floor (1.0) — tighter moves, 24/7 markets
     # Equity keeps the stricter 1.5 threshold
@@ -86,9 +106,42 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
             confidence=conf, entry=entry, target=target, stop=stop,
             kelly_fraction=0, kelly_capped=0, dollar_size=0, shares=0,
             risk_reward=round(rr_ratio, 2), regime_adjusted=False,
-            rejection_reason=f'R:R too low ({rr_ratio:.2f} < {min_rr})' 
+            rejection_reason=f'R:R too low ({rr_ratio:.2f} < {min_rr})',
+            decision="NO_TRADE", side=side,
         )
     
+    # ── Transaction-cost gate ─────────────────────────────────────────────────
+    # Costs are paid in R, and R is set by the STOP DISTANCE — so the same
+    # 0.25% crypto fee is 0.20R on a 5% stop and 3.40R on a 0.3% scalp. A
+    # setup whose round-trip cost consumes more than MAX_COST_R of the risk
+    # taken cannot pay for itself no matter how good the signal is, so it is
+    # rejected here rather than sized. This is deliberately a structural
+    # check (cost vs risk), not an expectancy check — calibrated P(win)
+    # arrives in P1 and will refine it into full net-EV rejection.
+    try:
+        from lib.transaction_costs import estimate_costs
+        costs = estimate_costs(
+            sym, entry, stop,
+            order_type=signal.get("order_type", "market"),
+            is_short=(side == trade_side.SHORT),
+            hold_hours=float(signal.get("expected_hold_hours") or 0),
+            funding_rate_8h=signal.get("funding_rate_8h"),
+        )
+        cost_r = costs.get("total_r")
+        if cost_r is not None and cost_r > MAX_COST_R:
+            return SizedSignal(
+                symbol=sym, direction=direction, confidence=conf,
+                entry=entry, target=target, stop=stop,
+                kelly_fraction=0, kelly_capped=0, dollar_size=0, shares=0,
+                risk_reward=round(rr_ratio, 2), regime_adjusted=False,
+                rejection_reason=(f'Transaction costs {cost_r:.2f}R exceed the '
+                                  f'{MAX_COST_R:.2f}R ceiling — the stop is too tight '
+                                  f'to pay for spread, fees and slippage'),
+                decision="NO_TRADE", side=side,
+            )
+    except Exception as e:
+        logger.debug(f"[Risk] Cost gate skipped for {sym}: {e}")
+
     # ── Fixed Fractional ──────────────────────────────────────────────────────
     # Max loss = 2% of equity
     max_loss_dollars = equity * max_risk_per_trade
@@ -120,16 +173,48 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
     base_dollars = min(dollar_by_risk, half_kelly_dollars)
     final_dollars = base_dollars * regime_mult * conf_mult
     
-    # Hard caps
-    final_dollars = max(200.0, min(final_dollars, equity * 0.05))  # $200 min, 5% equity max
-    
-    shares = final_dollars / entry
+    # Cap by equity share. The old line also applied max(200.0, ...), a FLOOR
+    # that overrode the risk budget: when the risk math said $50, it deployed
+    # $200 anyway — four times the intended risk. A minimum position size is
+    # not a risk control, it is a violation of one. The correct size for a
+    # trade too small to express is zero (Phase 3: NO_TRADE).
+    final_dollars = min(final_dollars, equity * 0.05)
+
+    shares = final_dollars / entry if entry > 0 else 0.0
     is_crypto = '/' in sym
     if not is_crypto:
-        shares = max(1.0, round(shares))
+        # Whole shares only; rounding DOWN so the risk invariant cannot be
+        # breached by rounding up into a bigger position than budgeted.
+        shares = float(int(shares))
         final_dollars = shares * entry
     else:
         shares = round(shares, 8)
+        final_dollars = shares * entry
+
+    # ── The invariant: loss at the stop must not exceed the risk budget ──
+    realized_loss_at_stop = trade_side.loss_at_stop(shares, entry, stop)
+    if shares <= 0 or final_dollars <= 0:
+        return SizedSignal(
+            symbol=sym, direction=direction, confidence=conf,
+            entry=entry, target=target, stop=stop,
+            kelly_fraction=round(kf, 4), kelly_capped=0, dollar_size=0, shares=0,
+            risk_reward=round(rr_ratio, 2), regime_adjusted=True,
+            rejection_reason='Position rounds to zero at this risk budget',
+            decision="NO_TRADE", side=side,
+            loss_at_stop=0.0, max_allowed_loss=round(max_loss_dollars, 2),
+        )
+    if realized_loss_at_stop > max_loss_dollars * 1.001:   # tolerance for float noise
+        return SizedSignal(
+            symbol=sym, direction=direction, confidence=conf,
+            entry=entry, target=target, stop=stop,
+            kelly_fraction=round(kf, 4), kelly_capped=0, dollar_size=0, shares=0,
+            risk_reward=round(rr_ratio, 2), regime_adjusted=True,
+            rejection_reason=(f'Loss at stop ${realized_loss_at_stop:,.2f} exceeds '
+                              f'risk budget ${max_loss_dollars:,.2f}'),
+            decision="NO_TRADE", side=side,
+            loss_at_stop=round(realized_loss_at_stop, 2),
+            max_allowed_loss=round(max_loss_dollars, 2),
+        )
     
     return SizedSignal(
         symbol=sym, direction=signal.get('direction','Long'),
@@ -139,7 +224,10 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
         dollar_size=round(final_dollars, 2),
         shares=shares,
         risk_reward=round(rr_ratio, 2),
-        regime_adjusted=regime_mult < 1.0
+        regime_adjusted=regime_mult < 1.0,
+        decision="TRADE", side=side,
+        loss_at_stop=round(realized_loss_at_stop, 2),
+        max_allowed_loss=round(max_loss_dollars, 2),
     )
 
 

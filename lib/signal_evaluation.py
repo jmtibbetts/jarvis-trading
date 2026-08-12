@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pandas as pd
+from lib import trade_side
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -34,7 +35,7 @@ def evaluate_signal_path(signal: dict, frame: pd.DataFrame) -> dict | None:
     stop = float(signal.get("stop_loss") or 0)
     if entry <= 0 or target <= 0 or stop <= 0:
         return None
-    short = str(signal.get("direction") or "").lower().startswith("short")
+    short = trade_side.is_short(signal.get("direction"))
     expires_at = _parse_time(signal.get("expires_at"))
 
     first_bar = data.iloc[0]

@@ -26,6 +26,7 @@ tested without a broker.
 from __future__ import annotations
 
 import logging
+from lib import trade_side
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ CONFLICT_CLOSE_CONFIDENCE = 75
 
 
 def _is_short(direction: str | None) -> bool:
-    return str(direction or "").lower().startswith("short")
+    return trade_side.is_short(direction)
 
 
 def _pct_diff(a: float, b: float) -> float:

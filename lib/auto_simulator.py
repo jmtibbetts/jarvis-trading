@@ -13,6 +13,7 @@ from app.database import (
     AutoSimPortfolio, AutoSimPosition, AutoSimTrade, DEFAULT_USER_ID,
     MarketAsset, TradingSignal, UserPreference, get_db, new_id, now_iso,
 )
+from lib import trade_side
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ _AUTO_SIM_LOCK = threading.Lock()
 
 
 def _side(direction: str | None) -> str:
-    return "short" if "short" in str(direction or "").lower() else "long"
+    return trade_side.normalize_side(direction)
 
 
 def _leverage(direction: str | None) -> float:

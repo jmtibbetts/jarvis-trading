@@ -24,6 +24,7 @@ codebase's standing discipline:
 from __future__ import annotations
 
 import math
+from lib import trade_side
 
 MIN_DECIDED = 10
 SCORE_BANDS = ((0, 50, "score_under_50"), (50, 70, "score_50_70"), (70, 101, "score_70_plus"))
@@ -41,7 +42,7 @@ def _score_band(score: float | None) -> str:
 def bucket_key(row: dict) -> tuple:
     """Bucket by the conditions known at generation time: composite-score
     band, asset class, and direction."""
-    direction = "short" if str(row.get("direction") or "").lower().startswith("short") else "long"
+    direction = trade_side.normalize_side(row.get("direction"))
     return (
         _score_band(row.get("composite_score")),
         (row.get("asset_class") or "unknown").lower(),
@@ -55,7 +56,7 @@ def realized_move_pct(row: dict) -> float | None:
     if entry <= 0:
         return None
     outcome = row.get("outcome")
-    short = str(row.get("direction") or "").lower().startswith("short")
+    short = trade_side.is_short(row.get("direction"))
     if outcome == "TARGET_HIT":
         target = row.get("target_price") or 0
         if target <= 0:

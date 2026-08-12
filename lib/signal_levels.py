@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from lib import trade_side
 
 
 SCALP_TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m"}
@@ -34,7 +35,7 @@ def clamp_stop_to_atr(signal: dict, atr_pct: float | None) -> tuple[dict, bool, 
     if not entry or not stop or not atr_pct or atr_pct <= 0:
         return signal, False, "missing entry/stop/atr"
 
-    is_short = "short" in str(signal.get("direction") or "").lower()
+    is_short = trade_side.is_short(signal.get("direction"))
     stop_distance_pct = abs(entry - stop) / entry * 100.0
     min_distance_pct = atr_pct * MIN_STOP_ATR_MULT
     max_distance_pct = atr_pct * MAX_STOP_ATR_MULT
@@ -69,7 +70,7 @@ def validate_signal_levels(signal: dict) -> tuple[bool, str]:
     if not all(math.isfinite(value) and value > 0 for value in (entry, target, stop)):
         return False, "price levels must be finite and positive"
 
-    is_short = "short" in str(signal.get("direction") or "").lower()
+    is_short = trade_side.is_short(signal.get("direction"))
     if is_short and not target < entry < stop:
         return False, "short requires target < entry < stop"
     if not is_short and not stop < entry < target:

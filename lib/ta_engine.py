@@ -97,6 +97,28 @@ def _obv(close, volume):
     return float(v.iloc[-1]), float(v.iloc[-5]) if len(v) >= 5 else float(v.iloc[0])
 
 
+# ── MACD crossover semantics ─────────────────────────────────────────────
+# compute_timeframe emits crossover as one of "bullish" / "bearish" / "none".
+# "none" is a NON-EMPTY string and therefore TRUTHY, so `if macd["crossover"]`
+# reports a crossover on every bar that has none. That exact bug marked a
+# crossover for every symbol in every LLM batch prompt (ta_engine) and in
+# every learning pattern signature (learning_engine) — the model and the
+# pattern memory were both told a signal existed that did not.
+# Use these helpers instead of testing the raw value for truthiness.
+CROSSOVER_NONE = "none"
+
+
+def has_crossover(macd: dict | None) -> bool:
+    """True only for a REAL crossover ("bullish" or "bearish")."""
+    return str((macd or {}).get("crossover") or CROSSOVER_NONE) in ("bullish", "bearish")
+
+
+def crossover_direction(macd: dict | None) -> str | None:
+    """"bullish" / "bearish", or None when there is no crossover."""
+    value = str((macd or {}).get("crossover") or CROSSOVER_NONE)
+    return value if value in ("bullish", "bearish") else None
+
+
 def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     if df is None or len(df) < 10:
         return {"error": "insufficient data", "tf": tf_label}
@@ -311,7 +333,7 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
         bias = d.get("bias", "?")[:1].upper()   # B/S/N one char
         macd = d.get("macd") or {}
         mt   = (macd.get("trend") or "?")[:1].upper()   # U/D one char
-        mc   = "X" if macd.get("crossover") else ""
+        mc   = "X" if has_crossover(macd) else ""
         bb   = d.get("bollinger_bands") or {}
         bbp  = (bb.get("position") or "?")[:3]          # low/mid/up
         vol  = d.get("volume") or {}

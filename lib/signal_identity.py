@@ -1,8 +1,9 @@
 """Stable identity rules for replacing same-side signals without hiding hedges."""
+from lib import trade_side
 
 
 def direction_side(direction: str | None) -> str:
-    return "short" if "short" in str(direction or "").lower() else "long"
+    return trade_side.normalize_side(direction)
 
 
 def signal_identity(symbol: str | None, direction: str | None,

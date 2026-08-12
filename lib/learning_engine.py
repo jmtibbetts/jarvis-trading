@@ -146,7 +146,10 @@ def _fingerprint_ta(ta_profile: dict, direction: str) -> tuple[str, str]:
     rsi_sig     = tf_data.get("rsi_signal", "neutral")
     macd        = tf_data.get("macd") or {}
     macd_trend  = macd.get("trend", "unknown")
-    macd_cross  = macd.get("crossover", False)
+    # "none" is truthy — see lib/ta_engine.has_crossover. Storing the raw
+    # value kept pattern signatures claiming a crossover on every bar.
+    from lib.ta_engine import crossover_direction
+    macd_cross  = crossover_direction(macd)
     bb          = tf_data.get("bollinger_bands") or {}
     bb_pos      = bb.get("position", "mid")
     vol         = tf_data.get("volume") or {}
@@ -187,7 +190,7 @@ def _fingerprint_ta(ta_profile: dict, direction: str) -> tuple[str, str]:
     # Human-readable description
     parts = [f"Dir={conditions['dir'].upper()}"]
     parts.append(f"RSI={rsi_bucket}")
-    parts.append(f"MACD={macd_trend}" + (" ✗cross" if macd_cross else ""))
+    parts.append(f"MACD={macd_trend}" + (f" ✗{macd_cross}cross" if macd_cross else ""))
     parts.append(f"BB={bb_pos}")
     if vol_surge: parts.append("VOL_SURGE")
     if vol_dry:   parts.append("VOL_DRY")

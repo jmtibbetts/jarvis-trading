@@ -114,24 +114,45 @@ def _private(endpoint: str, params: dict | None = None) -> dict:
 
 
 def check_connection() -> dict:
-    """Is the key valid, and is it genuinely read-only?
+    """Which scopes this key actually has.
 
-    Verifying the PERMISSION is the point: a key with trading rights would
-    work here identically, so the operator should confirm what they issued.
-    This reports what the key can read and reminds that write scopes cannot
-    be detected from a successful read.
+    An earlier version probed ONE endpoint (Balance) and reported total
+    failure when it was denied — but Kraken grants permissions per scope,
+    so a key can read positions and history while lacking Query Funds. A
+    single-endpoint health check turns "partially scoped" into "broken",
+    which sends you hunting for a signing bug that is not there.
     """
     if not is_configured():
         return {"connected": False, "reason": "no credentials in .env"}
-    out = _private("/0/private/Balance")
-    if not out["ok"]:
-        return {"connected": False, "reason": out["reason"]}
-    balances = {k: float(v) for k, v in (out["result"] or {}).items() if float(v) != 0}
+
+    probes = {
+        "Query Funds": "/0/private/Balance",
+        "Query Funds (margin)": "/0/private/TradeBalance",
+        "Open Orders": "/0/private/OpenOrders",
+        "Closed Orders": "/0/private/ClosedOrders",
+        "Open Positions": "/0/private/OpenPositions",
+        "Trades History": "/0/private/TradesHistory",
+        "Ledger / Volume": "/0/private/TradeVolume",
+    }
+    granted, denied = {}, {}
+    for label, endpoint in probes.items():
+        out = _private(endpoint)
+        (granted if out.get("ok") else denied)[label] = out.get("reason", "ok")
+
+    # Any successful signed call proves the key and secret are correct; a
+    # denial after that is a SCOPE question, not an authentication one.
+    authenticated = bool(granted)
     return {
-        "connected": True,
-        "assets_with_balance": len(balances),
-        "note": ("A successful read does NOT prove the key lacks trade permission. "
-                 "Confirm in Kraken that only 'Query' scopes were granted."),
+        "connected": authenticated,
+        "authenticated": authenticated,
+        "granted_scopes": sorted(granted),
+        "missing_scopes": sorted(denied),
+        "reason": (None if authenticated else
+                   "; ".join(sorted(set(denied.values())))),
+        "note": ("Signing is verified by any granted scope. Missing ones are "
+                 "permission checkboxes on the key, not a credential problem. "
+                 "A successful read still does NOT prove the key lacks TRADE "
+                 "permission — only Kraken's own scope screen shows that."),
     }
 
 

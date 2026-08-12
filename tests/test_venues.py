@@ -207,3 +207,66 @@ class ReadOnlyAccountTests(unittest.TestCase):
         self.assertEqual(sig_a, sig_b)
         self.assertNotEqual(sig_a, _sign("/0/private/Balance", {"nonce": 1234567891}, secret))
         self.assertEqual(len(base64.b64decode(sig_a)), 64)   # SHA-512 digest
+
+
+class TradeFlowTests(unittest.TestCase):
+    """Count and volume answer different questions. Observed live on BTC:
+    11 buy prints vs 2 sell prints, yet volume imbalance -0.800 — eleven
+    small buys against two large sells. A count-based read says buying;
+    the weighted read says the opposite, and the weighted read is right."""
+
+    def setUp(self):
+        from lib import kraken_stream
+        from collections import deque
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        kraken_stream._trades["TEST/USD"] = deque([
+            *[{"price": 100.0, "qty": 0.01, "side": "buy", "at": now} for _ in range(11)],
+            *[{"price": 100.0, "qty": 0.50, "side": "sell", "at": now} for _ in range(2)],
+        ], maxlen=500)
+
+    def tearDown(self):
+        from lib import kraken_stream
+        kraken_stream._trades.pop("TEST/USD", None)
+        kraken_stream._quotes.pop("TEST/USD", None)
+
+    def test_volume_imbalance_contradicts_the_count(self):
+        from lib.kraken_stream import trade_flow
+        f = trade_flow("TEST/USD")
+        self.assertGreater(f["buy_count"], f["sell_count"])   # looks like buying
+        self.assertLess(f["flow_imbalance"], 0)               # is actually selling
+
+    def test_flow_imbalance_is_bounded(self):
+        from lib.kraken_stream import trade_flow
+        self.assertGreaterEqual(trade_flow("TEST/USD")["flow_imbalance"], -1.0)
+        self.assertLessEqual(trade_flow("TEST/USD")["flow_imbalance"], 1.0)
+
+    def test_largest_print_is_surfaced(self):
+        from lib.kraken_stream import trade_flow
+        self.assertEqual(trade_flow("TEST/USD")["largest"], 0.5)
+
+    def test_unknown_symbol_returns_none_not_zeros(self):
+        from lib.kraken_stream import trade_flow
+        self.assertIsNone(trade_flow("NEVERSEEN/USD"))
+
+    def test_live_spread_needs_a_real_two_sided_quote(self):
+        from lib import kraken_stream
+        from datetime import datetime, timezone
+        kraken_stream._quotes["TEST/USD"] = {"bid": 0, "ask": 0,
+                                             "at": datetime.now(timezone.utc)}
+        spread, why = kraken_stream.live_spread_pct("TEST/USD")
+        self.assertIsNone(spread)
+        self.assertIn("no live quote", why)
+
+    def test_crossed_book_is_refused(self):
+        from lib import kraken_stream
+        from datetime import datetime, timezone
+        kraken_stream._quotes["TEST/USD"] = {"bid": 101.0, "ask": 100.0,
+                                             "at": datetime.now(timezone.utc)}
+        spread, why = kraken_stream.live_spread_pct("TEST/USD")
+        self.assertIsNone(spread)
+        self.assertIn("crossed", why)
+
+    def test_stream_reports_status_without_being_started(self):
+        from lib.kraken_stream import status
+        self.assertIn("connected", status())

@@ -984,6 +984,12 @@ export const api = {
       purchases: number; sales: number; other: number; trade_count: number;
       range_low_total: number; range_high_total: number; trades: CongressTrade[];
     }[]; note: string }>(`/congress/by-official?days=${days}&limit=${limit}`),
+  feeComparison: (notional = 10000, contracts = 1) =>
+    get<{
+      notional: number; contracts: number; region: string; cheapest: string | null;
+      rows: { venue: string; round_trip_usd: number; pct_of_notional: number; note: string }[];
+      note: string;
+    }>(`/venue/fee-comparison?notional=${notional}&contracts=${contracts}`),
   krakenVenue: () =>
     get<{
       venue: string; paper_venue: string;

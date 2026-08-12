@@ -851,6 +851,63 @@ def _build_provider_status() -> dict:
     return {"providers": providers, "checked_at": now.isoformat()}
 
 
+@router.get("/venue/fee-comparison")
+def get_fee_comparison(notional: float = 10_000.0, contracts: float = 1.0):
+    """What a round trip costs at each venue for a given trade size.
+
+    Exists because the venues price on incompatible SHAPES: spot charges a
+    percentage of notional (scale-neutral), while US perpetuals and CME
+    products charge per contract (regressive). Which venue is cheapest
+    therefore depends entirely on size, and the answer flips — so a single
+    "our fee is X" figure would be misleading at some size no matter which
+    number was chosen.
+    """
+    import os
+    from lib.venues import (fee_for, us_perpetual_fee, us_futures_fee,
+                            futures_fee_for, us_fee_as_pct_of_notional)
+
+    region = (os.getenv("VENUE_REGION") or "international").lower()
+    rows = []
+
+    def add(label, dollars, note=""):
+        rows.append({
+            "venue": label,
+            "round_trip_usd": round(dollars, 4),
+            "pct_of_notional": round(us_fee_as_pct_of_notional(notional, dollars) * 100, 5),
+            "note": note,
+        })
+
+    for v in ("alpaca", "kraken"):
+        rate, why = fee_for(v, asset_class="crypto")
+        add(f"{v} spot", notional * rate * 2.0, why)
+
+    if region == "us":
+        fee, why = us_perpetual_fee(contracts)
+        add("kraken US perpetual", fee, why)
+        for sym in ("MES=F", "ES=F"):
+            f, why2 = us_futures_fee(sym, contracts)
+            if f is not None:
+                add(f"kraken CME {sym}", f, why2)
+    else:
+        rate, why = futures_fee_for("BTC/USD")
+        if rate is not None:
+            add("kraken perpetual", notional * rate * 2.0, why)
+
+    rows.sort(key=lambda r: r["round_trip_usd"])
+    return {
+        "notional": notional,
+        "contracts": contracts,
+        "region": region,
+        "cheapest": rows[0]["venue"] if rows else None,
+        "rows": rows,
+        "note": (
+            "Percentage venues are scale-neutral; per-contract venues are regressive. "
+            "The cheapest venue therefore CHANGES with trade size — compare at the size "
+            "you actually trade, not at a default."
+        ),
+    }
+
+
 @router.get("/venue/kraken")
 def get_kraken_venue():
     """Everything the desk knows about the Kraken venue, for the UI.

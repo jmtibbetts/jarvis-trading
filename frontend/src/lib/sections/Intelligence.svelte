@@ -41,6 +41,12 @@
   let institutional = $state<InstitutionalAccumulation | null>(null);
   let congress = $state<CongressTradesResponse | null>(null);
   let congressActivity = $state<CongressActivityResponse | null>(null);
+  let fees = $state<Awaited<ReturnType<typeof api.feeComparison>> | null>(null);
+  let feeNotional = $state(10000);
+
+  async function loadFees() {
+    fees = await api.feeComparison(feeNotional).catch(() => fees);
+  }
   let kraken = $state<Awaited<ReturnType<typeof api.krakenVenue>> | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
   let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
@@ -161,7 +167,10 @@
     institutional = inst;
     congress = cg;
     congressActivity = cga;
-    if (CD) api.krakenVenue().then((r) => (kraken = r)).catch(() => {});
+    if (CD) {
+      api.krakenVenue().then((r) => (kraken = r)).catch(() => {});
+      loadFees();
+    }
     if (SM) {
       api.congressByOfficial(365, 40).then((r) => (congressOfficials = r)).catch(() => {});
     }
@@ -1012,6 +1021,44 @@
   {#if view === "cryptodesk"}
   <div class="span-12">
     <Panel
+      title="Execution Cost by Venue"
+      meta={fees ? `${fees.region} pricing · cheapest: ${fees.cheapest}` : "—"}
+    >
+      <div class="fee-size">
+        <span class="dim">Round-trip cost on a</span>
+        {#each [500, 2000, 10000, 50000, 100000] as n (n)}
+          <button
+            class="fee-btn"
+            class:on={feeNotional === n}
+            onclick={() => { feeNotional = n; loadFees(); }}
+          >${n.toLocaleString()}</button>
+        {/each}
+        <span class="dim">position</span>
+      </div>
+
+      {#if fees}
+        <table class="tbl">
+          <thead>
+            <tr><th>Venue</th><th class="num">Round trip</th><th class="num">% of notional</th></tr>
+          </thead>
+          <tbody>
+            {#each fees.rows as r, i (r.venue)}
+              <tr class:cheapest={i === 0}>
+                <td class="sym">{r.venue}{#if i === 0}<span class="fee-best">cheapest</span>{/if}</td>
+                <td class="num">${r.round_trip_usd.toFixed(2)}</td>
+                <td class="num dim">{r.pct_of_notional}%</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <div class="fee-foot dim">{fees.note}</div>
+      {:else}
+        <div class="empty">Loading fee comparison…</div>
+      {/if}
+    </Panel>
+  </div>
+  <div class="span-12">
+    <Panel
       title="Kraken Venue"
       dotColor={kraken?.stream.connected ? "var(--good)" : "var(--warm)"}
       meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : "—"}
@@ -1807,6 +1854,49 @@
     height: 100%;
     background: var(--accent);
     border-radius: 3px;
+  }
+  .fee-size {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 10.5px;
+    margin-bottom: 10px;
+  }
+  .fee-btn {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--ink-faint);
+    font: inherit;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .fee-btn.on {
+    border-color: var(--accent);
+    color: var(--ink);
+    background: rgba(124, 154, 255, 0.12);
+  }
+  tr.cheapest td {
+    color: var(--good);
+  }
+  .fee-best {
+    font-size: 8.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: rgba(61, 220, 151, 0.15);
+    border: 1px solid var(--good);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: 7px;
+  }
+  .fee-foot {
+    font-size: 9.5px;
+    line-height: 1.5;
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
   }
   .kv-head {
     display: flex;

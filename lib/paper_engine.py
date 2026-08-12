@@ -129,8 +129,8 @@ def score_leverage(score: float | None, *, asset_class: str | None = None,
     return result if explain else result["leverage"]
 
 
-def venue_round_trip_fee(symbol: str, notional: float,
-                         leverage: float = 1.0) -> tuple[float, str]:
+def venue_round_trip_fee(symbol: str, notional: float, leverage: float = 1.0,
+                         entry_price: float = 0.0) -> tuple[float, str]:
     """Dollar cost of opening AND closing this position at the real venue.
 
     Paper trading charged nothing, so every simulated result was optimistic
@@ -149,6 +149,17 @@ def venue_round_trip_fee(symbol: str, notional: float,
     try:
         # Above 1x this is a perpetual, not a spot trade — price it that way.
         if leverage > 1.0:
+            import os
+            if (os.getenv("VENUE_REGION") or "").lower() == "us":
+                # US perpetuals are PER CONTRACT, and contracts are counted
+                # in units of the contract size — not in dollars of notional.
+                # Falling back to a spot percentage here would overstate the
+                # cost of a leveraged trade by two orders of magnitude.
+                from lib.venues import us_perpetual_fee, kraken_futures_spec
+                spec = kraken_futures_spec(symbol)
+                contract_size = float((spec or {}).get("contract_size") or 1) or 1.0
+                contracts = max(1.0, abs(notional) / (entry_price * contract_size))                     if entry_price else 1.0
+                return us_perpetual_fee(contracts)
             from lib.venues import futures_fee_for
             rate, why = futures_fee_for(symbol, maker=False)
             if rate is not None:
@@ -254,7 +265,7 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
 
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
     loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)
-    fees, fee_why = venue_round_trip_fee(symbol, notional, leverage)
+    fees, fee_why = venue_round_trip_fee(symbol, notional, leverage, entry)
     return {
         "ok": True,
         "qty": qty,

@@ -820,21 +820,16 @@ def _build_provider_status() -> dict:
     except Exception as e:
         add("CoinGecko", False, str(e)[:60])
 
-    # FX — Frankfurter (keyless, no quota) reading the lib's hourly cache.
-    # Reported as "FX" rather than "AllRates": AllRatesToday is now an
-    # optional extra whose exhausted free quota must not show the desk a
-    # red light when rates are in fact flowing.
+    # Frankfurter — the FX source, listed by name alongside every other
+    # provider. Keyless and quota-free, read from the lib's hourly cache.
     try:
-        from lib.fx_rates import fetch_rates, allrates_quota_state
+        from lib.fx_rates import fetch_rates
         latest = fetch_rates("USD", ["EUR"])
         ok = bool((latest or {}).get("rates", {}).get("EUR"))
-        qs = allrates_quota_state()
-        extra = "" if not qs["configured"] else (
-            " · AllRates spare: ok" if qs["usable"] else f" · AllRates {qs['reason']}"
-        )
-        add("FX", ok, (f"ECB via Frankfurter ({latest.get('date')})" if ok else "no data") + extra)
+        add("Frankfurter", ok,
+            f"ECB reference rates ({latest.get('date')})" if ok else "no FX data")
     except Exception as e:
-        add("FX", False, str(e)[:60])
+        add("Frankfurter", False, str(e)[:60])
 
     # Web-search MCPs — initialize-level check via list_tools (cached inside
     # mcp_client per process; failures return empty rather than raising)

@@ -29,6 +29,10 @@ FRANKFURTER_BASE = "https://api.frankfurter.dev/v1"
 ALLRATES_BASE = "https://allratestoday.com/api"
 
 CACHE_TTL_SECONDS = 3600          # ECB publishes daily; hourly refresh is generous
+# A FAILURE must not be cached for the full hour — Frankfurter returned a
+# transient 522 during testing, and caching that alongside good data would
+# have blanked the FX panel for an hour over a blip. Retry failures soon.
+FAIL_TTL_SECONDS = 120
 _cache: dict[str, tuple[datetime, dict | None]] = {}
 _allrates_disabled_reason: str | None = None
 
@@ -95,9 +99,22 @@ def fx_pair_from_symbol(symbol: str) -> tuple[str, str] | None:
 
 def _cached(key: str):
     hit = _cache.get(key)
-    if hit and (datetime.now(timezone.utc) - hit[0]).total_seconds() < CACHE_TTL_SECONDS:
-        return hit[1]
-    return None
+    if not hit:
+        return None
+    age = (datetime.now(timezone.utc) - hit[0]).total_seconds()
+    ttl = CACHE_TTL_SECONDS if hit[1] is not None else FAIL_TTL_SECONDS
+    return hit[1] if age < ttl else None
+
+
+def last_known(key_prefix: str):
+    """Most recent SUCCESSFUL payload for a key, however old. Used so a
+    provider blip degrades to yesterday's rates rather than an empty panel."""
+    best = None
+    for k, (at, val) in _cache.items():
+        if k.startswith(key_prefix) and val is not None:
+            if best is None or at > best[0]:
+                best = (at, val)
+    return best[1] if best else None
 
 
 def _store(key: str, value):
@@ -116,10 +133,14 @@ def fetch_rates(base: str, symbols: list[str]) -> dict | None:
                       params={"base": base, "symbols": ",".join(symbols)}, timeout=20)
         if r.status_code == 200:
             return _store(key, r.json())
-        logger.info(f"[FX] Frankfurter latest -> {r.status_code}: {r.text[:100]}")
+        logger.info(f"[FX] Frankfurter latest -> {r.status_code}")
     except Exception as e:
         logger.debug(f"[FX] Frankfurter latest failed: {e}")
-    return _store(key, None)
+    _store(key, None)
+    stale = last_known(f"latest:{base}:")
+    if stale:
+        logger.info(f"[FX] serving last known {base} rates while Frankfurter is unreachable")
+    return stale
 
 
 def fetch_series(base: str, symbols: list[str], days: int = 30) -> dict | None:

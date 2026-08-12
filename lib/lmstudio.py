@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
-TIMEOUT       = 45.0
+# One GPU serving 4 parallel slots means each individual request takes
+# materially longer than it would alone — the old 90s ceiling produced
+# "LLM timeout after 56/66/90s" failures that tripped the circuit breaker
+# and cascaded into every queued caller. Sized for the parallel case.
+TIMEOUT       = 180.0
 
 # Max tokens to request on retry with /no_think — must stay under LM Studio's hard server cap.
 # Set conservatively so the model has budget for actual output after thinking tokens are stripped.

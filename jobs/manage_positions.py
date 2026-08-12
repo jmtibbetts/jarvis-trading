@@ -1064,6 +1064,12 @@ def run():
                 n_cancelled = cancel_open_orders_for_symbol(alpaca_sym)
                 if n_cancelled:
                     logger.info(f"[Positions] Cancelled {n_cancelled} open order(s) for {sym} before LLM close")
+                    # A cancelled protective order still RESERVES the asset for a
+                    # moment at the broker; closing immediately failed with
+                    # "insufficient balance for ARB (available: 0.000000175)".
+                    # Give the cancel a beat to settle before selling.
+                    import time as _t
+                    _t.sleep(1.5)
                 close_order = close_position(alpaca_sym)
                 filled, close_order = _wait_for_close_fill(close_order)
                 if not filled:

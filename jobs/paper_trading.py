@@ -466,6 +466,7 @@ Respond ONLY with valid JSON (no markdown):
 {{"action": "HOLD"|"TIGHTEN_STOP"|"EXIT", "new_stop_pct": null_or_float, "reasoning": "1-2 sentences"}}"""
 
         try:
+            _wait_out_llm_cooldown()
             raw = call_lm_studio(
                 prompt,
                 system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.",
@@ -569,6 +570,30 @@ def _get_pending_signals(db) -> list:
     return result
 
 
+def _wait_out_llm_cooldown(max_wait: float = 20.0) -> None:
+    """Sleep through an open circuit rather than failing instantly.
+
+    Entry evaluation runs ~30 symbols in a burst; when the breaker was open
+    every one of them failed inside the same 0.2 seconds ("LLM unavailable
+    — using original confidence" x30), which looked like the LLM was barely
+    being used. Waiting a few seconds lets the batch actually get answers."""
+    try:
+        from lib.lmstudio import get_llm_cooldown
+        import time as _t
+        waited = 0.0
+        while waited < max_wait:
+            cd = get_llm_cooldown()
+            if cd <= 0:
+                return
+            nap = min(cd + 0.25, max_wait - waited)
+            if nap <= 0:
+                return
+            _t.sleep(nap)
+            waited += nap
+    except Exception:
+        return
+
+
 def _evaluate_entry_with_ai(sig: dict, current_price: float, threat_ctx: str, news_ctx: str) -> dict:
     from lib.lmstudio import call_lm_studio
     from lib.futures_data import FUTURES_UNIVERSE
@@ -620,6 +645,7 @@ Respond ONLY with valid JSON (no markdown):
 approved=true means enter the paper trade. Score below {min_conf} should set approved=false."""
 
     try:
+        _wait_out_llm_cooldown()
         raw = call_lm_studio(
             prompt,
             system="You are a precise trading analyst. Respond only with the JSON object, no markdown.",

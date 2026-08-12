@@ -460,6 +460,25 @@ def _safe_qty(qty: float, is_crypto: bool) -> float:
     return max(0, int(math.floor(qty + 1e-9)))
 
 
+def _replace_price_only(client, order_id: str, *, stop_price: float = None,
+                        limit_price: float = None):
+    """Re-price an existing protective order WITHOUT touching its quantity.
+
+    ReplaceOrderRequest.qty is typed as an integer in the Alpaca SDK, so a
+    fractional crypto quantity (118.894856902) fails validation outright:
+    "Input should be a valid integer, got a number with a fractional part".
+    Every crypto stop tighten failed on this. Quantity does not need to
+    change when only the price moves — the order already protects the whole
+    position — so it is simply omitted."""
+    from alpaca.trading.requests import ReplaceOrderRequest
+    kwargs = {}
+    if stop_price is not None:
+        kwargs["stop_price"] = round(stop_price, 8)
+    if limit_price is not None:
+        kwargs["limit_price"] = round(limit_price, 8)
+    return client.replace_order_by_id(order_id, ReplaceOrderRequest(**kwargs))
+
+
 def _submit_stop(client, sym: str, qty: float, exit_side, stop_price: float,
                  is_crypto: bool):
     """Submit a protective stop in the ONLY form the venue accepts.
@@ -531,7 +550,7 @@ def _replace_or_submit_stop(client, sym: str, qty: float, exit_side, stop_price:
             if current and stop_price < current:
                 logger.info(f"[Positions] Ignored stop update for {sym}: ${stop_price:.6g} would loosen existing ${current:.6g}")
                 return True
-            client.replace_order_by_id(existing.id, ReplaceOrderRequest(qty=qty_safe, stop_price=round(stop_price, 8)))
+            _replace_price_only(client, existing.id, stop_price=stop_price)
             logger.info(f"[Positions] Replaced stop {sym} -> ${stop_price:.6g}")
         else:
             _submit_stop(client, sym, qty_safe, exit_side, stop_price, is_crypto)
@@ -557,7 +576,7 @@ def _replace_or_submit_target(client, sym: str, qty: float, exit_side, target_pr
             current = float(getattr(existing, "limit_price", 0) or 0)
             if not _price_changed_enough(current, target_price):
                 return True
-            client.replace_order_by_id(existing.id, ReplaceOrderRequest(qty=qty_safe, limit_price=round(target_price, 8)))
+            _replace_price_only(client, existing.id, limit_price=target_price)
             logger.info(f"[Positions] Replaced target {sym} -> ${target_price:.6g}")
         else:
             if not (force or ALLOW_STANDALONE_TAKE_PROFIT):

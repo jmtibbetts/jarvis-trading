@@ -124,3 +124,42 @@ class CryptoOrderSymbolFormatTests(unittest.TestCase):
         client = SimpleNamespace(get_orders=lambda request: [broken, good])
         found_stop, _ = _open_exit_orders(client, "ARBUSD", "sell")
         self.assertIs(found_stop, good)
+
+
+class ReplacePriceOnlyTests(unittest.TestCase):
+    """ReplaceOrderRequest.qty is an int in the SDK, so passing a fractional
+    crypto quantity fails validation. Re-pricing must omit qty entirely."""
+
+    def test_fractional_qty_would_have_failed_validation(self):
+        from alpaca.trading.requests import ReplaceOrderRequest
+        with self.assertRaises(Exception):
+            ReplaceOrderRequest(qty=118.894856902, stop_price=8.5)
+
+    def test_price_only_replace_omits_qty(self):
+        from jobs.manage_positions import _replace_price_only
+        captured = {}
+
+        class _C:
+            def replace_order_by_id(self, oid, req):
+                captured["id"] = oid
+                captured["req"] = req
+                return req
+
+        _replace_price_only(_C(), "abc", stop_price=8.512345678901)
+        self.assertEqual(captured["id"], "abc")
+        self.assertIsNone(captured["req"].qty)
+        # rounded to 8dp, the precision Alpaca accepts for crypto
+        self.assertEqual(captured["req"].stop_price, 8.51234568)
+
+    def test_price_only_replace_handles_targets(self):
+        from jobs.manage_positions import _replace_price_only
+        captured = {}
+
+        class _C:
+            def replace_order_by_id(self, oid, req):
+                captured["req"] = req
+                return req
+
+        _replace_price_only(_C(), "abc", limit_price=12.5)
+        self.assertIsNone(captured["req"].qty)
+        self.assertEqual(captured["req"].limit_price, 12.5)

@@ -449,6 +449,28 @@ def _safe_qty(qty: float, is_crypto: bool) -> float:
     return max(0, int(math.floor(qty + 1e-9)))
 
 
+def _submit_stop(client, sym: str, qty: float, exit_side, stop_price: float,
+                 is_crypto: bool):
+    """Submit a protective stop in the ONLY form the venue accepts.
+
+    Alpaca rejects plain StopOrderRequest for crypto with 40010001 "invalid
+    order type for crypto order" — crypto supports market/limit/stop_limit
+    only. Sending the wrong type left positions unprotected while the log
+    merely said "Stop sync failed". The limit leg sits 1% through the stop
+    so a normal stop-out still fills."""
+    from alpaca.trading.requests import StopLimitOrderRequest
+    if is_crypto:
+        return client.submit_order(StopLimitOrderRequest(
+            symbol=sym, qty=qty, side=exit_side, time_in_force=TimeInForce.GTC,
+            stop_price=round(stop_price, 8),
+            limit_price=round(stop_price * 0.99, 8),
+        ))
+    return client.submit_order(StopOrderRequest(
+        symbol=sym, qty=qty, side=exit_side,
+        time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 8),
+    ))
+
+
 def _replace_or_submit_stop(client, sym: str, qty: float, exit_side, stop_price: float, existing=None, is_crypto=False, current_price: float = None) -> bool:
     # NOTE: "tighter" here is assumed to mean a higher stop_price, which only holds for
     # long/protective-sell exits. Live execution is long-only today (execute_signals.py
@@ -483,10 +505,7 @@ def _replace_or_submit_stop(client, sym: str, qty: float, exit_side, stop_price:
                     except Exception as ce:
                         logger.warning(f"[Positions] Could not cancel trailing stop {sym} before tightening: {ce}")
                         return True
-                    client.submit_order(StopOrderRequest(
-                        symbol=sym, qty=qty_safe, side=exit_side,
-                        time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 8)
-                    ))
+                    _submit_stop(client, sym, qty_safe, exit_side, stop_price, is_crypto)
                     logger.info(f"[Positions] Converted trailing stop -> tighter fixed stop {sym} -> ${stop_price:.6g}")
                     return True
                 logger.info(f"[Positions] Retained existing trailing stop for {sym}")
@@ -500,10 +519,7 @@ def _replace_or_submit_stop(client, sym: str, qty: float, exit_side, stop_price:
             client.replace_order_by_id(existing.id, ReplaceOrderRequest(qty=qty_safe, stop_price=round(stop_price, 8)))
             logger.info(f"[Positions] Replaced stop {sym} -> ${stop_price:.6g}")
         else:
-            client.submit_order(StopOrderRequest(
-                symbol=sym, qty=qty_safe, side=exit_side,
-                time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 8)
-            ))
+            _submit_stop(client, sym, qty_safe, exit_side, stop_price, is_crypto)
             logger.info(f"[Positions] Submitted stop {sym} -> ${stop_price:.6g}")
         return True
     except Exception as e:
@@ -897,8 +913,16 @@ def run():
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
             client_o = get_trading_client()
-            open_o = client_o.get_orders(GetOrdersRequest(
-                status=QueryOrderStatus.OPEN, symbols=[alpaca_sym])) or []
+            # Alpaca stores crypto POSITIONS as "ETHUSD" and crypto ORDERS as
+            # "ETH/USD", so a symbol-filtered query matched nothing: the sweep
+            # concluded "NO protective order", tried to add one, and failed
+            # with insufficient balance — because the real stop was already
+            # holding the coins. Match unfiltered on the normalized symbol.
+            want_sym = str(alpaca_sym).upper().replace("/", "")
+            open_o = [
+                o for o in (client_o.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)) or [])
+                if str(o.symbol).upper().replace("/", "") == want_sym
+            ]
             protective = [
                 o for o in open_o
                 if str(getattr(o, "side", "")).lower().endswith("sell" if qty > 0 else "buy")

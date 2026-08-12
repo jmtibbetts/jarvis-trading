@@ -91,3 +91,52 @@ class OrderValidityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeasuredSpreadTests(unittest.TestCase):
+    """A conservative default is right when nothing is known. It is wrong
+    when a free live measurement exists — the 0.10% crypto assumption was
+    16x too wide for BTC, inflating the minimum viable stop."""
+
+    def test_live_spread_is_used_when_available(self):
+        from lib.transaction_costs import estimate_spread_pct
+        spread, source = estimate_spread_pct("BTC/USD", venue="kraken")
+        self.assertIn("measured", source)
+        self.assertGreater(spread, 0)
+
+    def test_measured_beats_the_default_for_a_liquid_pair(self):
+        from lib.transaction_costs import estimate_spread_pct, DEFAULT_CRYPTO_SPREAD_PCT
+        spread, _ = estimate_spread_pct("BTC/USD", venue="kraken")
+        self.assertLess(spread, DEFAULT_CRYPTO_SPREAD_PCT)
+
+    def test_illiquid_names_show_a_wider_spread_than_majors(self):
+        from lib.venues import measured_spread_pct
+        btc, _ = measured_spread_pct("BTC/USD")
+        sol, _ = measured_spread_pct("SOL/USD")
+        if btc is not None and sol is not None:
+            self.assertGreater(sol, btc)   # thinner book, wider quote
+
+    def test_a_caller_supplied_quote_always_wins(self):
+        from lib.transaction_costs import estimate_spread_pct
+        spread, source = estimate_spread_pct("BTC/USD", quoted_spread_pct=0.005, venue="kraken")
+        self.assertEqual(spread, 0.005)
+        self.assertEqual(source, "quoted")
+
+    def test_unlisted_symbol_falls_back_to_the_default_not_to_zero(self):
+        from lib.transaction_costs import estimate_spread_pct, DEFAULT_CRYPTO_SPREAD_PCT
+        spread, source = estimate_spread_pct("NOTACOIN/USD", venue="kraken")
+        self.assertEqual(spread, DEFAULT_CRYPTO_SPREAD_PCT)
+        self.assertEqual(source, "default_crypto")
+
+    def test_failure_never_makes_a_trade_look_free(self):
+        """The direction of the fallback matters: a network problem must
+        not reduce estimated cost."""
+        from lib.transaction_costs import estimate_spread_pct, DEFAULT_CRYPTO_SPREAD_PCT
+        spread, _ = estimate_spread_pct("BTC/USD", venue="nonexistent-venue")
+        self.assertGreaterEqual(spread, DEFAULT_CRYPTO_SPREAD_PCT)
+
+    def test_equities_are_unaffected(self):
+        from lib.transaction_costs import estimate_spread_pct, DEFAULT_EQUITY_SPREAD_PCT
+        spread, source = estimate_spread_pct("NVDA", venue="kraken")
+        self.assertEqual(spread, DEFAULT_EQUITY_SPREAD_PCT)
+        self.assertEqual(source, "default_equity")

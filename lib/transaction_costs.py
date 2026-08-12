@@ -53,13 +53,31 @@ def is_crypto_symbol(symbol: str) -> bool:
 
 
 def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
-                        illiquid: bool = False) -> tuple[float, str]:
-    """(spread as a fraction of price, source label)."""
+                        illiquid: bool = False,
+                        venue: str | None = None) -> tuple[float, str]:
+    """(spread as a fraction of price, source label).
+
+    Preference order: a spread the caller quoted, then a LIVE measurement
+    from the venue, then a conservative default. The defaults exist for
+    when nothing is known — measured against Kraken, DEFAULT_CRYPTO_SPREAD_PCT
+    was 16x too wide for BTC, which inflated the minimum viable stop and
+    rejected sound trades. A measurement beats a guess; a failed
+    measurement falls back to the guess rather than to optimism.
+    """
     if quoted_spread_pct is not None and quoted_spread_pct >= 0:
         return float(quoted_spread_pct), "quoted"
     if illiquid:
         return DEFAULT_ILLIQUID_SPREAD_PCT, "default_illiquid"
+
     if is_crypto_symbol(symbol):
+        try:
+            from lib.venues import measured_spread_pct, DEFAULT_VENUE
+            live, why = measured_spread_pct(symbol, venue or DEFAULT_VENUE)
+            if live is not None and live >= 0:
+                # Never let a suspiciously tight read make a trade look free.
+                return max(live, 0.00001), why
+        except Exception:
+            pass
         return DEFAULT_CRYPTO_SPREAD_PCT, "default_crypto"
     return DEFAULT_EQUITY_SPREAD_PCT, "default_equity"
 
@@ -150,7 +168,7 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
     if entry <= 0:
         return {"ok": False, "reason": "no entry price"}
 
-    spread_pct, spread_src = estimate_spread_pct(symbol, quoted_spread_pct, illiquid)
+    spread_pct, spread_src = estimate_spread_pct(symbol, quoted_spread_pct, illiquid, venue)
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
     # Half-spread per side, crossed on both entry and exit for market orders.
@@ -263,7 +281,7 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
     stop to this floor — or the signal is dropped if that floor breaks its
     timeframe's structure.
     """
-    spread_pct, _ = estimate_spread_pct(symbol, quoted_spread_pct, illiquid)
+    spread_pct, _ = estimate_spread_pct(symbol, quoted_spread_pct, illiquid, venue)
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else abs(float(slippage_pct))

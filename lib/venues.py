@@ -181,3 +181,66 @@ def validate_order(venue: str, symbol: str, qty: float, price: float) -> dict:
     if problems:
         return {"ok": False, "reason": "; ".join(problems), "spec": spec}
     return {"ok": True, "reason": f"valid on kraken ({spec['pair']})", "spec": spec}
+
+
+# ── Measured spreads ─────────────────────────────────────────────────────
+# The cost model assumed 0.10% for crypto. Kraken's real median on BTC is
+# 0.0064% — the assumption was 16x too wide, and since spread feeds the
+# minimum-viable-stop calculation, it was inflating that floor and
+# rejecting trades that were fine.
+#
+# A conservative default is correct when nothing is known. It is NOT
+# correct when a free, keyless, live measurement exists. This fetches the
+# real thing and falls back to the default only on failure, so a network
+# problem can never make a trade look cheaper than it is.
+_SPREAD_TTL = timedelta(minutes=5)     # spreads move fast; cache briefly
+_spread_cache: dict[str, tuple[datetime, float | None]] = {}
+
+
+def measured_spread_pct(symbol: str, venue: str = "kraken") -> tuple[float | None, str]:
+    """(median recent spread as a fraction of price, source) or (None, why).
+
+    Uses the MEDIAN of Kraken's recent quotes rather than the mean: a
+    momentary blowout during a print should not permanently widen the
+    estimate, and the median is what a normal fill actually faces.
+    """
+    if str(venue).lower() != "kraken":
+        return None, f"{venue}: no live spread source wired"
+
+    key = f"{venue}:{symbol}"
+    now = datetime.now(timezone.utc)
+    hit = _spread_cache.get(key)
+    if hit and (now - hit[0]) < _SPREAD_TTL:
+        return hit[1], "measured_cached" if hit[1] is not None else "unavailable_cached"
+
+    spec = kraken_pair_specs(symbol)
+    if not spec:
+        _spread_cache[key] = (now, None)
+        return None, f"kraken does not list {symbol}"
+
+    try:
+        r = httpx.get(f"{KRAKEN_PUBLIC}/Spread", params={"pair": spec["pair"]}, timeout=20)
+        if r.status_code != 200:
+            _spread_cache[key] = (now, None)
+            return None, f"kraken Spread -> {r.status_code}"
+        result = (r.json().get("result") or {})
+        quotes = next((v for k, v in result.items() if k != "last"), [])
+        rates = []
+        for row in quotes:
+            try:
+                _, bid, ask = row[0], float(row[1]), float(row[2])
+                if bid > 0 and ask >= bid:
+                    rates.append((ask - bid) / bid)
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not rates:
+            _spread_cache[key] = (now, None)
+            return None, "no usable quotes returned"
+        rates.sort()
+        median = rates[len(rates) // 2]
+        _spread_cache[key] = (now, median)
+        return median, f"measured from {len(rates)} kraken quotes"
+    except Exception as e:
+        logger.debug(f"[Venues] spread fetch failed for {symbol}: {e}")
+        _spread_cache[key] = (now, None)
+        return None, f"fetch failed: {str(e)[:60]}"

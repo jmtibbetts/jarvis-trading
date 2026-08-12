@@ -74,10 +74,68 @@ def configured_volume_tier() -> float:
         return 0.0
 
 
+# The operator's OWN fee, read from their account. Cached because it is a
+# signed call and the tier moves slowly.
+_account_fee_cache: dict[str, tuple[datetime, dict | None]] = {}
+_ACCOUNT_FEE_TTL = timedelta(hours=6)
+
+
+def account_fee(venue: str = "kraken") -> dict | None:
+    """The fee this ACCOUNT actually pays, or None if unreadable.
+
+    Published schedules are a starting point, not the answer. Measured
+    against a live Kraken account the real tier was 0.8% taker / 0.4% maker
+    where the public BTC schedule reads 0.40% / 0.25% — so pricing from the
+    published table understated true cost by half, in the direction that
+    lets unprofitable trades through.
+    """
+    if str(venue).lower() != "kraken":
+        return None
+    now = datetime.now(timezone.utc)
+    hit = _account_fee_cache.get(venue)
+    if hit and (now - hit[0]) < _ACCOUNT_FEE_TTL:
+        return hit[1]
+    try:
+        from lib.kraken_account import fee_tier, is_configured
+        if not is_configured():
+            _account_fee_cache[venue] = (now, None)
+            return None
+        out = fee_tier()
+        if not out.get("ok"):
+            _account_fee_cache[venue] = (now, None)
+            return None
+        measured = {
+            "taker": float(out["taker_pct"]) / 100.0,
+            "maker": float(out["maker_pct"]) / 100.0,
+            "volume_30d": float(out.get("volume_30d_usd") or 0),
+        }
+        _account_fee_cache[venue] = (now, measured)
+        return measured
+    except Exception as e:
+        logger.debug(f"[Venues] account fee lookup failed: {e}")
+        _account_fee_cache[venue] = (now, None)
+        return None
+
+
 def fee_for(venue: str, *, maker: bool = False, asset_class: str = "crypto",
-            volume_30d: float | None = None) -> tuple[float, str]:
-    """(fee as a fraction of notional, explanation) for one side."""
+            volume_30d: float | None = None,
+            use_account: bool = True) -> tuple[float, str]:
+    """(fee as a fraction of notional, explanation) for one side.
+
+    Preference: the account's MEASURED fee, then the published schedule at
+    the configured volume tier. A measurement that fails falls back to the
+    table rather than to optimism.
+    """
     v = str(venue or DEFAULT_VENUE).lower()
+
+    if use_account and volume_30d is None and asset_class == "crypto":
+        measured = account_fee(v)
+        if measured:
+            rate = measured["maker" if maker else "taker"]
+            side = "maker" if maker else "taker"
+            return rate, (f"{v} {side} {rate * 100:.3g}% — MEASURED from the account "
+                          f"(${measured['volume_30d']:,.0f} 30d volume)")
+
     schedule = VENUE_FEES.get(v, {}).get(asset_class)
     if not schedule:
         # An unknown venue must not silently become free.

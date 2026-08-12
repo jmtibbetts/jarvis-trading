@@ -270,3 +270,38 @@ class TradeFlowTests(unittest.TestCase):
     def test_stream_reports_status_without_being_started(self):
         from lib.kraken_stream import status
         self.assertIn("connected", status())
+
+
+class AccountFeeTests(unittest.TestCase):
+    """Published schedules are a starting point, not the answer. Measured
+    against a live account the real tier was 0.8%/0.4% where Kraken's public
+    BTC table reads 0.40%/0.25% — pricing from the table understated true
+    cost by HALF, in the direction that lets bad trades through."""
+
+    def test_measured_fee_is_preferred_when_readable(self):
+        from lib.venues import fee_for, account_fee
+        if account_fee("kraken") is None:
+            self.skipTest("no Kraken credentials configured")
+        _, why = fee_for("kraken")
+        self.assertIn("MEASURED", why)
+
+    def test_published_table_is_still_reachable_for_comparison(self):
+        from lib.venues import fee_for
+        rate, why = fee_for("kraken", use_account=False)
+        self.assertNotIn("MEASURED", why)
+        self.assertGreater(rate, 0)
+
+    def test_an_unreadable_account_falls_back_to_the_table_not_to_zero(self):
+        from lib.venues import fee_for
+        rate, _ = fee_for("kraken", volume_30d=0)   # forces the table path
+        self.assertGreater(rate, 0)
+
+    def test_a_dearer_measured_fee_widens_the_minimum_viable_stop(self):
+        """The safety property: higher real costs must make FEWER trades
+        viable, never more."""
+        from lib.transaction_costs import min_viable_stop_pct
+        from lib.venues import account_fee
+        if account_fee("kraken") is None:
+            self.skipTest("no Kraken credentials configured")
+        measured = min_viable_stop_pct("BTC/USD", venue="kraken")
+        self.assertGreater(measured, 0.02)   # 0.8% taker demands a wide stop

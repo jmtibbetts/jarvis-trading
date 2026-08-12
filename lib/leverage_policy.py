@@ -5,8 +5,9 @@ from 1x at the execution floor to MAX_LEVERAGE at a perfect score, then
 four independent factors — each of which can only REDUCE it — apply:
 
   regime      a high-risk regime halves leverage; nothing raises it
-  history     realized win rate for that score band, with an explicit
-              penalty for unproven buckets rather than optimism
+  evidence    how much track record exists (sample size only — the win
+              rate itself is counted once, in calibration, and must not
+              move a second number: see lib/historical_edge.py)
   streak      consecutive losses cut size; the account is telling you
               something before any model does
   volatility  ATR far above normal shrinks the position
@@ -63,24 +64,24 @@ def regime_factor(regime: dict | None) -> tuple[float, str]:
     return 0.85, "regime unknown — treated as medium"
 
 
-def history_factor(win_rate: float | None, sample: int | None) -> tuple[float, str]:
-    """Realized win rate for this kind of setup, honestly sampled.
+def evidence_factor(sample: int | None) -> tuple[float, str]:
+    """How much track record exists — NOT how good it is.
 
-    A win rate is only trusted at MIN_SAMPLE_FOR_TRUST+ decided outcomes.
-    Below that the setup is UNPROVEN and takes a penalty — betting big on
-    something with no track record is the most expensive habit there is.
+    This deliberately ignores the win rate. The win rate is evidence about
+    PROBABILITY and is already counted once, in calibration, which moves
+    the composite score that gates the trade. Scaling leverage by it as
+    well counted one outcome twice.
+
+    Sample size is a different question — how CERTAIN the estimate is — and
+    restraining size on an unproven setup is a legitimate risk control
+    rather than a second opinion on the edge.
     """
     n = int(sample or 0)
-    if win_rate is None or n < MIN_SAMPLE_FOR_TRUST:
+    if n < MIN_SAMPLE_FOR_TRUST:
         return UNPROVEN_FACTOR, f"unproven setup ({n} decided outcomes, need {MIN_SAMPLE_FOR_TRUST})"
-    wr = max(0.0, min(1.0, float(win_rate)))
-    if wr >= 0.60:
-        return 1.0, f"{wr:.0%} historical win rate over {n}"
-    if wr >= 0.50:
-        return 0.85, f"{wr:.0%} win rate over {n} — modest edge"
-    if wr >= 0.40:
-        return 0.6, f"{wr:.0%} win rate over {n} — weak edge"
-    return 0.35, f"{wr:.0%} win rate over {n} — negative edge, size cut hard"
+    if n < MIN_SAMPLE_FOR_TRUST * 3:
+        return 0.85, f"thin record ({n} outcomes)"
+    return 1.0, f"established record ({n} outcomes)"
 
 
 def streak_factor(consecutive_losses: int | None) -> tuple[float, str]:
@@ -121,7 +122,7 @@ def decide(score: float | None, floor: float, *, regime: dict | None = None,
     factors = []
     for name, (value, why) in (
         ("regime", regime_factor(regime)),
-        ("history", history_factor(win_rate, sample)),
+        ("evidence", evidence_factor(sample)),
         ("streak", streak_factor(consecutive_losses)),
         ("volatility", volatility_factor(atr_pct, typical_atr_pct)),
     ):

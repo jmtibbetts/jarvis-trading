@@ -24,7 +24,11 @@ router = APIRouter()
 
 @router.get("/health")
 def health():
-    return {"status":"ok","time":datetime.now(timezone.utc).isoformat()}
+    # Version is served here so a running instance can be identified without
+    # guessing from git — run.ps1 -Status and any deploy check can read it.
+    from app.version import VERSION
+    return {"status": "ok", "version": VERSION,
+            "time": datetime.now(timezone.utc).isoformat()}
 
 
 class TradingPreferenceRequest(BaseModel):

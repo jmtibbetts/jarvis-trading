@@ -211,19 +211,30 @@ class TestLeveragePolicy:
         assert best["multiplier"] <= 1.0
 
     def test_unproven_setups_are_penalised_not_trusted(self):
-        from lib.leverage_policy import history_factor, UNPROVEN_FACTOR
-        f_none, why = history_factor(None, None)
+        from lib.leverage_policy import evidence_factor, UNPROVEN_FACTOR
+        f_none, why = evidence_factor(None)
         assert f_none == UNPROVEN_FACTOR and "unproven" in why
-        # A great win rate on 3 samples is still unproven.
-        f_small, _ = history_factor(0.9, 3)
+        # Three outcomes is still unproven no matter how they went.
+        f_small, _ = evidence_factor(3)
         assert f_small == UNPROVEN_FACTOR
 
-    def test_negative_edge_cuts_hardest(self):
-        from lib.leverage_policy import history_factor
-        good, _ = history_factor(0.65, 100)
-        weak, _ = history_factor(0.45, 100)
-        bad, _ = history_factor(0.30, 100)
-        assert good > weak > bad
+    def test_leverage_does_not_re_judge_the_win_rate(self):
+        """Win rate is counted ONCE, in calibration. Leverage may restrain
+        risk for lack of EVIDENCE, but must not form a second opinion on
+        whether the setup wins — that compounded one outcome into two."""
+        from lib.leverage_policy import decide
+        great = decide(90, 55, regime={"risk": "low"}, win_rate=0.9, sample=100,
+                       consecutive_losses=0, atr_pct=1.0)
+        awful = decide(90, 55, regime={"risk": "low"}, win_rate=0.1, sample=100,
+                       consecutive_losses=0, atr_pct=1.0)
+        assert great["leverage"] == awful["leverage"]
+
+    def test_more_evidence_permits_more_size(self):
+        from lib.leverage_policy import evidence_factor
+        none, _ = evidence_factor(0)
+        thin, _ = evidence_factor(25)
+        solid, _ = evidence_factor(200)
+        assert none < thin < solid == 1.0
 
     def test_losing_streak_brakes(self):
         from lib.leverage_policy import streak_factor

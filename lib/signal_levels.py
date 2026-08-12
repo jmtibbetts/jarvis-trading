@@ -16,6 +16,37 @@ MIN_STOP_ATR_MULT = 0.5
 MAX_STOP_ATR_MULT = 5.0
 
 
+
+class LevelSource:
+    """Where a price level came from.
+
+    The distinction that matters for scoring: LLM and STRUCTURE levels
+    encode a claim about the market, while ATR_FALLBACK and COST_FLOOR are
+    prices Jarvis computed itself. An R:R built from two self-computed
+    levels is not evidence about the trade — it is arithmetic Jarvis chose,
+    and scoring it as confluence lets the system reward itself for its own
+    defaults."""
+    LLM = "LLM"                     # the model named this price
+    STRUCTURE = "STRUCTURE"         # swing high/low, support/resistance
+    ATR_FALLBACK = "ATR_FALLBACK"   # synthesised from a volatility multiple
+    COST_FLOOR = "COST_FLOOR"       # widened so the trade can pay its costs
+    MARKET = "MARKET"               # the live price at signal time
+    MANUAL = "MANUAL"               # a human set it
+
+    SYNTHETIC = {ATR_FALLBACK, COST_FLOOR}
+
+    @classmethod
+    def is_synthetic(cls, source: str | None) -> bool:
+        return str(source or "") in cls.SYNTHETIC
+
+
+def rr_is_self_referential(signal: dict) -> bool:
+    """True when BOTH risk and reward legs were computed by Jarvis, so the
+    ratio between them says nothing about the market."""
+    return (LevelSource.is_synthetic(signal.get("stop_source"))
+            and LevelSource.is_synthetic(signal.get("target_source")))
+
+
 def clamp_stop_to_atr(signal: dict, atr_pct: float | None) -> tuple[dict, bool, str]:
     """Widen or tighten an LLM/scanner-picked stop_loss so its distance from
     entry falls within a sane multiple of the symbol's own ATR%, instead of
@@ -68,6 +99,7 @@ def clamp_stop_to_atr(signal: dict, atr_pct: float | None) -> tuple[dict, bool, 
     # its timeframe will never deliver. The honest answer is that this
     # symbol cannot be traded profitably on this timeframe right now.
     if cost_floor_pct > max_distance_pct:
+        signal["stop_source"] = LevelSource.COST_FLOOR
         signal["untradeable_reason"] = (
             f"costs need a {cost_floor_pct:.2f}% stop but {MAX_STOP_ATR_MULT}x ATR "
             f"is only {max_distance_pct:.2f}% — no viable stop exists at this "
@@ -109,6 +141,12 @@ def clamp_stop_to_atr(signal: dict, atr_pct: float | None) -> tuple[dict, bool, 
         pass
 
     signal["stop_loss"] = new_stop
+    # Record WHY this price exists: a cost-driven widening is a different
+    # claim from a volatility-driven one, and neither is a market level.
+    signal["stop_source"] = (LevelSource.COST_FLOOR if binding == "cost"
+                             else LevelSource.ATR_FALLBACK)
+    if signal.get("target_price") is not None and target_distance_pct is not None:
+        signal["target_source"] = signal.get("target_source") or LevelSource.ATR_FALLBACK
     return signal, True, reason
 
 

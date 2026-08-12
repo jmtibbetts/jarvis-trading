@@ -1,4 +1,4 @@
-# 🤖 Jarvis Trading AI v6.5
+# 🤖 Jarvis Trading AI v7.0
 
 > **Python Edition** — FastAPI + APScheduler + TA-Lib + Alpaca  
 > Autonomous trading across equities, crypto, and commodities with geopolitical threat intelligence, multi-factor signal scoring, AI position management, a parallel paper trading engine for shorts and leverage, and a live Real vs Paper performance comparison dashboard.

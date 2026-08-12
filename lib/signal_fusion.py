@@ -147,13 +147,16 @@ def compute_opportunity_score(signal_composite_score: float, direction: str, sma
     # NOTE: historical["win_rate"] is a FRACTION (0.0-1.0), matching how
     # lib/learning_engine.py's signal_accuracy table actually stores it
     # (wins / total) — not a 0-100 percentage.
+    # Historical win rate is NO LONGER added here. It already moved this
+    # signal once, via calibrated_confidence inside signal_scorer — and
+    # since calibrated confidence is a component of the composite score,
+    # and the composite score is `base` below, adding it again compounded
+    # one piece of evidence into two movements of the same number.
+    # The record is still SHOWN, because an operator should see it; it just
+    # no longer votes twice. See lib/historical_edge.py.
+    from lib.historical_edge import describe_for_ui
     historical_adj = 0.0
-    historical_note = "insufficient trade history for this symbol"
-    if historical and (historical.get("total_trades") or 0) >= 5:
-        win_rate = historical.get("win_rate")
-        win_rate = 0.5 if win_rate is None else win_rate
-        historical_adj = (win_rate - 0.5) * 20  # cap ±10 at a 0%/100% win rate
-        historical_note = f"{historical['total_trades']} historical trades, {win_rate * 100:.0f}% win rate"
+    historical_note = describe_for_ui(historical) + " (already counted in the base score)"
 
     opportunity_score = round(max(0.0, min(100.0, base + smart_money_adj + historical_adj)), 1)
     return {

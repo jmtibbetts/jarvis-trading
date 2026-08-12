@@ -99,6 +99,14 @@ class TradingSignal(Base):
     scaled_out       = Column(Boolean, default=False)   # partial-close-at-TP1 already applied
     scaled_out_qty   = Column(Float)
     notes            = Column(Text)
+    # ── Level provenance ─────────────────────────────────────────────────
+    # Where each price came from. When Jarvis synthesises a stop and target
+    # from a fixed ATR multiple, the resulting R:R is its OWN arithmetic —
+    # crediting the score for that ratio is the model grading its own
+    # homework. See lib/signal_levels.LevelSource.
+    entry_source     = Column(String)
+    stop_source      = Column(String)
+    target_source    = Column(String)
     verification_json = Column(Text)   # last double-check result (verdict, checks, prices)
     verified_at      = Column(String)                     # free-text trade journal note
     user_id          = Column(String, default=DEFAULT_USER_ID)
@@ -993,6 +1001,9 @@ def _migrate_columns():
             ("scaled_out_qty", "REAL"),
             ("notes", "TEXT"),
             ("verification_json", "TEXT"),
+            ("entry_source", "TEXT"),
+            ("stop_source", "TEXT"),
+            ("target_source", "TEXT"),
             ("verified_at", "TEXT"),
         ],
         "news_items": [

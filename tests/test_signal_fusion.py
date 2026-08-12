@@ -149,19 +149,32 @@ class OpportunityScoreTests(unittest.TestCase):
         result = compute_opportunity_score(60.0, "Long", historical={"total_trades": 2, "win_rate": 1.0})
         self.assertEqual(result["breakdown"]["historical_adjustment"], 0.0)
 
-    def test_sufficient_history_adjusts_score(self):
+    def test_history_no_longer_moves_the_opportunity_score(self):
+        """History reaches this score ALREADY, through calibrated confidence
+        inside the base composite. Adding it again here counted one outcome
+        twice — see lib/historical_edge."""
         good = compute_opportunity_score(60.0, "Long", historical={"total_trades": 20, "win_rate": 0.8})
         bad = compute_opportunity_score(60.0, "Long", historical={"total_trades": 20, "win_rate": 0.2})
-        self.assertGreater(good["opportunity_score"], bad["opportunity_score"])
+        self.assertEqual(good["opportunity_score"], bad["opportunity_score"])
+        self.assertEqual(good["breakdown"]["historical_adjustment"], 0.0)
 
-    def test_win_rate_is_read_as_a_fraction_not_a_percentage(self):
-        """Regression: signal_accuracy stores win_rate as wins/total (a
-        0.0-1.0 fraction), NOT a 0-100 percentage. Reading it as a
-        percentage penalized a real 93%-win-rate symbol (PLTR, win_rate
-        0.932) as if it had won 0.93% of trades — caught against live data."""
-        result = compute_opportunity_score(79.8, "Short", historical={"total_trades": 103, "win_rate": 0.932})
-        self.assertGreater(result["breakdown"]["historical_adjustment"], 0)
-        self.assertIn("93% win rate", result["breakdown"]["historical_note"])
+    def test_history_is_still_shown_to_the_operator(self):
+        """Removed from the arithmetic, not from the interface."""
+        out = compute_opportunity_score(60.0, "Long", historical={"total_trades": 20, "win_rate": 0.8})
+        note = out["breakdown"]["historical_note"]
+        self.assertIn("20 trades", note)
+        self.assertIn("80% win rate", note)
+        self.assertIn("already counted", note)
+
+    def test_win_rate_fraction_and_percentage_both_normalise(self):
+        """The original bug this file guarded: signal_accuracy stores a
+        FRACTION. Normalisation moved into historical_edge, so it is tested
+        there rather than through a score that no longer varies."""
+        from lib.historical_edge import get_edge, PURPOSE_DISPLAY
+        as_fraction = get_edge({"total_trades": 20, "win_rate": 0.8}, purpose=PURPOSE_DISPLAY)
+        as_percent = get_edge({"total_trades": 20, "win_rate": 80.0}, purpose=PURPOSE_DISPLAY)
+        self.assertAlmostEqual(as_fraction["win_rate"], 0.8)
+        self.assertAlmostEqual(as_percent["win_rate"], 0.8)
 
     def test_exactly_even_win_rate_is_neutral(self):
         result = compute_opportunity_score(60.0, "Long", historical={"total_trades": 20, "win_rate": 0.5})

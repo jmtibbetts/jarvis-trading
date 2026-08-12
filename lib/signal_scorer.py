@@ -54,6 +54,13 @@ def _data_quality(valid: list[tuple[str, dict]]) -> float:
     return round(coverage * 0.55 + sum(completeness) / len(completeness) * 0.45, 1)
 
 
+# How much of the R:R component survives when Jarvis invented both legs.
+# Not zero: a synthesised stop still encodes real volatility (ATR) and a
+# real cost floor, so the geometry is not meaningless — but it is a far
+# weaker claim than a level the market itself drew.
+SELF_REFERENTIAL_RR_WEIGHT = 0.25
+
+
 def _calibrate_confidence(raw: float, historical: dict | None) -> tuple[float, dict]:
     historical = historical or {}
     total = int(historical.get("total_trades") or 0)
@@ -131,6 +138,16 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
         rr = (target - entry) / (entry - stop) if entry > stop > 0 and target > entry else 0.0
     rr_score = min(100.0, rr / 3 * 100)
 
+    # A ratio Jarvis computed is not evidence Jarvis found. When BOTH the
+    # stop and the target were synthesised from a fixed ATR multiple, their
+    # ratio is a constant the system chose — scoring it as confluence lets
+    # the model reward itself for its own defaults, and does so most loudly
+    # on exactly the signals where the LLM gave no usable levels.
+    from lib.signal_levels import rr_is_self_referential
+    rr_self_referential = rr_is_self_referential(signal)
+    if rr_self_referential:
+        rr_score *= SELF_REFERENTIAL_RR_WEIGHT
+
     volume_ratios = [
         float((data.get("volume") or {}).get("surge_ratio") or 1.0)
         for _, data in valid if data.get("volume")
@@ -186,6 +203,7 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
         "calibrated_confidence": calibrated,
         "ta_confluence": ta_confluence,
         "rr": rr_score,
+        "rr_self_referential": rr_self_referential,
         "volume": volume_score,
         "regime": regime_score,
         "data_quality": quality,

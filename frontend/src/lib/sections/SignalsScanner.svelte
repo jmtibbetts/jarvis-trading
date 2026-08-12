@@ -74,22 +74,38 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     );
     if (!ok) return;
     setBusy(sig.id, true);
+    const stop = startProgress(sig.id, true);
     try {
-      const res = await api.reverseSignal(sig.id);
+      let res;
+      try {
+        res = await api.reverseSignal(sig.id);
+      } catch (e: any) {
+        // Signals regenerate on a schedule, so a card that has been on
+        // screen a few minutes can hold an id the server has already
+        // superseded. The server hands back the live successor; retry
+        // against it rather than making the operator find the new card.
+        const successor = e?.detail?.successor_id ?? e?.body?.detail?.successor_id;
+        if (!successor) throw e;
+        toastStore.ok(`${sig.asset_symbol}: signal refreshed while you were reading — using the current one`);
+        res = await api.reverseSignal(successor);
+      }
+      stop();
       toastStore.ok(`${sig.asset_symbol}: flipped to ${res.proposal.direction} @ ${res.proposal.entry_price}`);
       await loadSignals();
     } catch (e) {
       toastStore.err(`Reverse failed: ${e instanceof Error ? e.message : e}`);
     } finally {
+      stop();
       setBusy(sig.id, false);
     }
   }
 
   async function doVerify(sig: Signal, deep = false) {
     setBusy(sig.id, true);
-    if (deep) toastStore.ok(`${sig.asset_symbol}: deep verify — fresh TA + web news + LLM, ~30-90s`);
+    const stop = startProgress(sig.id, deep);
     try {
       let res = await api.verifySignal(sig.id, false, deep);
+      stop();
       verifyResults = { ...verifyResults, [sig.id]: res };
       if (res.verdict === "STALE_ENTRY" && res.suggested_update) {
         const u = res.suggested_update;
@@ -121,6 +137,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     } catch (e) {
       toastStore.err(`Verify failed: ${e}`);
     } finally {
+      stop();
       setBusy(sig.id, false);
     }
   }
@@ -236,6 +253,71 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     const next = new Set(busyIds);
     busy ? next.add(id) : next.delete(id);
     busyIds = next;
+  }
+
+  /* ── Verify progress ──────────────────────────────────────────────────
+   * A deep verify runs 30-90s behind a single await, and a disabled button
+   * is indistinguishable from a hung one. These are the phases the server
+   * actually works through, with the elapsed time each typically reaches.
+   *
+   * The bar is honest about what it knows: it advances through real phases
+   * on a measured schedule, but the LAST phase does not complete on a timer
+   * — it holds at 90% until the response lands, because the client cannot
+   * know when the LLM is done. A bar that sat at 100% while still waiting
+   * would be lying in the direction that erodes trust in every other
+   * progress indicator in the app.
+   */
+  type Phase = { at: number; label: string };
+  const QUICK_PHASES: Phase[] = [
+    { at: 0,    label: "fetching current price" },
+    { at: 900,  label: "re-checking levels against ATR" },
+    { at: 2000, label: "scoring drift" },
+  ];
+  const DEEP_PHASES: Phase[] = [
+    { at: 0,     label: "fetching multi-timeframe TA" },
+    { at: 4000,  label: "pulling market data" },
+    { at: 12000, label: "searching web news" },
+    { at: 22000, label: "building the prompt" },
+    { at: 28000, label: "waiting on the LLM — this is the slow part" },
+  ];
+
+  type Progress = { pct: number; label: string; elapsed: number; deep: boolean };
+  let progress = $state<Record<string, Progress>>({});
+
+  function startProgress(id: string, deep: boolean): () => void {
+    const phases = deep ? DEEP_PHASES : QUICK_PHASES;
+    // Where the bar stops advancing on its own and waits for the response.
+    const CEILING = 90;
+    const span = phases[phases.length - 1].at || 1;
+    const t0 = Date.now();
+    const tick = () => {
+      const elapsed = Date.now() - t0;
+      const phase = [...phases].reverse().find((p) => elapsed >= p.at) ?? phases[0];
+      // Linear through the known phases, then asymptotic toward the ceiling
+      // so it keeps visibly moving without ever claiming to be finished.
+      const pct =
+        elapsed < span
+          ? (elapsed / span) * (CEILING - 20)
+          : CEILING - 20 * Math.exp(-(elapsed - span) / 20000);
+      progress = {
+        ...progress,
+        [id]: { pct: Math.min(CEILING, pct), label: phase.label, elapsed, deep },
+      };
+    };
+    tick();
+    const iv = setInterval(tick, 200);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      clearInterval(iv);
+      // Snap to complete so the bar resolves rather than vanishing mid-way.
+      progress = { ...progress, [id]: { ...progress[id], pct: 100, label: "done" } };
+      setTimeout(() => {
+        const { [id]: _, ...rest } = progress;
+        progress = rest;
+      }, 450);
+    };
   }
 
   async function doAction(sig: Signal, action: "approve" | "reject" | "execute" | "paper" | "delete") {
@@ -657,6 +739,25 @@ The original signal will be superseded. Levels are recomputed server-side at sub
                   <span class="num pl-down">stop &minus;${z.loss_at_stop?.toLocaleString()}</span>
                   {#if z.gain_at_target}<span class="num pl-up">target +${z.gain_at_target.toLocaleString()}</span>{/if}
                   {#if z.capped_by_cash}<span class="sz-cap">capped by cash</span>{/if}
+                </div>
+              {/if}
+              {#if progress[sig.id]}
+                {@const pr = progress[sig.id]}
+                <div
+                  class="vp"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={Math.round(pr.pct)}
+                  aria-label="{pr.deep ? 'Deep verify' : 'Verify'} {sig.asset_symbol}"
+                >
+                  <div class="vp-track">
+                    <div class="vp-fill" class:deep={pr.deep} style="width:{pr.pct}%"></div>
+                  </div>
+                  <div class="vp-meta">
+                    <span class="vp-label">{pr.deep ? "Deep verify" : "Verify"} — {pr.label}</span>
+                    <span class="vp-time num">{(pr.elapsed / 1000).toFixed(1)}s</span>
+                  </div>
                 </div>
               {/if}
               <div class="sc-actions" role="group" aria-label="Signal actions">
@@ -1180,6 +1281,65 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     flex-wrap: wrap;
     gap: 4px;
     margin-top: auto;
+  }
+
+  /* Verify progress. Sits directly above the actions so the bar is adjacent
+     to the button that started it, and `margin-top:auto` moves from the
+     actions to here so the card's bottom alignment is unchanged whether the
+     bar is present or not — a card must not jump when verify starts. */
+  .vp {
+    margin-top: auto;
+    padding-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .vp + .sc-actions {
+    margin-top: 6px;
+  }
+  .vp-track {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--stroke-faint, rgba(127, 127, 127, 0.22));
+    overflow: hidden;
+  }
+  .vp-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent, #4c8dff);
+    transition: width 200ms linear;
+  }
+  /* Deep verify hits the network and the LLM, so it reads as the heavier
+     operation rather than looking identical to the 2-second check. */
+  .vp-fill.deep {
+    background: linear-gradient(
+      90deg,
+      var(--accent, #4c8dff),
+      var(--warn, #e0a33e)
+    );
+  }
+  .vp-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--ink-faint);
+  }
+  .vp-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vp-time {
+    font-variant-numeric: tabular-nums;
+    flex: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vp-fill {
+      transition: none;
+    }
   }
   .dim {
     color: var(--ink-faint);

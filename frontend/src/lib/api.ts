@@ -1086,7 +1086,19 @@ export const api = {
       body: JSON.stringify({ supersede_original: supersedeOriginal }),
     }).then(async (r) => {
       const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `reverse ${r.status}`);
+      if (!r.ok) {
+        // A 409 carries a structured detail naming the live successor for a
+        // signal that was superseded while the page was open. Stringifying
+        // it would render "[object Object]" and throw away the one field
+        // the caller needs to recover, so the object rides on the Error.
+        const detail = body?.detail;
+        const err = new Error(
+          typeof detail === "string" ? detail : detail?.message ?? `reverse ${r.status}`,
+        ) as Error & { detail?: unknown; status?: number };
+        err.detail = detail;
+        err.status = r.status;
+        throw err;
+      }
       return body as { ok: boolean; new_signal_id: string; proposal: ReversalProposal; original_superseded: boolean };
     }),
   verifySignal: (id: string, applyUpdate = false, deep = false) =>

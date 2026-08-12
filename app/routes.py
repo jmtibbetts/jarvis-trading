@@ -540,7 +540,39 @@ def reverse_signal(signal_id: str, body: ReverseSignalRequest):
         if not sig:
             raise HTTPException(404, "Signal not found")
         if sig.status not in ("Active", "PendingApproval"):
-            raise HTTPException(400, f"Signal is {sig.status} — only live signals can be reversed")
+            # Signals regenerate on a schedule — HYPE/USD supersedes itself
+            # every 15 minutes — so a card rendered a few minutes ago holds
+            # an id that is already stale. The operator's intent ("flip this
+            # symbol") is still perfectly valid; only the id died. Point
+            # them at the live successor instead of a dead end.
+            successor = (
+                db.query(TradingSignal)
+                .filter(
+                    TradingSignal.asset_symbol == sig.asset_symbol,
+                    TradingSignal.user_id == sig.user_id,
+                    TradingSignal.status.in_(("Active", "PendingApproval")),
+                )
+                .order_by(TradingSignal.created_date.desc())
+                .first()
+            )
+            if successor:
+                raise HTTPException(
+                    409,
+                    {
+                        "message": (
+                            f"That {sig.asset_symbol} signal was superseded by a newer "
+                            f"one while the page was open — reversing the current signal "
+                            f"instead."
+                        ),
+                        "successor_id": successor.id,
+                        "symbol": sig.asset_symbol,
+                    },
+                )
+            raise HTTPException(
+                400,
+                f"Signal is {sig.status} and no live {sig.asset_symbol} signal has "
+                f"replaced it — nothing to reverse.",
+            )
         sig_dict = {
             "asset_symbol": sig.asset_symbol, "asset_class": sig.asset_class,
             "direction": sig.direction, "entry_price": sig.entry_price,
@@ -636,6 +668,13 @@ def get_signal_sizing(signal_id: str):
         target = float(sig.target_price or 0)
         score = sig.composite_score or sig.confidence
         direction = sig.direction or "Long"
+        # Read every attribute needed AFTER the session closes while it is
+        # still open. Touching sig.asset_symbol below the `with` raised
+        # DetachedInstanceError on every call, and the caller swallows sizing
+        # errors per-card — so all 40 cards silently lost their capital /
+        # leverage / exposure line with nothing visible but a 500 in the
+        # network tab.
+        symbol = sig.asset_symbol
 
         pf = db.query(PaperPortfolio).first()
         cash = float(pf.cash if pf else 100_000.0)
@@ -652,7 +691,7 @@ def get_signal_sizing(signal_id: str):
         explicit = float(m.group(1))
     leverage = explicit or score_leverage(score)
 
-    sizing = size_position(equity, entry, stop, leverage, cash, symbol=sig.asset_symbol)
+    sizing = size_position(equity, entry, stop, leverage, cash, symbol=symbol)
     if not sizing.get("ok"):
         return {"ok": False, "reason": sizing.get("reason"), "leverage": leverage}
 

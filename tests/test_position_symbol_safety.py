@@ -190,3 +190,57 @@ class PriceRoundingTests(unittest.TestCase):
         from jobs.manage_positions import _round_price
         self.assertEqual(_round_price(0), 0)
         self.assertEqual(_round_price(-5), -5)
+
+
+class SlippageOnlyForRealFillsTests(unittest.TestCase):
+    """A signal that never reached the broker has no fill and therefore no
+    slippage. Recording one produced 1,275 phantom 'fills' out of 1,278 -
+    later signals on a held symbol measured against its original entry."""
+
+    def _signal(self, order_id):
+        return SimpleNamespace(
+            id="sig-1", alpaca_order_id=order_id, actual_fill_price=None,
+            slippage_pct=None, fill_recorded_at=None, entry_price=100.0,
+            notes=None, updated_date=None,
+        )
+
+    def _run(self, sig, intended, fill):
+        import contextlib
+        import jobs.manage_positions as mp
+
+        class _Q:
+            def filter(self, *a, **k): return self
+            def first(self): return sig
+
+        class _DB:
+            def query(self, *a, **k): return _Q()
+
+        @contextlib.contextmanager
+        def _fake_db():
+            yield _DB()
+
+        original = mp.get_db
+        mp.get_db = _fake_db
+        try:
+            mp._record_slippage("sig-1", intended, fill, "2026-08-12T00:00:00Z")
+        finally:
+            mp.get_db = original
+        return sig
+
+    def test_no_order_id_records_nothing(self):
+        sig = self._run(self._signal(None), 100.0, 98.0)
+        self.assertIsNone(sig.slippage_pct)
+        self.assertIsNone(sig.actual_fill_price)
+        self.assertEqual(sig.entry_price, 100.0)
+
+    def test_real_order_records_and_reanchors_entry(self):
+        sig = self._run(self._signal("order-abc"), 100.0, 98.0)
+        self.assertEqual(sig.actual_fill_price, 98.0)
+        self.assertEqual(sig.slippage_pct, -2.0)
+        self.assertEqual(sig.entry_price, 98.0)          # anchored to reality
+        self.assertIn("re-anchored", sig.notes)
+
+    def test_negligible_difference_leaves_entry_alone(self):
+        sig = self._run(self._signal("order-abc"), 100.0, 100.01)
+        self.assertEqual(sig.actual_fill_price, 100.01)
+        self.assertEqual(sig.entry_price, 100.0)          # under the 0.05% floor

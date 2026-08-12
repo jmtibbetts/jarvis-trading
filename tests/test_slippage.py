@@ -33,6 +33,9 @@ class SlippageRecordingTests(unittest.TestCase):
             session.add(TradingSignal(
                 id="sig-1", asset_symbol="AAPL", direction="Long",
                 entry_price=100.0, status="Executed",
+                # A fill only exists if the signal actually reached the broker;
+                # without this the record is a phantom (see _record_slippage).
+                alpaca_order_id="order-abc",
                 generated_at=datetime.now(timezone.utc).isoformat(),
             ))
             session.commit()

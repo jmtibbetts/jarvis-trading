@@ -239,19 +239,38 @@ def _dynamic_exit_plan(pos, current_price: float, ta_data: dict, original_signal
 
 
 def _record_slippage(signal_id: str, intended_entry: float, actual_fill_price: float, now_iso: str) -> None:
-    """Persist the gap between a signal's intended entry price and the broker's
-    actual fill price, the first time a live position for it is observed. Only
-    meaningful for live (non-paper) fills — paper fills always fill exactly at
-    the requested price, so there's no execution quality to measure there."""
+    """Execution quality for a signal THAT ACTUALLY PLACED AN ORDER.
+
+    Previously this fired for any signal matched to a position by symbol,
+    whether or not it caused the trade. Because a held symbol keeps
+    generating signals, each new one was compared against the ORIGINAL
+    position's average entry — producing 1,275 phantom "fills" out of 1,278,
+    all with no broker order id, and an "execution slippage" panel that was
+    really measuring how far later signals drifted from an old entry.
+
+    The alpaca_order_id gate is the whole fix: no order, no fill, no
+    slippage. It also re-anchors entry_price to the real fill so every
+    downstream number (R:R, stop distance, P&L) is computed against the
+    price actually paid rather than the one the signal hoped for."""
     if not signal_id or not intended_entry or not actual_fill_price:
         return
     try:
         with get_db() as db:
             sig = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
-            if sig and sig.actual_fill_price is None:
-                sig.actual_fill_price = actual_fill_price
-                sig.slippage_pct = round((actual_fill_price - intended_entry) / intended_entry * 100, 4)
-                sig.fill_recorded_at = now_iso
+            if not sig or sig.actual_fill_price is not None:
+                return
+            if not sig.alpaca_order_id:
+                return  # this signal never reached the broker
+            sig.actual_fill_price = actual_fill_price
+            sig.slippage_pct = round((actual_fill_price - intended_entry) / intended_entry * 100, 4)
+            sig.fill_recorded_at = now_iso
+            # Re-anchor to reality: the trade lives at the price it filled at.
+            if abs(actual_fill_price - intended_entry) / intended_entry > 0.0005:
+                sig.notes = ((sig.notes or "") + "\n" + (
+                    f"[fill] entry re-anchored {intended_entry:g} -> {actual_fill_price:g} "
+                    f"({sig.slippage_pct:+.3f}%)")).strip()
+                sig.entry_price = actual_fill_price
+                sig.updated_date = now_iso
     except Exception as e:
         logger.debug(f"[Positions] Slippage record failed for signal {signal_id}: {e}")
 

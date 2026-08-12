@@ -355,10 +355,19 @@ def _open_exit_orders(client, sym: str, exit_side: str) -> tuple[object | None, 
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
+        # THE symbol-format trap, in the lookup every exit-sync path depends
+        # on: Alpaca stores crypto POSITIONS as "ARBUSD" but crypto ORDERS as
+        # "ARB/USD". Filtering the query by the position's symbol therefore
+        # matched nothing, so the sweep believed no protective order existed,
+        # tried to submit another, and Alpaca rejected it with 40310000 —
+        # the coins were already reserved by the stop it could not see.
+        # Query unfiltered and match on the normalized symbol instead.
         sym_clean = sym.upper().replace("/", "")
-        orders = client.get_orders(GetOrdersRequest(
-            status=QueryOrderStatus.OPEN, symbols=[sym_clean], nested=True,
-        ))
+        orders = [
+            o for o in (client.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.OPEN, nested=True)) or [])
+            if str(o.symbol).upper().replace("/", "") == sym_clean
+        ]
     except Exception as e:
         logger.debug(f"[Positions] Open order lookup failed for {sym}: {e}")
         return None, None

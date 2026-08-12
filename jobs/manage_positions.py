@@ -887,6 +887,36 @@ def run():
             )
             continue
 
+        # ── SAFETY NET: adopt any position that has no protective order ────
+        # Entry-time stop placement can fail (a market order still unfilled
+        # when the bracket legs are submitted leaves the position naked).
+        # Rather than trust that path, every sweep verifies protection and
+        # attaches a stop when none exists — a naked position is the single
+        # most expensive failure mode in this system.
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            client_o = get_trading_client()
+            open_o = client_o.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.OPEN, symbols=[alpaca_sym])) or []
+            protective = [
+                o for o in open_o
+                if str(getattr(o, "side", "")).lower().endswith("sell" if qty > 0 else "buy")
+            ]
+            if not protective and current_price > 0:
+                stop_pct = 3.0 if is_c else 2.0
+                if is_c:
+                    placed = _set_crypto_limit_stop(client_o, alpaca_sym, abs(qty), current_price, stop_pct)
+                else:
+                    # Equities use Alpaca's native trailing stop (crypto has none).
+                    placed = _set_trailing_stop_equity(client_o, alpaca_sym, abs(qty), stop_pct)
+                logger.warning(
+                    f"[Positions] {sym} had NO protective order — "
+                    f"{'attached' if placed else 'FAILED to attach'} a {stop_pct}% stop"
+                )
+        except Exception as e:
+            logger.debug(f"[Positions] Protection check skipped for {sym}: {e}")
+
         tier = _tier(plpc, is_crypto=is_c)
         ta_data = _fetch_ta(sym, is_crypto=is_c)
         original_signal = sig_map.get(sym.upper().replace("/", ""), {})

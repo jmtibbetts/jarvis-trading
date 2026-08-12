@@ -8,20 +8,51 @@ Job: Execute Signals v6.5
 import logging, os
 from datetime import datetime, timezone, timedelta
 from app.database import get_db, TradingSignal
-from lib.alpaca_client import get_account, get_positions, submit_bracket_order, normalize_symbol, is_crypto
+from lib.alpaca_client import (get_account, get_positions, submit_bracket_order, normalize_symbol,
+                               is_crypto, get_trading_client)
 from sqlalchemy import or_, func
 
 logger = logging.getLogger(__name__)
+
+def _both_formats(sym: str) -> set:
+    """A symbol in BOTH shapes Alpaca uses: SOL/USD and SOLUSD."""
+    sym = str(sym).upper().strip()
+    out = {sym}
+    if len(sym) > 3 and sym.endswith("USD") and sym[:-3].isalpha():
+        out.add(f"{sym[:-3]}/USD")
+    if "/" in sym:
+        out.add(sym.replace("/", ""))
+    return out
+
 
 def _normalize_held(positions):
     """Build a set of held symbols in BOTH formats: SOL/USD and SOLUSD."""
     held = set()
     for p in positions:
-        sym = str(p.symbol).upper().strip()
-        held.add(sym)
-        if len(sym) > 3 and sym.endswith('USD') and sym[:-3].isalpha():
-            held.add(f"{sym[:-3]}/USD")
+        held |= _both_formats(p.symbol)
     return held
+
+
+def _symbols_with_pending_entries(client) -> set:
+    """Symbols that already have an UNFILLED entry order working.
+
+    A market buy that has not filled yet creates no position, so the
+    held-set alone let a second run buy the same symbol again — observed
+    live: two concurrent RENDER/USD market buys, which would have doubled
+    the intended position on fill."""
+    pending = set()
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        for o in client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)) or []:
+            side = str(getattr(o, "side", "")).lower()
+            otype = str(getattr(o, "order_type", "")).lower()
+            # Only ENTRY orders block a re-buy; protective sells must not.
+            if "buy" in side and ("market" in otype or "limit" in otype):
+                pending |= _both_formats(o.symbol)
+    except Exception as e:
+        logger.warning(f"[Execute] Could not read pending orders (duplicate guard degraded): {e}")
+    return pending
 
 def run():
     logger.info("[Execute] Starting execution job...")
@@ -42,6 +73,12 @@ def run():
         return {"error": str(e)}
 
     held     = _normalize_held(positions)
+    # Unfilled entry orders count as "already committed" — otherwise a
+    # pending market buy is invisible and the next run buys the symbol again.
+    try:
+        held |= _symbols_with_pending_entries(get_trading_client())
+    except Exception as e:
+        logger.warning(f"[Execute] Pending-entry guard unavailable: {e}")
     mv_held  = sum(float(p.market_value or 0) for p in positions)
     max_pos  = max(8, int(equity * 0.5 / 1000))
     slots    = max_pos - len(positions)

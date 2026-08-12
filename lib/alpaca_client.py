@@ -236,12 +236,33 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
         # Always use filled_qty * 0.999 (floor to 8dp) for protective orders
         # to avoid "insufficient balance" 40310000 errors.
         import time as _time
-        _time.sleep(1.0)
-        try:
-            filled_order = client.get_order_by_id(entry_order.id)
-            filled_qty = float(filled_order.filled_qty or qty)
-        except Exception:
-            filled_qty = float(qty)
+        # POLL for the fill instead of assuming one second is enough. The old
+        # code slept 1s then read filled_qty — and Alpaca returns the STRING
+        # "0" while an order is still pending. "0" is truthy, so the
+        # `filled_qty or qty` fallback never fired, protective_qty became 0,
+        # and BOTH the stop-loss and take-profit were skipped: live positions
+        # sat completely unprotected (observed on SOL/LINK/XRP).
+        filled_qty = 0.0
+        for attempt in range(6):            # ~6s total, backing off
+            _time.sleep(0.5 if attempt == 0 else 1.0)
+            try:
+                filled_order = client.get_order_by_id(entry_order.id)
+                filled_qty = float(filled_order.filled_qty or 0)
+            except Exception as e:
+                logger.debug(f"[Alpaca] Fill poll {attempt + 1} failed for {sym}: {e}")
+                filled_qty = 0.0
+            if filled_qty > 0:
+                break
+        if filled_qty <= 0:
+            # Last resort: read the position itself — the order may have
+            # filled between polls, or partially.
+            try:
+                held = client.get_open_position(sym)
+                filled_qty = abs(float(held.qty or 0))
+                if filled_qty > 0:
+                    logger.info(f"[Alpaca] {sym} fill confirmed via position lookup: qty={filled_qty}")
+            except Exception:
+                pass
         # Apply a 0.1% haircut and floor to 8 decimal places to stay under settled balance
         protective_qty = round(filled_qty * 0.999, 8)
         logger.info(f"[Alpaca] Crypto filled qty={filled_qty} → protective qty={protective_qty} (0.1% haircut)")
@@ -291,7 +312,23 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                         f"[Alpaca] UNPROTECTED POSITION — Crypto SL order failed twice for {sym}: {e2} — entry filled with NO stop-loss protection"
                     )
         elif stop_loss and stop_loss > 0:
-            logger.error(f"[Alpaca] UNPROTECTED POSITION — {sym} has no positive protective_qty ({protective_qty}); skipping SL order")
+            logger.error(
+                f"[Alpaca] UNPROTECTED POSITION — {sym} has no positive protective_qty "
+                f"({protective_qty}); skipping SL order. manage_positions will attempt "
+                f"to attach a stop on its next sweep."
+            )
+            try:
+                from lib.alert_engine import raise_alert
+                raise_alert(
+                    source="execution", severity="HIGH_PRIORITY",
+                    title=f"Unprotected position: {sym}",
+                    detail=(f"Entry filled but no stop-loss could be placed (protective_qty={protective_qty}). "
+                            f"The position-manager sweep will retry; verify manually if it persists."),
+                    dedup_key=f"unprotected:{sym}",
+                    extra={"symbol": sym},
+                )
+            except Exception:
+                pass
 
         # ── Step 2b: take-profit limit-sell ─────────────────────────────────
         if take_profit and take_profit > 0 and protective_qty > 0:

@@ -224,7 +224,7 @@ def _market_data_block(symbol: str, asset_class: str | None) -> str | None:
             # Forex first — AllRatesToday has live interbank rates, which beat
             # Massive's previous-session data for currency pairs.
             try:
-                from lib.allrates_data import fx_summary_block
+                from lib.fx_rates import fx_summary_block
                 fx = fx_summary_block(symbol)
                 if fx:
                     return fx

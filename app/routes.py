@@ -820,13 +820,21 @@ def _build_provider_status() -> dict:
     except Exception as e:
         add("CoinGecko", False, str(e)[:60])
 
-    # AllRatesToday — reads the lib's 15-min cache (a hit costs nothing)
+    # FX — Frankfurter (keyless, no quota) reading the lib's hourly cache.
+    # Reported as "FX" rather than "AllRates": AllRatesToday is now an
+    # optional extra whose exhausted free quota must not show the desk a
+    # red light when rates are in fact flowing.
     try:
-        from lib.allrates_data import get_fx_rate
-        rate = get_fx_rate("USD", "EUR")
-        add("AllRates", bool(rate and rate.get("rate")), "interbank FX" if rate else "no data")
+        from lib.fx_rates import fetch_rates, allrates_quota_state
+        latest = fetch_rates("USD", ["EUR"])
+        ok = bool((latest or {}).get("rates", {}).get("EUR"))
+        qs = allrates_quota_state()
+        extra = "" if not qs["configured"] else (
+            " · AllRates spare: ok" if qs["usable"] else f" · AllRates {qs['reason']}"
+        )
+        add("FX", ok, (f"ECB via Frankfurter ({latest.get('date')})" if ok else "no data") + extra)
     except Exception as e:
-        add("AllRates", False, str(e)[:60])
+        add("FX", False, str(e)[:60])
 
     # Web-search MCPs — initialize-level check via list_tools (cached inside
     # mcp_client per process; failures return empty rather than raising)
@@ -857,55 +865,72 @@ def get_provider_status():
 
 
 def _build_fx_rates() -> dict | None:
-    """Full FX payload build — 24 upstream calls, run in parallel and mostly
-    from lib-level cache. Called inline only on true first run; afterwards
-    lib/api_cache serves the persisted payload instantly and refreshes in a
-    background thread."""
+    """Full FX payload — TWO upstream calls total.
+
+    Frankfurter returns every pair against a base in one request, so the
+    12-pair panel costs one latest call plus one series call instead of the
+    24 it used to (12 pairs x rate+history). That per-pair design burned
+    AllRatesToday's 300-request LIFETIME free quota in a few hours."""
     from datetime import datetime as _dt, timezone as _tz
+    from lib.fx_rates import fetch_rates, fetch_series, allrates_quota_state
     now = _dt.now(_tz.utc)
-    from lib.allrates_data import get_fx_rate, get_fx_history
-    # Majors Jarvis trades first, then the crosses and EM pairs that give
-    # macro context. Each pair costs 2 calls per 15-min cache window.
-    fx_pairs = [
+
+    # USD-based majors plus the EM pairs that give macro context. Cross
+    # pairs (EUR/GBP, EUR/JPY, GBP/JPY) are DERIVED from the same response —
+    # no extra calls, and arithmetically exact against a common base.
+    quoted = ["EUR", "JPY", "GBP", "CHF", "AUD", "CAD", "NZD", "CNY", "MXN"]
+    latest = fetch_rates("USD", quoted)
+    series = fetch_series("USD", quoted, days=30)
+    if not latest or not (latest.get("rates")):
+        return None
+
+    r_now = latest["rates"]
+    hist = sorted(((series or {}).get("rates") or {}).items())
+
+    def usd_rate(ccy: str, table: dict) -> float | None:
+        return table.get(ccy) if ccy != "USD" else 1.0
+
+    def build(src: str, tgt: str) -> dict | None:
+        """Rate for src/tgt from USD-based quotes: USD/tgt divided by USD/src."""
+        s_now, t_now = usd_rate(src, r_now), usd_rate(tgt, r_now)
+        if not s_now or not t_now:
+            return None
+        rate = t_now / s_now
+        points = []
+        for day, table in hist:
+            s_d, t_d = usd_rate(src, table), usd_rate(tgt, table)
+            if s_d and t_d:
+                points.append({"date": day, "rate": round(t_d / s_d, 6)})
+        chg = None
+        if len(points) >= 2 and points[0]["rate"]:
+            chg = (points[-1]["rate"] - points[0]["rate"]) / points[0]["rate"] * 100
+        return {
+            "symbol": f"{src}{tgt}=X", "pair": f"{src}/{tgt}",
+            "rate": round(rate, 6),
+            "rate_source": "ecb_reference",
+            "history": points,
+            "change_pct": round(chg, 3) if chg is not None else None,
+        }
+
+    wanted = [
         ("EUR", "USD"), ("USD", "JPY"), ("GBP", "USD"), ("USD", "CHF"),
         ("AUD", "USD"), ("NZD", "USD"), ("USD", "CAD"), ("EUR", "GBP"),
         ("EUR", "JPY"), ("GBP", "JPY"), ("USD", "CNY"), ("USD", "MXN"),
     ]
-    # 24 upstream calls cold — sequential took ~13s and stalled the macro
-    # page; parallel across 8 workers lands ~1.5s. Cache hits skip all of it.
-    from concurrent.futures import ThreadPoolExecutor
-
-    def fetch_pair(pt):
-        src, tgt = pt
-        return (pt, get_fx_rate(src, tgt),
-                get_fx_history(src, tgt, "30d") or get_fx_history(src, tgt, "7d"))
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        fetched = list(pool.map(fetch_pair, fx_pairs))
-
-    pairs_out = []
-    for (src, tgt), rate, hist in fetched:
-        sym = f"{src}{tgt}=X"
-        points = [
-            {"date": p.get("date"), "rate": p.get("rate")}
-            for p in ((hist or {}).get("data") or [])
-            if p.get("rate") is not None
-        ]
-        chg_pct = None
-        if len(points) >= 2 and points[0]["rate"]:
-            chg_pct = (float(points[-1]["rate"]) - float(points[0]["rate"])) / float(points[0]["rate"]) * 100
-        pairs_out.append({
-            "symbol": sym, "pair": f"{src}/{tgt}",
-            "rate": (rate or {}).get("rate"),
-            "rate_source": (rate or {}).get("source"),
-            "history": points, "change_pct": round(chg_pct, 3) if chg_pct is not None else None,
-        })
-    if not any(p["rate"] is not None for p in pairs_out):
+    pairs_out = [row for row in (build(a, b) for a, b in wanted) if row]
+    if not pairs_out:
         return None
     return {
         "pairs": pairs_out,
         "as_of": now.isoformat(),
-        "note": "Live interbank rates via AllRatesToday; history is daily closes. Cached 15 min; stale payloads serve instantly while refreshing.",
+        "rate_date": latest.get("date"),
+        "provider": "frankfurter (ECB reference rates)",
+        "allrates": allrates_quota_state(),
+        "note": (
+            "ECB reference rates via Frankfurter — free and keyless, published once per "
+            "business day, so these are NOT live interbank ticks. Cross pairs are derived "
+            "from a common USD base. Two upstream calls serve the whole panel."
+        ),
     }
 
 
@@ -1316,7 +1341,7 @@ def ask_analyst(body: dict):
                     if not handled:
                         # FX pairs → AllRatesToday live interbank rates
                         try:
-                            from lib.allrates_data import fx_summary_block
+                            from lib.fx_rates import fx_summary_block
                             fx = fx_summary_block(sym_guess)
                             if fx:
                                 context_blocks["market_data"] = {"provider": "allratestoday", "live": True, "data": fx}

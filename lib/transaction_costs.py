@@ -64,11 +64,23 @@ def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
     return DEFAULT_EQUITY_SPREAD_PCT, "default_equity"
 
 
-def fee_pct(symbol: str, maker: bool = False) -> float:
-    """Per-side fee as a fraction of notional."""
+def fee_pct(symbol: str, maker: bool = False, venue: str | None = None) -> float:
+    """Per-side fee as a fraction of notional, for the venue that will fill it.
+
+    Venue matters more than it looks: Kraken's base taker fee is 0.40% against
+    Alpaca's 0.25%, and P0 rejects trades whose costs exceed 0.50R — so a fee
+    assumption wrong by 60% moves the line between tradeable and not. Falls
+    back to the module constants when the venue registry is unavailable, so a
+    missing import can never make a trade look free.
+    """
     if not is_crypto_symbol(symbol):
         return EQUITY_FEE_PCT
-    return CRYPTO_MAKER_FEE_PCT if maker else CRYPTO_TAKER_FEE_PCT
+    try:
+        from lib.venues import fee_for, DEFAULT_VENUE
+        rate, _ = fee_for(venue or DEFAULT_VENUE, maker=maker, asset_class="crypto")
+        return rate
+    except Exception:
+        return CRYPTO_MAKER_FEE_PCT if maker else CRYPTO_TAKER_FEE_PCT
 
 
 def funding_cost_pct(symbol: str, hold_hours: float,
@@ -130,7 +142,8 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
                    is_short: bool = False,
                    illiquid: bool = False,
                    borrow_rate_annual: float | None = None,
-                   hard_to_borrow: bool = False) -> dict:
+                   hard_to_borrow: bool = False,
+                   venue: str | None = None) -> dict:
     """Full round-trip cost estimate, in both percent and R."""
     entry = float(entry or 0)
     risk_distance = abs(entry - float(stop or 0))
@@ -153,7 +166,7 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         fee_cost_pct = ((spec.commission * 2.0) / contract_notional_value
                         if contract_notional_value > 0 else 0.0)
     else:
-        per_side_fee = fee_pct(symbol, maker=maker)
+        per_side_fee = fee_pct(symbol, maker=maker, venue=venue)
         fee_cost_pct = per_side_fee * 2.0          # in and out
 
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else float(slippage_pct)
@@ -178,6 +191,8 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         "spread_pct": round(spread_cost_pct, 6),
         "spread_source": spread_src,
         "fees_pct": round(fee_cost_pct, 6),
+        "fee_venue": (venue or __import__("lib.venues", fromlist=["DEFAULT_VENUE"]).DEFAULT_VENUE)
+                     if is_crypto_symbol(symbol) else "equity",
         "slippage_pct": round(slip_cost_pct, 6),
         "slippage_source": "measured" if slippage_pct is not None else "default_from_measured_median",
         "funding_pct": round(fund_pct, 6),
@@ -228,7 +243,8 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
                         order_type: str = "market", maker: bool = False,
                         quoted_spread_pct: float | None = None,
                         slippage_pct: float | None = None,
-                        illiquid: bool = False) -> float:
+                        illiquid: bool = False,
+                        venue: str | None = None) -> float:
     """The tightest stop, as a fraction of entry, that can still pay for itself.
 
     This is the inverse of estimate_costs. Cost in R is
@@ -251,7 +267,7 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
     slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else abs(float(slippage_pct))
-    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker) * 2.0 + slip * 2.0
+    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker, venue=venue) * 2.0 + slip * 2.0
     if max_cost_r <= 0:
         return float("inf")
     return total_cost_pct / max_cost_r

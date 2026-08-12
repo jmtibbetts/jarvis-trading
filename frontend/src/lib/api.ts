@@ -1031,8 +1031,20 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).then((r) => {
-      if (!r.ok) throw new Error(`update ${r.status}`);
+    }).then(async (r) => {
+      if (!r.ok) {
+        // Surface the server's reason — a bare "update 422" hid a schema
+        // mismatch that made saving impossible.
+        let why = `${r.status}`;
+        try {
+          const d = await r.json();
+          const detail = d?.detail;
+          why = Array.isArray(detail)
+            ? detail.map((x: { loc?: string[]; msg?: string }) => `${x.loc?.slice(-1)[0] ?? ""}: ${x.msg ?? ""}`).join("; ")
+            : (detail ?? why);
+        } catch { /* non-JSON body — keep the status */ }
+        throw new Error(`update failed — ${why}`);
+      }
       return r.json();
     }),
   cancelAllOrders: () => del<{ ok: boolean }>(`/alpaca/orders`),

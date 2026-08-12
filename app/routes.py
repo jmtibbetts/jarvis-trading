@@ -2570,8 +2570,25 @@ def create_setting(body: ConfigCreate):
             created_date=now, updated_date=now)
         db.add(cfg); return _config_dict(cfg)
 
+class ConfigUpdate(BaseModel):
+    """Partial update — EVERY field optional. ConfigCreate was reused here
+    originally, but its required label/platform meant the Ops edit form
+    (which sends neither) got a 422 and no config could ever be saved."""
+    label: Optional[str] = None
+    platform: Optional[str] = None
+    config_type: Optional[str] = None
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    api_url: Optional[str] = None
+    extra_field_1: Optional[str] = None
+    extra_field_2: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_default: Optional[bool] = None
+    notes: Optional[str] = None
+
+
 @router.put("/settings/{cfg_id}")
-def update_setting(cfg_id: str, body: ConfigCreate):
+def update_setting(cfg_id: str, body: ConfigUpdate):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as db:
         cfg = db.query(PlatformConfig).filter(PlatformConfig.id==cfg_id).first()

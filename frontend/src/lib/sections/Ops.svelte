@@ -93,18 +93,29 @@
   }
 
   let editingId = $state<string | null>(null);
-  let editCfg = $state<{ label: string; api_url: string; api_key: string }>({ label: "", api_url: "", api_key: "" });
+  let editCfg = $state<{ label: string; api_url: string; api_key: string; api_secret: string }>({ label: "", api_url: "", api_key: "", api_secret: "" });
 
   function startEdit(cfg: (typeof configs)[number]) {
     editingId = cfg.id;
-    editCfg = { label: cfg.label ?? "", api_url: cfg.api_url ?? "", api_key: "" };
+    editCfg = { label: cfg.label ?? "", api_url: cfg.api_url ?? "", api_key: "", api_secret: "" };
   }
 
   async function saveEdit() {
     if (!editingId) return;
     try {
       const body: Record<string, unknown> = { label: editCfg.label, api_url: editCfg.api_url };
-      if (editCfg.api_key.trim()) body.api_key = editCfg.api_key.trim(); // blank = keep existing key
+      // Blank = keep whatever is stored. Alpaca (and most brokers) need BOTH
+      // halves — a key without its secret authenticates nothing.
+      const hasKey = !!editCfg.api_key.trim();
+      const hasSecret = !!editCfg.api_secret.trim();
+      if (hasKey !== hasSecret) {
+        const which = hasKey ? "key without its secret" : "secret without its key";
+        if (!confirm(`You entered a new ${which}. Brokers validate the pair together, so a mismatched half means every request fails with "unauthorized".
+
+Save anyway?`)) return;
+      }
+      if (hasKey) body.api_key = editCfg.api_key.trim();
+      if (hasSecret) body.api_secret = editCfg.api_secret.trim();
       await api.updateSetting(editingId, body);
       toastStore.ok("Provider updated");
       editingId = null;
@@ -343,7 +354,8 @@
               <div class="add-form edit-form">
                 <input placeholder="Label" bind:value={editCfg.label} />
                 <input placeholder="API URL" bind:value={editCfg.api_url} />
-                <input placeholder="API Key (leave blank to keep current)" type="password" bind:value={editCfg.api_key} />
+                <input placeholder="API Key (blank = keep current)" type="password" autocomplete="off" bind:value={editCfg.api_key} />
+                <input placeholder="API Secret (blank = keep current)" type="password" autocomplete="off" bind:value={editCfg.api_secret} />
                 <button class="btn small primary" onclick={saveEdit}>Save Changes</button>
               </div>
             {/if}

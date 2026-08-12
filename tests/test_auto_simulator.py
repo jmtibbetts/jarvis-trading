@@ -266,3 +266,98 @@ class TestModuleHygiene:
                 if not (defines or imports):
                     offenders.append(str(path.relative_to(root)))
         assert offenders == [], f"modules use logger without defining it: {offenders}"
+
+
+class TestWatchlistPriority:
+    """The operator's own watchlist was never consulted by signal
+    generation - 246 of 307 tracked assets produced no signals at all."""
+
+    def test_excludes_symbols_already_in_fixed_tracks(self, monkeypatch):
+        import jobs.generate_signals as gs
+        rows = [
+            type("A", (), {"symbol": "BTC/USD", "price": 60000, "change_percent": 5}),   # in TRACK_C
+            type("A", (), {"symbol": "BEAT/USD", "price": 1.24, "change_percent": 30}),  # not tracked
+        ]
+        self._patch_db(monkeypatch, gs, rows)
+        out = gs.watchlist_symbols()
+        assert "BEAT/USD" in out
+        assert "BTC/USD" not in out            # already covered by TRACK_C
+
+    def test_orders_by_absolute_move_so_dead_names_do_not_eat_budget(self, monkeypatch):
+        import jobs.generate_signals as gs
+        rows = [
+            type("A", (), {"symbol": "QUIET/USD", "price": 1.0, "change_percent": 0.2}),
+            type("A", (), {"symbol": "WILD/USD", "price": 1.0, "change_percent": -45}),
+            type("A", (), {"symbol": "MID/USD", "price": 1.0, "change_percent": 8}),
+        ]
+        self._patch_db(monkeypatch, gs, rows)
+        assert gs.watchlist_symbols() == ["WILD/USD", "MID/USD", "QUIET/USD"]
+
+    def test_stablecoins_and_priceless_rows_are_skipped(self, monkeypatch):
+        import jobs.generate_signals as gs
+        rows = [
+            type("A", (), {"symbol": "USDT/USD", "price": 1.0, "change_percent": 0.01}),
+            type("A", (), {"symbol": "GHOST/USD", "price": 0, "change_percent": 99}),
+            type("A", (), {"symbol": "REAL/USD", "price": 2.5, "change_percent": 12}),
+        ]
+        self._patch_db(monkeypatch, gs, rows)
+        assert gs.watchlist_symbols() == ["REAL/USD"]
+
+    @staticmethod
+    def _patch_db(monkeypatch, gs, rows):
+        import contextlib
+
+        class _Q:
+            def all(self): return rows
+
+        class _DB:
+            def query(self, *a, **k): return _Q()
+
+        @contextlib.contextmanager
+        def _fake():
+            yield _DB()
+
+        import app.database as dbmod
+        monkeypatch.setattr(dbmod, "get_db", _fake)
+        monkeypatch.setattr(gs, "get_db", _fake, raising=False)
+
+
+class TestBatchInterleaving:
+    """Watchlist priority must not cost discovery. The LLM budget is fixed
+    and late batches fall back to TA, so front-loading one track starves
+    the other - interleaving gives the watchlist first pick per pair while
+    keeping discovery batches early enough to run."""
+
+    @staticmethod
+    def _interleave(all_batches):
+        wl = [b for b in all_batches if b[0].startswith("W")]
+        rest = [b for b in all_batches if not b[0].startswith("W")]
+        if not (wl and rest):
+            return all_batches
+        out, wi, ri = [], 0, 0
+        while wi < len(wl) or ri < len(rest):
+            if wi < len(wl):
+                out.append(wl[wi]); wi += 1
+            if ri < len(rest):
+                out.append(rest[ri]); ri += 1
+        return out
+
+    def test_discovery_runs_second_not_last(self):
+        batches = [(f"W{i}",) for i in range(5)] + [(f"A{i}",) for i in range(4)]
+        order = [b[0] for b in self._interleave(batches)]
+        assert order[0].startswith("W")          # watchlist still first
+        assert order[1].startswith("A")          # discovery immediately after
+
+    def test_no_batch_is_dropped(self):
+        batches = [(f"W{i}",) for i in range(5)] + [(f"A{i}",) for i in range(4)] + [(f"C{i}",) for i in range(4)]
+        order = self._interleave(batches)
+        assert len(order) == len(batches)
+        assert {b[0] for b in order} == {b[0] for b in batches}
+
+    def test_watchlist_only_is_untouched(self):
+        batches = [(f"W{i}",) for i in range(3)]
+        assert self._interleave(batches) == batches
+
+    def test_discovery_only_is_untouched(self):
+        batches = [(f"A{i}",) for i in range(3)]
+        assert self._interleave(batches) == batches

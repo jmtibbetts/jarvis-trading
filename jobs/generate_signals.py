@@ -573,6 +573,48 @@ def select_llm_batches(all_batches, max_batches):
     return selected
 
 
+def watchlist_symbols(limit: int = 25) -> list:
+    """Symbols the OPERATOR tracks, which the hardcoded tracks never covered.
+
+    TRACK_A/B/C are fixed lists written into this file; the watchlist in the
+    database was never consulted, so 246 of 307 tracked assets produced no
+    signals at all. Anything the user deliberately added is at least as
+    interesting as a hardcoded ticker, so these are analysed FIRST and the
+    standard universe runs afterwards with whatever budget remains.
+
+    Ordered by absolute 24h move: a symbol swinging hard is where setups
+    actually exist, and it keeps the batch budget on live names rather than
+    stablecoins parked at 1.00.
+    """
+    from app.database import get_db, MarketAsset
+    fixed = set(TRACK_A) | set(TRACK_B) | set(TRACK_C) | set(TRACK_E_PAPER)
+    rows = []
+    try:
+        with get_db() as db:
+            for a in db.query(MarketAsset).all():
+                sym = (a.symbol or "").upper().strip()
+                if not sym or sym in fixed:
+                    continue
+                price = float(a.price or 0)
+                if price <= 0:
+                    continue
+                # Stablecoins never produce a directional setup worth an LLM call.
+                base = sym.split("/")[0]
+                if base in {"USDT", "USDC", "USD1", "USDG", "DAI", "FDUSD", "TUSD", "PYUSD"}:
+                    continue
+                move = abs(float(getattr(a, "change_percent", 0) or 0))
+                rows.append((move, sym))
+    except Exception as e:
+        logger.warning(f"[Signals] Watchlist load failed: {e}")
+        return []
+    rows.sort(reverse=True)
+    picked = [sym for _, sym in rows[:limit]]
+    if picked:
+        logger.info(f"[Signals] Watchlist track: {len(picked)} operator-tracked symbols "
+                    f"(top movers first) — {', '.join(picked[:6])}...")
+    return picked
+
+
 def run():
     global ta_profiles_global, asset_map_global
 
@@ -725,6 +767,32 @@ def run():
         """Yield successive n-sized chunks from list."""
         for i in range(0, len(lst), n):
             yield lst[i:i + n]
+
+    # Track W — the operator's own watchlist, analysed BEFORE the fixed
+    # tracks so their budget is never consumed by hardcoded tickers.
+    wl = watchlist_symbols()
+    wl_crypto = [s for s in wl if "/" in s]
+    wl_equity = [s for s in wl if "/" not in s]
+    for i, batch in enumerate(_chunk(wl_crypto, BATCH_SIZE)):
+        crypto_rule_wl = (
+            " Evaluate bullish and bearish TA equally. direction='Long', 'Bounce', or 'Short'. "
+            "Long/Bounce: stop BELOW entry and target ABOVE. Short: stop ABOVE entry and target BELOW. "
+            "These are high-volatility names: size stops from ATR, not a fixed percentage. "
+            "R:R>=2. Return only the strongest 1-2 setups.\n"
+        )
+        prompt = make_batch_prompt(
+            batch, "WATCHLIST/CRYPTO",
+            "Operator-tracked crypto, 24/7. Often high volatility. Analyze TA for each symbol.",
+            threat_ctx, news_ctx, regime, held_ctx, crypto_rule_wl, SIGNAL_SCHEMA
+        )
+        all_batches.append((f"W{i}", batch, prompt, False))
+    for i, batch in enumerate(_chunk(wl_equity, BATCH_SIZE)):
+        prompt = make_batch_prompt(
+            batch, "WATCHLIST/EQUITY",
+            "Operator-tracked equities. Analyze TA for each symbol.",
+            threat_ctx, news_ctx, regime, held_ctx, directional_rule, SIGNAL_SCHEMA
+        )
+        all_batches.append((f"WE{i}", batch, prompt, False))
 
     # Track A — macro / defense / energy / commodities
     for i, batch in enumerate(_chunk(TRACK_A, BATCH_SIZE)):
@@ -899,6 +967,29 @@ def run():
                 else f"LLM call failed for this batch ({type(e).__name__}: {str(e)[:80]})"
             )
             _append_fallback(batch_id, batch_syms, is_paper, reason=reason)
+
+    # ── Watchlist priority WITHOUT starving discovery ────────────────────
+    # The LLM time budget is fixed, and batches that miss the deadline fall
+    # back to TA. Simply front-loading the watchlist would therefore push the
+    # discovery tracks (A/B/C, opportunistic scanner, futures) past the
+    # deadline on a slow model — trading one blind spot for another.
+    # Interleaving gives the watchlist the FIRST slot of every pair while
+    # guaranteeing discovery batches run early enough to matter.
+    _wl = [b for b in all_batches if b[0].startswith("W")]
+    _rest = [b for b in all_batches if not b[0].startswith("W")]
+    if _wl and _rest:
+        interleaved = []
+        wi = ri = 0
+        while wi < len(_wl) or ri < len(_rest):
+            if wi < len(_wl):
+                interleaved.append(_wl[wi]); wi += 1
+            if ri < len(_rest):
+                interleaved.append(_rest[ri]); ri += 1
+        all_batches = interleaved
+        logger.info(
+            f"[Signals] Batch order interleaved: {len(_wl)} watchlist + {len(_rest)} discovery "
+            f"— watchlist first in each pair, neither track starves the other"
+        )
 
     max_llm_batches = int(os.getenv("SIGNAL_LLM_MAX_BATCHES", "0"))
     llm_workers = max(1, min(4, int(os.getenv("SIGNAL_LLM_WORKERS", "1"))))

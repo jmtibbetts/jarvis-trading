@@ -28,7 +28,27 @@ def health():
     # guessing from git — run.ps1 -Status and any deploy check can read it.
     from app.version import VERSION
     return {"status": "ok", "version": VERSION,
+            "ui_build": _ui_build(),
             "time": datetime.now(timezone.utc).isoformat()}
+
+
+def _ui_build() -> str | None:
+    """The bundle filename the SHELL currently points at.
+
+    "Is my browser on the latest build?" was answerable only by opening
+    devtools and reading the network tab, which made a caching problem
+    hard to distinguish from a rendering one — a button that shipped
+    looked identical to a button that was never written. The UI compares
+    this against the bundle it actually loaded and says so when they
+    differ.
+    """
+    try:
+        from pathlib import Path
+        index = Path(__file__).parent.parent / "static" / "dist" / "index.html"
+        m = re.search(r'src="[^"]*/(index-[A-Za-z0-9_-]+\.js)"', index.read_text(encoding="utf-8"))
+        return m.group(1) if m else None
+    except Exception:
+        return None
 
 
 class TradingPreferenceRequest(BaseModel):

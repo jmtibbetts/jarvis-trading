@@ -1067,6 +1067,10 @@ export const api = {
         }[];
       };
     }>(`/venue/kraken`),
+  /** Version plus the bundle the SHELL points at, so the UI can tell a
+   *  stale cached page from a missing feature. */
+  health: () =>
+    get<{ status: string; version: string; ui_build: string | null; time: string }>(`/health`),
   focusList: () =>
     get<{
       focus: {

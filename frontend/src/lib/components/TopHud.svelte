@@ -14,6 +14,37 @@
   });
   const downCount = $derived(providers.filter((p) => !p.ok).length);
 
+  // ── Stale-build detector ────────────────────────────────────────────
+  // "Is my browser on the latest build?" was answerable only by opening
+  // devtools and reading the network tab, which makes a caching problem
+  // indistinguishable from a rendering one — a button that shipped looks
+  // exactly like a button that was never written. The server reports which
+  // bundle the shell points at; compare it to the one actually running.
+  let staleBuild = $state<{ loaded: string; latest: string } | null>(null);
+  $effect(() => {
+    const check = async () => {
+      try {
+        const h = await api.health();
+        if (!h.ui_build) return;
+        const loaded = [...document.querySelectorAll<HTMLScriptElement>("script[src]")]
+          .map((s) => s.src.split("/").pop() ?? "")
+          .find((n) => n.startsWith("index-") && n.endsWith(".js"));
+        staleBuild = loaded && loaded !== h.ui_build ? { loaded, latest: h.ui_build } : null;
+      } catch { /* health is best-effort; never block the HUD on it */ }
+    };
+    check();
+    const id = setInterval(check, 60_000);
+    return () => clearInterval(id);
+  });
+
+  function reloadFresh() {
+    // A query string defeats the cached entry even when a hard refresh has
+    // not, then is dropped so the URL stays clean.
+    const u = new URL(window.location.href);
+    u.searchParams.set("b", Date.now().toString(36));
+    window.location.replace(u.toString());
+  }
+
   let clock = $state(new Date().toTimeString().slice(0, 8));
   $effect(() => {
     const id = setInterval(() => {
@@ -32,6 +63,15 @@
   }
 </script>
 
+{#if staleBuild}
+  <div class="stale-build" role="status">
+    <span>
+      This page is running an old build ({staleBuild.loaded}) — the server has
+      {staleBuild.latest}. Features added since will be missing.
+    </span>
+    <button onclick={reloadFresh}>Load the current build</button>
+  </div>
+{/if}
 <div class="hud">
   <div class="brand">
     <div class="mark"></div>
@@ -79,6 +119,33 @@
 </div>
 
 <style>
+  /* Stale build banner. Deliberately loud and above everything: a page that
+     silently lags a deploy makes every other bug report unreliable. */
+  .stale-build {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 6px 14px;
+    font-size: 11px;
+    color: var(--ink);
+    background: color-mix(in srgb, var(--warm, #e0a33e) 22%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warm, #e0a33e) 55%, transparent);
+  }
+  .stale-build button {
+    font: inherit;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 5px;
+    border: 1px solid var(--warm, #e0a33e);
+    background: none;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .stale-build button:hover {
+    background: color-mix(in srgb, var(--warm, #e0a33e) 25%, transparent);
+  }
   .hud {
     grid-column: 1 / 3;
     display: flex;

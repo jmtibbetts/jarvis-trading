@@ -192,35 +192,48 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # The Svelte dashboard (frontend/) is the only dashboard as of the Phase 16
 # cutover — the old Jinja2/vanilla-JS dashboard (templates/index.html,
-# static/js/jarvis.js) has been removed. Its built assets are still served
-# from /next/assets/... (that's the base path baked into static/dist/index.html
-# by the Vite build) even though "/" is now the primary entry point; spa_fallback
-# below serves that same index.html for "/" and any other unmatched path, since
-# the app's routing is hash-based (#command, #signals, ...) and never reaches
-# the server.
+# static/js/jarvis.js) has been removed. It is served entirely from "/":
+# the shell at "/" (and any unmatched path, since routing is hash-based —
+# #command, #signals, ... — and never reaches the server), its bundle from
+# /assets/.
 #
-# Registration order matters here, but not the way it looks: Starlette
-# doesn't simply take the first route in registration order that matches —
-# a Mount only returns a FULL match for "/next/..." (sub-path); the bare
-# "/next" (no trailing slash) only PARTIAL-matches the Mount, and Starlette
-# keeps searching for a FULL match, which spa_fallback's catch-all
-# "/{full_path:path}" then provides — so the bare path would otherwise fall
-# through to spa_fallback. Since spa_fallback now serves the same index.html
-# anyway, that's harmless, but the explicit redirect keeps the URL bar tidy.
-NEXT_DIST_DIR = STATIC_DIR / "dist"
-if NEXT_DIST_DIR.exists():
-    app.mount("/next", StaticFiles(directory=str(NEXT_DIST_DIR), html=True), name="next")
+# Both used to come from different places: the shell from "/" but its assets
+# from the /next staging mount, because the Vite base still said so long
+# after the cutover. Splitting one page across two routes is what let a
+# no-cache header fix one and miss the other.
+DIST_DIR = STATIC_DIR / "dist"
+if DIST_DIR.exists():
+    # The build now emits /assets/... (vite base '/'), matching where the app
+    # actually lives. This mount must be registered BEFORE spa_fallback's
+    # catch-all, or a missing asset would return index.html as text/html
+    # instead of a 404 — which is exactly how a bare /assets/... URL behaved
+    # before this existed, and it made diagnosing a cache problem harder
+    # than it needed to be.
+    ASSETS_DIR = DIST_DIR / "assets"
+    if ASSETS_DIR.exists():
+        app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
+    # /next is GONE as a place to serve from. It was a staging path used
+    # while this dashboard was built alongside the old one; the cutover moved
+    # everything to "/", but the Vite base kept emitting /next/assets/... so
+    # the app on port 3000 still quietly depended on the staging mount. That
+    # is what made a plain caching bug hard to reason about — the shell came
+    # from one route and its assets from another, and a header fix applied to
+    # one did not apply to the other.
+    #
+    # The redirect stays so an old bookmark lands somewhere sensible rather
+    # than on a 404.
     @app.get("/next", include_in_schema=False)
+    @app.get("/next/", include_in_schema=False)
     def next_redirect():
-        return RedirectResponse(url="/next/")
+        return RedirectResponse(url="/", status_code=301)
 else:
-    logger.warning(f"[Server] {NEXT_DIST_DIR} not found — run `npm run build` in frontend/ to enable the dashboard")
+    logger.warning(f"[Server] {DIST_DIR} not found — run `npm run build` in frontend/ to enable the dashboard")
 
 @app.get("/")
 @app.get("/{full_path:path}")
 def spa_fallback(full_path: str = ""):
-    index = NEXT_DIST_DIR / "index.html"
+    index = DIST_DIR / "index.html"
     if index.exists():
         # The shell must NEVER be cached. It is the only file that names the
         # content-hashed bundle, so a cached copy pins the browser to a build

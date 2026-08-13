@@ -1,0 +1,103 @@
+#!/bin/sh
+# Refuse to commit databases, real .env files, or anything carrying a
+# credential that looks live.
+#
+# This exists because it already happened. A backups/ directory was
+# committed before .gitignore covered it, and the SQLite files inside carry
+# the platform_configs table with api_key and api_secret in PLAINTEXT. An
+# Alpaca key and its 44-character secret sat in a PUBLIC repo's history from
+# 2026-08-09 until a filter-repo rewrite on 2026-08-13 — and even then the
+# orphaned objects stayed fetchable by SHA, because GitHub garbage-collects
+# on its own schedule and no client can force it.
+#
+# .gitignore was not enough on its own. It listed data/ and .env, but a
+# NEW backup directory with a new name was not covered, and nothing checked
+# what was actually inside the files being staged. This does.
+#
+# Deliberate design choices:
+#   - Matches on CONTENT and extension, not on directory names. The failure
+#     mode was an unanticipated directory name, so a path-based rule would
+#     have missed it again.
+#   - Reads staged content (:0:path), not the working tree. Committing a
+#     clean file while a dirty one is staged is exactly how a check gets
+#     fooled.
+#   - Prints the override explicitly. A hook people cannot bypass is a hook
+#     people delete.
+
+fail=0
+
+say() { printf '%s\n' "$*" >&2; }
+
+block() {
+    if [ "$fail" -eq 0 ]; then
+        say ""
+        say "COMMIT REFUSED — pre-commit hook (.githooks/pre-commit)"
+        say ""
+    fi
+    fail=1
+    say "  $1"
+    say "      $2"
+    say ""
+}
+
+# Added, copied, modified, renamed — anything landing in the commit.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+for path in $staged; do
+    case "$path" in
+        # ── Databases ────────────────────────────────────────────────────
+        *.db|*.sqlite|*.sqlite3|*.db-journal|*.db-wal|*.db-shm)
+            block "$path" "SQLite database. jarvis.db stores API keys and secrets in plaintext."
+            continue
+            ;;
+        # ── Real env files. .env.example is the intended, safe one. ──────
+        .env|.env.*|*/.env|*/.env.*)
+            case "$path" in
+                *.example|*.sample|*.template) ;;
+                *) block "$path" "environment file — commit .env.example with placeholders instead."
+                   continue ;;
+            esac
+            ;;
+    esac
+
+    # ── Content scan ─────────────────────────────────────────────────────
+    # Skip binaries: -z reports whether the staged blob is binary.
+    if git diff --cached --numstat -- "$path" | head -1 | grep -q '^-'; then
+        continue
+    fi
+
+    content=$(git show ":0:$path" 2>/dev/null) || continue
+
+    # Alpaca keys are distinctively shaped: PK/AK then 18+ uppercase
+    # alphanumerics. Specific enough not to fire on ordinary prose.
+    if printf '%s' "$content" | grep -Eq '\b[AP]K[A-Z0-9]{18,}\b'; then
+        case "$path" in
+            *.example|*.sample|*.template|.githooks/*) ;;
+            *) block "$path" "contains something shaped like a live Alpaca API key." ;;
+        esac
+    fi
+
+    # A secret assigned a value that is not an obvious placeholder.
+    if printf '%s' "$content" | grep -Eiq '(api[_-]?secret|secret[_-]?key|private[_-]?key)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9/+_-]{24,}'; then
+        case "$path" in
+            *.example|*.sample|*.template|.githooks/*) ;;
+            *) block "$path" "assigns a long value to a secret-looking name." ;;
+        esac
+    fi
+done
+
+if [ "$fail" -ne 0 ]; then
+    say "Nothing was committed."
+    say ""
+    say "If a match is a false positive, override for this one commit:"
+    say "    git commit --no-verify"
+    say ""
+    say "If a database or key was staged by accident:"
+    say "    git restore --staged <path>"
+    say "    echo '<path>' >> .gitignore"
+    say ""
+    exit 1
+fi
+
+exit 0

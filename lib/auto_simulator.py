@@ -25,6 +25,9 @@ MARGIN_PER_SIGNAL = 1000.0
 # same way the paper engine is bounded.
 MAX_DEPLOYED_PCT   = 60.0    # total committed margin, % of starting capital
 MAX_OPEN_POSITIONS = 60
+# How far past its expected hold a position may run before the failure to
+# resolve is itself the verdict. Shared with the paper book.
+STALE_HOLD_MULTIPLE = 3.0
 ELIGIBLE_STATUSES = {"Active", "PendingApproval"}
 _AUTO_SIM_LOCK = threading.Lock()
 
@@ -270,13 +273,24 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                 reason = "signal_replaced"
             elif signal.status in {"Rejected", "Expired"}:
                 reason = signal.status.lower()
-            elif signal.expires_at:
+            else:
+                # A signal's expiry says "this ENTRY is no longer fresh", not
+                # "close the trade". Treating the two as the same thing closed
+                # a position the moment its entry window shut — which for a 1D
+                # setup means exiting on day 3 of a hold the system itself
+                # estimates at 1-4 weeks. 68 positions closed as "expired".
+                #
+                # A trade is now closed on TIME only once it has run well past
+                # the hold its own timeframe implies, i.e. when the setup has
+                # been refuted by the clock rather than merely gone stale as
+                # an entry.
                 try:
-                    expiry = datetime.fromisoformat(signal.expires_at.replace("Z", "+00:00"))
-                    expiry = expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry.astimezone(timezone.utc)
-                    if expiry <= now:
-                        reason = "expired"
-                except ValueError:
+                    from lib.trade_horizon import hold_status
+                    hs = hold_status(signal.timeframe, position.opened_at,
+                                     STALE_HOLD_MULTIPLE)
+                    if hs.get("state") == "stale":
+                        reason = "hold_window_elapsed"
+                except Exception:
                     pass
             target = float(position.target_price or 0)
             stop = float(position.stop_loss or 0)

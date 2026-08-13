@@ -139,11 +139,48 @@ def funding_cost_pct(symbol: str, hold_hours: float,
     """
     if not is_crypto_symbol(symbol) or not hold_hours or hold_hours <= 0:
         return 0.0, "not_applicable"
+    source = "measured"
     if funding_rate_8h is None:
-        return 0.0, "unknown_rate_excluded"
+        # The rate is COLLECTED — crypto_derivatives_snapshots has been
+        # storing it all along — but nothing ever handed it to this function,
+        # so every caller got 0.0 and funding silently did not exist. It is
+        # negligible on a scalp and material on a hold: at the standard
+        # 0.01%/8h, four weeks costs 0.84% of NOTIONAL, which on 9x leverage
+        # is 7.6% of the margin behind the trade.
+        funding_rate_8h, source = _latest_funding_rate(symbol)
+        if funding_rate_8h is None:
+            return 0.0, "unknown_rate_excluded"
     periods = hold_hours / 8.0
     paid = float(funding_rate_8h) * periods
-    return (-paid if is_short else paid), "measured"
+    return (-paid if is_short else paid), source
+
+
+# The published baseline perpetual funding rate: 0.01% per 8-hour period.
+# Used only when no measurement is on file, and never in place of one.
+DEFAULT_FUNDING_RATE_8H = 0.0001
+
+
+def _latest_funding_rate(symbol: str) -> tuple[float | None, str]:
+    """Most recent measured 8-hour funding rate for this underlying.
+
+    A missing measurement falls back to the published baseline rather than
+    to zero: pricing an unknown funding rate as free is the same class of
+    error as pricing an unknown fee as free, and it flatters exactly the
+    trades that hold longest.
+    """
+    base = str(symbol or "").upper().split("/")[0].replace("XBT", "BTC").strip()
+    try:
+        from app.database import get_db, CryptoDerivativesSnapshot
+        with get_db() as db:
+            row = (db.query(CryptoDerivativesSnapshot)
+                     .filter(CryptoDerivativesSnapshot.symbol == base)
+                     .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
+                     .first())
+            if row is not None and row.funding_rate is not None:
+                return float(row.funding_rate), "measured"
+    except Exception:
+        pass
+    return DEFAULT_FUNDING_RATE_8H, "default_baseline"
 
 
 # Equity short borrow. Selling a stock short means borrowing it, and the

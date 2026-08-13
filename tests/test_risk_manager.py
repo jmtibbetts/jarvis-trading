@@ -166,9 +166,31 @@ class TransactionCostTests(unittest.TestCase):
         self.assertGreater(long_c["funding_pct"], 0)
         self.assertLess(short_c["funding_pct"], 0)
 
-    def test_unknown_funding_is_excluded_not_assumed_zero_cost(self):
+    def test_an_unquoted_funding_rate_is_looked_up_not_priced_at_zero(self):
+        """Changed deliberately from asserting "unknown_rate_excluded".
+
+        That name promised the cost was "not assumed zero" while the function
+        returned exactly zero — labelled honestly, but still the number that
+        flatters the trade. Excluding a cost IS pricing it at zero, and it
+        flatters precisely the positions that hold longest, where funding
+        matters most: a 1D setup estimates a 1-4 week hold, and four weeks at
+        the standard 0.01%/8h is 0.84% of notional before leverage.
+
+        The rate was being collected all along in
+        crypto_derivatives_snapshots and simply never handed to this
+        function. It is now read from there, falling back to the published
+        baseline — never to zero, which is the one direction this model must
+        not fail in.
+        """
         c = estimate_costs("SOL/USD", 100.0, 98.0, hold_hours=24, funding_rate_8h=None)
-        self.assertEqual(c["funding_source"], "unknown_rate_excluded")
+        self.assertIn(c["funding_source"], ("measured", "default_baseline"))
+        self.assertNotEqual(c["funding_pct"], 0.0)
+
+    def test_a_non_crypto_symbol_still_has_no_funding(self):
+        """Perpetual funding is not a thing on equities — the fallback must
+        not invent one."""
+        c = estimate_costs("AAPL", 100.0, 98.0, hold_hours=24, funding_rate_8h=None)
+        self.assertEqual(c["funding_pct"], 0.0)
 
     def test_missing_risk_distance_blocks_the_verdict(self):
         c = estimate_costs("SOL/USD", 100.0, 100.0)

@@ -21,17 +21,21 @@ from datetime import datetime, timezone
 # setup either works or is refuted. Labels are kept verbatim from what the
 # UI and Telegram already displayed, so this consolidation changes no text
 # the operator is used to reading.
+# The minutes ARE the label. Any drift between the two is a trap: the
+# operator reads "hold 1-4 weeks" on the card, so a window that quietly
+# means 3-14 days would judge a three-week-old position stale while the
+# screen still said it was on schedule.
 HORIZONS: dict[str, tuple[int, int, str]] = {
-    "1m":  (5, 20, "<30 min"),
-    "3m":  (15, 60, "<30 min"),
-    "5m":  (25, 90, "<1 hr"),
-    "15m": (60, 300, "1-4 hr"),
-    "30m": (120, 600, "2-8 hr"),
-    "1H":  (240, 1_200, "4-24 hr"),
-    "2H":  (480, 2_400, "1-3 days"),
-    "4H":  (960, 4_320, "1-5 days"),
-    "1D":  (4_320, 20_160, "1-4 weeks"),
-    "1W":  (20_160, 80_640, "1-3 months"),
+    "1m":  (5, 30, "<30 min"),
+    "3m":  (10, 30, "<30 min"),
+    "5m":  (15, 60, "<1 hr"),
+    "15m": (60, 240, "1-4 hr"),
+    "30m": (120, 480, "2-8 hr"),
+    "1H":  (240, 1_440, "4-24 hr"),
+    "2H":  (1_440, 4_320, "1-3 days"),
+    "4H":  (1_440, 7_200, "1-5 days"),
+    "1D":  (10_080, 40_320, "1-4 weeks"),
+    "1W":  (40_320, 129_600, "1-3 months"),
 }
 
 # An unknown timeframe is given hours, not minutes or weeks: the middle of

@@ -536,6 +536,33 @@ def _get_portfolio_cash(db):
     return p
 
 
+def _funding_cost_usd(symbol: str, notional: float, side: int,
+                      opened_at) -> float:
+    """Perpetual funding accrued over the time the position was held.
+
+    Funding is a TRANSFER, not a fee: longs pay shorts when the rate is
+    positive and shorts pay longs when it is negative, so this can
+    legitimately come back negative and REDUCE the cost of a short. Returns
+    0 for anything that is not a crypto perpetual.
+
+    It exists only once a trade is held, which is why it is charged at close
+    rather than reserved at open like the round-trip fee. Negligible on a
+    scalp; material on the 1D setups this book runs, whose own estimate is a
+    1-4 week hold.
+    """
+    try:
+        from lib.trade_horizon import age_minutes
+        held_min = age_minutes(opened_at)
+        if not held_min or held_min <= 0 or not notional:
+            return 0.0
+        from lib.transaction_costs import funding_cost_pct
+        pct, _src = funding_cost_pct(symbol, held_min / 60.0, is_short=(side == -1))
+        return float(pct) * abs(float(notional))
+    except Exception as e:
+        logger.debug(f"[Paper] funding cost unavailable for {symbol}: {e}")
+        return 0.0
+
+
 def _calc_pnl(entry: float, close_price: float, qty: float, side: int, leverage: float,
               margin: float, symbol: str = ""):
     """
@@ -953,6 +980,15 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
         # The round trip reserved at open is charged here. Without it the book
         # kept the losing side of the ledger optional.
         pos_fees = float(getattr(pos, "fees", 0.0) or 0.0)
+        # Perpetual funding, which only exists once a trade is HELD. It is
+        # rounding error on a scalp and a real cost on the 1D setups this
+        # book runs, whose own estimate is a 1-4 week hold: at the standard
+        # 0.01%/8h that is 0.84% of notional over four weeks, and notional is
+        # leveraged. Charged at close because it accrues with time, unlike
+        # the fee, which is known at open.
+        funding = _funding_cost_usd(pos_symbol, qty * entry, side,
+                                    getattr(pos, "opened_at", None))
+        pos_fees += funding
         pnl = gross - pos_fees
         pnl_pct = (pnl / pos_margin * 100) if pos_margin else 0.0
 

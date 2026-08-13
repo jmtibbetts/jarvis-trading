@@ -36,6 +36,40 @@ class LabelsMatchWhatTheUIAlreadyShowedTests(unittest.TestCase):
         self.assertEqual(set(m), set(HORIZONS))
 
 
+class WindowMatchesLabelTests(unittest.TestCase):
+    """The minutes ARE the label.
+
+    Any drift between the two is a trap: the operator reads "hold 1-4 weeks"
+    on the card, so a window that quietly meant 3-14 days would judge a
+    three-week-old position stale while the screen still said it was on
+    schedule. That mismatch existed in the first version of this table.
+    """
+
+    DAY = 1_440
+
+    def test_one_to_four_weeks_really_means_one_to_four_weeks(self):
+        lo, hi = expected_hold_minutes("1D")
+        self.assertEqual(hold_estimate("1D"), "1-4 weeks")
+        self.assertAlmostEqual(lo / self.DAY, 7, delta=0.1)
+        self.assertAlmostEqual(hi / self.DAY, 28, delta=0.1)
+
+    def test_hour_labels_match_their_windows(self):
+        for tf, lo_h, hi_h in (("15m", 1, 4), ("30m", 2, 8), ("1H", 4, 24)):
+            lo, hi = expected_hold_minutes(tf)
+            self.assertAlmostEqual(lo / 60, lo_h, delta=0.1, msg=tf)
+            self.assertAlmostEqual(hi / 60, hi_h, delta=0.1, msg=tf)
+
+    def test_day_labels_match_their_windows(self):
+        for tf, lo_d, hi_d in (("2H", 1, 3), ("4H", 1, 5)):
+            lo, hi = expected_hold_minutes(tf)
+            self.assertAlmostEqual(lo / self.DAY, lo_d, delta=0.1, msg=tf)
+            self.assertAlmostEqual(hi / self.DAY, hi_d, delta=0.1, msg=tf)
+
+    def test_sub_hour_labels_are_not_exceeded(self):
+        self.assertLessEqual(expected_hold_minutes("1m")[1], 30)
+        self.assertLessEqual(expected_hold_minutes("5m")[1], 60)
+
+
 class HoldWindowTests(unittest.TestCase):
     def test_longer_timeframes_expect_longer_holds(self):
         order = ["1m", "5m", "15m", "1H", "4H", "1D", "1W"]

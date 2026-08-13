@@ -216,6 +216,39 @@ def kraken_pair_specs(symbol: str) -> dict | None:
     return None
 
 
+def crypto_requires_paper(symbol: str) -> bool:
+    """Route crypto that Alpaca does not list to the paper engine.
+
+    The live venue lists exactly 73 crypto pairs; the crypto universe is
+    effectively unbounded (hundreds of thousands counting meme coins), so
+    this is an ALLOWLIST decision against the broker's own listing — never
+    a denylist that would need maintenance. A new coin needs no code
+    change: not listed means paper, priced at Kraken's fee schedule like
+    every other paper crypto trade.
+
+    A FAILED listing lookup returns False (unknown must not flip the whole
+    crypto book to paper on an Alpaca hiccup) — the submit-time guard in
+    alpaca_client still refuses unlisted symbols as the last line.
+    """
+    sym = str(symbol or "").upper().strip()
+    if "/" not in sym:
+        try:
+            from lib.crypto_market_data import is_crypto_symbol
+            if not is_crypto_symbol(sym):
+                return False
+            sym = f"{sym}/USD"
+        except Exception:
+            return False
+    try:
+        from lib.alpaca_client import tradable_crypto_symbols
+        listed = tradable_crypto_symbols()
+    except Exception:
+        return False
+    if listed is None:
+        return False
+    return sym not in listed
+
+
 def is_tradeable_on(venue: str, symbol: str) -> tuple[bool, str]:
     """Whether a venue lists the symbol at all."""
     if str(venue).lower() != "kraken":

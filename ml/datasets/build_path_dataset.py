@@ -189,8 +189,22 @@ def build(timeframe: str, symbols: list[str], stride: int, window: int,
     from lib.signal_replay import load_cached_bars
     from lib.ta_engine import compute_timeframe
 
-    rows = []
+    # Checkpoint per symbol. The first full build ran three hours and died
+    # with the session at symbol 19 of 54, writing NOTHING — because output
+    # only existed at the end. Each symbol now lands as its own part file
+    # the moment it finishes; a rerun with the same tag skips completed
+    # parts, so an interruption costs one symbol, not the run. The final
+    # dataset remains one immutable parquet + manifest, assembled from
+    # parts at the end.
+    parts_dir = OUT_DIR / "parts" / f"{timeframe}_{tag or 'untagged'}"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
     for si, sym in enumerate(symbols, 1):
+        part_path = parts_dir / f"{sym.replace('/', '_')}.parquet"
+        if part_path.exists():
+            logger.info(f"  [{si}/{len(symbols)}] {sym}: part exists, skipped")
+            continue
+        rows = []
         bars = load_cached_bars(sym, timeframe)
         if bars is None or len(bars) < window + horizon + stride:
             logger.info(f"  [{si}/{len(symbols)}] {sym}: too thin, skipped")
@@ -226,10 +240,15 @@ def build(timeframe: str, symbols: list[str], stride: int, window: int,
                     **feats, **labels,
                 })
             n_anchors += 1
+        if rows:
+            pd.DataFrame(rows).to_parquet(part_path, index=False)
         logger.info(f"  [{si}/{len(symbols)}] {sym}: {n_anchors} anchors "
-                    f"({len(bars)} bars)")
+                    f"({len(bars)} bars) -> {part_path.name}")
 
-    df = pd.DataFrame(rows)
+    parts = sorted(parts_dir.glob("*.parquet"))
+    if not parts:
+        raise RuntimeError("no parts produced — nothing to assemble")
+    df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
     dataset_id = f"path_{timeframe}_{stamp}{('_' + tag) if tag else ''}"

@@ -512,9 +512,12 @@ def _classify_symbol(sym: str) -> tuple[str, bool]:
     # Futures
     if sym_up.endswith("=F") or sym_up.endswith("=X") or sym_up.startswith("^"):
         return "Futures", True
-    # Crypto
+    # Crypto: live only when Alpaca actually lists the pair (73 assets).
+    # Everything else — the unbounded rest of the crypto universe — is
+    # paper, priced at Kraken's fee model. Allowlist, never a denylist.
     if is_crypto_data_symbol(sym_up):
-        return "Crypto", False  # live crypto via Alpaca
+        from lib.venues import crypto_requires_paper
+        return "Crypto", crypto_requires_paper(sym_up)
     # Leveraged ETFs → paper
     if sym_up in {"SOXS","SQQQ","TQQQ","SPXU","UVXY","SVXY","TBT","LABD","LABU","TECL","TECS"}:
         return "Equity", True

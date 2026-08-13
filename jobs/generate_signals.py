@@ -1263,7 +1263,16 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
 
         for raw, batch_is_paper in all_raw:
             try:
-                is_paper = bool(batch_is_paper or direction_requires_paper(raw.get("direction")))
+                # Paper when: the batch is paper, the direction can't
+                # execute live (shorts/leverage), OR the symbol is crypto
+                # Alpaca doesn't list — an allowlist check against the
+                # broker's 73 pairs, because the crypto universe is
+                # unbounded and unlisted coins trade paper at Kraken's
+                # fee model instead of failing at the venue.
+                from lib.venues import crypto_requires_paper
+                is_paper = bool(batch_is_paper
+                                or direction_requires_paper(raw.get("direction"))
+                                or crypto_requires_paper(raw.get("asset_symbol")))
                 n = normalize_signal(raw, ta_profiles, asset_map, is_paper=is_paper)
                 if not n:
                     skipped += 1

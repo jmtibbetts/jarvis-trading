@@ -264,6 +264,21 @@ def _record_slippage(signal_id: str, intended_entry: float, actual_fill_price: f
             sig.actual_fill_price = actual_fill_price
             sig.slippage_pct = round((actual_fill_price - intended_entry) / intended_entry * 100, 4)
             sig.fill_recorded_at = now_iso
+            # Close the loop on the execution sample written at submit time,
+            # joining the realised fill to the book state that preceded it.
+            # Without this pairing the snapshot is just a log line.
+            try:
+                from app.database import ExecutionSample
+                from lib.execution_recorder import record_fill
+                row = (db.query(ExecutionSample)
+                       .filter(ExecutionSample.signal_id == signal_id,
+                               ExecutionSample.status == "PENDING")
+                       .order_by(ExecutionSample.submitted_at.desc()).first())
+                if row is not None:
+                    record_fill(row.id, fill_price=actual_fill_price,
+                                broker_order_id=sig.alpaca_order_id)
+            except Exception as e:
+                logger.debug(f"[Positions] execution sample not closed: {e}")
             # Re-anchor to reality: the trade lives at the price it filled at.
             if abs(actual_fill_price - intended_entry) / intended_entry > 0.0005:
                 sig.notes = ((sig.notes or "") + "\n" + (

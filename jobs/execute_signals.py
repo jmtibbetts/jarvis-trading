@@ -522,6 +522,27 @@ def run():
                     continue
 
             try:
+                # Book and tape as they stand BEFORE the order goes out.
+                # Measured after the fill they are contaminated by the fill
+                # itself — the order moves the book it would be judged
+                # against. Recorded whether or not it fills: an order that
+                # does not fill is a real observation about liquidity, and
+                # keeping only the successful ones biases the dataset
+                # toward moments when trading was easy.
+                exec_row = None
+                try:
+                    from lib.execution_recorder import record_intent
+                    exec_row = record_intent(
+                        signal_id=sig.get("id"), symbol=sym,
+                        side="buy" if str(sig.get("direction", "")).lower().startswith(("long", "b"))
+                             else "sell",
+                        order_type="market", intended_price=entry, qty=qty,
+                        stop_loss=stop, asset_class=sig.get("asset_class"),
+                        venue="alpaca",
+                    )
+                except Exception as e:
+                    logger.debug(f"[Execute] execution snapshot skipped for {sym}: {e}")
+
                 submit_bracket_order(
                     symbol=sym, qty=qty, entry_price=entry,
                     take_profit=target, stop_loss=stop

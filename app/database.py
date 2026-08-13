@@ -1312,6 +1312,23 @@ def _migrate_columns():
                     created_at TEXT
                 )
             """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS execution_samples (
+                    id TEXT PRIMARY KEY,
+                    signal_id TEXT, symbol TEXT, asset_class TEXT, venue TEXT,
+                    side TEXT, order_type TEXT,
+                    intended_price REAL, qty REAL, stop_loss REAL,
+                    broker_order_id TEXT, status TEXT DEFAULT 'PENDING',
+                    microstructure TEXT,
+                    spread_pct_at_submit REAL, book_imbalance_at_submit REAL,
+                    fill_price REAL, filled_qty REAL, fill_ratio REAL,
+                    fill_delay_ms REAL, slippage_pct REAL, slippage_bps REAL,
+                    submitted_at TEXT, resolved_at TEXT
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_exec_samples_symbol "
+                "ON execution_samples(symbol, submitted_at)"))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_llm_calls_task ON llm_calls(task, thinking)"))
             conn.execute(text(
@@ -1415,6 +1432,52 @@ class PaperPortfolio(Base):
     winning_trades = Column(Float, default=0)
     realized_pnl   = Column(Float, default=0.0)
     updated_at     = Column(String, default=now_iso)
+
+class ExecutionSample(Base):
+    """One order, the book it was sent into, and what it actually cost.
+
+    Phase 4 failed for want of data: 4 of 39,821 signals carried a measured
+    slippage and nothing persisted the order book at all. No later
+    cleverness recovers a measurement nobody took, so this starts
+    collecting now.
+
+    The columns that matter are the *_at_submit ones. Spread and imbalance
+    read after the fill are contaminated by the fill itself — the order
+    moved the book it would be measured against.
+
+    PENDING rows are kept. An order that never filled is a real observation
+    about liquidity, and dropping those biases the dataset toward moments
+    when trading happened to be easy.
+    """
+    __tablename__ = "execution_samples"
+    id                = Column(String, primary_key=True, default=new_id)
+    signal_id         = Column(String)
+    symbol            = Column(String)
+    asset_class       = Column(String)
+    venue             = Column(String)     # behaviour differs per venue
+    side              = Column(String)     # buy | sell
+    order_type        = Column(String)     # market | limit
+    intended_price    = Column(Float)
+    qty               = Column(Float)
+    stop_loss         = Column(Float)
+    broker_order_id   = Column(String)
+    status            = Column(String, default="PENDING")
+    # ── market state AT SUBMIT ────────────────────────────────────────
+    microstructure    = Column(Text)       # full JSON snapshot
+    spread_pct_at_submit     = Column(Float)
+    book_imbalance_at_submit = Column(Float)
+    # ── what happened ─────────────────────────────────────────────────
+    fill_price        = Column(Float)
+    filled_qty        = Column(Float)
+    fill_ratio        = Column(Float)      # partial fills are data
+    fill_delay_ms     = Column(Float)
+    # Signed so POSITIVE is always worse than intended, for both sides.
+    # Unsigned, longs and shorts average into a comfortable zero.
+    slippage_pct      = Column(Float)
+    slippage_bps      = Column(Float)
+    submitted_at      = Column(String, default=now_iso)
+    resolved_at       = Column(String)
+
 
 class LlmCall(Base):
     """One row per LLM call, so "does thinking mode help?" is a query.

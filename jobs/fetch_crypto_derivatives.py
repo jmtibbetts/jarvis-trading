@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from app.database import CryptoDerivativesSnapshot, CryptoLiquidation, MarketAsset, get_db
 from lib.crypto_derivatives import (
     DEFAULT_DERIVATIVES_WATCHLIST, classify_oi_price_action,
-    fetch_derivatives_snapshot, fetch_recent_liquidations, summarize_liquidations,
+    fetch_cryptocom_snapshot, fetch_derivatives_snapshot,
+    fetch_recent_liquidations, summarize_liquidations,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,15 +32,19 @@ def run():
         snap = fetch_derivatives_snapshot(symbol)
         if snap:
             with get_db() as db:
+                # prev is venue-pinned: OI change measured against the OTHER
+                # exchange's OI is a number about nothing.
                 prev = (
                     db.query(CryptoDerivativesSnapshot)
                     .filter(CryptoDerivativesSnapshot.symbol == symbol)
+                    .filter(CryptoDerivativesSnapshot.venue == "okx")
                     .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
                     .first()
                 )
                 price = _price_for(symbol)
                 db.add(CryptoDerivativesSnapshot(
-                    symbol=symbol, inst_id=snap["inst_id"], price=price,
+                    symbol=symbol, inst_id=snap["inst_id"], venue="okx",
+                    price=price,
                     funding_rate=snap["funding_rate"],
                     open_interest_usd=snap["open_interest_usd"],
                     long_short_ratio=snap["long_short_ratio"],
@@ -53,6 +58,21 @@ def run():
                         logger.debug(f"[CryptoDerivatives] {symbol} OI/price action: {action}")
         else:
             logger.debug(f"[CryptoDerivatives] No snapshot for {symbol} (no OKX perpetual or fetch failed)")
+
+        # Second venue, tagged rows. Funding intervals differ (1h vs 8h),
+        # so these are stored raw with provenance and only ever compared
+        # through funding_dispersion(), which normalizes.
+        cdc = fetch_cryptocom_snapshot(symbol)
+        if cdc:
+            with get_db() as db:
+                db.add(CryptoDerivativesSnapshot(
+                    symbol=symbol, inst_id=cdc["inst_id"], venue="cryptocom",
+                    price=cdc["price"],
+                    funding_rate=cdc["funding_rate"],
+                    open_interest_usd=cdc["open_interest_usd"],
+                    long_short_ratio=None,
+                ))
+                saved_snapshots += 1
 
         liquidations = fetch_recent_liquidations(symbol, limit=100)
         if liquidations:

@@ -184,7 +184,13 @@ class CryptoDerivativesSnapshot(Base):
     __tablename__ = "crypto_derivatives_snapshots"
     id               = Column(String, primary_key=True, default=new_id)
     symbol           = Column(String, nullable=False, index=True)   # app-native BASE/USD
-    inst_id          = Column(String)                               # OKX instId, e.g. BTC-USDT-SWAP
+    inst_id          = Column(String)                               # venue instId, e.g. BTC-USDT-SWAP
+    # Which exchange this observation came from. Funding rates are NOT
+    # comparable across venues without knowing each one's funding interval
+    # (OKX pays 8-hourly on these majors, Crypto.com hourly), so every
+    # consumer must either filter to one venue or normalize explicitly —
+    # never average rows blind. transaction_costs pins itself to 'okx'.
+    venue            = Column(String, default="okx", index=True)
     price            = Column(Float)
     funding_rate     = Column(Float)
     open_interest_usd= Column(Float)
@@ -1151,6 +1157,11 @@ def _migrate_columns():
             ("live_min_score", "REAL DEFAULT 55.0"),
             ("live_min_rr", "REAL DEFAULT 0.0"),
             ("live_min_confidence", "REAL DEFAULT 0.0"),
+        ],
+        # Second derivatives venue. Every pre-existing row was OKX, so the
+        # default backfills them truthfully.
+        "crypto_derivatives_snapshots": [
+            ("venue", "TEXT DEFAULT 'okx'"),
         ],
         # Auto Sim priced every trade as free: no fee, no spread. A book that
         # cannot lose money to costs will always look profitable, so its P&L

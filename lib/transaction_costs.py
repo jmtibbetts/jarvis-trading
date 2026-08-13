@@ -172,8 +172,14 @@ def _latest_funding_rate(symbol: str) -> tuple[float | None, str]:
     try:
         from app.database import get_db, CryptoDerivativesSnapshot
         with get_db() as db:
+            # Venue-pinned to OKX: this function's contract is an 8-HOUR
+            # funding rate (see DEFAULT_FUNDING_RATE_8H), and Crypto.com
+            # rows in the same table carry HOURLY rates. Taking "latest
+            # row per symbol" across venues would randomly under-price
+            # funding by 8x whenever the cryptocom row was newer.
             row = (db.query(CryptoDerivativesSnapshot)
                      .filter(CryptoDerivativesSnapshot.symbol == base)
+                     .filter(CryptoDerivativesSnapshot.venue == "okx")
                      .order_by(CryptoDerivativesSnapshot.fetched_at.desc())
                      .first())
             if row is not None and row.funding_rate is not None:

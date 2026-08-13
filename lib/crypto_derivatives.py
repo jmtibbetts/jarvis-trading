@@ -193,6 +193,116 @@ def fetch_derivatives_snapshot(symbol: str) -> dict | None:
     }
 
 
+# ── Crypto.com — second venue ────────────────────────────────────────────────
+# Public REST, no key, verified live 2026-08-13. A single-venue funding rate
+# cannot show DISAGREEMENT between venues, and cross-exchange funding/OI
+# dispersion is one of the platform doc's named derived features. Rows are
+# tagged venue='cryptocom'; nothing that consumed the OKX-only table sees
+# them unless it asks.
+#
+# Semantics note (the §49 trap): Crypto.com pays funding HOURLY on these
+# perps while OKX pays 8-hourly, so the raw rates differ by nature, not by
+# market view. Comparisons must normalize; funding_dispersion() below does,
+# with the intervals stated.
+CRYPTOCOM_BASE = "https://api.crypto.com/exchange/v1"
+CRYPTOCOM_FUNDING_INTERVAL_H = 1.0
+OKX_FUNDING_INTERVAL_H = 8.0
+
+
+def to_cryptocom_inst(base_symbol: str) -> str:
+    """'BTC' or 'BTC/USD' -> 'BTCUSD-PERP'."""
+    return f"{base_symbol.upper().split('/')[0]}USD-PERP"
+
+
+def parse_cryptocom_ticker(payload: dict) -> dict | None:
+    """Crypto.com tickers use one-letter keys: a=last, oi=open interest in
+    BASE units (verified: BTC oi 6059 x $63,645 = $385M, a sane number for
+    that venue), b/k=bid/ask, t=ms timestamp."""
+    try:
+        rows = (payload.get("result") or {}).get("data") or []
+        if not rows:
+            return None
+        t = rows[0]
+        last = float(t.get("a") or 0)
+        oi_base = float(t.get("oi") or 0)
+        if last <= 0:
+            return None
+        return {
+            "last": last,
+            "open_interest_base": oi_base,
+            "open_interest_usd": round(oi_base * last, 2),
+            "ts": _ms_to_iso(t.get("t")),
+        }
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def parse_cryptocom_funding(payload: dict) -> dict | None:
+    """Valuations rows are {v: rate, t: ms}, newest first."""
+    try:
+        rows = (payload.get("result") or {}).get("data") or []
+        if not rows:
+            return None
+        return {"funding_rate": float(rows[0]["v"]),
+                "ts": _ms_to_iso(rows[0].get("t"))}
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def fetch_cryptocom_snapshot(symbol: str) -> dict | None:
+    """Funding + OI from Crypto.com for one symbol; None when the venue has
+    no such perp or the fetch fails — never a partial guess."""
+    inst = to_cryptocom_inst(symbol)
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            tick = parse_cryptocom_ticker(client.get(
+                f"{CRYPTOCOM_BASE}/public/get-tickers",
+                params={"instrument_name": inst}).json())
+            funding = parse_cryptocom_funding(client.get(
+                f"{CRYPTOCOM_BASE}/public/get-valuations",
+                params={"instrument_name": inst,
+                        "valuation_type": "funding_rate", "count": 1}).json())
+    except (httpx.HTTPError, ValueError) as e:
+        logger.debug(f"[CryptoDerivatives] cryptocom fetch failed for {symbol}: {e}")
+        return None
+    if not tick:
+        return None
+    return {
+        "symbol": symbol.upper().split("/")[0],
+        "inst_id": inst,
+        "venue": "cryptocom",
+        "funding_rate": funding["funding_rate"] if funding else None,
+        "open_interest_usd": tick["open_interest_usd"],
+        "price": tick["last"],
+        # Crypto.com's public API has no long/short account ratio; None is
+        # the honest value, not a copy of OKX's.
+        "long_short_ratio": None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def funding_dispersion(okx_rate: float | None, cryptocom_rate: float | None) -> dict | None:
+    """Cross-venue funding disagreement, normalized to per-hour rates.
+
+    Raw rates are NOT comparable — OKX pays every 8h, Crypto.com every 1h —
+    so each is divided by its own interval first. The sign of the spread
+    says which venue's longs are paying more dearly; a large spread means
+    the venues disagree about positioning, which single-venue data cannot
+    express at all.
+    """
+    if okx_rate is None or cryptocom_rate is None:
+        return None
+    okx_hourly = okx_rate / OKX_FUNDING_INTERVAL_H
+    cdc_hourly = cryptocom_rate / CRYPTOCOM_FUNDING_INTERVAL_H
+    return {
+        "okx_hourly": okx_hourly,
+        "cryptocom_hourly": cdc_hourly,
+        "spread_hourly": okx_hourly - cdc_hourly,
+        "intervals_h": {"okx": OKX_FUNDING_INTERVAL_H,
+                        "cryptocom": CRYPTOCOM_FUNDING_INTERVAL_H},
+    }
+
+
 def fetch_recent_liquidations(symbol: str, limit: int = 100) -> list[dict]:
     base = symbol.upper().split("/")[0]
     inst_id = to_okx_inst_id(symbol)

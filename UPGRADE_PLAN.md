@@ -1,3 +1,40 @@
+# Status — all eight phases shipped (2026-08-13)
+
+| Phase | What | Where |
+|---|---|---|
+| 1 | ATR normalisation, relative strength, calibration, named strategies | `lib/atr_normalization.py`, `lib/relative_strength.py`, `lib/calibration.py`, `lib/strategies.py` |
+| 2 | Contradiction + confluence by category | `lib/evidence.py` |
+| 3 | Structure engine + divergence | `lib/structure.py` |
+| 4 | Multi-axis regime + timeframe hierarchy | `lib/regime_axes.py` |
+| 5 | Net EV and the NO_TRADE gate | `lib/expectancy.py` |
+| 6 | Nine further strategies (14 total) | `lib/strategies.py` |
+| 7 | Setup state machine | `lib/setup_state.py` |
+| 8 | Walk-forward + strategy lifecycle | `lib/strategy_lifecycle.py` |
+
+Observability: `GET /api/calibration`, `/api/expectancy`,
+`/api/strategies/lifecycle`, `/api/llm/routing`, and the Calibration /
+Expectancy / Model-routing panels under Performance & Learning.
+
+Two items were deliberately NOT built, and are documented in code rather
+than approximated: `absorption_reversal` and `liquidation_cascade`. Both
+need aggressor-side data — who crossed the spread, into what resting size.
+Free OHLCV cannot distinguish absorption from ordinary two-way volume, and
+a detector built from bar volume alone would emit confident labels from a
+measurement that was never taken.
+
+What the phases measured, which is the point of having built them:
+
+- The composite score is INVERTED. Signals scoring 80+ win 33.0% over 190
+  trades; those under 60 win 54.9% over 1,972.
+- A BTC 15m setup with a 0.08% stop carries 13R of round-trip cost. The
+  same symbol and direction at 4H with a 2.68% stop nets +0.219R.
+- Equity 4H longs: 67% win, +0.86R up against -0.53R down, +0.395R gross
+  over 674 trades.
+- Nothing is currently curve-fitted: the out-of-sample expectancy is
+  HIGHER than in-sample (gap -0.0885R).
+
+---
+
 # Feature Engine + Strategy Layer — implementation plan
 
 Measured against `tradingupgradep1.md` (feature engine) and

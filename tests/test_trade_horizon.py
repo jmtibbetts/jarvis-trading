@@ -12,7 +12,7 @@ loop needs.
 """
 import unittest
 
-from lib.trade_horizon import (HORIZONS, expected_hold_minutes, hold_estimate,
+from lib.trade_horizon import (HORIZONS, category, expected_hold_minutes, hold_estimate,
                                hold_map, hold_status, is_scalp, room_multiplier,
                                format_duration)
 from jobs.paper_trading import _tier
@@ -156,5 +156,35 @@ class DurationFormatTests(unittest.TestCase):
         self.assertIn("weeks", format_duration(30_000))
 
 
+
+class LongHorizonTests(unittest.TestCase):
+    """1m through 1W. A weekly setup and a one-minute scalp cannot share a
+    clock, a stop width, or an expiry."""
+
+    LADDER = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "1D", "2D", "1W"]
+
+    def test_the_whole_ladder_has_a_horizon(self):
+        for tf in self.LADDER:
+            self.assertIn(tf, HORIZONS, tf)
+
+    def test_hold_windows_increase_monotonically(self):
+        lows = [expected_hold_minutes(tf)[0] for tf in self.LADDER]
+        self.assertEqual(lows, sorted(lows))
+
+    def test_the_longest_horizons_are_measured_in_weeks(self):
+        self.assertGreater(expected_hold_minutes("2D")[0], 14 * 1440 - 1)
+        self.assertGreater(expected_hold_minutes("1W")[0], 27 * 1440)
+
+    def test_room_scales_all_the_way_up(self):
+        self.assertGreater(room_multiplier("1W"), room_multiplier("1D"))
+        self.assertGreater(room_multiplier("1D"), room_multiplier("1H"))
+
+    def test_the_long_end_is_position_trading(self):
+        for tf in ("1D", "2D", "1W"):
+            self.assertEqual(category(tf), "position", tf)
+
+    def test_the_ladder_the_engine_walks_matches(self):
+        from lib.ta_engine import TIMEFRAME_LADDER
+        self.assertEqual(TIMEFRAME_LADDER, self.LADDER)
 if __name__ == "__main__":
     unittest.main()

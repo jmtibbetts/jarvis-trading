@@ -230,7 +230,7 @@ def _binance_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
 def _binance_ohlcv(symbol: str, tf: str, limit: int) -> Optional[pd.DataFrame]:
     interval = {
         "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-        "1H": "1h", "2H": "2h", "4H": "4h", "1D": "1d",
+        "1H": "1h", "2H": "2h", "4H": "4h", "1D": "1d", "1W": "1w",
     }.get(tf, "1d")
     try:
         pair = _binance_symbol(symbol)
@@ -272,7 +272,7 @@ def _coinbase_price(symbol: str) -> Optional[dict[str, Any]]:
 def _coinbase_ohlcv(symbol: str, tf: str, limit: int) -> Optional[pd.DataFrame]:
     granularity = {
         "1m": 60, "3m": 60, "5m": 300, "15m": 900, "30m": 300,
-        "1H": 3600, "2H": 3600, "4H": 21600, "1D": 86400,
+        "1H": 3600, "2H": 3600, "4H": 21600, "1D": 86400, "1W": 604800,
     }.get(tf, 86400)
     end = datetime.now(timezone.utc)
     start = end - timedelta(seconds=granularity * min(limit, 300))
@@ -327,7 +327,7 @@ def _kraken_price(symbol: str) -> Optional[dict[str, Any]]:
 def _kraken_ohlcv(symbol: str, tf: str, limit: int) -> Optional[pd.DataFrame]:
     interval = {
         "1m": 1, "3m": 1, "5m": 5, "15m": 15, "30m": 30,
-        "1H": 60, "2H": 60, "4H": 240, "1D": 1440,
+        "1H": 60, "2H": 60, "4H": 240, "1D": 1440, "1W": 10080,
     }.get(tf, 1440)
     since = int((datetime.now(timezone.utc) - timedelta(minutes=interval * limit * 2)).timestamp())
     for pair in _kraken_pairs(symbol):
@@ -393,7 +393,7 @@ def _okx_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
 def _okx_ohlcv(symbol: str, tf: str, limit: int) -> Optional[pd.DataFrame]:
     bar = {
         "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-        "1H": "1H", "2H": "2H", "4H": "4H", "1D": "1Dutc",
+        "1H": "1H", "2H": "2H", "4H": "4H", "1D": "1Dutc", "1W": "1Wutc",
     }.get(tf, "1Dutc")
     try:
         inst = _okx_inst(symbol)
@@ -452,7 +452,7 @@ def _bybit_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
 def _bybit_ohlcv(symbol: str, tf: str, limit: int) -> Optional[pd.DataFrame]:
     interval = {
         "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
-        "1H": "60", "2H": "120", "4H": "240", "1D": "D",
+        "1H": "60", "2H": "120", "4H": "240", "1D": "D", "1W": "W",
     }.get(tf, "D")
     try:
         pair = _bybit_pair(symbol)

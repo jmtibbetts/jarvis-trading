@@ -35,6 +35,7 @@ HORIZONS: dict[str, tuple[int, int, str]] = {
     "2H":  (1_440, 4_320, "1-3 days"),
     "4H":  (1_440, 7_200, "1-5 days"),
     "1D":  (10_080, 40_320, "1-4 weeks"),
+    "2D":  (20_160, 60_480, "2-6 weeks"),
     "1W":  (40_320, 129_600, "1-3 months"),
 }
 
@@ -44,7 +45,7 @@ HORIZONS: dict[str, tuple[int, int, str]] = {
 DEFAULT_HORIZON = (240, 1_440, "varies")
 
 SCALP_TIMEFRAMES = {"1m", "3m", "5m", "15m"}
-LONGER_TIMEFRAMES = {"30m", "1H", "2H", "4H", "1D", "1W"}
+LONGER_TIMEFRAMES = {"30m", "1H", "2H", "4H", "1D", "2D", "1W"}
 
 # The trader-facing category, duplicated alongside the hold map in the same
 # three places. Kept verbatim; "1W" is new — the other copies simply had no
@@ -53,7 +54,7 @@ CATEGORY: dict[str, str] = {
     "1m": "scalp", "3m": "scalp", "5m": "scalp",
     "15m": "intraday", "30m": "intraday", "1H": "intraday",
     "2H": "swing", "4H": "swing",
-    "1D": "position", "1W": "position",
+    "1D": "position", "2D": "position", "1W": "position",
 }
 DEFAULT_CATEGORY = "position"
 
@@ -124,12 +125,19 @@ def room_multiplier(timeframe: str | None) -> float:
     needs. Derived from the expected hold rather than a second table, so the
     two cannot drift apart.
 
-    Square-root damped: a 1D hold is 18x a 1H hold but does not want an 18x
-    wider trail.
+    Fourth-root damped: a 1D hold is 42x a 1H hold and a 1W hold is 168x,
+    but neither wants a trail that much wider.
+
+    This was a square root while 1D was the longest horizon. Over the full
+    1m-1W ladder a square root saturates: 1D, 2D and 1W all produced 6.5,
+    9.2 and 13.0 and all three clamped to the same 4.0 ceiling, so the three
+    longest timeframes were managed identically and the extra rungs bought
+    nothing. The fourth root spreads the whole ladder inside the existing
+    bounds instead of pressing against them.
     """
     lo, _hi = expected_hold_minutes(timeframe)
     base_lo, _ = expected_hold_minutes("1H")
-    return max(0.6, min(4.0, (lo / base_lo) ** 0.5))
+    return max(0.6, min(4.0, (lo / base_lo) ** 0.25))
 
 
 def hold_status(timeframe: str | None, opened_at: str | None,

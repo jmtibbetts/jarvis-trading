@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def _r(value, sig: int = 8):
     """Round a PRICE to significant figures, never to fixed decimals.
 
-    _r(x) silently destroys sub-cent assets: SHIB at $0.00000449
+    round(x, 6) silently destroys sub-cent assets: SHIB at $0.00000449
     becomes $0.000004, an 10.91% error, and every level derived from it —
     VWAP, support, resistance, bands, Supertrend — inherits that error
     before any strategy sees it. The same class of bug as pricing a
@@ -33,7 +33,7 @@ def _r(value, sig: int = 8):
     digits = sig - 1 - math.floor(math.log10(abs(v)))
     return round(v, max(0, digits)) if digits > 0 else round(v, 0)
 
-TIMEFRAME_LADDER = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "1D"]
+TIMEFRAME_LADDER = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "1D", "2D", "1W"]
 
 # Detect which TA library is available
 try:

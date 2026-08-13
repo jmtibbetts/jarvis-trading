@@ -12,10 +12,13 @@ SIGNAL_VERSION = "v7.2"
 TF_SECONDS = {
     "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
     "1H": 3600, "2H": 7200, "4H": 14400, "1D": 86400,
+    "2D": 172800, "1W": 604800,
 }
 EXPIRY_MINUTES = {
     "1m": 20, "3m": 30, "5m": 45, "15m": 120, "30m": 240,
     "1H": 480, "2H": 720, "4H": 1440, "1D": 4320,
+    # A weekly setup's entry stays valid for days, not hours.
+    "2D": 8640, "1W": 20160,
 }
 
 
@@ -134,7 +137,7 @@ def _setup_type(signal: dict) -> str:
         return "intraday"
     if timeframe in {"2H", "4H"}:
         return "swing"
-    return "position"
+    return "position"   # 1D, 2D, 1W
 
 
 def _expiry(generated_at: datetime, timeframe: str) -> str:

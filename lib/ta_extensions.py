@@ -32,7 +32,7 @@ import pandas as pd
 def _r(value, sig: int = 8):
     """Round a PRICE to significant figures, never to fixed decimals.
 
-    _r(x) silently destroys sub-cent assets: SHIB at $0.00000449
+    round(x, 6) silently destroys sub-cent assets: SHIB at $0.00000449
     becomes $0.000004, a 10.9% error, and every level derived from it
     inherits that error before any strategy sees it. Significant figures
     keep the same relative precision at $0.0000045 and at $63,000.

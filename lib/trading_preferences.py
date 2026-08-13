@@ -4,7 +4,7 @@ from app.database import DEFAULT_USER_ID, UserPreference, get_db, now_iso
 
 VALID_TRADE_MODES = {"scalp", "longer", "all"}
 SCALP_TIMEFRAMES = {"1m", "3m", "5m", "15m"}
-LONGER_TIMEFRAMES = {"30m", "1H", "2H", "4H", "1D"}
+LONGER_TIMEFRAMES = {"30m", "1H", "2H", "4H", "1D", "2D", "1W"}
 
 
 def normalize_trade_mode(value: str | None) -> str:

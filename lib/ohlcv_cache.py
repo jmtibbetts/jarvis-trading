@@ -318,7 +318,9 @@ TF_CONFIG = {
     '1H':  {'bar_count': 72,  'lookback_days': 5,   'hist_days': 90},
     '2H':  {'bar_count': 60,  'lookback_days': 10,  'hist_days': 90},
     '4H':  {'bar_count': 60,  'lookback_days': 20,  'hist_days': 180},
-    '1D':  {'bar_count': 252, 'lookback_days': 400, 'hist_days': 730},
+    # Deeper than a trading year because 2D and 1W are resampled FROM this
+    # series, and on a seven-day-a-week asset 252 daily bars is 36 weeks.
+    '1D':  {'bar_count': 520, 'lookback_days': 900, 'hist_days': 1100},
 }
 
 def fetch_with_cache(symbol: str, tf: str,

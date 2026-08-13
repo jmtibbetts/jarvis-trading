@@ -194,19 +194,281 @@ def _momentum(d: dict, is_short: bool) -> tuple[float, list]:
     return len(hits) / total, hits
 
 
+
+# ── Phase 6 strategies ──────────────────────────────────────────────────
+# These need lib/structure.py: a level with a history, and a break with a
+# verdict. Before that existed, "price is above resistance" was the whole
+# vocabulary, and three of the strategies below are distinguished purely by
+# what a break DID afterwards — held, failed, or swept. They were
+# unbuildable, not merely unbuilt.
+
+
+def _breaks(d: dict) -> list:
+    return ((d.get("structure") or {}).get("breaks") or [])
+
+
+def _break_of(d: dict, outcome: str, want_up: bool):
+    """The most recent break with this outcome in the given direction."""
+    for b in _breaks(d):
+        if b.get("outcome") == outcome and (b.get("direction") == "up") == want_up:
+            return b
+    return None
+
+
+def _breakout_retest(d: dict, is_short: bool) -> tuple[float, list]:
+    """A level broke, held, and price has come back to it.
+
+    The highest-quality entry in the set and the one most often missed: the
+    breakout bar is where the chase happens, the retest is where the risk
+    is defined.
+    """
+    hits, total = [], 4
+    b = _break_of(d, "held", want_up=not is_short)
+    if not b:
+        return 0.0, []                      # NECESSARY: a break that held
+    hits.append(f"broke {b['level_price']:g} and held")
+
+    atrs = d.get("atr_distances") or {}
+    back = _f(atrs.get("to_resistance") if is_short else atrs.get("to_support"))
+    if back is not None and abs(back) <= 1.0:
+        hits.append(f"price back within {abs(back):.2f} ATR of the level")
+    if (b.get("break_volume_ratio") or 0) >= 1.2:
+        hits.append(f"broke on {b['break_volume_ratio']:.1f}x volume")
+    if (b.get("bars_ago") or 99) <= 8:
+        hits.append(f"break is {b['bars_ago']} bars old — still live")
+    return len(hits) / total, hits
+
+
+def _failed_breakout(d: dict, is_short: bool) -> tuple[float, list]:
+    """A break in the OPPOSITE direction that was reclaimed.
+
+    The trade is against the break: whoever chased it is now offside, and
+    their exits are the fuel. Trading WITH a failed break is the error this
+    condition exists to prevent.
+    """
+    hits, total = [], 3
+    b = _break_of(d, "failed", want_up=is_short)   # up-break failed -> short
+    if not b:
+        return 0.0, []                      # NECESSARY: a failed break the other way
+    hits.append(f"{b['detail']} at {b['level_price']:g}")
+    if (b.get("bars_ago") or 99) <= 5:
+        hits.append(f"failure is {b['bars_ago']} bars old")
+    if (b.get("distance_atr") or 0) >= 0.5:
+        hits.append(f"travelled {b['distance_atr']:.1f} ATR before failing — trapped size")
+    return len(hits) / total, hits
+
+
+def _liquidity_sweep_reversal(d: dict, is_short: bool) -> tuple[float, list]:
+    """A wick took a level and closed straight back inside.
+
+    Stops were taken and nothing followed. Reads as a breakout on any rule
+    that only asks whether price exceeded the level.
+    """
+    hits, total = [], 3
+    b = _break_of(d, "sweep", want_up=is_short)    # swept the highs -> short
+    if not b:
+        return 0.0, []                      # NECESSARY: an actual sweep
+    hits.append(f"swept {b['level_price']:g} — {b['detail']}")
+    if (b.get("bars_ago") or 99) <= 3:
+        hits.append(f"sweep is {b['bars_ago']} bars old")
+    if (b.get("break_volume_ratio") or 0) >= 1.3:
+        hits.append(f"{b['break_volume_ratio']:.1f}x volume into the sweep")
+    return len(hits) / total, hits
+
+
+def _squeeze_expansion(d: dict, is_short: bool) -> tuple[float, list]:
+    """Volatility compressed, and it is now expanding in this direction.
+
+    Compression alone is not a trade — it says a move is coming, not which
+    way. The expansion is what makes it directional.
+    """
+    hits, total = [], 4
+    prof = d.get("atr_profile") or {}
+    state = str(prof.get("state") or "").upper()
+    pctile = _f(prof.get("percentile"))
+    was_compressed = state == "CONTRACTION" or (pctile is not None and pctile <= 25)
+    if not was_compressed:
+        return 0.0, []                      # NECESSARY: it was actually coiled
+    hits.append(f"volatility compressed ({state.lower() or 'low percentile'})")
+
+    if prof.get("expanding"):
+        hits.append("ATR now expanding")
+    don = d.get("donchian") or {}
+    if don.get("breakout_down" if is_short else "breakout_up"):
+        hits.append("breaking the channel in this direction")
+    st = _g(d, "supertrend", "direction")
+    if st == ("down" if is_short else "up"):
+        hits.append(f"Supertrend {st}")
+    return len(hits) / total, hits
+
+
+def _momentum_ignition(d: dict, is_short: bool) -> tuple[float, list]:
+    """A sudden expansion in range AND participation together.
+
+    Volume without range is absorption; range without volume is a gap
+    nobody traded. Requiring both is what separates this from noise.
+    """
+    hits, total = [], 4
+    vol = d.get("volume") or {}
+    surge = _f(vol.get("surge_ratio"))
+    if surge is None or surge < 1.5:
+        return 0.0, []                      # NECESSARY: real participation
+    hits.append(f"volume {surge:.1f}x average")
+
+    prof = d.get("atr_profile") or {}
+    if prof.get("expanding"):
+        hits.append("range expanding")
+    if _g(d, "supertrend", "flipped_this_bar"):
+        hits.append("Supertrend flipped this bar")
+    macd = _g(d, "macd", "crossover")
+    if macd == ("bearish" if is_short else "bullish"):
+        hits.append(f"MACD crossed {macd}")
+    return len(hits) / total, hits
+
+
+def _vwap_reclaim(d: dict, is_short: bool) -> tuple[float, list]:
+    """Price crossing back through VWAP, the level most desks anchor to.
+
+    Proximity is a NECESSARY condition, not a bonus. Position alone is a
+    STATE, not a reclaim: a name that has sat 8 ATR above VWAP for three
+    weeks satisfies "above" and has reclaimed nothing. Measured live, that
+    version matched 10 of 36 chart/direction combinations — more than any
+    other strategy — which would have made "vwap_reclaim" the label on
+    every trending chart and diluted the attribution it exists to collect.
+    """
+    hits, total = [], 3
+    vwap = d.get("vwap") or {}
+    pos = vwap.get("position")
+    want = "below" if is_short else "above"
+    if pos != want:
+        return 0.0, []                      # NECESSARY: on the right side of it
+
+    atrs = d.get("atr_distances") or {}
+    to_vwap = _f(atrs.get("to_vwap"))
+    if to_vwap is None or abs(to_vwap) > VWAP_RECLAIM_ATR:
+        return 0.0, []                      # NECESSARY: recently crossed, not merely above
+    hits.append(f"reclaimed VWAP from {want}, {abs(to_vwap):.2f} ATR away")
+
+    if abs(to_vwap) <= VWAP_RECLAIM_ATR / 2:
+        hits.append("still hugging VWAP — entry and invalidation are tight")
+    bias = str(d.get("bias") or "").lower()
+    if bias == ("bearish" if is_short else "bullish"):
+        hits.append(f"timeframe bias {bias}")
+    return len(hits) / total, hits
+
+
+def _relative_strength_breakout(d: dict, is_short: bool) -> tuple[float, list]:
+    """Outperforming its benchmark AND breaking its own structure.
+
+    Relative strength alone is a ranking, not a trade. The break is the
+    trigger; the strength is why this name rather than another.
+    """
+    hits, total = [], 3
+    rs = d.get("relative_strength") or {}
+    state = str(rs.get("state") or "").lower()
+    slope = _f(rs.get("rs_slope"))
+    if is_short:
+        leading = "underperform" in state or "laggard" in state
+    else:
+        leading = "outperform" in state or "leader" in state
+    if not leading:
+        return 0.0, []                      # NECESSARY: it is actually leading
+    hits.append(f"relative strength: {state}")
+
+    if slope is not None and abs(slope) > 1e-9 and ((slope < 0) == is_short):
+        hits.append("relative strength still improving in this direction")
+    don = d.get("donchian") or {}
+    if don.get("breakout_down" if is_short else "breakout_up") or rs.get("rs_breakout"):
+        hits.append("breaking out")
+    return len(hits) / total, hits
+
+
+def _funding_squeeze(d: dict, is_short: bool) -> tuple[float, list]:
+    """Crowded positioning against the trade direction.
+
+    Crypto only, and only where a real funding number exists. Contrarian by
+    construction: crowded longs paying to stay long are fuel for a move
+    down, not confirmation of one up.
+    """
+    hits, total = [], 3
+    dv = d.get("derivatives") or {}
+    funding = _f(dv.get("funding_rate"))
+    if funding is None:
+        return 0.0, []                      # NECESSARY: real positioning data
+    crowded_against = funding > 0.0005 if is_short else funding < -0.0005
+    if not crowded_against:
+        return 0.0, []
+    hits.append(f"funding {funding * 100:.3f}% — the crowd is on the other side")
+
+    oi = _f(dv.get("oi_change_pct"))
+    if oi is not None and oi >= 5:
+        hits.append(f"open interest +{oi:.1f}% — the crowded side is still adding")
+    bias = str(d.get("bias") or "").lower()
+    if bias == ("bearish" if is_short else "bullish"):
+        hits.append(f"price bias {bias} agrees")
+    return len(hits) / total, hits
+
+
+def _divergence_reversal(d: dict, is_short: bool) -> tuple[float, list]:
+    """Price made a new extreme that momentum did not confirm.
+
+    Built on confirmed swings only (lib/structure.py), so it cannot be read
+    off the in-progress bar — which is where every repainting divergence
+    indicator gets its impressive backtest.
+    """
+    hits, total = [], 3
+    want = "bearish" if is_short else "bullish"
+    divs = [x for x in ((d.get("structure") or {}).get("divergences") or [])
+            if x.get("bias") == want and x.get("regular")]
+    if not divs:
+        return 0.0, []                      # NECESSARY: a regular divergence
+    best = max(divs, key=lambda x: x.get("strength", 0))
+    hits.append(f"{best['kind'].replace('_', ' ')} on {best['indicator']}")
+    if len(divs) >= 2:
+        hits.append(f"confirmed across {len(divs)} indicators")
+    if (best.get("age_bars") or 99) <= 5:
+        hits.append(f"{best['age_bars']} bars old — still current")
+    return len(hits) / total, hits
+
+
 STRATEGIES = {
     "breakout": _breakout,
     "trend_continuation": _trend_continuation,
     "mean_reversion": _mean_reversion,
     "range_fade": _range_fade,
     "momentum": _momentum,
+    # Phase 6. Each needs the structure engine, relative strength, or the
+    # derivatives feed — all of which now exist.
+    "breakout_retest": _breakout_retest,
+    "failed_breakout": _failed_breakout,
+    "liquidity_sweep_reversal": _liquidity_sweep_reversal,
+    "squeeze_expansion": _squeeze_expansion,
+    "momentum_ignition": _momentum_ignition,
+    "vwap_reclaim": _vwap_reclaim,
+    "relative_strength_breakout": _relative_strength_breakout,
+    "funding_squeeze": _funding_squeeze,
+    "divergence_reversal": _divergence_reversal,
 }
+
+# Deliberately NOT built: absorption reversal, and liquidation cascade as a
+# per-bar strategy. Both need aggressor-side data — who crossed the spread,
+# and into what resting size. Free OHLCV cannot distinguish absorption from
+# ordinary two-way volume, and a detector built from bar volume alone would
+# produce confident labels from a measurement that was never taken. The gap
+# is documented rather than approximated; the upgrade docs make the same
+# call about full-universe CVD.
+UNBUILDABLE_WITHOUT_ORDER_FLOW = ("absorption_reversal", "liquidation_cascade")
 
 # A setup must meet at least this fraction of a strategy's conditions to be
 # tagged with it. Below the bar it is UNCLASSIFIED — deliberately, because
 # forcing a weak match into the nearest bucket would poison the statistics
 # the tagging exists to collect.
 MIN_MATCH = 0.5
+
+# How close to VWAP still counts as a reclaim rather than a position. Beyond
+# this the level has been left behind and is no longer the reference the
+# trade is being taken against.
+VWAP_RECLAIM_ATR = 1.5
 
 
 def classify(ta_timeframe_data: dict, direction: str | None) -> dict:

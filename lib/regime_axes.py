@@ -252,6 +252,29 @@ STRATEGY_FIT = {
                             "volatility": ("quiet", "normal", "compressed")},
     "momentum":            {"trend": ("uptrend", "downtrend", "choppy_up", "choppy_down"),
                             "volatility": ("expanding", "elevated", "normal")},
+
+    # Phase 6. A retest needs a trend to retest INTO; a failed break and a
+    # sweep are reversal trades and belong where direction is contested;
+    # squeeze expansion is the one strategy that WANTS compression, which
+    # is exactly the regime every other breakout strategy avoids.
+    "breakout_retest":     {"trend": ("uptrend", "downtrend", "choppy_up", "choppy_down"),
+                            "volatility": ("expanding", "elevated", "normal")},
+    "failed_breakout":     {"trend": ("flat", "choppy_up", "choppy_down"),
+                            "volatility": ("expanding", "elevated", "normal")},
+    "liquidity_sweep_reversal": {"trend": ("flat", "choppy_up", "choppy_down",
+                                           "uptrend", "downtrend"),
+                                 "volatility": ("expanding", "elevated", "normal")},
+    "squeeze_expansion":   {"volatility": ("compressed", "quiet", "normal")},
+    "momentum_ignition":   {"volatility": ("expanding", "elevated", "normal"),
+                            "liquidity": ("heavy", "normal")},
+    "vwap_reclaim":        {"trend": ("uptrend", "downtrend", "choppy_up", "choppy_down",
+                                      "flat"),
+                            "liquidity": ("heavy", "normal")},
+    "relative_strength_breakout": {"trend": ("uptrend", "downtrend", "choppy_up",
+                                             "choppy_down"),
+                                   "liquidity": ("heavy", "normal")},
+    "funding_squeeze":     {"flow": ("crowded_long", "crowded_short")},
+    "divergence_reversal": {"trend": ("uptrend", "downtrend", "choppy_up", "choppy_down")},
 }
 
 # How much a strategy used outside its regime is marked down. Not a veto:

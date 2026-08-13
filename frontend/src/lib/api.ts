@@ -55,6 +55,9 @@ export type Position = {
   unrealized_pl: number;
   unrealized_plpc: number;
   avg_entry_price: number;
+  // Cash actually committed. Alpaca reports no per-position margin figure,
+  // so this is labelled Cost rather than dressed up as one.
+  cost_basis: number;
   current_price: number;
   asset_class: string;
 };

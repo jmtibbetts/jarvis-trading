@@ -408,7 +408,7 @@ Type FLATTEN to confirm:`,
     {#if live && live.positions.length}
       <table class="tbl">
         <thead>
-          <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
+          <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Cost</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
         </thead>
         <tbody>
           {#each live.positions as p (p.symbol)}
@@ -416,6 +416,7 @@ Type FLATTEN to confirm:`,
               <td class="sym">{expandedLive.has(p.symbol) ? "▾" : "▸"} {p.symbol}{#if earningsRisk(p.symbol)}<span class="earnings-tag" title="Reports earnings this week">EARNINGS</span>{/if}</td>
               <td><Pill label={p.side} tone={p.side === "long" ? "good" : "bad"} /></td>
               <td class="num qty">{fmtQty(p.qty)}</td>
+              <td class="num margin">{fmtUsd(p.cost_basis ?? 0)}</td>
               <td class="num dim">{fmtUsd(p.market_value)}</td>
               <td class="num">{fmtPrice(p.avg_entry_price)}</td>
               <td class="num">{fmtPrice(p.current_price)}</td>
@@ -576,7 +577,7 @@ Type FLATTEN to confirm:`,
       {#if paper && paper.positions.length}
         <table class="tbl">
           <thead>
-            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
+            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Margin</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
           </thead>
           <tbody>
             {#each paper.positions as p (p.id)}
@@ -585,6 +586,7 @@ Type FLATTEN to confirm:`,
                 <td><Pill label={p.direction} tone={p.side === "long" ? "good" : "bad"} /></td>
                 <td class="num">{p.leverage}x</td>
                 <td class="num qty">{fmtQty(p.qty)}</td>
+                <td class="num margin">{fmtUsd(p.margin_used ?? 0)}</td>
                 <td class="num dim">{fmtValue(p.qty, p.current_price)}</td>
                 <td class="num">{fmtPrice(p.entry_price)}</td>
                 <td class="num">{fmtPrice(p.current_price)}</td>
@@ -699,7 +701,7 @@ Type FLATTEN to confirm:`,
       {#if autosim && autosim.positions.length}
         <table class="tbl">
           <thead>
-            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>Fees</th><th>P&amp;L</th></tr>
+            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Margin</th><th>Value</th><th>Entry</th><th>Current</th><th>Fees</th><th>P&amp;L</th></tr>
           </thead>
           <tbody>
             {#each autosim.positions as p (p.id)}
@@ -708,6 +710,7 @@ Type FLATTEN to confirm:`,
                 <td><Pill label={p.direction} tone={(p.direction ?? "").toLowerCase().includes("short") ? "bad" : "good"} /></td>
                 <td class="num">{p.leverage}x</td>
                 <td class="num qty">{fmtQty(p.qty)}</td>
+                <td class="num margin">{fmtUsd(p.margin_used ?? 0)}</td>
                 <td class="num dim">{fmtValue(p.qty, p.current_price ?? p.entry_price)}</td>
                 <td class="num">{fmtPrice(p.entry_price)}</td>
                 <td class="num">{fmtPrice(p.current_price)}</td>
@@ -1010,6 +1013,15 @@ Type FLATTEN to confirm:`,
   /* Quantity is the number you would place an order for, so it carries the
      same weight as the symbol rather than reading as a secondary figure. */
   .qty {
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  /* Margin is the money genuinely at stake, so it reads at full strength
+     while Value — the leveraged exposure it controls — stays quiet. A
+     $4,180 position funded by $435 is a very different commitment from one
+     funded by $4,180, and the two numbers must not look alike. */
+  .margin {
     font-weight: 600;
     color: var(--ink);
     white-space: nowrap;

@@ -3544,6 +3544,11 @@ def _position_dict(p):
         # than as an error. avg_entry stays for any other consumer.
         "avg_entry_price": float(p.avg_entry_price or 0),
         "avg_entry":       float(p.avg_entry_price or 0),
+        # Cash actually committed. Alpaca reports no per-position margin
+        # figure, and inventing one would be worse than labelling this what
+        # it is: cost basis is the capital in the trade, which for the
+        # unleveraged equity positions this account holds IS the margin.
+        "cost_basis":      float(getattr(p, "cost_basis", 0) or 0),
         "market_value":    float(p.market_value or 0),
         "unrealized_pl":   float(p.unrealized_pl or 0),
         "unrealized_plpc": round(plpc, 4),

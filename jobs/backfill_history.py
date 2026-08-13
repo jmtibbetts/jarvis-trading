@@ -21,6 +21,12 @@ import argparse
 import logging
 import sys
 
+from dotenv import load_dotenv
+
+# Standalone entrypoint: unlike jobs launched inside the server process,
+# nothing has loaded .env before this runs. main.py does exactly this.
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 

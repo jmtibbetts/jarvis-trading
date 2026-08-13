@@ -60,6 +60,7 @@ job_status = {
     'ipo':       {'status': 'idle', 'last': None, 'error': None},
     'postmortem':{'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
+    'candidates': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -133,6 +134,14 @@ def load_persisted_job_status():
 
 
 def make_job_runner(name: str, fn):
+    # Self-seeding, because the alternative already failed: the 'candidates'
+    # job was registered without a row in the job_status dict above, so this
+    # runner's first line raised KeyError on EVERY firing and the job
+    # silently never ran — while looking merely "not yet fired" from the
+    # outside. Registration and seeding must not be two separate manual
+    # steps that can disagree.
+    job_status.setdefault(name, {'status': 'idle', 'last': None, 'error': None})
+
     def runner():
         with _job_status_lock:
             if job_status[name]['status'] == 'running':

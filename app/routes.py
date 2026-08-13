@@ -1357,6 +1357,29 @@ def calibration_summary():
     return summary()
 
 
+@router.get("/score-variants")
+def score_variants(gate: float = 55.0, timeframe: str | None = None):
+    """How each shadow scoring variant would have selected, over resolved
+    outcomes. A = the live composite (control), B = inverted diagnostic,
+    C = component-calibrated from the 2026-08-13 decomposition.
+
+    Retrospective and replay-weighted: this ranks variants for shadowing.
+    Promotion requires the shadow rows accumulating on new signals plus
+    outcomes that postdate the variant's definition.
+    """
+    from lib.score_variants import evaluate_variants
+    return evaluate_variants(gate=gate, timeframe=timeframe)
+
+
+@router.get("/candidates/selection-bias")
+def candidates_selection_bias():
+    """Rejected vs accepted candidates on resolved counterfactuals — the
+    direct measurement of whether the filters discard winners. Sparse until
+    the resolution job has had time to work through the backlog."""
+    from lib.candidates import selection_bias_summary
+    return selection_bias_summary()
+
+
 @router.get("/watchlist/focus")
 def list_focus():
     """The "coins to watch" list, with each symbol's accumulated profile."""

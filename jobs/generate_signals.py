@@ -1288,6 +1288,16 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                 MIN_PERSIST_SCORE = 45.0
                 score_now = float(scored.get("composite_score") or 0)
                 if score_now < MIN_PERSIST_SCORE:
+                    # Dropped from the SIGNAL table, recorded as a CANDIDATE.
+                    # The filter that discards a setup must not also be able
+                    # to erase the evidence of what it discarded — that is
+                    # how "are the filters right?" became unanswerable, and
+                    # with the composite measured inverted, the rejected pile
+                    # is exactly where the winners may be.
+                    from lib.candidates import record_candidate
+                    record_candidate(db, scored, "rejected",
+                                     rejection_reason="below_min_persist",
+                                     is_paper=is_paper)
                     skipped += 1
                     continue
 
@@ -1316,6 +1326,10 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                                    f"{FOCUS_MIN_SCORE - score_now:.0f} short of the "
                                    f"{FOCUS_MIN_SCORE:.0f} focus bar"),
                     })
+                    from lib.candidates import record_candidate
+                    record_candidate(db, scored, "rejected",
+                                     rejection_reason="below_focus_bar",
+                                     is_paper=is_paper)
                     skipped += 1
                     continue
                 if sym in _focus_set:
@@ -1385,6 +1399,13 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                 )
                 db.add(new_rec)
                 existing_map[rec_key] = new_rec
+                # Accepted setups become candidates too — the comparison
+                # "rejected vs accepted" needs both sides recorded under the
+                # same rules, with the shadow variant scores logged at the
+                # moment of judgment rather than recomputed in hindsight.
+                from lib.candidates import record_candidate
+                record_candidate(db, scored, "persisted",
+                                 signal_id=new_rec.id, is_paper=is_paper)
                 logger.debug(f"[Signals] New signal: {sym} (paper={is_paper}) → {target_status}")
                 saved += 1
             except Exception as e:

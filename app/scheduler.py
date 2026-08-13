@@ -596,6 +596,18 @@ def create_scheduler() -> BackgroundScheduler:
                   next_run_time=now + timedelta(minutes=2, seconds=30),
                   replace_existing=True, max_instances=1)
 
+    # Counterfactual resolution: what would have happened to the candidates
+    # the filters rejected. Local bar walk over the OHLCV cache — no LLM, no
+    # network. 30 min because a candidate needs forward bars to judge anyway;
+    # resolving more eagerly would only find "too young".
+    def candidates_run():
+        from lib.candidates import resolve_pending
+        return resolve_pending(limit=500)
+    sched.add_job(make_job_runner('candidates', candidates_run),
+                  'interval', minutes=30, id='candidates',
+                  next_run_time=now + timedelta(minutes=6),
+                  replace_existing=True, max_instances=1)
+
 
     # ── OPPORTUNITY SCANNER ────────────────────────────────────────────────────
     # Each mode uses its own job_status key (see job_status dict above) since

@@ -1479,6 +1479,57 @@ class ExecutionSample(Base):
     resolved_at       = Column(String)
 
 
+class CandidateSignal(Base):
+    """Every setup the system CONSIDERED — including the ones it refused.
+
+    Until now only surviving signals were persisted; anything under
+    MIN_PERSIST_SCORE or below the focus bar vanished. That means the
+    filters could never be evaluated: the system only learned from trades
+    its own filters already approved, which is selection bias by
+    construction. The question "would the rejected ones have won?" was
+    unanswerable — and with the composite score measured INVERTED, it is
+    exactly the question that matters.
+
+    Rows are immutable once written except for the resolution fields, which
+    are filled in later by counterfactual replay. The original judgment —
+    score, breakdown, verdict, rejection reason — is never rewritten after
+    the fact; hindsight editing its own paper trail is how a learning
+    system lies to itself.
+    """
+    __tablename__ = "candidate_signals"
+    id               = Column(String, primary_key=True, default=new_id)
+    created_at       = Column(String, default=now_iso)
+    engine_epoch     = Column(String)
+    # identity — also the dedup key, since generators re-emit the same
+    # setup for many cycles while it remains valid
+    dedup_hash       = Column(String, index=True)
+    symbol           = Column(String, index=True)
+    asset_class      = Column(String)
+    timeframe        = Column(String)
+    direction        = Column(String)
+    strategy         = Column(String)
+    entry_price      = Column(Float)
+    stop_loss        = Column(Float)
+    target_price     = Column(Float)
+    # the judgment as it stood at creation
+    composite_score  = Column(Float)
+    score_breakdown  = Column(Text)      # JSON, same shape as trading_signals
+    shadow_variants  = Column(Text)      # JSON {schema, B, C} — logged, never acted on
+    verdict          = Column(String)    # persisted | rejected
+    rejection_reason = Column(String)    # below_min_persist | below_focus_bar | ...
+    signal_id        = Column(String)    # link when verdict == persisted
+    paper_mode       = Column(Boolean, default=False)
+    # counterfactual resolution — the only fields ever updated
+    resolved         = Column(Boolean, default=False)
+    resolved_at      = Column(String)
+    outcome          = Column(String)    # WIN | LOSS | BREAKEVEN
+    pnl_pct          = Column(Float)
+    mfe_r            = Column(Float)
+    mae_r            = Column(Float)
+    first_touch      = Column(String)    # STOP | TARGET | AMBIGUOUS
+    exit_reason      = Column(String)
+
+
 class LlmCall(Base):
     """One row per LLM call, so "does thinking mode help?" is a query.
 

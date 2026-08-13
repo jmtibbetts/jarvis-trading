@@ -254,9 +254,80 @@ def _update_pattern_memory(fingerprint: str, desc: str, asset_class: str,
                "ls": now, "lu": now})
 
 
+# How many observations a pattern needs before its win rate may be stated
+# as a rate at all. Bound to the expectancy engine's own bar rather than a
+# new literal: pattern memory and expectancy must not disagree about what
+# counts as evidence, and two independently-tuned numbers eventually will.
+from lib.expectancy import MIN_SAMPLE as PATTERN_MEASURED_SAMPLE   # 25
+
+# Between these, a rate is worth showing but only as a leading indication.
+PATTERN_EARLY_SAMPLE = 10
+
+
+def describe_pattern(total: int, wins: int, desc: str, avg_pnl: float = 0.0) -> str:
+    """Pattern history, stated at the confidence the sample actually supports.
+
+    The previous gate was `total < 3`, which let three observations reach the
+    signal-generation prompt as:
+
+        "This exact TA setup has occurred 3 times — 3/3 wins (100% win rate)"
+
+    Nothing downstream could tell that "100%" came from three trades. Measured
+    on the live table when this was written: 45 of 70 stored patterns had
+    fewer than 10 observations, several with n=1 recording a win rate of
+    1.0 — a perfect record from a single trade.
+
+    Meanwhile lib/calibration.py requires 30 observations and
+    lib/expectancy.py requires 25 before either will state a rate. So the
+    LLM was being handed a confident number from three samples while the
+    deterministic engines, looking at the same history, correctly refused to
+    draw any conclusion. That is not a disagreement about thresholds; it is
+    one part of the system undermining another.
+
+    Pattern memory is CONTEXT — "have we stood here before" — never
+    statistical authority. Calibration and expectancy own that, and the
+    wording below says so at every tier so the model cannot mistake
+    familiarity for evidence.
+    """
+    # Coerced defensively: this feeds an LLM prompt from a DB row, and a
+    # malformed count must produce silence rather than an exception that
+    # takes the whole signal-generation batch down with it.
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    total, wins = _int(total), max(0, _int(wins))
+    if total <= 0:
+        return ""
+
+    if total < PATTERN_EARLY_SAMPLE:
+        # Deliberately no percentage. A rate printed next to n=2 gets read as
+        # a rate; the only honest summary at this size is the count.
+        return (f"\nPATTERN MEMORY: this setup has been seen {total} "
+                f"time{'s' if total != 1 else ''} before. Sample far too small "
+                f"for any performance conclusion — treat as familiarity only, "
+                f"not evidence. Pattern: {desc}\n")
+
+    rate = wins / total
+    sign = "+" if avg_pnl >= 0 else ""
+    if total < PATTERN_MEASURED_SAMPLE:
+        return (f"\nPATTERN MEMORY: seen {total} times, {wins}/{total} wins "
+                f"({rate:.0%}), avg {sign}{avg_pnl:.2f}% P&L. EARLY EVIDENCE ONLY "
+                f"— not a calibrated probability, and below the {PATTERN_MEASURED_SAMPLE}-trade "
+                f"bar the expectancy engine requires. Pattern: {desc}\n")
+
+    return (f"\nPATTERN MEMORY: seen {total} times, {wins}/{total} wins "
+            f"({rate:.0%}), avg {sign}{avg_pnl:.2f}% P&L. Descriptive context — "
+            f"use calibrated expectancy for the statistical verdict. "
+            f"Pattern: {desc}\n")
+
+
 def get_pattern_context(ta_profile: dict, direction: str) -> str:
     """
-    Returns a text block for LLM injection: pattern win-rate history.
+    Returns a text block for LLM injection: pattern history, tiered by how
+    much evidence actually stands behind it. See describe_pattern().
     """
     _lazy_ensure()
     from app.database import engine
@@ -269,14 +340,10 @@ def get_pattern_context(ta_profile: dict, direction: str) -> str:
             row = conn.execute(text(
                 "SELECT total, wins, win_rate, avg_pnl_pct FROM pattern_memory WHERE fingerprint=:fp"
             ), {"fp": fp}).fetchone()
-        if not row or row[0] < 3:
-            return ""   # not enough data to be meaningful
-        total, wins, wr, avg_pnl = row
-        pct = round(wr * 100, 0)
-        sign = "+" if avg_pnl >= 0 else ""
-        return (f"\n🧠 PATTERN MEMORY: This exact TA setup has occurred {total} times — "
-                f"{wins}/{total} wins ({pct:.0f}% win rate, avg {sign}{avg_pnl:.2f}% P&L). "
-                f"Pattern: {desc}\n")
+        if not row:
+            return ""
+        total, wins, _wr, avg_pnl = row
+        return describe_pattern(total, wins, desc, float(avg_pnl or 0.0))
     except Exception as e:
         logger.warning(f"[Learning-T3] get_pattern_context error: {e}")
         return ""

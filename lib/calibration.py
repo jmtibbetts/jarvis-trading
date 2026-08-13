@@ -36,6 +36,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
+# Imported lazily-ish: used only to recognise a bucket label as a strategy.
+try:
+    from lib.strategies import STRATEGIES as _S
+    STRATEGY_NAMES = set(_S)
+except Exception:
+    STRATEGY_NAMES = set()
+
 # Below this many decided outcomes a bucket cannot speak for itself and the
 # lookup falls back to a broader one. Chosen so a bucket's win rate has a
 # meaningful confidence interval rather than being one lucky streak.
@@ -87,13 +94,14 @@ def build_table(force: bool = False) -> dict:
         if not force and _CACHE["table"] is not None and (time.time() - _CACHE["built_at"]) < _CACHE_TTL:
             return _CACHE["table"]
 
-    table = {"timeframe": {}, "tf_score": {}, "score": {}, "overall": None}
+    table = {"timeframe": {}, "tf_score": {}, "score": {}, "strategy": {},
+             "strategy_tf": {}, "overall": None}
     try:
         from app.database import get_db, TradingSignal, TradeOutcome
         with get_db() as db:
             rows = db.query(
                 TradeOutcome.timeframe, TradeOutcome.pnl_pct,
-                TradingSignal.composite_score,
+                TradingSignal.composite_score, TradingSignal.strategy,
             ).outerjoin(
                 TradingSignal, TradingSignal.id == TradeOutcome.signal_id
             ).all()
@@ -107,7 +115,7 @@ def build_table(force: bool = False) -> dict:
         cell["wins"] += 1 if won else 0
 
     total_all = wins_all = 0
-    for tf, pnl, score in rows:
+    for tf, pnl, score, strat in rows:
         try:
             won = float(pnl or 0) > 0
         except (TypeError, ValueError):
@@ -118,9 +126,16 @@ def build_table(force: bool = False) -> dict:
             _tally(table["timeframe"], tf, won)
             _tally(table["tf_score"], (tf, _bucket_score(score)), won)
         _tally(table["score"], _bucket_score(score), won)
+        # Strategy attribution. The point of naming strategies is to be able
+        # to say "breakouts work here and range fades do not" instead of
+        # staring at one pooled win rate with nothing to act on.
+        if strat:
+            _tally(table["strategy"], strat, won)
+            if tf:
+                _tally(table["strategy_tf"], (strat, tf), won)
 
     table["overall"] = {"wins": wins_all, "total": total_all}
-    for store in ("timeframe", "tf_score", "score"):
+    for store in ("timeframe", "tf_score", "score", "strategy", "strategy_tf"):
         for key, cell in table[store].items():
             cell["win_rate"] = round(_smoothed(cell["wins"], cell["total"]), 1)
 
@@ -133,7 +148,8 @@ def build_table(force: bool = False) -> dict:
     return table
 
 
-def lookup(timeframe: str | None, composite_score=None) -> dict:
+def lookup(timeframe: str | None, composite_score=None,
+           strategy: str | None = None) -> dict:
     """Measured win rate for this kind of setup, most specific bucket first.
 
     Returns the rate, the sample behind it, and WHICH bucket answered — a
@@ -149,6 +165,12 @@ def lookup(timeframe: str | None, composite_score=None) -> dict:
     # it as a bucket calibrated every fresh signal against an artifact of the
     # join (8,329 rows at 39%) instead of against anything about the setup.
     candidates = []
+    # Strategy + timeframe is the most specific aggregate available: "range
+    # fades on 1H" says far more than either half alone.
+    if strategy and timeframe:
+        candidates.append(((strategy, timeframe), "strategy_tf", f"{strategy} on {timeframe}"))
+    if strategy:
+        candidates.append((strategy, "strategy", f"{strategy}"))
     if band != "unknown":
         candidates.append(((timeframe, band), "tf_score", f"{timeframe}/{band}"))
     candidates.append((timeframe, "timeframe", f"{timeframe}"))
@@ -185,7 +207,8 @@ FULL_TRUST_SYMBOL_SAMPLE = 50
 
 
 def calibrate(raw_confidence: float, timeframe: str | None,
-              composite_score=None, historical: dict | None = None) -> tuple[float, dict]:
+              composite_score=None, historical: dict | None = None,
+              strategy: str | None = None) -> tuple[float, dict]:
     """Blend the model's stated confidence toward what actually happened.
 
     Evidence is taken from the MOST SPECIFIC source with enough of it:
@@ -210,7 +233,7 @@ def calibrate(raw_confidence: float, timeframe: str | None,
               "sample": h_total, "bucket": "this symbol", "source": "measured"}
         full_trust = FULL_TRUST_SYMBOL_SAMPLE
     if ev is None:
-        ev = lookup(timeframe, composite_score)
+        ev = lookup(timeframe, composite_score, strategy)
     if ev["win_rate"] is None:
         return raw, {**ev, "weight": 0.0, "raw": raw}
 
@@ -232,6 +255,10 @@ def _specificity(bucket: str | None) -> float:
         return 0.0
     if bucket == "this symbol":
         return 1.0
+    if " on " in bucket:          # strategy on a timeframe
+        return 1.0
+    if bucket in STRATEGY_NAMES:  # strategy across horizons
+        return 0.95
     if bucket == "overall":
         return 0.35          # the base rate, not evidence about this setup
     if bucket.startswith("score "):
@@ -261,6 +288,24 @@ def timeframe_edge(timeframe: str | None) -> dict:
             "sample": cell["total"], "baseline": round(base, 1), "source": "measured"}
 
 
+def strategy_edge(strategy: str | None) -> dict:
+    """How a named strategy has actually performed, against the baseline.
+
+    This is what naming strategies was for: turning "the bot is 32%
+    accurate" into "breakouts work here and range fades do not", which is
+    something a person can act on.
+    """
+    table = build_table()
+    cell = table["strategy"].get(strategy)
+    o = table.get("overall") or {}
+    base = _smoothed(o.get("wins", 0), o.get("total", 0)) if o.get("total") else 50.0
+    if not cell or cell["total"] < MIN_SAMPLE:
+        return {"edge": 0.0, "win_rate": None, "sample": cell["total"] if cell else 0,
+                "baseline": round(base, 1), "source": "insufficient_history"}
+    return {"edge": round(cell["win_rate"] - base, 1), "win_rate": cell["win_rate"],
+            "sample": cell["total"], "baseline": round(base, 1), "source": "measured"}
+
+
 def summary() -> dict:
     """Everything measured, for the UI and for answering "says who?"."""
     table = build_table()
@@ -273,6 +318,16 @@ def summary() -> dict:
         "by_timeframe": sorted(
             ({"timeframe": tf, "win_rate": c["win_rate"], "sample": c["total"]}
              for tf, c in table["timeframe"].items() if c["total"] >= MIN_SAMPLE),
+            key=lambda r: -r["win_rate"],
+        ),
+        "by_strategy": sorted(
+            ({"strategy": st, "win_rate": c["win_rate"], "sample": c["total"]}
+             for st, c in table["strategy"].items() if c["total"] >= MIN_SAMPLE),
+            key=lambda r: -r["win_rate"],
+        ),
+        "by_strategy_timeframe": sorted(
+            ({"strategy": k[0], "timeframe": k[1], "win_rate": c["win_rate"], "sample": c["total"]}
+             for k, c in table["strategy_tf"].items() if c["total"] >= MIN_SAMPLE),
             key=lambda r: -r["win_rate"],
         ),
         "by_score": sorted(

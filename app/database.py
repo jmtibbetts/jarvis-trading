@@ -87,6 +87,11 @@ class TradingSignal(Base):
     freshness_score  = Column(Float)
     news_confidence  = Column(Float)
     setup_type       = Column(String)
+    # Which named strategy this setup matched (lib/strategies.py), so
+    # performance can be attributed to a strategy rather than pooled into
+    # one unexplainable win rate. Deterministic, never LLM-assigned.
+    strategy         = Column(String)
+    strategy_score   = Column(Float)
     invalidation     = Column(Text)
     signal_version   = Column(String, default="v7.2")
     market_data_at   = Column(String)
@@ -991,6 +996,8 @@ def _migrate_columns():
             ("freshness_score", "REAL"),
             ("news_confidence", "REAL"),
             ("setup_type", "TEXT"),
+            ("strategy", "TEXT"),
+            ("strategy_score", "REAL"),
             ("invalidation", "TEXT"),
             ("signal_version", "TEXT DEFAULT 'v7.2'"),
             ("market_data_at", "TEXT"),

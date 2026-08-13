@@ -1358,6 +1358,8 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                         earnings_risk=bool(scored.get("earnings_risk", False)),
                         rr_ratio=scored.get("rr_ratio"),
                         calibrated_confidence=scored.get("calibrated_confidence"),
+                        strategy=scored.get("strategy"),
+                        strategy_score=scored.get("strategy_score"),
                         score_breakdown=json.dumps(scored.get("score_breakdown", {}), sort_keys=True),
                         data_quality_score=scored.get("data_quality_score"),
                         freshness_score=scored.get("freshness_score"),

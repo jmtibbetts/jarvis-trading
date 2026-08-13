@@ -69,10 +69,17 @@ SELF_REFERENTIAL_RR_WEIGHT = 0.25
 # individual setup.
 TIMEFRAME_EDGE_WEIGHT = 1.0 / 3.0
 
+# Same damping for the strategy's own measured edge. Timeframe and strategy
+# are different questions — "does this horizon pay" and "does this setup
+# type pay" — so both apply, each bounded so neither can swamp the evidence
+# for the individual trade.
+STRATEGY_EDGE_WEIGHT = 1.0 / 3.0
+
 
 def _calibrate_confidence(raw: float, historical: dict | None,
                           timeframe: str | None = None,
-                          composite_score=None) -> tuple[float, dict]:
+                          composite_score=None,
+                          strategy: str | None = None) -> tuple[float, dict]:
     """Blend the model's stated confidence toward what actually happened.
 
     Measured over 8,899 outcomes, raw confidence was INVERTED at the
@@ -89,7 +96,8 @@ def _calibrate_confidence(raw: float, historical: dict | None,
     """
     try:
         from lib.calibration import calibrate as _cal
-        calibrated, why = _cal(raw, timeframe, composite_score, historical=historical)
+        calibrated, why = _cal(raw, timeframe, composite_score,
+                               historical=historical, strategy=strategy)
         return calibrated, {
             "sample_size": why.get("sample"),
             "empirical_win_rate": why.get("win_rate"),
@@ -143,6 +151,17 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     valid = _valid_timeframes(ta_data)
+    # Which named strategy this setup is, decided deterministically from the
+    # indicators — never by the LLM, or the label would drift and the
+    # attribution it exists for would be worthless.
+    strategy_info = {}
+    try:
+        from lib.strategies import classify_signal
+        strategy_info = classify_signal(signal, ta_data) or {}
+    except Exception as e:
+        logger.debug(f"[Scorer] strategy classification unavailable: {e}")
+    strategy_name = strategy_info.get("strategy")
+
     raw_confidence = max(0.0, min(100.0, float(signal.get("confidence") or 65)))
     # Calibrated against outcomes for THIS timeframe, which is the strongest
     # measured predictor: 1H wins 66.4% over 635 trades while 4H wins 27.8%
@@ -151,6 +170,7 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     calibrated, calibration = _calibrate_confidence(
         raw_confidence, historical, timeframe=signal.get("timeframe"),
         composite_score=signal.get("composite_score"),
+        strategy=strategy_name,
     )
 
     direction = (signal.get("direction") or "Long").lower()
@@ -291,6 +311,21 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     except Exception as e:
         logger.debug(f"[Scorer] timeframe edge unavailable: {e}")
 
+    # The measured edge of the STRATEGY itself, same damping and the same
+    # sample gate. This is what makes "breakouts work here, range fades do
+    # not" show up in the score rather than only in a report.
+    strat_edge_applied = 0.0
+    strat_edge_meta = None
+    try:
+        from lib.calibration import strategy_edge
+        se = strategy_edge(strategy_name)
+        if se.get("win_rate") is not None:
+            strat_edge_applied = round(se["edge"] * STRATEGY_EDGE_WEIGHT, 2)
+            composite += strat_edge_applied
+            strat_edge_meta = se
+    except Exception as e:
+        logger.debug(f"[Scorer] strategy edge unavailable: {e}")
+
     bar_times = [data.get("bar_time") for _, data in valid if data.get("bar_time")]
     market_data_at = max(bar_times) if bar_times else None
     setup_type = _setup_type(signal)
@@ -300,6 +335,8 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
         invalidation = f"Invalid below {stop:g}; also invalidate if higher-timeframe bias turns bearish."
 
     signal.update({
+        "strategy": strategy_name,
+        "strategy_score": round(float(strategy_info.get("score") or 0), 3),
         "composite_score": round(max(0, min(100, composite)), 1),
         "calibrated_confidence": calibrated,
         "score_breakdown": {
@@ -308,6 +345,9 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             "calibration": calibration,
             "timeframe_edge": tf_edge_applied,
             "timeframe_evidence": tf_edge_meta,
+            "strategy_edge": strat_edge_applied,
+            "strategy_evidence": strat_edge_meta,
+            "strategy_match": strategy_info.get("reason"),
             "conflict_ratio": round(conflict_ratio, 3),
             "conflict_penalty": conflict_penalty,
             "stale_penalty": stale_penalty,

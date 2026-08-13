@@ -3568,6 +3568,8 @@ def _sig_dict(s):
         "composite_score": s.composite_score,
         "horizon":       _tf_category(s.timeframe),
         "hold_estimate": _tf_hold(s.timeframe),
+        "strategy":      getattr(s, "strategy", None),
+        "strategy_score": getattr(s, "strategy_score", None),
         "timeframe":     s.timeframe,
         "reasoning":     s.reasoning,
         "entry_price":   s.entry_price,

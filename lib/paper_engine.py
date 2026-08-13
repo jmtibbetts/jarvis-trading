@@ -1438,8 +1438,63 @@ def get_paper_summary() -> dict:
     }
 
 
+def soft_reset_paper_portfolio(starting_cash: float = None) -> dict:
+    """Reset the FUNDS while keeping every trade the book ever made.
+
+    The hard reset below deletes PaperTrade rows — which are learning data:
+    outcomes, calibration and the failure postmortems all read them. Wiping
+    the ledger to refill the wallet destroys measurements to move a number.
+
+    This version: every open position is closed through the normal close
+    path at its last known price (so it lands in history as a real trade,
+    tagged 'reset'), then the portfolio row alone is re-seeded. The stats
+    counters restart at zero — they describe the NEW book — while the old
+    book's rows remain queryable forever. The reset itself is recorded in
+    the AI decision log so an equity curve that suddenly jumps to the
+    starting balance has a visible, timestamped explanation.
+    """
+    cash = float(starting_cash or PAPER_STARTING_CAPITAL)
+    closed = []
+    with get_db() as db:
+        open_ids = [(p.id, p.current_price or p.entry_price)
+                    for p in db.query(PaperPosition).all()]
+    for pos_id, price in open_ids:
+        try:
+            r = close_paper_position(pos_id, float(price or 0), reason="reset")
+            closed.append({"id": pos_id, "ok": bool(r.get("ok", True))})
+        except Exception as e:
+            logger.warning(f"[Paper] soft reset: close {pos_id} failed: {e}")
+            closed.append({"id": pos_id, "ok": False})
+
+    from app.database import new_id
+    with get_db() as db:
+        # Only the PORTFOLIO row is replaced. Trades stay.
+        db.query(PaperPortfolio).delete()
+        db.add(PaperPortfolio(
+            id=new_id(), cash=cash, total_trades=0, winning_trades=0,
+            realized_pnl=0.0, updated_at=_now(),
+        ))
+    try:
+        from lib.learning_engine import log_decision
+        log_decision("paper", "RESET",
+                     f"Funds soft-reset to ${cash:,.0f}; {len(closed)} open "
+                     f"position(s) closed into history; trade rows preserved",
+                     thinking=False)
+    except Exception:
+        pass
+    logger.info(f"[Paper] Soft reset: cash=${cash:,.0f}, "
+                f"{len(closed)} positions closed, history preserved")
+    return {"ok": True, "cash": cash, "positions_closed": len(closed),
+            "history_preserved": True}
+
+
 def reset_paper_portfolio() -> dict:
-    """Reset the paper portfolio back to $100k starting capital."""
+    """Reset the paper portfolio back to $100k starting capital.
+
+    DESTRUCTIVE: deletes every PaperTrade and PaperPosition row — the
+    learning data, not just the wallet. Prefer soft_reset_paper_portfolio,
+    which refills the funds and keeps the history.
+    """
     from app.database import new_id
     with get_db() as db:
         db.query(PaperTrade).delete()

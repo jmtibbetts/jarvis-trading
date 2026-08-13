@@ -4016,12 +4016,17 @@ def paper_close(pos_id: str, price: Optional[float] = None):
         raise HTTPException(500, str(e))
 
 @router.post("/autosim/reset")
-def autosim_reset():
-    """Wipe the auto-sim book back to its starting capital — same contract as
-    /paper/reset but for the follow-everything simulator."""
-    from lib.auto_simulator import reset_auto_simulator
-    reset_auto_simulator()
-    return {"ok": True, "message": "Auto-sim account reset"}
+def autosim_reset(hard: bool = False, starting_cash: float = 100000.0):
+    """Reset the auto-sim funds. Default is a SOFT reset: open positions are
+    closed into history, the wallet refills, and every trade row survives —
+    the sim's books are learning data. `hard=true` is the old destructive
+    wipe, kept only for destroying corrupt data."""
+    if hard:
+        from lib.auto_simulator import reset_auto_simulator
+        reset_auto_simulator()
+        return {"ok": True, "message": "Auto-sim HARD reset — trade history deleted"}
+    from lib.auto_simulator import soft_reset_auto_simulator
+    return soft_reset_auto_simulator(starting_cash=starting_cash)
 
 
 class FlattenRequest(BaseModel):
@@ -4120,21 +4125,20 @@ def flatten_trading(body: FlattenRequest):
 
 
 @router.post("/paper/reset")
-def paper_reset():
-    """Reset paper portfolio to starting capital ($100k). Wipes all positions and trades."""
+def paper_reset(hard: bool = False, starting_cash: float = 100000.0):
+    """Reset the paper funds. Default is a SOFT reset: open positions are
+    closed into history at their last price (tagged 'reset'), the wallet
+    refills, and every PaperTrade row survives — outcomes, calibration and
+    the postmortems all read those rows. `hard=true` is the old destructive
+    wipe, kept only for destroying corrupt data."""
     try:
-        from app.database import PaperPosition, PaperTrade, PaperPortfolio, new_id, now_iso
-        with get_db() as db:
-            # Hard delete ALL trades and positions, then recreate a clean portfolio row
-            db.query(PaperTrade).delete()
-            db.query(PaperPosition).delete()
-            db.query(PaperPortfolio).delete()
-            db.flush()
-            db.add(PaperPortfolio(
-                id=new_id(), cash=100_000.0, total_trades=0,
-                winning_trades=0, realized_pnl=0.0, updated_at=now_iso()
-            ))
-        return {"ok": True, "message": "Paper account reset to $100,000", "cash": 100000.0}
+        if hard:
+            from lib.paper_engine import reset_paper_portfolio
+            r = reset_paper_portfolio()
+            r["message"] = "Paper account HARD reset — trade history deleted"
+            return r
+        from lib.paper_engine import soft_reset_paper_portfolio
+        return soft_reset_paper_portfolio(starting_cash=starting_cash)
     except Exception as e:
         raise HTTPException(500, str(e))
 

@@ -483,7 +483,49 @@ def flatten_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
     return {"closed": closed, "skipped_no_price": no_price}
 
 
+def soft_reset_auto_simulator(user_id: str = DEFAULT_USER_ID,
+                              starting_cash: float = 100000.0) -> dict:
+    """Refill the sim's wallet without burning its books.
+
+    Open positions are closed through the normal _close path at their last
+    marked price — spread charged, fees settled, one AutoSimTrade row each,
+    reason 'reset' — and then only the portfolio counters restart. The
+    hard reset below deletes every trade row, which is the sim's entire
+    evidentiary value; use it only to destroy corrupt data, not to top up.
+    """
+    closed = 0
+    with get_db() as db:
+        portfolio = _ensure_portfolio(db, user_id)
+        for pos in db.query(AutoSimPosition).filter(
+                AutoSimPosition.user_id == user_id).all():
+            price = float(pos.current_price or pos.entry_price or 0)
+            if price > 0:
+                _close(db, pos, price, "reset", portfolio)
+            db.delete(pos)
+            closed += 1
+        portfolio.starting_cash = float(starting_cash)
+        portfolio.realized_pnl = 0.0
+        portfolio.total_trades = 0
+        portfolio.wins = 0
+        portfolio.losses = 0
+        portfolio.updated_at = now_iso()
+    try:
+        from lib.learning_engine import log_decision
+        log_decision("autosim", "RESET",
+                     f"Funds soft-reset to ${starting_cash:,.0f}; {closed} open "
+                     f"position(s) closed into history; trade rows preserved",
+                     thinking=False)
+    except Exception:
+        pass
+    logger.info(f"[AutoSim] Soft reset: cash=${starting_cash:,.0f}, "
+                f"{closed} positions closed, history preserved")
+    return {"ok": True, "cash": starting_cash, "positions_closed": closed,
+            "history_preserved": True}
+
+
 def reset_auto_simulator(user_id: str = DEFAULT_USER_ID) -> None:
+    """DESTRUCTIVE: deletes every AutoSimTrade row. Prefer
+    soft_reset_auto_simulator, which refills funds and keeps history."""
     with get_db() as db:
         db.query(AutoSimTrade).filter(AutoSimTrade.user_id == user_id).delete()
         db.query(AutoSimPosition).filter(AutoSimPosition.user_id == user_id).delete()

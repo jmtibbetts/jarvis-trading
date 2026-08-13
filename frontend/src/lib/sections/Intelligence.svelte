@@ -35,6 +35,32 @@
   let macro = $state<MacroSnapshot | null>(null);
   let darkPoolTop = $state<DarkPoolTopActivity | null>(null);
   let expandedDarkPoolSymbol = $state<string | null>(null);
+  let expandedInsiderTicker = $state<string | null>(null);
+
+  // Filings grouped BY TICKER, because cluster activity is the signal:
+  // three insiders buying one stock says more than one person's history
+  // ever does. One collapsed net-position row per ticker; the individual
+  // transactions expand beneath it.
+  const insiderByTicker = $derived.by(() => {
+    const groups = new Map<string, { ticker: string; txs: InsiderTransaction[];
+      buys: number; sells: number; buyVal: number; sellVal: number;
+      insiders: Set<string>; latest: string }>();
+    for (const t of insiderTxs) {
+      const key = t.ticker ?? "—";
+      if (!groups.has(key))
+        groups.set(key, { ticker: key, txs: [], buys: 0, sells: 0,
+          buyVal: 0, sellVal: 0, insiders: new Set(), latest: "" });
+      const g = groups.get(key)!;
+      g.txs.push(t);
+      if (t.owner_name) g.insiders.add(t.owner_name);
+      const v = t.total_value ?? 0;
+      if (t.transaction_code === "P") { g.buys++; g.buyVal += v; }
+      else if (t.transaction_code === "S") { g.sells++; g.sellVal += v; }
+      if ((t.transaction_date ?? "") > g.latest) g.latest = t.transaction_date ?? "";
+    }
+    return [...groups.values()].sort(
+      (a, b) => Math.abs(b.buyVal - b.sellVal) - Math.abs(a.buyVal - a.sellVal));
+  });
   let darkPoolVenues = $state<DarkPoolVenues | null>(null);
   let darkPoolVenuesLoading = $state(false);
   let squeeze = $state<SqueezeTopResponse | null>(null);
@@ -526,59 +552,87 @@
   <div class="span-12">
     <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d · ${insiderTxs.length} recent filings` : "—"}>
       {#snippet children()}
-        {#if insiderClusters && insiderClusters.clusters.length}
-          <div class="insider-list">
-            {#each insiderClusters.clusters as c (c.ticker)}
-              <div class="insider-row">
-                <div class="insider-sym">{c.ticker}</div>
-                <div class="insider-flags">
-                  {#each c.flags as flag (flag)}
-                    <Pill label={flag.replaceAll("_", " ")} tone={flag.includes("SELL") ? "bad" : flag.includes("BUY") || flag.includes("OFFICER") ? "good" : "neutral"} />
+        <div class="insider-cols">
+          <div class="insider-col">
+            {#if insiderClusters && insiderClusters.clusters.length}
+              <div class="itx-head">Notable clusters</div>
+              <div class="wl-scroll cap-h-sm">
+                <div class="insider-list">
+                  {#each insiderClusters.clusters as c (c.ticker)}
+                    <div class="insider-row">
+                      <div class="insider-sym">{c.ticker}</div>
+                      <div class="insider-flags">
+                        {#each c.flags as flag (flag)}
+                          <Pill label={flag.replaceAll("_", " ")} tone={flag.includes("SELL") ? "bad" : flag.includes("BUY") || flag.includes("OFFICER") ? "good" : "neutral"} />
+                        {/each}
+                      </div>
+                      <div class="insider-stats">
+                        <span>{c.distinct_buyers} buyer{c.distinct_buyers === 1 ? "" : "s"} / {c.distinct_sellers} seller{c.distinct_sellers === 1 ? "" : "s"}</span>
+                        <span class="num {c.net_value >= 0 ? 'pl-up' : 'pl-down'}">net {c.net_value >= 0 ? "+" : ""}${Math.round(c.net_value).toLocaleString()}</span>
+                      </div>
+                      {#if c.officer_buyers.length}
+                        <div class="insider-officers">Officer buying: {c.officer_buyers.join(", ")}</div>
+                      {/if}
+                    </div>
                   {/each}
                 </div>
-                <div class="insider-stats">
-                  <span>{c.distinct_buyers} buyer{c.distinct_buyers === 1 ? "" : "s"} / {c.distinct_sellers} seller{c.distinct_sellers === 1 ? "" : "s"}</span>
-                  <span class="num {c.net_value >= 0 ? 'pl-up' : 'pl-down'}">net {c.net_value >= 0 ? "+" : ""}${Math.round(c.net_value).toLocaleString()}</span>
-                </div>
-                {#if c.officer_buyers.length}
-                  <div class="insider-officers">Officer buying: {c.officer_buyers.join(", ")}</div>
-                {/if}
               </div>
-            {/each}
+            {:else if insiderClusters}
+              <div class="empty">No notable clusters in the last {insiderClusters.window_days} days</div>
+            {:else}
+              <div class="empty">Insider activity unavailable</div>
+            {/if}
           </div>
-          <p class="insider-note">Sourced from SEC Form 4 filings (free EDGAR API). Only open-market buys/sells (codes P/S) are analyzed — grants, option exercises, and tax withholding are excluded. This does not imply wrongdoing or predict price direction.</p>
-        {:else if insiderClusters}
-          <div class="empty">No notable insider buy/sell clusters in the last {insiderClusters.window_days} days</div>
-        {:else}
-          <div class="empty">Insider activity unavailable</div>
-        {/if}
-        {#if insiderTxs.length}
-          <div class="itx-head">Recent filings — price, value, and reporting lag</div>
-          <div class="wl-scroll cap-h">
-            <table class="tbl">
-              <thead>
-                <tr><th>Ticker</th><th>Insider</th><th>Action</th><th>@ Price</th><th>Total</th><th>Traded</th><th>Reported</th></tr>
-              </thead>
-              <tbody>
-                {#each insiderTxs.slice(0, 15) as t (t.id)}
-                  <tr>
-                    <td class="sym">{t.ticker ?? "—"}</td>
-                    <td title={t.owner_title ?? ""}>{(t.owner_name ?? "").slice(0, 22)}{t.is_officer ? " • officer" : t.is_director ? " • director" : ""}</td>
-                    <td class={t.transaction_code === "P" ? "pl-up" : t.transaction_code === "S" ? "pl-down" : "dim"}>{t.transaction_label}</td>
-                    <td class="num">{t.price_per_share != null ? `$${t.price_per_share.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
-                    <td class="num">{fmtUsdShort(t.total_value)}</td>
-                    <td class="num">{t.transaction_date ?? "—"}</td>
-                    <td class="num">
-                      {#if reportDelayDays(t.transaction_date, t.filed_at) != null}
-                        +{reportDelayDays(t.transaction_date, t.filed_at)}d
-                      {:else}—{/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
+
+          <div class="insider-col">
+            {#if insiderByTicker.length}
+              <div class="itx-head">Recent filings by ticker — click to expand</div>
+              <div class="wl-scroll cap-h-sm">
+                <table class="tbl">
+                  <thead>
+                    <tr><th>Ticker</th><th>Net</th><th>Buys</th><th>Sells</th><th>Insiders</th><th>Latest</th></tr>
+                  </thead>
+                  <tbody>
+                    {#each insiderByTicker as g (g.ticker)}
+                      {@const net = g.buyVal - g.sellVal}
+                      <tr
+                        class="expandable"
+                        role="button"
+                        tabindex="0"
+                        onclick={() => (expandedInsiderTicker = expandedInsiderTicker === g.ticker ? null : g.ticker)}
+                        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); expandedInsiderTicker = expandedInsiderTicker === g.ticker ? null : g.ticker; } }}
+                      >
+                        <td class="sym">{expandedInsiderTicker === g.ticker ? "▾" : "▸"} {g.ticker}</td>
+                        <td class="num {net >= 0 ? 'pl-up' : 'pl-down'}">{net >= 0 ? "+" : "−"}{fmtUsdShort(Math.abs(net))}</td>
+                        <td class="num pl-up">{g.buys || "—"}</td>
+                        <td class="num pl-down">{g.sells || "—"}</td>
+                        <td class="num">{g.insiders.size}</td>
+                        <td class="num dim">{g.latest || "—"}</td>
+                      </tr>
+                      {#if expandedInsiderTicker === g.ticker}
+                        {#each g.txs as t (t.id)}
+                          <tr class="itx-detail">
+                            <td class="dim" title={t.owner_title ?? ""} colspan="2">{(t.owner_name ?? "").slice(0, 24)}{t.is_officer ? " • officer" : t.is_director ? " • director" : ""}</td>
+                            <td class={t.transaction_code === "P" ? "pl-up" : t.transaction_code === "S" ? "pl-down" : "dim"} colspan="1">{t.transaction_label}</td>
+                            <td class="num">{fmtUsdShort(t.total_value)}</td>
+                            <td class="num dim">{t.price_per_share != null ? `$${t.price_per_share.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
+                            <td class="num dim">
+                              {t.transaction_date ?? "—"}
+                              {#if reportDelayDays(t.transaction_date, t.filed_at) != null}
+                                <span title="reporting lag"> +{reportDelayDays(t.transaction_date, t.filed_at)}d</span>
+                              {/if}
+                            </td>
+                          </tr>
+                        {/each}
+                      {/if}
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
           </div>
-        {/if}
+        </div>
+        <p class="insider-note">Sourced from SEC Form 4 filings (free EDGAR API). Only open-market buys/sells (codes P/S) are analyzed — grants, option exercises, and tax withholding are excluded. This does not imply wrongdoing or predict price direction.</p>
       {/snippet}
     </Panel>
   </div>
@@ -1944,6 +1998,22 @@
   .cap-h {
     max-height: 420px;
     overflow-y: auto;
+  }
+  /* The insider window: clusters and grouped filings side by side, each in
+     a short scroll, instead of two full-width stacks. Halves the panel. */
+  .insider-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 14px;
+    align-items: start;
+  }
+  .cap-h-sm {
+    max-height: 250px;
+    overflow-y: auto;
+  }
+  .itx-detail td {
+    font-size: 10.5px;
+    background: color-mix(in srgb, var(--panel) 55%, transparent);
   }
   .off-row {
     display: grid;

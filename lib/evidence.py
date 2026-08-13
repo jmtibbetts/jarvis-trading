@@ -145,7 +145,10 @@ def _trend(d: dict) -> tuple[str, float, list[str]]:
     elif st.get("direction") == "down":
         votes.append((BEAR, "Supertrend down"))
 
-    ema = d.get("ema") or {}
+    # "emas", not "ema" — the TA engine's key is plural. Reading the wrong
+    # one returned {} on every symbol, so this vote never once fired and the
+    # trend category has been running on supertrend and VWAP alone.
+    ema = d.get("emas") or d.get("ema") or {}
     fast, slow = _f(ema.get("ema9")), _f(ema.get("ema21"))
     if fast and slow:
         if fast > slow:

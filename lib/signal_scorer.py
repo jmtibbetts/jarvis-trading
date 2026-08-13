@@ -271,6 +271,29 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     else:
         volatility_score = 20.0
 
+    # ── Regime on four axes, against the asset's OWN benchmark ───────────
+    # The single label below is SPY-derived and applied to everything, so a
+    # BTC signal on a Saturday was graded on an index that had been shut
+    # for two days. This measures trend / volatility / liquidity / flow
+    # separately, from the right market, and abstains where it cannot —
+    # missing data must not become evidence.
+    regime_axes = None
+    regime_fit = None
+    regime_penalty = 0.0
+    hierarchy = None
+    try:
+        from lib.regime_axes import (for_symbol as _regime_for, hierarchy_alignment,
+                                     strategy_fit)
+        regime_axes = _regime_for(signal.get("asset_symbol"),
+                                  signal.get("asset_class"),
+                                  signal.get("derivatives"))
+        regime_fit = strategy_fit(strategy_name, regime_axes)
+        regime_penalty = float(regime_fit.get("penalty") or 0)
+        hierarchy = hierarchy_alignment(ta_data, signal.get("timeframe"),
+                                        signal.get("direction"))
+    except Exception as e:
+        logger.debug(f"[Scorer] regime axes unavailable: {e}")
+
     regime_risk = (regime or {}).get("risk", "unknown")
     regime_score = {
         "low": 60 if is_short else 85,
@@ -322,6 +345,10 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     # strictly below one with the same structure and no objection — which
     # is the behaviour the pooled average could not express.
     composite -= contradiction_pen
+    # A technically valid setup in the wrong regime — mean reversion in a
+    # strong trend is the textbook case. Marked down, never vetoed: the
+    # setup may still work and the measured record should decide.
+    composite -= regime_penalty
 
     # ── Timeframe edge ──────────────────────────────────────────────────
     # Nothing in scoring reflected that horizons perform differently, so a
@@ -399,8 +426,17 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             # writers, so this reaches the card without a schema change —
             # compacted, because the scanner writes ~1,300 rows a day.
             "evidence": evidence_compact,
+            "regime_penalty": -regime_penalty,
+            "regime_fit": regime_fit,
+            "regime_axes": ({k: {"state": v["state"], "confidence": v["confidence"],
+                                 "detail": v["detail"]}
+                             for k, v in (regime_axes or {}).get("axes", {}).items()}
+                            or None),
+            "regime_benchmark": (regime_axes or {}).get("benchmark"),
+            "timeframe_hierarchy": hierarchy,
         },
         "evidence": evidence,
+        "regime_axes": regime_axes,
         "data_quality_score": round(quality, 1),
         "freshness_score": round(freshness, 1),
         "news_confidence": round(news_score, 1),

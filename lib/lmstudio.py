@@ -32,7 +32,18 @@ DEFAULT_MODEL = "local-model"
 # materially longer than it would alone — the old 90s ceiling produced
 # "LLM timeout after 56/66/90s" failures that tripped the circuit breaker
 # and cascaded into every queued caller. Sized for the parallel case.
-TIMEOUT       = 180.0
+TIMEOUT       = float(os.getenv("LLM_TIMEOUT", "180"))
+
+# Thinking calls on a large model are a different workload from fast
+# classification and get their own, larger budget. Measured on the day
+# qwen3-32b replaced the smaller model: average latency went 12-17s to
+# 35s and the slowest healthy answer took 234s, so the 90s ceilings baked
+# into call sites produced 229 timeout-and-cooldown errors in one hour
+# while the server was UP the whole time. This floor overrides a caller's
+# smaller request_timeout whenever thinking=True — callers sized their
+# numbers for the old model, and a too-small budget doesn't cancel the
+# generation, it abandons a nearly-finished answer and pays for it anyway.
+THINKING_TIMEOUT = float(os.getenv("LLM_THINKING_TIMEOUT", "300"))
 
 # Max tokens to request on retry with /no_think — must stay under LM Studio's hard server cap.
 # Set conservatively so the model has budget for actual output after thinking tokens are stripped.
@@ -266,6 +277,13 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         stats['model'] = cfg['model']
         stats['platform'] = cfg.get('platform')
 
+    # Thinking calls get the thinking budget even when the caller passed a
+    # smaller number — call sites sized their 90s ceilings for a smaller
+    # model, and a too-small budget doesn't cancel a generation, it abandons
+    # a nearly-finished answer after paying full price for it.
+    if thinking:
+        request_timeout = max(float(request_timeout or 0), THINKING_TIMEOUT)
+
     # Qwen3 thinking toggle — only applies to local models (lmstudio / ollama)
     # /no_think prefix suppresses chain-of-thought for fast, low-stakes calls
     effective_system = system
@@ -393,9 +411,21 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
 
     except _EmptyThinkingResponse:
         raise  # pass through to retry handler — do NOT wrap
-    except httpx.TimeoutException:
+    except httpx.ConnectError as e:
+        # The host is actually unreachable — this is what the circuit
+        # breaker exists for. Cool down so queued callers fail fast instead
+        # of each paying a full connect timeout against a dead server.
         _cool_down_llm()
-        raise RuntimeError(f"LLM timeout after {read_timeout:.1f}s - is {cfg['platform']} running at {cfg['url']}?")
+        raise RuntimeError(f"LLM unreachable ({cfg['platform']} @ {cfg['url']}): {e}")
+    except httpx.TimeoutException:
+        # A read timeout means the server is ALIVE and busy — the opposite
+        # of an outage. Tripping the breaker here is how one slow qwen3-32b
+        # answer cascaded into 229 instant "cooling down" rejections in an
+        # hour: each timeout poisoned ~15s of every other caller's work
+        # while the GPU was up and generating the whole time. The slow call
+        # already paid its own cost; the next caller starts clean.
+        raise RuntimeError(f"LLM timeout after {read_timeout:.1f}s — server busy "
+                           f"(model={cfg.get('model')}); consider LLM_THINKING_TIMEOUT")
     except Exception as e:
         _cool_down_llm()
         raise RuntimeError(f"LLM call failed ({cfg['platform']} @ {cfg['url']}): {e}")
@@ -433,6 +463,9 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
             stats['completion_tokens'] = usage.get('output_tokens')
             stats['finish_reason'] = data.get('stop_reason')
         return data['content'][0]['text']
+    except httpx.TimeoutException:
+        # Same rule as the OpenAI-compat path: slow is not down.
+        raise RuntimeError(f"Anthropic API timeout after {read_timeout:.1f}s")
     except Exception as e:
         _cool_down_llm()
         raise RuntimeError(f"Anthropic API error: {e}")

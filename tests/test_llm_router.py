@@ -248,3 +248,74 @@ class RoutinePositionsStayCheapTests(unittest.TestCase):
     def test_a_multi_week_position_does(self):
         self.assertTrue(R.route("position_management", R.AUTO, {
             "pnl_pct": -0.5, "leverage": 1, "timeframe": "1W"}).thinking)
+
+
+class SlowIsNotDownTests(unittest.TestCase):
+    """One slow qwen3-32b answer must not poison every queued caller.
+
+    Measured on the day the 32B model replaced the smaller one: avg latency
+    went 12-17s to 35s (max 234s), the 90s ceilings started expiring, and
+    every expiry tripped the circuit breaker — 229 instant "cooling down"
+    rejections in one hour while the GPU was up and generating throughout.
+    """
+
+    def test_thinking_calls_get_the_thinking_floor(self):
+        """A caller's 90s ceiling (sized for the old model) is raised to
+        THINKING_TIMEOUT when thinking=True."""
+        from unittest.mock import patch
+
+        from lib import lmstudio
+
+        captured = {}
+
+        def fake_compat(prompt, system, max_tokens, temperature, cfg,
+                        thinking_mode=False, request_timeout=None, stats=None):
+            captured["timeout"] = request_timeout
+            return "ok"
+
+        with patch.object(lmstudio, "_call_openai_compat", fake_compat), \
+             patch.object(lmstudio, "get_llm_config", return_value={
+                 "url": "http://x", "model": "m", "api_key": "",
+                 "max_tokens": 100, "platform": "lmstudio",
+                 "provider": "openai_compat"}), \
+             patch.object(lmstudio, "_resolve_model", lambda c: "m"):
+            lmstudio.call_lm_studio("p", thinking=True, request_timeout=90)
+            self.assertEqual(captured["timeout"], lmstudio.THINKING_TIMEOUT)
+            lmstudio.call_lm_studio("p", thinking=False, request_timeout=90)
+            self.assertEqual(captured["timeout"], 90)
+
+    def test_a_read_timeout_does_not_trip_the_breaker(self):
+        import httpx as _httpx
+        from unittest.mock import patch
+
+        from lib import lmstudio
+
+        lmstudio._llm_circuit_open_until = 0.0
+        with patch.object(_httpx, "Client") as MC:
+            MC.return_value.__enter__.return_value.post.side_effect = \
+                _httpx.ReadTimeout("slow")
+            with self.assertRaises(RuntimeError) as ctx:
+                lmstudio._call_openai_compat("p", None, 100, 0.1, {
+                    "url": "http://x", "model": "m", "api_key": "",
+                    "platform": "lmstudio", "provider": "openai_compat"})
+        self.assertIn("busy", str(ctx.exception))
+        self.assertEqual(lmstudio._llm_circuit_remaining(), 0.0,
+                         "a busy server must not open the circuit")
+
+    def test_a_connect_error_still_trips_the_breaker(self):
+        import httpx as _httpx
+        from unittest.mock import patch
+
+        from lib import lmstudio
+
+        lmstudio._llm_circuit_open_until = 0.0
+        with patch.object(_httpx, "Client") as MC:
+            MC.return_value.__enter__.return_value.post.side_effect = \
+                _httpx.ConnectError("refused")
+            with self.assertRaises(RuntimeError):
+                lmstudio._call_openai_compat("p", None, 100, 0.1, {
+                    "url": "http://x", "model": "m", "api_key": "",
+                    "platform": "lmstudio", "provider": "openai_compat"})
+        self.assertGreater(lmstudio._llm_circuit_remaining(), 0.0,
+                           "a dead host is exactly what the breaker is for")
+        lmstudio._llm_circuit_open_until = 0.0

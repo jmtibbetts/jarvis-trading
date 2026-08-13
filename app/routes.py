@@ -1438,7 +1438,22 @@ def add_watchlist_symbol(body: WatchlistAdd):
         sym = normalize_crypto_symbol(raw)
         rowp = fetch_crypto_prices([sym]).get(sym)
         if not rowp or not rowp.get("price"):
-            raise HTTPException(404, f"No exchange lists {sym} — not added")
+            # A dead end is not an answer. The same asset is very often
+            # already tracked under a different ticker — SPCX/USD does not
+            # exist, but SPCXB/USD and XSPCX/USD both do and one had already
+            # been traded twice. Offer what the base actually matches.
+            base = sym.split("/")[0].replace("X", "", 1) if sym.startswith("X") else sym.split("/")[0]
+            near = []
+            try:
+                with get_db() as db:
+                    rows = db.query(MarketAsset.symbol, MarketAsset.name).filter(
+                        MarketAsset.symbol.ilike(f"%{base}%")
+                    ).limit(6).all()
+                    near = [f"{s} ({n})" if n and n != s else s for s, n in rows]
+            except Exception:
+                pass
+            hint = f" Tracked symbols matching '{base}': {', '.join(near)}." if near else ""
+            raise HTTPException(404, f"No exchange lists {sym} — not added.{hint}")
         price = rowp["price"]; name = sym; asset_class = "Crypto"
     else:
         sym = raw

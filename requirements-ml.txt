@@ -1,0 +1,37 @@
+# Training and inference stack for the predictive layer.
+# Kept SEPARATE from requirements.txt: training is a batch activity on the
+# RTX 5090 and must not become a runtime dependency of the trading system.
+# JARVIS has to start and trade with none of this installed.
+#
+# Install:
+#     pip install -r requirements-ml.txt --index-url https://download.pytorch.org/whl/cu128
+#
+# The CUDA 12.8 index is required. The RTX 5090 is Blackwell (sm_120) and
+# the default PyPI wheels do not carry that architecture — torch imports
+# fine and then reports no usable device, which reads like a driver problem
+# rather than a wheel problem.
+
+# ── Pinned, and the pin matters ──────────────────────────────────────────
+# Installing scikit-learn/scipy unpinned pulled numpy 1.26.4 -> 2.5.2,
+# because scipy >= 1.15 requires numpy >= 2.0. That silently replaced the
+# numerical foundation the entire trading system has been tested against,
+# as a side effect of adding an ML library. numpy 2 changes scalar
+# promotion, default integer width on Windows, and copy semantics — none of
+# which should ever change underneath fee, P&L or position-sizing
+# arithmetic without a deliberate decision.
+#
+# All 1,341 tests happened to pass on numpy 2.5.2, but tests do not cover
+# every path and this is not a risk worth taking for a dependency used only
+# by offline training. Held at the tested version; scipy and scikit-learn
+# are pinned to the last releases that support it.
+numpy==1.26.4
+scipy<1.15
+scikit-learn<1.6
+
+# ── Training (RTX 5090) ──────────────────────────────────────────────────
+# Never the NPU: it is an inference device.
+torch==2.11.0+cu128
+
+# ── Inference (CPU / Intel NPU) ──────────────────────────────────────────
+# Also constrains numpy to <2.6.0, which the pin above already satisfies.
+openvino==2026.3.0

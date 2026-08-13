@@ -29,6 +29,26 @@ import numpy as np
 import pandas as pd
 
 
+def _r(value, sig: int = 8):
+    """Round a PRICE to significant figures, never to fixed decimals.
+
+    _r(x) silently destroys sub-cent assets: SHIB at $0.00000449
+    becomes $0.000004, a 10.9% error, and every level derived from it
+    inherits that error before any strategy sees it. Significant figures
+    keep the same relative precision at $0.0000045 and at $63,000.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    if v == 0 or v != v or v in (float("inf"), float("-inf")):
+        return v
+    import math
+    digits = sig - 1 - math.floor(math.log10(abs(v)))
+    return round(v, max(0, digits)) if digits > 0 else round(v, 0)
+
+
+
 def williams_r(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
     """Williams %R: (highest_high - close) / (highest_high - lowest_low) * -100.
     Range -100..0; below -80 oversold, above -20 overbought (convention)."""
@@ -82,7 +102,7 @@ def keltner_channels(high: pd.Series, low: pd.Series, close: pd.Series,
     upper, lower = mid + mult * a, mid - mult * a
     last = float(close.iloc[-1])
     return {
-        "upper": round(upper, 6), "mid": round(mid, 6), "lower": round(lower, 6),
+        "upper": _r(upper), "mid": _r(mid), "lower": _r(lower),
         "position": "above_upper" if last > upper else "below_lower" if last < lower else "inside",
     }
 
@@ -95,9 +115,9 @@ def donchian_channels(high: pd.Series, low: pd.Series, period: int = 20) -> dict
     upper = float(high.iloc[-(period + 1):-1].max())
     lower = float(low.iloc[-(period + 1):-1].min())
     return {
-        "upper": round(upper, 6),
-        "lower": round(lower, 6),
-        "mid": round((upper + lower) / 2, 6),
+        "upper": _r(upper),
+        "lower": _r(lower),
+        "mid": _r((upper + lower) / 2),
         "breakout_up": float(high.iloc[-1]) > upper,
         "breakout_down": float(low.iloc[-1]) < lower,
     }
@@ -151,7 +171,7 @@ def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
     direction = "up" if trend[-1] == 1 else "down"
     level = float(lower.iloc[-1]) if trend[-1] == 1 else float(upper.iloc[-1])
     flipped = bool(trend[-1] != trend[-2])
-    return {"direction": direction, "level": round(level, 6), "flipped_this_bar": flipped}
+    return {"direction": direction, "level": _r(level), "flipped_this_bar": flipped}
 
 
 def pivot_points(prev_high: float, prev_low: float, prev_close: float) -> dict | None:
@@ -161,11 +181,11 @@ def pivot_points(prev_high: float, prev_low: float, prev_close: float) -> dict |
     except TypeError:
         return None
     return {
-        "pivot": round(p, 6),
-        "r1": round(2 * p - prev_low, 6),
-        "s1": round(2 * p - prev_high, 6),
-        "r2": round(p + (prev_high - prev_low), 6),
-        "s2": round(p - (prev_high - prev_low), 6),
+        "pivot": _r(p),
+        "r1": _r(2 * p - prev_low),
+        "s1": _r(2 * p - prev_high),
+        "r2": _r(p + (prev_high - prev_low)),
+        "s2": _r(p - (prev_high - prev_low)),
     }
 
 
@@ -238,8 +258,8 @@ def market_structure(df: pd.DataFrame, window: int = 3) -> dict | None:
     return {
         "structure": structure,
         "labels": labels,
-        "last_swing_high": round(last_swing_high, 6),
-        "last_swing_low": round(last_swing_low, 6),
+        "last_swing_high": _r(last_swing_high),
+        "last_swing_low": _r(last_swing_low),
         "event": event,
         "swing_count": {"highs": len(sh), "lows": len(sl)},
         "confirmation_window": window,

@@ -568,6 +568,11 @@ class TradeOutcome(Base):
     ta_summary       = Column(Text)            # TA snapshot at entry
     market_regime    = Column(String)          # trending | ranging | volatile at entry
     paper_mode       = Column(Boolean, default=False)
+    # Which generation of the engine produced this outcome. Calibration reads
+    # ONLY the current epoch: 93.6% of pre-epoch outcomes were closed by an
+    # exit rule that no longer exists, so their win/loss labels describe a
+    # machine that is gone. Quarantined, not deleted.
+    engine_epoch     = Column(String)
     entered_at       = Column(String)
     exited_at        = Column(String, default=now_iso)
 
@@ -1097,6 +1102,16 @@ def _migrate_columns():
             ("is_focus", "INTEGER DEFAULT 0"),
             ("focus_note", "TEXT"),
             ("focus_added", "TEXT"),
+        ],
+        # Which generation of the engine produced this outcome. Everything
+        # recorded before 2026-08-13 came from a system where fees went
+        # uncharged, stops fired at 0.12%, positions closed when their ENTRY
+        # signal expired, futures P&L was off by the contract multiplier and
+        # sub-cent prices were rounded to nothing. 93.6% of those outcomes
+        # were closed by an exit rule that no longer exists, so they measure
+        # a machine that is gone.
+        "trade_outcomes": [
+            ("engine_epoch", "TEXT"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),

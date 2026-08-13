@@ -45,7 +45,14 @@ class SignalDirectionTests(unittest.TestCase):
         scored = score_signal(signal, ta_data, {"risk": "high"})
         self.assertEqual(scored["rr_ratio"], 2.0)
         self.assertEqual(scored["score_breakdown"]["ta_confluence"], 100)
-        self.assertGreater(scored["composite_score"], 70)
+        # Threshold lowered from 70 deliberately. The scoring SCALE moved
+        # when confidence stopped being inflated: this signal has perfect
+        # bearish confluence and 2.0 R:R, but no measured history behind it,
+        # so its confidence is capped at the no-evidence ceiling rather than
+        # taking the model's 80 at face value. A strong technical setup with
+        # nothing proven about it scoring in the high 60s is the honest
+        # answer — the old >70 encoded the inflated number.
+        self.assertGreater(scored["composite_score"], 60)
 
     def test_plain_long_does_not_require_paper(self):
         self.assertFalse(direction_requires_paper("Long"))

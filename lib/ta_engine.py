@@ -9,6 +9,30 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _r(value, sig: int = 8):
+    """Round a PRICE to significant figures, never to fixed decimals.
+
+    _r(x) silently destroys sub-cent assets: SHIB at $0.00000449
+    becomes $0.000004, an 10.91% error, and every level derived from it —
+    VWAP, support, resistance, bands, Supertrend — inherits that error
+    before any strategy sees it. The same class of bug as pricing a
+    contract by token count: a fixed unit applied across a five-order-of-
+    magnitude price range.
+
+    Significant figures keep the same relative precision whether the
+    instrument trades at $0.0000045 or $63,000.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    if v == 0 or v != v or v in (float("inf"), float("-inf")):
+        return v
+    import math
+    digits = sig - 1 - math.floor(math.log10(abs(v)))
+    return round(v, max(0, digits)) if digits > 0 else round(v, 0)
+
 TIMEFRAME_LADDER = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "1D"]
 
 # Detect which TA library is available
@@ -153,10 +177,10 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
 
     # Price
     result["price"] = {
-        "last":       round(last, 6),
-        "open":       round(float(df["open"].iloc[-1]), 6),
-        "high":       round(float(high.iloc[-1]), 6),
-        "low":        round(float(low.iloc[-1]), 6),
+        "last":       _r(last),
+        "open":       _r(float(df["open"].iloc[-1])),
+        "high":       _r(float(high.iloc[-1])),
+        "low":        _r(float(low.iloc[-1])),
         "pct_change": round((last - prev) / prev * 100, 3) if prev else 0,
     }
 
@@ -165,7 +189,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     for p in [9, 21, 50, 200]:
         try:
             if len(df) >= p:
-                emas[f"ema{p}"] = round(_ema(close, p), 6)
+                emas[f"ema{p}"] = _r(_ema(close, p))
             else:
                 emas[f"ema{p}"] = None
         except:
@@ -186,7 +210,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
         mv, sv, hv, pmv, psv = _macd(close)
         crossover = "bullish" if pmv <= psv and mv > sv else "bearish" if pmv >= psv and mv < sv else "none"
         result["macd"] = {
-            "macd": round(mv, 6), "signal": round(sv, 6), "histogram": round(hv, 6),
+            "macd": _r(mv), "signal": _r(sv), "histogram": _r(hv),
             "trend": "bullish" if hv > 0 else "bearish", "crossover": crossover
         }
     except:
@@ -224,7 +248,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
             [(close.iloc[i] * 2 * 2) for i in range(len(close))]
         ).rolling(20).mean().iloc[-1]) if False else bw  # simplified
         result["bollinger_bands"] = {
-            "upper": round(upper, 6), "mid": round(mid, 6), "lower": round(lower, 6),
+            "upper": _r(upper), "mid": _r(mid), "lower": _r(lower),
             "pct_b": round((last - lower) / (upper - lower), 4) if (upper - lower) > 0 else 0.5,
             "bandwidth": round(bw, 4),
             "position": "above_upper" if last > upper else "below_lower" if last < lower else "inside"
@@ -235,9 +259,20 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     # ATR
     try:
         atr_val = _atr(high, low, close)
-        result["atr"] = {"value": round(atr_val, 6), "pct": round(atr_val / last * 100, 3) if last else 0} if atr_val else None
+        result["atr"] = {"value": _r(atr_val), "pct": round(atr_val / last * 100, 3) if last else 0} if atr_val else None
     except:
         result["atr"] = None
+
+    # ATR profile — multi-horizon, plus where this volatility sits in the
+    # instrument's OWN history. The single-value ATR above cannot answer
+    # "is this high for this asset", which is what makes any threshold
+    # portable across BTC, SHIB and NVDA.
+    try:
+        from lib.atr_normalization import compute_atr_profile
+        result["atr_profile"] = compute_atr_profile(df)
+    except Exception as e:
+        logger.debug(f"[TA] ATR profile unavailable: {e}")
+        result["atr_profile"] = None
 
     # VWAP
     try:
@@ -249,7 +284,7 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
             raise ValueError("zero volume — no VWAP")
         pct_diff = (last - vwap_val) / vwap_val * 100 if vwap_val else 0
         result["vwap"] = {
-            "value": round(vwap_val, 6), "pct_diff": round(pct_diff, 3),
+            "value": _r(vwap_val), "pct_diff": round(pct_diff, 3),
             "position": "above" if last > vwap_val else "below"
         }
     except:
@@ -270,8 +305,8 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     # Support / Resistance
     try:
         recent     = df.tail(50)
-        resistance = round(float(recent["high"].tail(20).max()), 6)
-        support    = round(float(recent["low"].tail(20).min()), 6)
+        resistance = _r(float(recent["high"].tail(20).max()))
+        support    = _r(float(recent["low"].tail(20).min()))
         result["support_resistance"] = {
             "support": support, "resistance": resistance,
             "range_pct": round((resistance - support) / last * 100, 2) if last else 0,
@@ -305,6 +340,20 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     except Exception:
         pass
 
+    # Every level found above, restated in ATRs from the current price.
+    # LAST, because it needs all of them to exist first. This is what makes
+    # a threshold portable: "2% from VWAP" says nothing across assets,
+    # "1.4 ATR from VWAP" says the same thing on SHIB and on crude.
+    try:
+        from lib.atr_normalization import normalized_distances
+        prof = result.get("atr_profile") or {}
+        ref = prof.get("reference") or ((result.get("atr") or {}).get("value"))
+        dist = normalized_distances(result, ref)
+        result["atr_distances"] = dist or None
+    except Exception as e:
+        logger.debug(f"[TA] ATR distances unavailable: {e}")
+        result["atr_distances"] = None
+
     return result
 
 
@@ -317,9 +366,21 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
     def fmt(v, dec=2):
         return f"{float(v):.{dec}f}" if v is not None else "?"
     def pfmt(p):
+        """Price with SIGNIFICANT figures, not fixed decimals.
+
+        `f"${p:.4f}"` for anything under $1 printed SHIB, its support and
+        its resistance all as "$0.0000" — three different levels rendered
+        identically, in the text the model actually reads. The same class of
+        error as round(x, 6) destroying the levels themselves.
+        """
         if p is None: return "?"
         p = float(p)
-        return f"${p:,.0f}" if p > 1000 else f"${p:.4f}" if p < 1 else f"${p:.2f}"
+        if p == 0: return "$0"
+        if p >= 1000: return f"${p:,.0f}"
+        if p >= 1: return f"${p:.2f}"
+        import math
+        decimals = min(12, max(4, 4 - int(math.floor(math.log10(abs(p))))))
+        return f"${p:.{decimals}f}".rstrip("0")
 
     lines = [f"[{symbol}]" + (f" {asset_name}" if asset_name else "")]
     for tf in TIMEFRAME_LADDER:
@@ -352,5 +413,26 @@ def build_ta_prompt_block(symbol: str, ta_data: dict, asset_name: str = "") -> s
             f"BB={bbp} VWAP={vp} ATR={atrp}% Vol={vs} "
             f"S={sup} R={res}"
         )
+        # Distances in ATRs, so the model can judge stretch without knowing
+        # what a normal move looks like on this instrument. "3.2 ATR from
+        # VWAP" is the same statement on SHIB and on crude; "2% from VWAP"
+        # is not a statement at all.
+        dist = d.get("atr_distances") or {}
+        prof = d.get("atr_profile") or {}
+        parts = [f"{name}={value:+.1f}" for name, value in (
+            ("vwap", dist.get("to_vwap")),
+            ("sup", dist.get("to_support")),
+            ("res", dist.get("to_resistance")),
+        ) if value is not None]
+        extra = []
+        if prof.get("state"):
+            extra.append(prof["state"].lower())
+        if prof.get("percentile") is not None:
+            extra.append(f"pctile={prof['percentile']:.0f}")
+        if parts or extra:
+            lines.append(
+                f"       ATRs: {' '.join(parts)}"
+                + (f"  [{' '.join(extra)}]" if extra else "")
+            )
     return "\n".join(lines) + "\n"
 

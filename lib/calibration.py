@@ -59,6 +59,25 @@ FULL_TRUST_SAMPLE = 200
 PRIOR_WINS = 2.0
 PRIOR_TOTAL = 4.0
 
+# Outcomes recorded before this epoch came from a materially different
+# machine and are EXCLUDED from calibration. Not deleted — they remain for
+# analysis — but they cannot be allowed to calibrate a system they never
+# measured.
+#
+# Measured on 8,903 pre-epoch outcomes: 93.6% were closed by an exit rule
+# that no longer exists (the $15 noise cap, closing when the ENTRY signal
+# expired, un-scaled tier cuts, LLM exits without horizon context) and only
+# 6.0% ever reached their target. Add the contract-multiplier error on
+# futures and 6-decimal rounding on sub-cent assets, and the win/loss labels
+# describe a machine that is gone.
+CURRENT_EPOCH = "2026-08-13"
+
+# Confidence a signal may claim when there is no evidence behind it.
+# Without this cap, "insufficient history" silently returns the model's own
+# number — and raw confidence was measured INVERTED: 90%+ signals won 28%.
+# "We do not know" must not present as "90% sure".
+NO_EVIDENCE_CEILING = 55.0
+
 _CACHE: dict = {"built_at": 0.0, "table": None}
 _CACHE_TTL = 300.0
 _LOCK = threading.Lock()
@@ -104,6 +123,8 @@ def build_table(force: bool = False) -> dict:
                 TradingSignal.composite_score, TradingSignal.strategy,
             ).outerjoin(
                 TradingSignal, TradingSignal.id == TradeOutcome.signal_id
+            ).filter(
+                TradeOutcome.engine_epoch == CURRENT_EPOCH
             ).all()
     except Exception as e:
         logger.warning(f"[Calibration] could not read outcomes: {e}")
@@ -235,7 +256,13 @@ def calibrate(raw_confidence: float, timeframe: str | None,
     if ev is None:
         ev = lookup(timeframe, composite_score, strategy)
     if ev["win_rate"] is None:
-        return raw, {**ev, "weight": 0.0, "raw": raw}
+        # No evidence. The model's own number cannot be trusted here — it was
+        # measured inverted — so it is capped rather than passed through. A
+        # signal with nothing behind it must not outrank one with a measured
+        # edge simply because the model felt strongly about it.
+        capped = min(raw, NO_EVIDENCE_CEILING)
+        return capped, {**ev, "weight": 0.0, "raw": raw,
+                        "capped_at": NO_EVIDENCE_CEILING if capped < raw else None}
 
     # Sample size says how RELIABLE the rate is; specificity says how much
     # it is about THIS setup. A base rate over 8,899 mixed trades is highly

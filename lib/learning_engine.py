@@ -57,6 +57,14 @@ def _safe_add_column(conn, table: str, column: str, col_type: str):
     except Exception:
         pass  # column already present
 
+def _CURRENT_EPOCH() -> str:
+    try:
+        from lib.calibration import CURRENT_EPOCH
+        return CURRENT_EPOCH
+    except Exception:
+        return "unknown"
+
+
 def _ensure_tables(conn):
     from sqlalchemy import text
     conn.execute(text("""CREATE TABLE IF NOT EXISTS trade_outcomes (
@@ -65,7 +73,8 @@ def _ensure_tables(conn):
         qty REAL, pnl_usd REAL, pnl_pct REAL, outcome TEXT, exit_reason TEXT,
         hold_duration_m REAL, signal_confidence REAL, signal_score REAL,
         signal_reasoning TEXT, ta_summary TEXT, market_regime TEXT,
-        paper_mode INTEGER DEFAULT 0, entered_at TEXT, exited_at TEXT
+        paper_mode INTEGER DEFAULT 0, entered_at TEXT, exited_at TEXT,
+        engine_epoch TEXT
     )"""))
     conn.execute(text("""CREATE TABLE IF NOT EXISTS signal_accuracy (
         id TEXT PRIMARY KEY, symbol TEXT, asset_class TEXT, timeframe TEXT,
@@ -666,12 +675,14 @@ def record_trade_outcome(
                 (id, signal_id, symbol, asset_class, direction, timeframe,
                  entry_price, exit_price, qty, pnl_usd, pnl_pct, outcome, exit_reason,
                  hold_duration_m, signal_confidence, signal_score,
-                 signal_reasoning, ta_summary, market_regime, paper_mode, entered_at, exited_at)
+                 signal_reasoning, ta_summary, market_regime, paper_mode, entered_at, exited_at,
+                 engine_epoch)
                 VALUES
                 (:id, :signal_id, :symbol, :asset_class, :direction, :timeframe,
                  :entry_price, :exit_price, :qty, :pnl_usd, :pnl_pct, :outcome, :exit_reason,
                  :hold_duration_m, :signal_confidence, :signal_score,
-                 :signal_reasoning, :ta_summary, :market_regime, :paper_mode, :entered_at, :exited_at)
+                 :signal_reasoning, :ta_summary, :market_regime, :paper_mode, :entered_at, :exited_at,
+                 :engine_epoch)
             """), {
                 "id": row_id, "signal_id": signal_id, "symbol": symbol,
                 "asset_class": asset_class, "direction": direction, "timeframe": timeframe,
@@ -684,6 +695,11 @@ def record_trade_outcome(
                 "market_regime": market_regime,
                 "paper_mode": 1 if paper_mode else 0,
                 "entered_at": entered_at, "exited_at": exited_at,
+                # Which generation of the engine produced this. Calibration
+                # reads only the current epoch, so outcomes from a machine
+                # with uncharged fees, 0.12% stops and entry-expiry closes
+                # cannot calibrate the one that replaced it.
+                "engine_epoch": _CURRENT_EPOCH(),
             })
 
             # Tier 3 — Pattern Memory (paper trades count too)

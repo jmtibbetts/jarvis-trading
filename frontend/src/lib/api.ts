@@ -5,6 +5,11 @@
 
 export type Signal = {
   id: string;
+  // Sent by the server from lib/trade_horizon.py, the same table the exit
+  // logic reads — so the card, Telegram and the position manager cannot
+  // disagree about how long a setup is supposed to take.
+  horizon?: string | null;
+  hold_estimate?: string | null;
   asset_symbol: string;
   asset_name: string | null;
   asset_class: string | null;

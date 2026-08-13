@@ -79,6 +79,34 @@ CATASTROPHIC_LOSS_PCT_OF_MARGIN = _env_float("CATASTROPHIC_LOSS_PCT_OF_MARGIN", 
 MAX_LOSS_PER_TRADE_USD = _env_float("MAX_LOSS_PER_TRADE_USD", 15.0, 10.0, 20.0)
 
 
+PROFIT_LOCK_USD = _env_float("PROFIT_LOCK_USD", 10.0, 0.0, 50.0)
+MIN_DYNAMIC_TRAIL_PCT = _env_float("MIN_DYNAMIC_TRAIL_PCT", 0.75, 0.1, 5.0)
+TARGET_REWARD_MULTIPLIER = _env_float("TARGET_REWARD_MULTIPLIER", 2.8, 1.2, 6.0)
+EXIT_ORDER_REPRICE_PCT = _env_float("EXIT_ORDER_REPRICE_PCT", 0.25, 0.05, 2.0)
+FUTURES_MIN_CONFIDENCE = 45  # lower bar for futures — macro-driven, even 47% conviction is tradeable
+
+
+# ── Trade horizon ───────────────────────────────────────────────────────────
+# A 3% adverse move kills a 5-minute scalp and is ordinary noise on a weekly
+# position. Managing both with one set of numbers means one of them is always
+# being managed wrong, and this book holds both at once.
+#
+# The table lives in lib/trade_horizon.py — it already existed in three
+# copies (signals API, Telegram formatter, signal card) as a bare string map
+# that the management loop could not use. Same numbers, now readable here.
+from lib.trade_horizon import (expected_hold_minutes, hold_estimate,
+                               hold_status, room_multiplier as horizon_room_multiplier,
+                               format_duration as _fmt_duration)
+
+# How much wider than its expected hold a position may run before the fact
+# that it has NOT resolved is itself evidence the setup failed.
+STALE_HOLD_MULTIPLE = _env_float("STALE_HOLD_MULTIPLE", 3.0, 1.5, 10.0)
+
+
+def hold_window_label(timeframe: str | None) -> str:
+    return hold_estimate(timeframe)
+
+
 def catastrophic_loss_usd(margin: float) -> float:
     """The most a position may lose before it is closed regardless of what
     any model thinks. Scaled to the capital committed, because a fixed
@@ -101,11 +129,6 @@ def catastrophic_stop_price(entry: float, qty: float, margin: float,
         return None
     move = catastrophic_loss_usd(margin) / q
     return entry + move if is_short else entry - move
-PROFIT_LOCK_USD = _env_float("PROFIT_LOCK_USD", 10.0, 0.0, 50.0)
-MIN_DYNAMIC_TRAIL_PCT = _env_float("MIN_DYNAMIC_TRAIL_PCT", 0.75, 0.1, 5.0)
-TARGET_REWARD_MULTIPLIER = _env_float("TARGET_REWARD_MULTIPLIER", 2.8, 1.2, 6.0)
-EXIT_ORDER_REPRICE_PCT = _env_float("EXIT_ORDER_REPRICE_PCT", 0.25, 0.05, 2.0)
-FUTURES_MIN_CONFIDENCE = 45  # lower bar for futures — macro-driven, even 47% conviction is tradeable
 
 # ── Same tier thresholds as real manage_positions.py ──────────────────────────
 TIERS_CRYPTO = [
@@ -126,16 +149,27 @@ def _is_crypto(sym: str) -> bool:
     return "/" in sym or sym.upper().endswith("USD")
 
 
-def _tier(plpc: float, is_crypto: bool):
+def _tier(plpc: float, is_crypto: bool, timeframe: str | None = None):
+    """The deterministic tier for this P&L, widened for longer horizons.
+
+    The loss thresholds (-4% crypto, -5% equity) were written for one
+    horizon and applied to all of them, so a 1D setup was cut for exactly
+    the pullback a 1D setup is supposed to absorb. Only the LOSS side is
+    scaled — a 10% gain is worth taking on any timeframe, but a 4% drawdown
+    means something entirely different on a 5m chart than on a weekly.
+    """
     tiers = TIERS_CRYPTO if is_crypto else TIERS_EQUITY
+    room = horizon_room_multiplier(timeframe) if timeframe else 1.0
     for t in tiers:
         mg, xg = t["min_gain"], t["max_gain"]
+        if xg is not None and xg < 0:
+            xg = xg * room          # the loss cut, given room for its horizon
         if mg is not None and xg is not None:
             if mg <= plpc < xg: return t
         elif mg is not None and xg is None:
             if plpc >= mg: return t
         elif mg is None and xg is not None:
-            if plpc <= xg: return t
+            if plpc <= xg: return dict(t, scaled_threshold=xg)
     return None
 
 
@@ -227,22 +261,43 @@ def _get_open_paper_symbols() -> set:
 
 
 def _get_open_paper_positions() -> list:
-    """Return all open paper positions as plain dicts."""
+    """Return all open paper positions as plain dicts.
+
+    The signal's TIMEFRAME rides along, because it is what says whether a
+    position is a 25-minute scalp or a three-week hold — and the same adverse
+    move means opposite things in those two cases. It lives on the signal,
+    not the position, so it has to be joined here or the management loop
+    manages every trade as though it had the same horizon."""
     with get_db() as db:
         rows = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
-        return [{
-            "id":           str(p.id),
-            "symbol":       p.symbol,
-            "direction":    p.direction,
-            "entry_price":  float(p.entry_price or 0),
-            "qty":          float(p.qty or 0),
-            "margin":       float(p.margin_used or 0),
-            "leverage":     float(p.leverage or 1),
-            "stop_loss":    float(p.stop_loss or 0),
-            "target_price": float(p.target_price or 0),
-            "opened_at":    str(p.opened_at or ""),
-            "scaled_out":   bool(p.scaled_out),
-        } for p in rows]
+        sig_ids = [p.signal_id for p in rows if p.signal_id]
+        timeframes: dict[str, str] = {}
+        if sig_ids:
+            for sid, tf in db.query(TradingSignal.id, TradingSignal.timeframe).filter(
+                TradingSignal.id.in_(sig_ids)
+            ).all():
+                if tf:
+                    timeframes[sid] = tf
+        out = []
+        for p in rows:
+            tf = timeframes.get(p.signal_id)
+            out.append({
+                "id":           str(p.id),
+                "symbol":       p.symbol,
+                "direction":    p.direction,
+                "entry_price":  float(p.entry_price or 0),
+                "qty":          float(p.qty or 0),
+                "margin":       float(p.margin_used or 0),
+                "margin_used":  float(p.margin_used or 0),
+                "leverage":     float(p.leverage or 1),
+                "stop_loss":    float(p.stop_loss or 0),
+                "target_price": float(p.target_price or 0),
+                "opened_at":    str(p.opened_at or ""),
+                "scaled_out":   bool(p.scaled_out),
+                "timeframe":    tf,
+                "signal_id":    p.signal_id,
+            })
+        return out
 
 
 def _get_context() -> tuple:
@@ -332,7 +387,11 @@ def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data:
 
     primary = _primary_ta(ta_data)
     atr = float(((primary.get("atr") or {}).get("value")) or current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
-    trail = max(atr * 1.15, current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
+    # Trail width follows the trade's own horizon. A trail calibrated for a
+    # 5-minute chart stops a daily position out on its first ordinary
+    # pullback — the position never gets the room its thesis needs.
+    room = horizon_room_multiplier(pos.get("timeframe"))
+    trail = max(atr * 1.15, current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0) * room
     # The widest the stop may sit from entry, in price. Previously this was
     # $15 spread over the leveraged quantity, which pinned every stop to a
     # ~0.15% move and guaranteed the noise-triggered exits above.
@@ -506,7 +565,7 @@ def _manage_open_positions(prices: dict) -> dict:
         # change is a bet worth measuring, not a proven win — which is why
         # the catastrophic backstop above still fires first and
         # unconditionally.
-        tier = _tier(plpc, is_c)
+        tier = _tier(plpc, is_c, pos.get("timeframe"))
         tier_is_loss_cut = bool(tier and tier["action"] == "close" and plpc < 0)
         if tier and tier["action"] == "close" and not tier_is_loss_cut:
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
@@ -533,6 +592,17 @@ def _manage_open_positions(prices: dict) -> dict:
             ) or "No symbol-specific news"
 
         tier_label = tier["label"] if tier else "No tier action"
+        # The clock the setup implies. Without it every position is judged as
+        # though it had the same horizon, so a 1D trade gets cut for the
+        # wobble a 1D trade is supposed to absorb, and a 5m scalp is nursed
+        # for hours after its thesis expired.
+        hs = hold_status(pos.get("timeframe"), pos.get("opened_at"), STALE_HOLD_MULTIPLE)
+        horizon_ctx = (
+            f"  Chart timeframe: {pos.get('timeframe') or 'unknown'}\n"
+            f"  Expected hold:   {hs['label']}\n"
+            f"  Open for:        {_fmt_duration(hs['age_min']) if hs['age_min'] is not None else 'unknown'}"
+            f"  ({hs['state']})\n"
+        )
         _margin = float(pos.get("margin_used") or 0) or (abs(float(pos.get("qty") or 0)) * entry / max(1.0, float(pos.get("leverage") or 1)))
         _hard = catastrophic_loss_usd(_margin)
         _room = _hard - abs(min(0.0, pl_dollar))
@@ -567,7 +637,14 @@ POSITION: {sym} ({'Crypto 24/7' if is_c else 'Equity'})
   Stop Loss:      ${pos['stop_loss']:.4f}
   Take Profit:    ${pos['target_price']:.4f}
   Leverage:       {pos['leverage']}x
-{risk_ctx}  Deterministic tier: {tier_label}
+{horizon_ctx}{risk_ctx}  Deterministic tier: {tier_label}
+
+HORIZON MATTERS. Judge the move against the timeframe this setup was taken
+on, not against the clock. A 3% adverse move refutes a 5-minute scalp and is
+ordinary noise on a 1D or 1W position — do not cut a longer-horizon trade for
+the wobble its own timeframe is supposed to absorb. Equally, a scalp still
+open well past its expected hold has been refuted by TIME even if price has
+not hit the stop: the move it was entered for did not happen.
 
 {authority_ctx}
 

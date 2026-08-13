@@ -239,18 +239,15 @@ def _price_levels(entry, stop, target):
 # the user-facing answer to "is this a scalp or a swing?"
 # Expected hold duration per chart timeframe — shown on every setup so
 # "scalp or swing, and for how long?" is answered in the message itself.
-_HOLD_BY_TF = {
-    "1m": "<30 min", "3m": "<30 min", "5m": "<1 hr",
-    "15m": "1-4 hr", "30m": "2-8 hr", "1H": "4-24 hr",
-    "2H": "1-3 days", "4H": "1-5 days", "1D": "1-4 weeks",
-}
+#
+# One table now, in lib/trade_horizon. It lived here, in the signals API and
+# in the signal card — three copies of the same numbers, and none of them
+# reachable by the position-management loop, which therefore managed a 1D
+# hold and a 5m scalp identically.
+from lib.trade_horizon import hold_map as _hold_map, category_map as _category_map
 
-_HORIZON_BY_TF = {
-    "1m": "SCALP", "3m": "SCALP", "5m": "SCALP",
-    "15m": "INTRADAY", "30m": "INTRADAY", "1H": "INTRADAY",
-    "2H": "SWING", "4H": "SWING",
-    "1D": "POSITION",
-}
+_HOLD_BY_TF = _hold_map()
+_HORIZON_BY_TF = {tf: cat.upper() for tf, cat in _category_map().items()}
 
 
 def _horizon(signal) -> str:

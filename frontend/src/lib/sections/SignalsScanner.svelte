@@ -154,12 +154,21 @@ The original signal will be superseded. Levels are recomputed server-side at sub
 
   // Expected hold time per chart timeframe — the user-facing answer to
   // "how long is this trade supposed to take?"
+  //
+  // The server now sends hold_estimate with every signal, from the same
+  // table the exit logic reads (lib/trade_horizon.py). This local copy is
+  // the fallback for a payload that predates that field; preferring the
+  // server's value is what keeps the card, Telegram and the position
+  // manager from quietly disagreeing about how long a setup should take.
   const HOLD_BY_TF: Record<string, string> = {
     "1m": "<30 min", "3m": "<30 min", "5m": "<1 hr",
     "15m": "1-4 hr", "30m": "2-8 hr", "1H": "4-24 hr",
     "2H": "1-3 days", "4H": "1-5 days", "1D": "1-4 weeks",
+    "1W": "1-3 months",
   };
   const holdEstimate = (tf: string | null) => HOLD_BY_TF[tf ?? ""] ?? "varies";
+  const holdFor = (sig: { timeframe: string | null; hold_estimate?: string | null }) =>
+    sig.hold_estimate ?? holdEstimate(sig.timeframe);
 
   const verdictTone = (v: string) => (v === "CONFIRMED" ? "good" : v === "INVALIDATED" ? "bad" : v === "STALE_ENTRY" ? "warm" : "neutral");
 
@@ -721,7 +730,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
                   <div class="num"><span class="dim">conf</span> {Math.round(sig.confidence ?? 0)}%</div>
                   <div class="num"><span class="dim">R:R</span> {sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</div>
                   <div class="num"><span class="dim">tf</span> {sig.timeframe ?? "—"}</div>
-                  <div class="num"><span class="dim">hold</span> {holdEstimate(sig.timeframe)}</div>
+                  <div class="num"><span class="dim">hold</span> {holdFor(sig)}</div>
                 </div>
               </div>
               <div class="sc-levels num">

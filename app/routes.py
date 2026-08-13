@@ -3291,11 +3291,14 @@ def analyze(body: AnalyzeRequest):
                     signal["bias_conflict"] = conflict
                     signal["bias_summary"] = {"bullish": bull, "bearish": bear, "total": len(biases)}
                     # horizon + hold estimate for the UI
+                    # One table, in lib/trade_horizon. This map lived here, in
+                    # the Telegram formatter and in the signal card — three
+                    # copies none of which the position-management loop could
+                    # read, so it managed every trade on one horizon.
+                    from lib.trade_horizon import category, hold_estimate
                     tf = str(signal.get("timeframe") or "")
-                    horizon_map = {"1m":"scalp","3m":"scalp","5m":"scalp","15m":"intraday","30m":"intraday","1H":"intraday","2H":"swing","4H":"swing","1D":"position"}
-                    hold_map = {"1m":"<30 min","3m":"<30 min","5m":"<1 hr","15m":"1-4 hr","30m":"2-8 hr","1H":"4-24 hr","2H":"1-3 days","4H":"1-5 days","1D":"1-4 weeks"}
-                    signal["horizon"] = horizon_map.get(tf, "position")
-                    signal["hold_estimate"] = hold_map.get(tf, "varies")
+                    signal["horizon"] = category(tf)
+                    signal["hold_estimate"] = hold_estimate(tf)
             except Exception as e:
                 signal={"error":str(e)}
         return {"symbol":body.symbol.upper(),"ta":ta,"prompt_block":pb,"signal":signal}
@@ -3363,6 +3366,11 @@ def _sig_dict(s):
         score_breakdown = json.loads(getattr(s, "score_breakdown", None) or "{}")
     except (TypeError, ValueError):
         score_breakdown = {}
+    # The horizon travels WITH the signal rather than being re-derived by each
+    # consumer. The same table was previously copied into the signal card, the
+    # Telegram formatter and the analyze endpoint; sending it means the card
+    # stops guessing and every surface agrees by construction.
+    from lib.trade_horizon import category as _tf_category, hold_estimate as _tf_hold
     return {
         "id":            s.id,
         "asset_symbol":  s.asset_symbol,
@@ -3371,6 +3379,8 @@ def _sig_dict(s):
         "direction":     s.direction,
         "confidence":    s.confidence,
         "composite_score": s.composite_score,
+        "horizon":       _tf_category(s.timeframe),
+        "hold_estimate": _tf_hold(s.timeframe),
         "timeframe":     s.timeframe,
         "reasoning":     s.reasoning,
         "entry_price":   s.entry_price,

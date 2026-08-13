@@ -22,6 +22,35 @@ logger = logging.getLogger(__name__)
 PAPER_MIN_CONFIDENCE = 55   # fallback when no criteria are configured
 
 
+# ── Bootstrap ───────────────────────────────────────────────────────────
+# Calibration needs OBSERVED outcomes, and observed outcomes need trades.
+# With the pre-fix history quarantined, honest confidence sat near the
+# no-evidence ceiling and almost nothing cleared the gate — no data, so no
+# trades, so no data.
+#
+# The paper book exists to break exactly that circle: it risks nothing real,
+# and every position it opens becomes evidence the live gate can later rely
+# on. So while the current epoch is still thin, PAPER trades at a lower bar
+# than the broker does. The live gate is untouched.
+BOOTSTRAP_MIN_OUTCOMES = 300      # observed, current-epoch, non-replay
+BOOTSTRAP_MIN_SCORE = 45.0
+
+
+def _observed_outcome_count() -> int:
+    """Live outcomes in the current epoch. Replayed ones are excluded — a
+    simulation cannot certify that the system is ready to stop bootstrapping."""
+    try:
+        from app.database import get_db, TradeOutcome
+        from lib.calibration import CURRENT_EPOCH
+        with get_db() as db:
+            return db.query(TradeOutcome).filter(
+                TradeOutcome.engine_epoch == CURRENT_EPOCH,
+                TradeOutcome.outcome_source != "replay",
+            ).count()
+    except Exception:
+        return 0
+
+
 def _criteria() -> dict:
     """Operator-configured execution criteria (Ops -> Execution Criteria).
 
@@ -31,10 +60,24 @@ def _criteria() -> dict:
     try:
         from lib.trading_preferences import get_user_preference
         pref = get_user_preference()
+        configured = float(pref.get("live_min_score") or PAPER_MIN_CONFIDENCE)
+        observed = _observed_outcome_count()
+        if observed < BOOTSTRAP_MIN_OUTCOMES:
+            score = min(configured, BOOTSTRAP_MIN_SCORE)
+            if score < configured:
+                logger.info(
+                    f"[Paper] Bootstrap: {observed}/{BOOTSTRAP_MIN_OUTCOMES} observed "
+                    f"outcomes this epoch — paper gate {score:.0f} (live stays "
+                    f"{configured:.0f}) so the book can earn the evidence calibration needs"
+                )
+        else:
+            score = configured
         return {
-            "min_score": float(pref.get("live_min_score") or PAPER_MIN_CONFIDENCE),
+            "min_score": score,
             "min_rr": float(pref.get("live_min_rr") or 0),
             "min_confidence": float(pref.get("live_min_confidence") or 0),
+            "bootstrapping": observed < BOOTSTRAP_MIN_OUTCOMES,
+            "observed_outcomes": observed,
         }
     except Exception:
         return {"min_score": PAPER_MIN_CONFIDENCE, "min_rr": 0.0, "min_confidence": 0.0}

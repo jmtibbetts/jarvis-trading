@@ -78,6 +78,13 @@ CURRENT_EPOCH = "2026-08-13"
 # "We do not know" must not present as "90% sure".
 NO_EVIDENCE_CEILING = 55.0
 
+# Replayed outcomes are simulated against real bars under the current rules.
+# The fills are perfect — no slippage, no partial fills, both the bar's high
+# and low assumed reachable — so replay is systematically optimistic and
+# counts for less than an observed result. It bootstraps calibration without
+# pretending to BE live evidence.
+REPLAY_WEIGHT = 0.5
+
 _CACHE: dict = {"built_at": 0.0, "table": None}
 _CACHE_TTL = 300.0
 _LOCK = threading.Lock()
@@ -121,6 +128,7 @@ def build_table(force: bool = False) -> dict:
             rows = db.query(
                 TradeOutcome.timeframe, TradeOutcome.pnl_pct,
                 TradingSignal.composite_score, TradingSignal.strategy,
+                TradeOutcome.outcome_source,
             ).outerjoin(
                 TradingSignal, TradingSignal.id == TradeOutcome.signal_id
             ).filter(
@@ -130,30 +138,34 @@ def build_table(force: bool = False) -> dict:
         logger.warning(f"[Calibration] could not read outcomes: {e}")
         return table
 
-    def _tally(store, key, won):
-        cell = store.setdefault(key, {"wins": 0, "total": 0})
-        cell["total"] += 1
-        cell["wins"] += 1 if won else 0
+    def _tally(store, key, won, w=1.0):
+        """Fractional tallies, so replayed evidence counts for less than
+        observed evidence without needing a separate table."""
+        cell = store.setdefault(key, {"wins": 0.0, "total": 0.0, "raw": 0})
+        cell["total"] += w
+        cell["wins"] += w if won else 0.0
+        cell["raw"] += 1
 
     total_all = wins_all = 0
-    for tf, pnl, score, strat in rows:
+    for tf, pnl, score, strat, src in rows:
         try:
             won = float(pnl or 0) > 0
         except (TypeError, ValueError):
             continue
-        total_all += 1
-        wins_all += 1 if won else 0
+        w = REPLAY_WEIGHT if src == "replay" else 1.0
+        total_all += w
+        wins_all += w if won else 0.0
         if tf:
-            _tally(table["timeframe"], tf, won)
-            _tally(table["tf_score"], (tf, _bucket_score(score)), won)
-        _tally(table["score"], _bucket_score(score), won)
+            _tally(table["timeframe"], tf, won, w)
+            _tally(table["tf_score"], (tf, _bucket_score(score)), won, w)
+        _tally(table["score"], _bucket_score(score), won, w)
         # Strategy attribution. The point of naming strategies is to be able
         # to say "breakouts work here and range fades do not" instead of
         # staring at one pooled win rate with nothing to act on.
         if strat:
-            _tally(table["strategy"], strat, won)
+            _tally(table["strategy"], strat, won, w)
             if tf:
-                _tally(table["strategy_tf"], (strat, tf), won)
+                _tally(table["strategy_tf"], (strat, tf), won, w)
 
     table["overall"] = {"wins": wins_all, "total": total_all}
     for store in ("timeframe", "tf_score", "score", "strategy", "strategy_tf"):

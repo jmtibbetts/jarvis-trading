@@ -573,6 +573,12 @@ class TradeOutcome(Base):
     # exit rule that no longer exists, so their win/loss labels describe a
     # machine that is gone. Quarantined, not deleted.
     engine_epoch     = Column(String)
+    # "live" (observed) or "replay" (simulated under current rules against
+    # real historical bars). A replayed fill is perfect — no slippage, no
+    # partial fills, both the bar's high and low assumed reachable — so it
+    # is systematically optimistic and must be weighted below live evidence
+    # rather than pooled with it.
+    outcome_source   = Column(String, default="live")
     entered_at       = Column(String)
     exited_at        = Column(String, default=now_iso)
 
@@ -1112,6 +1118,7 @@ def _migrate_columns():
         # a machine that is gone.
         "trade_outcomes": [
             ("engine_epoch", "TEXT"),
+            ("outcome_source", "TEXT DEFAULT 'live'"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),

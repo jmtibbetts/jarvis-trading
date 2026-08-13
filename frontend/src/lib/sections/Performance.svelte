@@ -3,6 +3,7 @@
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
   import LearningPanel from "../components/LearningPanel.svelte";
+  import CalibrationPanel from "../components/CalibrationPanel.svelte";
   import { api, type PerformanceAnalytics, type Decision, type BacktestRun, type RMultipleSummary } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
@@ -327,6 +328,11 @@
         </div>
       {/snippet}
     </Panel>
+  </div>
+
+  <div class="span-12">
+    <div class="section-divider">What the desk has measured about itself</div>
+    <CalibrationPanel />
   </div>
 
   <div class="span-12">

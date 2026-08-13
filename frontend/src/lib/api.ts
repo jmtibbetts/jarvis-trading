@@ -699,6 +699,47 @@ export type RankedOpportunity = {
 };
 
 export type LlmHealth = { ok: boolean; platform?: string; model?: string; url?: string; error?: string; status_code?: number };
+
+// What the system has MEASURED about its own accuracy, from lib/calibration.py.
+// Every row carries its sample size because a win rate without one is a
+// rumour — and raw model confidence here was inverted against outcomes.
+export type CalibrationRow = { win_rate: number; sample: number };
+export type Calibration = {
+  overall_win_rate: number;
+  sample: number;
+  min_sample: number;
+  full_trust_sample: number;
+  by_timeframe: (CalibrationRow & { timeframe: string })[];
+  by_strategy: (CalibrationRow & { strategy: string })[];
+  by_strategy_timeframe: (CalibrationRow & { strategy: string; timeframe: string })[];
+  by_score: (CalibrationRow & { band: string })[];
+};
+
+// lib/llm_router.py telemetry. `effectiveness` stays empty until BOTH arms
+// of a task have enough closed trades to compare — an empty list means the
+// question is not yet answerable, not that thinking makes no difference.
+export type LlmRoutingArm = {
+  trades: number; win_rate: number; avg_pnl_pct: number;
+  avg_latency_ms: number; avg_tokens: number;
+};
+export type LlmRouting = {
+  coverage: {
+    days: number; routed_calls: number; thinking: number; non_thinking: number;
+    thinking_pct: number; unspecified_task: number; known_tasks: number;
+  };
+  usage: {
+    task: string; thinking: boolean; calls: number; failures: number;
+    avg_latency_ms: number; prompt_tokens: number; completion_tokens: number;
+    avg_completion_tokens: number;
+  }[];
+  effectiveness: {
+    task: string; deep: LlmRoutingArm; fast: LlmRoutingArm;
+    win_rate_delta: number; pnl_delta: number; extra_ms: number; extra_tokens: number;
+  }[];
+  effectiveness_note: string | null;
+  tasks: { task: string; default_mode: string; why: string }[];
+  error?: string;
+};
 export type CacheStats = {
   total_bars: number;
   symbols_cached: number;
@@ -1268,6 +1309,8 @@ export const api = {
   jobReset: (name: string) => post<{ ok: boolean }>(`/jobs/${name}/reset`),
   jobTrigger: (name: string) => post<{ ok: boolean; already_running?: boolean; detail?: string }>(`/jobs/${name}/trigger`),
 
+  calibration: () => get<Calibration>(`/calibration`),
+  llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),
   cacheBackfill: () => post<{ ok: boolean; message: string }>(`/cache/backfill`),

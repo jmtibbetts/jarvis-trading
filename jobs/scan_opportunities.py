@@ -633,6 +633,17 @@ def _save_signals(signals: list, scan_mode: str):
                     key_risks     = sig.get("key_risks", ""),
                     momentum      = sig.get("momentum", "Neutral"),
                     rr_ratio      = sig.get("rr_ratio"),
+                    # The scanner calls score_signal, which classifies the
+                    # setup — and then this constructor dropped the result on
+                    # the floor. The scanner is 1,302 of today's 1,657
+                    # signals, so strategy attribution was ~0% populated and
+                    # calibration's by_strategy table could never fill: the
+                    # whole point of naming strategies is to say "breakouts
+                    # work here and range fades do not", and it was being
+                    # computed and discarded on every scan.
+                    strategy      = sig.get("strategy"),
+                    strategy_score = sig.get("strategy_score"),
+                    earnings_risk = bool(sig.get("earnings_risk", False)),
                     status        = target_status,
                     generated_at  = now_iso,
                     paper_mode    = is_paper,

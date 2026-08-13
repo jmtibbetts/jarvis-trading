@@ -181,6 +181,39 @@ def get_open_orders():
     client = get_trading_client()
     return client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
 
+# ── Tradable-asset cache ─────────────────────────────────────────────────────
+# Alpaca lists 73 active crypto assets; SUI/USD is not one of them, and every
+# attempt to trade an unlisted symbol burned an API round trip to learn the
+# same 42210000 again. Cached for an hour — listings do not change mid-session.
+_tradable_cache: dict = {"at": 0.0, "syms": None}
+
+
+def tradable_crypto_symbols() -> set[str] | None:
+    """Active Alpaca crypto symbols (slash format), or None when the lookup
+    itself fails — None means 'unknown', and unknown must not reject trades."""
+    import time as _t
+    if _tradable_cache["syms"] is not None and _t.time() - _tradable_cache["at"] < 3600:
+        return _tradable_cache["syms"]
+    try:
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        client = get_trading_client()
+        assets = client.get_all_assets(GetAssetsRequest(
+            asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
+        _tradable_cache["syms"] = {str(a.symbol) for a in assets}
+        _tradable_cache["at"] = _t.time()
+    except Exception as e:
+        logger.debug(f"[Alpaca] asset list fetch failed: {e}")
+    return _tradable_cache["syms"]
+
+
+def _symbol_variants(sym: str) -> list[str]:
+    """Alpaca is inconsistent about the slash: POSITIONS come back as
+    'LINKUSD', ORDERS as 'LINK/USD' (verified live 2026-08-13). Anything
+    matching a symbol against broker state must try both."""
+    return list({sym, sym.replace("/", "")})
+
+
 def submit_bracket_order(symbol: str, qty: float, entry_price: float,
                           take_profit: float, stop_loss: float,
                           side: str = 'buy') -> dict:
@@ -201,16 +234,49 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
     order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
 
     if crypto:
-        # ── Step 0: cancel any existing open sell orders for this symbol ────
-        # Alpaca rejects new sell orders as "wash trade" if a prior sell
-        # order (orphaned SL/TP from a previous entry) is still open.
+        # ── Step 0a: refuse unlisted symbols before spending a submit ───────
+        # SUI/USD produced 42210000 'asset not found' on every attempt; the
+        # listing is knowable in advance and cached. None = lookup failed =
+        # unknown, and unknown must not reject — let the submit decide.
+        listed = tradable_crypto_symbols()
+        if listed is not None and sym not in listed:
+            raise ValueError(
+                f"{sym} is not listed on Alpaca crypto ({len(listed)} active "
+                f"assets) — signal cannot execute on this venue")
+
+        # ── Step 0b: never trade OVER an existing position ──────────────────
+        # Verified live 2026-08-13: a LINK/USD entry was rejected as a wash
+        # trade against order c5d68b81 — which was the STOP-LOSS protecting an
+        # open 113-LINK position. The old code here would have CANCELLED that
+        # stop and bought more: protection stripped, position pyramided. It
+        # only failed to because its order filter used 'LINKUSD' while orders
+        # carry 'LINK/USD' — a format bug accidentally preventing damage.
+        # Policy now explicit: an open position belongs to the position
+        # manager; entries refuse rather than touch its protective orders.
+        for variant in _symbol_variants(sym):
+            try:
+                held_pos = client.get_open_position(variant)
+                if held_pos is not None and abs(float(held_pos.qty or 0)) > 0:
+                    raise ValueError(
+                        f"{sym} already has an open position (qty {held_pos.qty}) "
+                        f"with protective orders — refusing to pyramid or touch "
+                        f"its stops; the position manager owns it")
+            except ValueError:
+                raise
+            except Exception:
+                pass    # no position under this variant — keep checking
+
+        # ── Step 0c: sweep TRUE orphans only ────────────────────────────────
+        # With no position open, any resting sell for the symbol is a leftover
+        # SL/TP from a closed entry, and Alpaca will wash-trade-reject the new
+        # buy against it. Both symbol formats, because orders use the slash.
         try:
             from alpaca.trading.requests import GetOrdersRequest as _GOR
             from alpaca.trading.enums import QueryOrderStatus as _QOS
-            sym_clean = sym.replace("/", "")
-            existing_sells = client.get_orders(_GOR(status=_QOS.OPEN, symbols=[sym_clean]))
+            existing = client.get_orders(_GOR(status=_QOS.OPEN,
+                                              symbols=_symbol_variants(sym)))
             cancelled = 0
-            for o in existing_sells:
+            for o in existing:
                 try:
                     client.cancel_order_by_id(o.id)
                     cancelled += 1

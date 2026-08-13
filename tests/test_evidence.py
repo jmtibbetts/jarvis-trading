@@ -275,3 +275,53 @@ class PersistedFormIsCompactTests(unittest.TestCase):
         stored = out["score_breakdown"]["evidence"]
         self.assertIn("neutral_categories", stored)
         self.assertNotIn("neutral", stored)
+
+
+class StructureFeedsTheEvidenceTests(unittest.TestCase):
+    """Phase 3's readings have to reach the score, or they are a report
+    nobody acts on. "Price is above resistance" was the whole of the old
+    structure reading, so a wick that took stops and closed back inside
+    voted identically to a break that held."""
+
+    def _with_break(self, outcome, direction="up"):
+        return {"structure": {"levels": [], "divergences": [],
+                              "breaks": [{"outcome": outcome, "direction": direction,
+                                          "level_price": 120.0, "detail": "d"}]}}
+
+    def test_a_break_that_held_supports_the_direction_it_broke(self):
+        ev = gather(self._with_break("held", "up"), "Long")
+        self.assertIn("structure", [c["category"] for c in ev["supporting"]])
+
+    def test_a_sweep_argues_the_OTHER_way(self):
+        """The wick went up; its failure is bearish. This is the pair the
+        old reading could not tell apart."""
+        ev = gather(self._with_break("sweep", "up"), "Long")
+        self.assertIn("structure", [c["category"] for c in ev["contradicting"]])
+
+    def test_a_failed_break_argues_the_other_way_too(self):
+        ev = gather(self._with_break("failed", "up"), "Long")
+        self.assertIn("structure", [c["category"] for c in ev["contradicting"]])
+
+    def test_a_held_break_and_a_sweep_land_on_opposite_sides(self):
+        held = gather(self._with_break("held", "up"), "Long")
+        swept = gather(self._with_break("sweep", "up"), "Long")
+        self.assertNotEqual(
+            [c["category"] for c in held["supporting"]],
+            [c["category"] for c in swept["supporting"]])
+
+    def test_divergence_reaches_momentum(self):
+        d = {"structure": {"levels": [], "breaks": [], "divergences": [
+            {"kind": "regular_bullish", "bias": "bullish", "indicator": "rsi",
+             "strength": 0.8}]}}
+        ev = gather(d, "Long")
+        self.assertIn("momentum", [c["category"] for c in ev["supporting"]])
+
+    def test_weak_divergence_is_ignored(self):
+        d = {"structure": {"levels": [], "breaks": [], "divergences": [
+            {"kind": "regular_bullish", "bias": "bullish", "indicator": "obv",
+             "strength": 0.05}]}}
+        ev = gather(d, "Long")
+        self.assertNotIn("momentum", [c["category"] for c in ev["supporting"]])
+
+    def test_a_missing_structure_block_changes_nothing(self):
+        self.assertEqual(gather({"structure": None}, "Long")["contradiction_count"], 0)

@@ -340,6 +340,19 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
     except Exception:
         pass
 
+    # Levels with a history, breaks with a verdict, divergence on confirmed
+    # swings. Everything above reports the CURRENT reading of an indicator;
+    # this is the only part that knows what already happened at a price —
+    # how often a level was defended, and whether the last break of it held,
+    # failed, or was a wick that took stops and closed back inside. Those
+    # last two are opposite trades and were previously indistinguishable.
+    try:
+        from lib.structure import analyze as _structure, divergence_series
+        result["structure"] = _structure(df, divergence_series(df))
+    except Exception as e:
+        logger.debug(f"[TA] structure unavailable: {e}")
+        result["structure"] = None
+
     # Every level found above, restated in ATRs from the current price.
     # LAST, because it needs all of them to exist first. This is what makes
     # a threshold portable: "2% from VWAP" says nothing across assets,

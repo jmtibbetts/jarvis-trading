@@ -116,6 +116,23 @@ def _structure(d: dict) -> tuple[str, float, list[str]]:
             votes.append((BULL, "market structure making higher highs"))
         elif "bear" in b:
             votes.append((BEAR, "market structure making lower lows"))
+
+    # What the last break of a real level actually DID (lib/structure.py).
+    # "Price is above resistance" was the whole of the old reading, so a
+    # wick that took stops and closed back inside voted the same way as a
+    # break that held — opposite trades scored identically.
+    st = d.get("structure") or {}
+    for b in (st.get("breaks") or [])[:2]:
+        up = b.get("direction") == "up"
+        outcome = b.get("outcome")
+        lvl = b.get("level_price")
+        if outcome == "held":
+            votes.append((BULL if up else BEAR,
+                          f"broke {lvl:g} and held"))
+        elif outcome in ("sweep", "failed"):
+            # The break went one way, so its failure argues the other.
+            votes.append((BEAR if up else BULL,
+                          f"{outcome} at {lvl:g} — {b.get('detail')}"))
     return _verdict(votes)
 
 
@@ -199,6 +216,16 @@ def _momentum(d: dict) -> tuple[str, float, list[str]]:
         votes.append((BULL, "MACD crossed up"))
     elif cross == "bearish":
         votes.append((BEAR, "MACD crossed down"))
+
+    # Divergence between price and momentum, on confirmed swings only
+    # (lib/structure.py). This is momentum DISAGREEING with price, which is
+    # a different observation from momentum being high or low, so it belongs
+    # here rather than as a category of its own — but it is the reading most
+    # likely to contradict the trade the rest of momentum implies.
+    for dv in ((d.get("structure") or {}).get("divergences") or [])[:2]:
+        if dv.get("strength", 0) >= 0.25:
+            votes.append((BULL if dv["bias"] == BULL else BEAR,
+                          f"{dv['kind'].replace('_', ' ')} on {dv['indicator']}"))
     return _verdict(votes)
 
 

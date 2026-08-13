@@ -222,7 +222,26 @@ else:
 def spa_fallback(full_path: str = ""):
     index = NEXT_DIST_DIR / "index.html"
     if index.exists():
-        return FileResponse(str(index))
+        # The shell must NEVER be cached. It is the only file that names the
+        # content-hashed bundle, so a cached copy pins the browser to a build
+        # that no longer exists on disk — the UI silently stays one deploy
+        # behind and the only cure is a manual hard refresh. Observed: a new
+        # per-coin scan button was live in index-IV7ij3VY.js while the
+        # browser kept loading the previous bundle and showed no button at
+        # all. FileResponse sends etag/last-modified but no Cache-Control,
+        # which leaves browsers free to heuristically cache it.
+        #
+        # The hashed assets under /assets/ are the opposite case: their names
+        # change whenever their contents do, so they are safe to cache hard
+        # and are left alone.
+        return FileResponse(
+            str(index),
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     return {"error": "Frontend not found — run `npm run build` in frontend/"}
 
 

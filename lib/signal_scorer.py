@@ -214,6 +214,20 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     except (TypeError, ValueError):
         preceding_move_pct = None
 
+    # Whether the trade runs WITH or AGAINST the day's news mood — recorded
+    # cargo, same discipline as preceding_move_pct. Measured 2026-08-13:
+    # aligned signals won 52.5% vs 26.0% against, but over ~4 falling days,
+    # so it stays out of the composite until out-of-sample resolutions
+    # judge it across more than one regime.
+    news_alignment = None
+    try:
+        from lib.news_sentiment import alignment as _news_alignment
+        news_alignment = _news_alignment(
+            signal.get("asset_symbol"), signal.get("direction"),
+            now.strftime("%Y-%m-%d"))
+    except Exception:
+        news_alignment = None
+
     # ── Category evidence ────────────────────────────────────────────────
     # The confluence above counts per TIMEFRAME, which cannot see that RSI,
     # Stochastic, CCI, Williams %R and MFI are five restatements of one
@@ -454,6 +468,7 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             "conflict_ratio": round(conflict_ratio, 3),
             "conflict_penalty": conflict_penalty,
             "preceding_move_pct": preceding_move_pct,
+            "news_alignment": news_alignment,
             "stale_penalty": stale_penalty,
             "earnings_penalty": earnings_penalty,
             "failure_penalty": failure_penalty,

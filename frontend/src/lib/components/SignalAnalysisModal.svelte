@@ -93,6 +93,23 @@
       toastStore.err("Clipboard access denied");
     }
   }
+
+  // Category evidence rides inside score_breakdown, which _sig_dict already
+  // parses and forwards — so this needed no new endpoint. Older signals
+  // predate the engine and simply have no evidence block; the section is
+  // omitted rather than rendered empty, which would read as "no objections
+  // found" when the truth is "never looked".
+  const evidence = $derived(
+    (data?.signal?.score_breakdown as Record<string, any> | undefined)?.evidence ?? null,
+  );
+  const contradictionPenalty = $derived(
+    Math.abs(
+      Number(
+        (data?.signal?.score_breakdown as Record<string, any> | undefined)
+          ?.contradiction_penalty ?? 0,
+      ),
+    ),
+  );
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -186,6 +203,61 @@
           </div>
         {/each}
       </div>
+
+      {#if evidence}
+        <!-- The two sides side by side, never merged into one number. A
+             setup where structure is bullish and flow is bearish used to
+             average into a single confluence figure, which is the one
+             summary guaranteed to hide the conflict. -->
+        <div class="evidence">
+          <div class="section-label">
+            Evidence · {evidence.timeframe ?? ""}
+            {#if evidence.contradiction_count > 0}
+              <span class="contra-badge">
+                {evidence.contradiction_count} contradicting
+                {evidence.contradiction_count === 1 ? "category" : "categories"}
+              </span>
+            {/if}
+          </div>
+          <p class="ev-summary">{evidence.summary}</p>
+          <div class="ev-cols">
+            <div class="ev-col">
+              <h5 class="for">Supports this trade</h5>
+              {#if evidence.supporting.length}
+                {#each evidence.supporting as c (c.category)}
+                  <div class="ev-item">
+                    <span class="ev-cat">{c.category}</span>
+                    <ul>{#each c.readings as r}<li>{r}</li>{/each}</ul>
+                  </div>
+                {/each}
+              {:else}
+                <p class="ev-none">nothing</p>
+              {/if}
+            </div>
+            <div class="ev-col">
+              <h5 class="against">Argues against it</h5>
+              {#if evidence.contradicting.length}
+                {#each evidence.contradicting as c (c.category)}
+                  <div class="ev-item">
+                    <span class="ev-cat">
+                      {c.category}{#if c.verdict === "caveat"}<em> (caveat)</em>{/if}
+                    </span>
+                    <ul>{#each c.readings as r}<li>{r}</li>{/each}</ul>
+                  </div>
+                {/each}
+              {:else}
+                <p class="ev-none">nothing</p>
+              {/if}
+            </div>
+          </div>
+          {#if contradictionPenalty}
+            <p class="ev-cost">
+              Contradiction cost the composite score
+              <b>{contradictionPenalty.toFixed(1)} points</b>.
+            </p>
+          {/if}
+        </div>
+      {/if}
 
       {#if s.reasoning}
         <div class="reasoning">
@@ -509,6 +581,62 @@
     color: var(--accent);
     font-weight: 600;
   }
+
+  .evidence {
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--line);
+  }
+  .contra-badge {
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    text-transform: none;
+  }
+  .ev-summary {
+    margin: 0 0 var(--space-sm);
+    font-size: 12px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+  .ev-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: var(--space-md);
+  }
+  .ev-col h5 {
+    margin: 0 0 5px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .ev-col h5.for { color: var(--good); }
+  .ev-col h5.against { color: var(--bad); }
+  .ev-item { margin-bottom: 7px; }
+  .ev-cat {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink);
+  }
+  .ev-cat em { color: var(--ink-faint); font-style: normal; }
+  .ev-item ul { margin: 2px 0 0; padding-left: 15px; }
+  .ev-item li {
+    font-size: 11px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+  .ev-none { margin: 0; font-size: 11px; color: var(--ink-faint); }
+  .ev-cost {
+    margin: var(--space-sm) 0 0;
+    font-size: 11px;
+    color: var(--ink-dim);
+  }
+  .ev-cost b { color: var(--bad); }
 
   .options-section {
     margin-top: 16px;

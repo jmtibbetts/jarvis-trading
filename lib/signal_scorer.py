@@ -198,6 +198,35 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     ta_confluence = min(100.0, aligned / len(valid) * 100) if valid else 50.0
     conflict_ratio = opposing / len(valid) if valid else 0.0
 
+    # ── Category evidence ────────────────────────────────────────────────
+    # The confluence above counts per TIMEFRAME, which cannot see that RSI,
+    # Stochastic, CCI, Williams %R and MFI are five restatements of one
+    # observation — so a single extended reading was scored as five
+    # confirmations. lib/evidence.py groups evidence by what it
+    # independently measures and returns the two sides SEPARATELY, because
+    # averaging support against contradiction is the one summary guaranteed
+    # to hide the conflict.
+    evidence = None
+    evidence_compact = None
+    contradiction_pen = 0.0
+    try:
+        from lib.evidence import compact, gather, contradiction_penalty
+        tf_for_evidence = signal.get("timeframe")
+        ev_data = (ta_data or {}).get(tf_for_evidence)
+        if not ev_data and valid:
+            tf_for_evidence, ev_data = valid[0]
+        if ev_data:
+            evidence = gather(
+                ev_data, signal.get("direction"),
+                relative_strength=(ev_data or {}).get("relative_strength"),
+                derivatives=signal.get("derivatives"),
+            )
+            evidence["timeframe"] = tf_for_evidence
+            evidence_compact = compact(evidence)
+            contradiction_pen = contradiction_penalty(evidence)
+    except Exception as e:
+        logger.debug(f"[Scorer] category evidence unavailable: {e}")
+
     entry = float(signal.get("entry_price") or 0)
     target = float(signal.get("target_price") or 0)
     stop = float(signal.get("stop_loss") or 0)
@@ -288,6 +317,11 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     }
     composite = sum(values[key] * weights[key] for key in weights)
     composite += conflict_penalty + stale_penalty + earnings_penalty + failure_penalty
+    # Independent categories arguing the other way. Subtracted rather than
+    # blended so a setup with bullish structure and bearish flow scores
+    # strictly below one with the same structure and no objection — which
+    # is the behaviour the pooled average could not express.
+    composite -= contradiction_pen
 
     # ── Timeframe edge ──────────────────────────────────────────────────
     # Nothing in scoring reflected that horizons perform differently, so a
@@ -357,7 +391,16 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             "earnings_penalty": earnings_penalty,
             "failure_penalty": failure_penalty,
             "failure_history": failure_adjustment,
+            "contradiction_penalty": -contradiction_pen,
+            "contradiction_count": (evidence or {}).get("contradiction_count", 0),
+            # The two sides ride along as LISTS, not as a number that has
+            # already decided for the reader how much the objection was
+            # worth. score_breakdown is persisted as JSON by both signal
+            # writers, so this reaches the card without a schema change —
+            # compacted, because the scanner writes ~1,300 rows a day.
+            "evidence": evidence_compact,
         },
+        "evidence": evidence,
         "data_quality_score": round(quality, 1),
         "freshness_score": round(freshness, 1),
         "news_confidence": round(news_score, 1),

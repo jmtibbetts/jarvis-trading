@@ -1103,7 +1103,18 @@ export const api = {
       started_at: string | null;
       finished_at: string | null;
       error: string | null;
-      result: { symbol: string; new_signals: number; new_signal_ids: string[] } | null;
+      result: {
+        symbol: string;
+        new_signals: number;
+        new_signal_ids: string[];
+        evaluated?: boolean;
+        // Set when the model DID propose a setup that fell short of the
+        // focus bar — so "no signal" can say how close it came.
+        near_miss?: {
+          score: number; floor: number; reason: string;
+          direction: string | null; timeframe: string | null;
+        } | null;
+      } | null;
     }>(`/watchlist/focus/${encodeURIComponent(symbol)}/scan`),
   setFocus: (symbol: string, focus: boolean, note?: string) =>
     fetch(`/api/watchlist/focus`, {

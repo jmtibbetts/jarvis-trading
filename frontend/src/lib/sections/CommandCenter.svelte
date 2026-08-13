@@ -39,7 +39,7 @@
   // each row shows only its own progress.
   type ScanState = {
     busy: boolean; pct: number; phase: string; elapsed: string;
-    result: { new_signals: number } | null; error: string | null;
+    result: { new_signals: number; near_miss?: { score: number; floor: number; reason: string; direction: string | null; timeframe: string | null } | null } | null; error: string | null;
   };
   let scans = $state<Record<string, ScanState>>({});
   const scanOf = (sym: string): ScanState =>
@@ -598,16 +598,31 @@
                 <span class="scan-note dim">{sc.phase} · {sc.elapsed}s</span>
               </div>
             {:else if scanOf(f.symbol).result}
-              {@const n = scanOf(f.symbol).result?.new_signals ?? 0}
+              {@const res = scanOf(f.symbol).result}
+              {@const n = res?.new_signals ?? 0}
+              {@const miss = res?.near_miss}
               <div class="fc-scan-row">
                 <span class="scan-note {n > 0 ? 'pl-up' : 'dim'}">
-                  {n > 0
-                    ? `${n} new signal${n === 1 ? "" : "s"} — see Signals`
-                    : "nothing ready — silence is a real answer here"}
+                  {#if n > 0}
+                    {n} new signal{n === 1 ? "" : "s"} — see Signals
+                  {:else if miss}
+                    <!-- The model DID propose something. Saying how far short
+                         it fell tells you whether this coin is warming up or
+                         nowhere near — which is why you are watching it. -->
+                    proposed {miss.direction ?? "a setup"}{miss.timeframe ? ` on ${miss.timeframe}` : ""},
+                    {miss.reason} — holding watch
+                  {:else}
+                    no setup proposed — silence is a real answer here
+                  {/if}
                 </span>
               </div>
             {:else if scanOf(f.symbol).error}
-              <div class="fc-scan-row"><span class="scan-note pl-down">{scanOf(f.symbol).error}</span></div>
+              <!-- A failed scan must never read like an empty one. "Nothing
+                   ready" is a verdict; this is the absence of one. -->
+              <div class="fc-scan-row">
+                <span class="scan-note scan-failed">Scan failed — {scanOf(f.symbol).error}</span>
+                <button class="fc-scan-btn" onclick={() => scanFocusNow(f.symbol)}>retry</button>
+              </div>
             {/if}
             {#if f.note}<div class="fc-note dim">{f.note}</div>{/if}
             {#if f.profile?.summary}
@@ -984,6 +999,12 @@
     border-radius: 2px;
     background: linear-gradient(90deg, var(--accent, #4c8dff), var(--warm, #e0a33e));
     transition: width 200ms linear;
+  }
+  /* A failed scan is not a quiet footnote — it means no verdict exists,
+     which is a different thing entirely from "nothing was ready". */
+  .scan-failed {
+    color: var(--bad);
+    font-weight: 600;
   }
   .scan-note {
     font-size: 10px;

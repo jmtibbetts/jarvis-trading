@@ -1047,6 +1047,13 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
     # ── Run all batches in parallel (capped by LM Studio semaphore) ──────────
     all_raw      = []  # (signal_dict, is_paper)
     all_raw_lock = threading.Lock()
+    # Batches that never reached the model. Reported so a caller can tell a
+    # considered "no setup" from "nothing was considered" — see the failure
+    # handler below.
+    batch_failures = []
+    # Focus setups the model DID propose but that fell short of the focus
+    # bar. Reported so "no signal" can say how close it came.
+    focus_rejections = []
     fallback_profiles = {**ta_profiles, **futures_ta_profiles}
 
     def _append_fallback(batch_id, batch_syms, is_paper, reason="Local LLM unavailable"):
@@ -1126,6 +1133,12 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                 f"Local LLM unreachable ({e})" if is_conn_err
                 else f"LLM call failed for this batch ({type(e).__name__}: {str(e)[:80]})"
             )
+            # A batch that never reached the model produced NO VERDICT. Without
+            # recording that, "0 signals" is indistinguishable from "the model
+            # looked and declined" — and the caller reports silence as a
+            # considered answer when nothing was actually considered.
+            batch_failures.append({"batch": batch_id, "symbols": list(batch_syms),
+                                   "error": f"{type(e).__name__}: {str(e)[:120]}"})
             _append_fallback(batch_id, batch_syms, is_paper, reason=reason)
 
     # ── Watchlist priority WITHOUT starving discovery ────────────────────
@@ -1280,6 +1293,22 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                         f"[Signals] FOCUS {sym}: setup scored {score_now:.0f}, below the "
                         f"{FOCUS_MIN_SCORE:.0f} focus bar — holding watch, no signal"
                     )
+                    # The reason is recorded, not just logged. "Nothing ready"
+                    # answers nothing; "the model proposed a Long at 61, ten
+                    # short of the bar" tells the operator whether the coin is
+                    # warming up or nowhere near, which is the entire point of
+                    # watching it continuously.
+                    focus_rejections.append({
+                        "symbol": sym,
+                        "score": round(float(score_now), 1),
+                        "floor": FOCUS_MIN_SCORE,
+                        "direction": scored.get("direction"),
+                        "timeframe": scored.get("timeframe"),
+                        "confidence": scored.get("confidence"),
+                        "reason": (f"scored {score_now:.0f}, "
+                                   f"{FOCUS_MIN_SCORE - score_now:.0f} short of the "
+                                   f"{FOCUS_MIN_SCORE:.0f} focus bar"),
+                    })
                     skipped += 1
                     continue
                 if sym in _focus_set:
@@ -1367,4 +1396,6 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
         except Exception:
             pass
     return {"saved": saved, "updated": updated, "skipped": skipped,
-            "regime": regime.get("label"), "batches": len(all_batches)}
+            "regime": regime.get("label"), "batches": len(all_batches),
+            "batch_failures": batch_failures,
+            "focus_rejections": focus_rejections}

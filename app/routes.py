@@ -1284,13 +1284,42 @@ def scan_focus_symbol(symbol: str):
     def _run():
         state = _FOCUS_SCANS[sym]
         try:
+            # The breaker opens after any provider failure and stays open for
+            # a few seconds. A scheduled sweep can shrug that off and try
+            # again next cycle; an operator who just pressed a button cannot,
+            # and would get a failure for a condition that clears itself in
+            # under a minute. Wait it out first.
+            from jobs.paper_trading import _wait_out_llm_cooldown
+            _wait_out_llm_cooldown(max_wait=45.0)
+
             from jobs.generate_signals import run as gen_run
             before = _focus_signal_ids(sym)
-            gen_run(focus_only=True, only_symbols=[sym])
+            outcome = gen_run(focus_only=True, only_symbols=[sym]) or {}
             after = _focus_signal_ids(sym)
+            # A batch that never reached the model produced no verdict. Zero
+            # new signals then means "nothing was considered", not "nothing
+            # was ready" — reporting the second when the first is true is the
+            # failure-looks-benign pattern this codebase keeps paying for.
+            # Observed live: the LLM was in a post-failure cooldown, the batch
+            # errored, and the UI still said "silence is a real answer here".
+            failures = outcome.get("batch_failures") or []
+            if failures:
+                state["error"] = (
+                    f"the model was not reached — {failures[0].get('error', 'batch failed')}. "
+                    f"No verdict was formed for {sym}; this is not 'no setup found'."
+                )
+                return
+            near = next((r for r in (outcome.get("focus_rejections") or [])
+                         if r.get("symbol") == sym), None)
             state["result"] = {"symbol": sym,
                                "new_signal_ids": sorted(after - before),
-                               "new_signals": len(after - before)}
+                               "new_signals": len(after - before),
+                               "evaluated": True,
+                               # How close it came. The difference between
+                               # "nothing ready" and "a Long at 61, ten short
+                               # of the bar" is the difference between a mute
+                               # button and an answer.
+                               "near_miss": near}
         except Exception as e:
             logger.error(f"[Focus] scan failed for {sym}: {e}", exc_info=True)
             state["error"] = str(e)

@@ -55,6 +55,10 @@ MCP_SERVERS: dict[str, dict] = {
     # auth is the x-cg-demo-api-key header, NOT Bearer (verified live).
     "coingecko": {"url": "https://mcp.api.coingecko.com/mcp", "key_env": "COINGECKO_API_KEY",
                   "key_header": "x-cg-demo-api-key"},
+    # AI-analysed equity intelligence: fundamentals + indicators (get_stock),
+    # insider synthesis, earnings intelligence, market/sector assessments.
+    # 17 tools, Bearer auth, verified live 2026-08-13 (server v3.2.4).
+    "stocklake": {"url": "https://api.stocklake.dev/mcp", "key_env": "STOCKLAKE_API_KEY"},
 }
 
 # Prebuilt JS for coingecko's execute tool — one snapshot call for a list of

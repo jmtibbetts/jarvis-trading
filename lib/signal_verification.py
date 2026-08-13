@@ -171,6 +171,45 @@ def _fresh_ta_block(symbol: str) -> tuple[str | None, dict | None]:
         return None, None
 
 
+def _stocklake_fundamentals_block(symbol: str) -> str | None:
+    """Compact fundamentals for an EQUITY deep-check: valuation, margins,
+    beta and 52-week position from Stocklake's get_stock. Context for the
+    LLM's judgment — never a number it may do arithmetic with, per the
+    authority boundaries. Crypto symbols return None (no '/' guard needed
+    upstream; Stocklake simply has no such listing)."""
+    if "/" in symbol or "=" in symbol:
+        return None
+    try:
+        import json as _json
+
+        from lib.mcp_client import call_tool
+        raw = call_tool("stocklake", "get_stock", {"symbol": symbol.upper()})
+        if not raw:
+            return None
+        d = _json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(d, dict) or not d.get("symbol"):
+            return None
+        parts = []
+        if d.get("pe_forward") is not None:
+            parts.append(f"fwd P/E {d['pe_forward']:.1f}")
+        if d.get("profit_margins") is not None:
+            parts.append(f"margin {d['profit_margins'] * 100:.0f}%")
+        if d.get("beta") is not None:
+            parts.append(f"beta {d['beta']:.2f}")
+        lo, hi, px = d.get("week52_low"), d.get("week52_high"), d.get("prev_close")
+        if lo and hi and px and hi > lo:
+            parts.append(f"52w position {(px - lo) / (hi - lo) * 100:.0f}%")
+        if d.get("sector"):
+            parts.append(str(d["sector"]))
+        if not parts:
+            return None
+        return ("FUNDAMENTALS (stocklake, context only — not for arithmetic): "
+                + ", ".join(parts))
+    except Exception as e:
+        logger.debug(f"[DeepVerify] Stocklake fundamentals failed for {symbol}: {e}")
+        return None
+
+
 def _mcp_news_block(symbol: str) -> str | None:
     """Fresh symbol news for the LLM: tavily first (keyed, structured
     title+content per story), exa as keyless fallback. Both verified live."""
@@ -251,11 +290,13 @@ def deep_verify_signal(signal: dict) -> dict:
     ta_block, ta = _fresh_ta_block(symbol)
     news_block = _mcp_news_block(symbol)
     md_block = _market_data_block(symbol, signal.get("asset_class"))
+    fundamentals_block = _stocklake_fundamentals_block(symbol)
 
-    blocks = [b for b in (ta_block, md_block, news_block) if b]
+    blocks = [b for b in (ta_block, md_block, fundamentals_block, news_block) if b]
     context_used = {
         "fresh_ta": ta_block is not None,
         "market_data": md_block is not None,
+        "fundamentals": fundamentals_block is not None,
         "web_news": news_block is not None,
     }
     if not blocks:

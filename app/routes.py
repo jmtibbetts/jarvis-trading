@@ -1779,6 +1779,20 @@ def ask_analyst(body: dict):
                         except Exception as e:
                             logger.debug(f"[Analyst] AllRates lookup failed: {e}")
                     if not handled:
+                        # Equities → Stocklake first: one call returns price,
+                        # fundamentals (PE, margins, beta, 52w range) AND
+                        # indicator state, fresher and richer than the Massive
+                        # summary. Falls through on any failure.
+                        try:
+                            raw = call_tool("stocklake", "get_stock", {"symbol": sym_guess})
+                            if raw and '"symbol"' in str(raw):
+                                context_blocks["market_data"] = {
+                                    "provider": "stocklake", "live": True,
+                                    "data": str(raw)[:2400]}
+                                handled = True
+                        except Exception as e:
+                            logger.debug(f"[Analyst] Stocklake lookup failed: {e}")
+                    if not handled:
                         from lib.massive_data import get_market_summary
                         summary = get_market_summary(sym_guess)
                         if summary:

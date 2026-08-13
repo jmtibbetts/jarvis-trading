@@ -5,7 +5,7 @@ Added: /regime, /portfolio/equity, /market/full, /positions/close, /signals/clea
 import json, logging, re, threading, uuid
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import Optional, Union
@@ -1678,15 +1678,17 @@ def ask_analyst(body: dict):
             return None
 
         if any(list_tools(s) for s in ("exa", "firecrawl", "tavily", "massive")):
-            triage_raw = call_lm_studio(
+            from lib import llm_router as llm
+            triage_raw = llm.call(
                 f"Question from a trading-dashboard user: {question!r}\n\n"
                 "Classify whether answering well needs external information, and "
                 "which kind. For market_data, query must be the TICKER SYMBOL "
                 "(e.g. NVDA, BTC/USD). Reply ONLY with JSON:\n"
                 '{"intent": "news"|"research"|"fetch_url"|"market_data"|"none", '
                 '"query": "search query, URL, or ticker" or null}',
+                task="triage", mode=llm.FAST,
                 system="You are a routing classifier. JSON only.",
-                max_tokens=120, temperature=0.0, thinking=False,
+                max_tokens=120, temperature=0.0,
             )
             triage = parse_json(triage_raw) or {}
             intent = triage.get("intent")
@@ -1788,7 +1790,15 @@ def ask_analyst(body: dict):
     )
     prompt = f"DATA BLOCKS:\n{_json.dumps(context_blocks, default=str)}\n\nQUESTION: {question}"
     try:
-        answer = call_lm_studio(prompt, system=system, max_tokens=600, temperature=0.2)
+        from lib import llm_router as llm
+        # A question answered from one data block is a lookup; one that has
+        # to reconcile TA against web reporting against exchange data is
+        # synthesis across sources that routinely disagree.
+        answer = llm.call(
+            prompt, task="analyst_chat", mode=llm.AUTO,
+            context={"cross_asset": len(context_blocks) > 2,
+                     "contradiction_count": len(context_blocks) - 1},
+            system=system, max_tokens=600, temperature=0.2)
     except Exception as e:
         raise HTTPException(503, f"Analyst model unavailable: {e}")
     return {
@@ -3084,6 +3094,55 @@ def llm_health():
     except Exception as e:
         return {"ok":False,"error":str(e)}
 
+@router.get("/llm/routing")
+def llm_routing(days: int = 30):
+    """What the router decided, what it cost, and whether it paid off.
+
+    `effectiveness` is empty until both arms of a task have enough closed
+    trades to compare — that is the honest state, not a failure. An empty
+    list means the question is not yet answerable, which is different from
+    the answer being "no difference".
+    """
+    try:
+        from lib import llm_router as llm
+        eff = llm.thinking_effectiveness(days=max(days, 90))
+        return {
+            "coverage": llm.coverage(days),
+            "usage": llm.usage_stats(days),
+            "effectiveness": eff,
+            "effectiveness_note": (
+                None if eff else
+                "Not enough closed trades in both arms yet to compare thinking "
+                "against non-thinking. Rows appear once each side clears 20 trades."
+            ),
+            "tasks": [
+                {"task": t.name, "default_mode": t.default_mode, "why": t.why}
+                for t in sorted(llm.TASKS.values(), key=lambda x: x.name)
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/llm/routing/preview")
+def llm_routing_preview(body: dict = Body(...)):
+    """Ask the router what it WOULD do, without calling the model.
+
+    The policy is a set of fixed thresholds; this makes them inspectable
+    rather than something to be inferred from logs after the fact.
+    """
+    try:
+        from lib import llm_router as llm
+        r = llm.route(str(body.get("task") or "unspecified"),
+                      str(body.get("mode") or llm.AUTO),
+                      body.get("context") or {})
+        return {"task": r.task, "requested": r.mode, "resolved": r.resolved_mode,
+                "thinking": r.thinking, "reason": r.reason,
+                "triggers": llm.auto_triggers(body.get("context") or {})}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/cache/stats")
 def cache_stats():
     try:
@@ -3432,7 +3491,16 @@ def analyze(body: AnalyzeRequest):
                 # allowed, and the model must justify direction against the
                 # per-timeframe biases it was shown.
                 prompt=f"""Analyze this ticker for a trade setup:\n\n{pb}\n\nRegime: {regime.get("label")} | Risk: {regime.get("risk")}\n\nGenerate ONE signal as JSON object with keys: asset_symbol, asset_class, direction (Long or Short — match the timeframe biases above; shorting a bearish chart is expected), confidence (0-100), timeframe (one of the analyzed timeframes), entry_price, target_price, stop_loss, reasoning, key_risks, momentum. Return ONLY the JSON."""
-                raw=call_lm_studio(prompt,max_tokens=800,temperature=0.1)
+                from lib import llm_router as llm
+                _biases=[(d.get("bias") or "").lower() for d in ta.values()
+                         if isinstance(d,dict) and not d.get("error")]
+                raw=llm.call(prompt, task="signal_generation", mode=llm.AUTO,
+                             context={"symbol": sym,
+                                      # both directions represented = the
+                                      # timeframes disagree with each other
+                                      "contradiction_count": min(_biases.count("bullish"),
+                                                                 _biases.count("bearish")) * 2},
+                             symbol=sym, max_tokens=800, temperature=0.1)
                 parsed=parse_json(raw)
                 signal=parsed[0] if isinstance(parsed,list) else parsed
 
@@ -3455,12 +3523,16 @@ def analyze(body: AnalyzeRequest):
                         # retry still conflicts, the warning stands and the UI
                         # blocks saving.
                         try:
-                            retry_raw = call_lm_studio(
+                            # The retry exists BECAUSE the answer contradicted
+                            # the chart — the one case that is unambiguously
+                            # reasoning work, not transcription.
+                            retry_raw = llm.call(
                                 prompt
                                 + f"\n\nYOUR PREVIOUS ANSWER WAS WRONG: {conflict}. "
                                 "Re-issue the JSON with a direction that MATCHES the timeframe "
                                 "biases (Short for a bearish chart), with entry/target/stop "
                                 "consistent with that direction.",
+                                task="contradiction_review", mode=llm.DEEP, symbol=sym,
                                 max_tokens=800, temperature=0.1)
                             retry = parse_json(retry_raw)
                             retry = retry[0] if isinstance(retry, list) else retry

@@ -123,7 +123,7 @@ def build_narrative(symbol: str, stats: dict, ta_block: str | None) -> str | Non
     if not stats:
         return None
     try:
-        from lib.lmstudio import call_lm_studio
+        from lib import llm_router as llm
         prompt = (
             f"Write a short behavioural profile of how {symbol} TRADES. This is not a "
             f"forecast and must not contain a price prediction or a trade recommendation.\n\n"
@@ -134,10 +134,14 @@ def build_narrative(symbol: str, stats: dict, ta_block: str | None) -> str | Non
               "that volatility, and what a trader should be careful of with this symbol. "
               "Be concrete and use the numbers above."
         )
-        text = call_lm_studio(
-            prompt,
+        # `timeout=` was passed here; call_lm_studio has no such parameter,
+        # so every call raised TypeError into the bare except below and this
+        # narrative has never once been generated. The parameter is
+        # request_timeout.
+        text = llm.call(
+            prompt, task="focus_profile", mode=llm.FAST, symbol=symbol,
             system="You are a trading desk analyst describing instrument behaviour, not making predictions.",
-            max_tokens=320, timeout=90,
+            max_tokens=320, request_timeout=90,
         )
         return (text or "").strip() or None
     except Exception as e:

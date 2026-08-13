@@ -454,7 +454,12 @@ def _run_reasoning_audit(outcome_row: dict) -> dict | None:
             regime=outcome_row.get("market_regime") or "Unknown",
         )
 
-        raw = call_lm_studio(prompt, system="You are a self-reviewing trading AI.", max_tokens=400, temperature=0.1, thinking=True)
+        from lib import llm_router as llm
+        raw = llm.call(prompt, task="postmortem", mode=llm.DEEP,
+                       signal_id=outcome_row.get("signal_id"),
+                       symbol=outcome_row.get("symbol"),
+                       system="You are a self-reviewing trading AI.",
+                       max_tokens=400, temperature=0.1)
         result = parse_json(raw)
 
         if not result or not result.get("lesson"):

@@ -1101,10 +1101,17 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                 logger.info(f"[Signals] Batch {batch_id} waiting out LLM cooldown ({cooldown:.1f}s)")
                 time.sleep(cooldown + 0.5)
             logger.info(f"[Signals] LLM call batch {batch_id} ({len(batch_syms)} syms)...")
-            r = call_lm_studio(prompt, system=sys_p, max_tokens=TRACK_MAX_TOKENS,
-                               temperature=0.15, thinking=False,
-                               queue_timeout=min(llm_queue_timeout, remaining),
-                               request_timeout=min(llm_request_timeout, remaining))
+            # Batch scanning stays FAST deliberately: this call screens many
+            # symbols at once against a deadline, and the reasoning tokens
+            # would blow the per-batch budget. The setups it produces are
+            # re-examined individually by signal_verification, which is where
+            # AUTO can afford to escalate.
+            from lib import llm_router as llm
+            r = llm.call(prompt, task="signal_generation", mode=llm.FAST,
+                         system=sys_p, max_tokens=TRACK_MAX_TOKENS,
+                         temperature=0.15,
+                         queue_timeout=min(llm_queue_timeout, remaining),
+                         request_timeout=min(llm_request_timeout, remaining))
             logger.info(f"[Signals] Batch {batch_id} → {len(r)} chars")
             sigs = parse_json(r)
             results = []

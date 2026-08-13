@@ -850,7 +850,23 @@ Respond ONLY with valid JSON:
 {{"action": "HOLD" | "TIGHTEN_STOP" | "EXIT", "reason": "1-2 sentence explanation", "new_stop_pct": <float or null>}}"""
 
     try:
-        raw = call_lm_studio(prompt, system="You are a precise trading risk manager. Answer directly without reasoning. Return ONLY the JSON object, no markdown, no explanation, no thinking.", max_tokens=1024, thinking=False)
+        # Was hard-wired thinking=False for every position alike, so a
+        # position 20% underwater on 20x leverage got exactly the same
+        # treatment as one drifting 0.3% off entry. AUTO escalates on the
+        # facts already in hand, and the system prompt has to stop telling
+        # the model not to reason when the router has decided it should.
+        from lib import llm_router as llm
+        raw = llm.call(
+            prompt, task="position_management", mode=llm.AUTO,
+            context={"pnl_pct": plpc,
+                     "leverage": (original_signal or {}).get("leverage"),
+                     "timeframe": (original_signal or {}).get("timeframe")},
+            signal_id=(original_signal or {}).get("id"), symbol=sym,
+            system=("You are a precise trading risk manager. Answer directly without reasoning. "
+                    "Return ONLY the JSON object, no markdown, no explanation, no thinking."),
+            system_deep=("You are a precise trading risk manager. Return ONLY the JSON object, "
+                         "no markdown, no explanation."),
+            max_tokens=1024)
         result = parse_json(raw)
         if isinstance(result, dict) and result.get("action") in ("HOLD", "TIGHTEN_STOP", "EXIT"):
             return result

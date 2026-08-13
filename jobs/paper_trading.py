@@ -714,8 +714,13 @@ Respond ONLY with valid JSON (no markdown):
 
         try:
             _wait_out_llm_cooldown()
-            raw = call_lm_studio(
-                prompt,
+            from lib import llm_router as llm
+            raw = llm.call(
+                prompt, task="position_management", mode=llm.AUTO,
+                context={"pnl_pct": pos.get("pnl_pct"),
+                         "leverage": pos.get("leverage"),
+                         "timeframe": pos.get("timeframe")},
+                signal_id=pos.get("signal_id"), symbol=pos.get("symbol"),
                 system="You are a precise trading risk manager. Respond only with the JSON object, no markdown.",
                 max_tokens=150
             )
@@ -925,8 +930,11 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
 
     try:
         _wait_out_llm_cooldown()
-        raw = call_lm_studio(
-            prompt,
+        from lib import llm_router as llm
+        raw = llm.call(
+            prompt, task="trade_review", mode=llm.AUTO,
+            context={"leverage": sig.get("leverage"), "timeframe": sig.get("timeframe")},
+            signal_id=sig.get("id"), symbol=sym,
             system="You are a precise trading analyst. Respond only with the JSON object, no markdown.",
             max_tokens=150
         )

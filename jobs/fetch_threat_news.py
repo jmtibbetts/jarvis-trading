@@ -407,12 +407,12 @@ Return one JSON object per article in a JSON array. Schema:
 Use t=true only for a concrete security, policy, infrastructure, supply, energy, or market threat. JSON only."""
 
     try:
-        response = call_lm_studio(
-            prompt,
+        from lib import llm_router as llm
+        response = llm.call(
+            prompt, task="news_tagging", mode=llm.FAST,
             system="You are a factual market-news classifier. Return only the requested JSON array.",
             max_tokens=min(6144, 700 + len(articles) * 420),
             temperature=0.1,
-            thinking=False,
         )
         parsed = parse_json(response)
         if isinstance(parsed, list):

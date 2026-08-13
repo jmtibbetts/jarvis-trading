@@ -1264,6 +1264,32 @@ def _migrate_columns():
                     created_at TEXT
                 )
             """))
+            # LLM routing telemetry — see lib/llm_router.py. signal_id is
+            # what lets this table join to trade_outcomes, which is the only
+            # way to answer whether thinking mode pays for itself.
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    id TEXT PRIMARY KEY,
+                    task TEXT,
+                    mode_requested TEXT,
+                    thinking INTEGER,
+                    reason TEXT,
+                    model TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    latency_ms REAL,
+                    response_chars INTEGER,
+                    ok INTEGER DEFAULT 1,
+                    error TEXT,
+                    signal_id TEXT,
+                    symbol TEXT,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_llm_calls_task ON llm_calls(task, thinking)"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_llm_calls_signal ON llm_calls(signal_id)"))
             print("[DB] Learning engine tables (Tiers 1-5) ready")
     except Exception as e:
         print(f"[DB] Learning table migration warning: {e}")
@@ -1363,6 +1389,33 @@ class PaperPortfolio(Base):
     winning_trades = Column(Float, default=0)
     realized_pnl   = Column(Float, default=0.0)
     updated_at     = Column(String, default=now_iso)
+
+class LlmCall(Base):
+    """One row per LLM call, so "does thinking mode help?" is a query.
+
+    Nobody currently knows whether chain-of-thought improves trading
+    outcomes for any given task — the parameter defaulted to True and
+    eleven of fourteen call sites simply inherited it. `signal_id` joins
+    this row to trade_outcomes, which turns the question into a measurement:
+    win rate and average P&L, grouped by task and thinking flag.
+    """
+    __tablename__ = "llm_calls"
+    id                = Column(String, primary_key=True, default=new_id)
+    task              = Column(String)    # lib/llm_router.TASKS
+    mode_requested    = Column(String)    # FAST | AUTO | DEEP as the caller asked
+    thinking          = Column(Boolean)   # what was actually sent
+    reason            = Column(String)    # which trigger fired, verbatim
+    model             = Column(String)
+    prompt_tokens     = Column(Integer)
+    completion_tokens = Column(Integer)
+    latency_ms        = Column(Float)
+    response_chars    = Column(Integer)
+    ok                = Column(Boolean, default=True)
+    error             = Column(String)
+    signal_id         = Column(String)    # FK → trading_signals.id, joins to outcomes
+    symbol            = Column(String)
+    created_at        = Column(String, default=now_iso)
+
 
 class AiDecision(Base):
     """Log of every AI decision made by Guardian, position manager, and paper trading."""

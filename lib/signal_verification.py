@@ -280,9 +280,27 @@ def deep_verify_signal(signal: dict) -> dict:
           "\"key_change\": \"what changed since the signal was generated, or 'nothing material'\"}"
     )
     try:
-        from lib.lmstudio import call_lm_studio, parse_json
-        text = call_lm_studio(prompt, system="You are a rigorous trade verification analyst. JSON only.",
-                              max_tokens=400, request_timeout=90)
+        from lib.lmstudio import parse_json
+        from lib import llm_router as llm
+        # AUTO, not a fixed mode: verifying a clean 15m setup is a lookup,
+        # verifying a leveraged weekly one against contradicting timeframes
+        # is the job. The triggers decide, and record which one fired.
+        text = llm.call(
+            prompt, task="signal_verification", mode=llm.AUTO,
+            context={
+                "timeframe": signal.get("timeframe"),
+                "leverage": signal.get("leverage"),
+                # A deterministic check that already failed IS contradicting
+                # evidence — the levels disagree with the fresh price before
+                # the model is asked anything.
+                "contradiction_count": sum(
+                    1 for c in (base.get("checks") or [])
+                    if isinstance(c, dict) and not c.get("ok", True)
+                ),
+            },
+            signal_id=signal.get("id"), symbol=signal.get("asset_symbol"),
+            system="You are a rigorous trade verification analyst. JSON only.",
+            max_tokens=400, request_timeout=90)
         parsed = parse_json(text) or {}
         base["llm_assessment"] = {
             "assessment": str(parsed.get("assessment") or "UNCERTAIN").upper(),

@@ -235,13 +235,22 @@ def check_health() -> dict:
 def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                    temperature: float = 0.15, thinking: bool = True,
                    queue_timeout: float = None,
-                   request_timeout: float = None) -> str:
+                   request_timeout: float = None,
+                   stats: dict = None) -> str:
     """
     Unified LLM call — serialized via global lock so local models aren't overwhelmed.
     Aborts immediately if shutdown has been signalled.
 
     thinking=True  → full chain-of-thought (signal gen, position mgmt, Tier 5 review)
     thinking=False → /no_think prefix for fast classification (news tagging, heartbeat)
+
+    Prefer lib/llm_router.call() over calling this directly: `thinking`
+    defaults to True here, so a caller that does not pass it silently buys
+    chain-of-thought for work that may not need it. The router makes the
+    choice explicit and records it.
+
+    `stats`, if given, is filled in with model / prompt_tokens /
+    completion_tokens / finish_reason for telemetry.
     """
     if _shutdown_event.is_set():
         raise RuntimeError("LLM call aborted — shutdown in progress")
@@ -253,6 +262,9 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     # Auto-resolve placeholder model names (e.g. "local-model") to the real loaded model ID
     cfg['model'] = _resolve_model(cfg)
     effective_max = max_tokens or cfg['max_tokens']
+    if stats is not None:
+        stats['model'] = cfg['model']
+        stats['platform'] = cfg.get('platform')
 
     # Qwen3 thinking toggle — only applies to local models (lmstudio / ollama)
     # /no_think prefix suppresses chain-of-thought for fast, low-stakes calls
@@ -268,10 +280,11 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         try:
             if cfg['provider'] == 'anthropic':
                 return _call_anthropic(prompt, effective_system, effective_max, temperature, cfg,
-                                       request_timeout=request_timeout)
+                                       request_timeout=request_timeout, stats=stats)
             else:
                 return _call_openai_compat(prompt, effective_system, effective_max, temperature, cfg,
-                                           thinking_mode=thinking, request_timeout=request_timeout)
+                                           thinking_mode=thinking, request_timeout=request_timeout,
+                                           stats=stats)
         except _EmptyThinkingResponse:
             # Qwen3 produced only <think> tokens — retry immediately with /no_think
             # Use RETRY_MAX_TOKENS (not the full requested amount) so the model has room to output
@@ -279,12 +292,15 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                 logger.warning(f"[LLM] Retrying with /no_think + {RETRY_MAX_TOKENS} token cap — model produced thinking-only output on first attempt")
                 fallback_system = '/no_think\n\n' + (system or '')
                 try:
+                    if stats is not None:
+                        stats['thinking_retry'] = True
                     if cfg['provider'] == 'anthropic':
                         return _call_anthropic(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg,
-                                               request_timeout=request_timeout)
+                                               request_timeout=request_timeout, stats=stats)
                     else:
                         return _call_openai_compat(prompt, fallback_system, RETRY_MAX_TOKENS, temperature, cfg,
-                                                   thinking_mode=False, request_timeout=request_timeout)
+                                                   thinking_mode=False, request_timeout=request_timeout,
+                                                   stats=stats)
                 except _EmptyThinkingResponse:
                     # Both attempts exhausted — LM Studio token cap is overriding max_tokens.
                     # Return empty JSON array so the track degrades gracefully instead of crashing.
@@ -296,7 +312,7 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
 
 def _call_openai_compat(prompt: str, system: str, max_tokens: int,
                          temperature: float, cfg: dict, thinking_mode: bool = False,
-                         request_timeout: float = None) -> str:
+                         request_timeout: float = None, stats: dict = None) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -346,8 +362,16 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         data    = r.json()
         choice  = data['choices'][0]
         raw_content = choice['message']['content'] or ''
-        tokens  = data.get('usage', {}).get('completion_tokens', '?')
+        usage   = data.get('usage') or {}
+        tokens  = usage.get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')
+        if stats is not None:
+            # Recorded even on the thinking-only path below: those tokens
+            # were spent whether or not any content survived the strip, and
+            # a cost measurement that omits the failures understates DEEP.
+            stats['prompt_tokens'] = usage.get('prompt_tokens')
+            stats['completion_tokens'] = usage.get('completion_tokens')
+            stats['finish_reason'] = finish
         logger.info(f"[LLM] ← {tokens} completion tokens | {len(raw_content)} chars | finish={finish}")
 
         if finish == 'length':
@@ -378,7 +402,8 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
 
 
 def _call_anthropic(prompt: str, system: str, max_tokens: int,
-                    temperature: float, cfg: dict, request_timeout: float = None) -> str:
+                    temperature: float, cfg: dict, request_timeout: float = None,
+                    stats: dict = None) -> str:
     headers = {
         "x-api-key":         cfg['api_key'],
         "anthropic-version": "2023-06-01",
@@ -402,6 +427,11 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
             r = client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
+        if stats is not None:
+            usage = data.get('usage') or {}
+            stats['prompt_tokens'] = usage.get('input_tokens')
+            stats['completion_tokens'] = usage.get('output_tokens')
+            stats['finish_reason'] = data.get('stop_reason')
         return data['content'][0]['text']
     except Exception as e:
         _cool_down_llm()

@@ -18,3 +18,8 @@ static/dist/
 backups/
 backup-*/
 *.whl
+
+# Stray root-level SQLite files. The real database lives in data/,
+# which is already ignored — a database never belongs in git.
+/*.db
+/*.db-journal

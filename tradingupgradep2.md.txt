@@ -1,0 +1,928 @@
+Now build the STRATEGY / REGIME / CONFLUENCE layer on top of JARVIS's
+market-state feature engine.
+
+Do NOT simply create:
+
+indicator bullish = +5
+indicator bearish = -5
+
+The objective is to recognize specific trading setups and determine whether
+the current market regime is appropriate for them.
+
+Support:
+
+CRYPTO
+STOCKS
+ETFs
+FOREX
+FUTURES
+COMMODITIES
+INDICES
+
+The same indicator must be allowed to mean different things under different
+regimes and strategies.
+
+Example:
+
+RSI 75
+
+Strong trending market:
+potential momentum confirmation
+
+Range:
+potential mean-reversion condition
+
+Short squeeze:
+may indicate accelerating forced buying
+
+Therefore:
+
+INDICATORS ARE FEATURES.
+
+STRATEGIES INTERPRET FEATURES.
+
+==================================================
+1. REGIME ENGINE
+==================================================
+
+Classify markets along multiple independent dimensions.
+
+TREND:
+
+STRONG_UPTREND
+UPTREND
+WEAK_UPTREND
+RANGE
+WEAK_DOWNTREND
+DOWNTREND
+STRONG_DOWNTREND
+
+VOLATILITY:
+
+COMPRESSION
+LOW
+NORMAL
+EXPANSION
+HIGH
+EXTREME
+
+LIQUIDITY:
+
+DEEP
+NORMAL
+THIN
+DISLOCATED
+
+FLOW:
+
+BUY_DOMINANT
+SELL_DOMINANT
+BALANCED
+ABSORPTION
+EXHAUSTION
+
+Do not force the entire market into one label.
+
+Example:
+
+{
+  "trend": "UPTREND",
+  "volatility": "EXPANSION",
+  "liquidity": "NORMAL",
+  "flow": "BUY_DOMINANT"
+}
+
+==================================================
+2. ASSET-CLASS REGIME
+==================================================
+
+STOCKS:
+
+include:
+
+SPY
+QQQ
+VIX
+breadth
+sector
+relative strength
+market session
+risk-on/risk-off
+
+CRYPTO:
+
+include:
+
+BTC trend
+ETH trend
+crypto breadth
+BTC dominance where available
+funding
+OI
+liquidations
+realized volatility
+crypto correlation
+
+FOREX:
+
+include:
+
+currency strength
+USD regime
+session
+volatility
+rate/macro context where available
+
+FUTURES:
+
+classify by complex:
+
+equity index
+energy
+metals
+rates
+agriculture
+FX futures
+
+Do not use SPY regime to determine every asset's trading regime.
+
+==================================================
+3. STRATEGY FAMILY: TREND CONTINUATION
+==================================================
+
+Ideal environment:
+
+established trend
+healthy structure
+reasonable volatility
+supportive volume/flow
+
+Features:
+
+EMA structure
+ADX/DMI
+HH/HL or LH/LL
+Supertrend
+relative strength
+CVD
+RVOL
+VWAP/AVWAP
+
+LONG:
+
+uptrend
+HH/HL
+positive flow
+pullback holds structure
+
+SHORT:
+
+downtrend
+LH/LL
+negative flow
+rally fails structure
+
+Avoid chasing extreme ATR extensions.
+
+==================================================
+4. BREAKOUT
+==================================================
+
+Detect:
+
+Donchian breakout
+BOS
+range breakout
+prior high/low break
+volume-profile level break
+
+Confirmation:
+
+RVOL
+CVD
+OI where applicable
+relative strength
+volatility expansion
+book liquidity
+
+Distinguish:
+
+REAL BREAKOUT
+WEAK BREAKOUT
+FAILED BREAKOUT
+
+A breakout without participation should receive lower expectancy.
+
+==================================================
+5. BREAKOUT RETEST
+==================================================
+
+Sequence:
+
+break
+expansion
+pullback
+retest
+hold
+continuation
+
+Look for:
+
+former resistance -> support
+
+or:
+
+former support -> resistance
+
+Confirmation:
+
+CVD
+volume
+VWAP/AVWAP
+structure
+ATR
+
+This should be treated separately from chasing the initial breakout.
+
+==================================================
+6. FAILED BREAKOUT / FAILED BREAKDOWN
+==================================================
+
+Detect:
+
+price breaks major level
+liquidity is swept
+price returns inside range
+flow fails to confirm
+CHoCH occurs
+
+This can produce high-quality reversal setups.
+
+Require confirmation.
+
+Do not fade every breakout.
+
+==================================================
+7. LIQUIDITY SWEEP REVERSAL
+==================================================
+
+Detect:
+
+previous high/low
+swing high/low
+session high/low
+equal highs/lows
+liquidation cluster
+
+Price sweeps level.
+
+Then require:
+
+rejection
+reclaim
+CVD reversal or divergence
+absorption
+CHoCH
+
+Potential strategy:
+
+SWEEP -> RECLAIM -> STRUCTURE CHANGE -> ENTRY
+
+==================================================
+8. MEAN REVERSION
+==================================================
+
+Only activate primarily during appropriate range/mean-reverting regimes.
+
+Features:
+
+VWAP deviation
+AVWAP deviation
+ATR extension
+Bollinger position
+volume profile
+RSI/MFI
+CVD exhaustion
+support/resistance
+
+Avoid automatically shorting overbought markets in strong trends.
+
+==================================================
+9. SQUEEZE EXPANSION
+==================================================
+
+Detect compression using:
+
+BB/Keltner squeeze
+ATR percentile
+realized-volatility contraction
+
+Then detect expansion:
+
+range break
+volume expansion
+CVD
+structure
+relative strength
+
+Squeeze itself has NO direction.
+
+Direction comes from breakout/flow.
+
+==================================================
+10. MOMENTUM IGNITION
+==================================================
+
+Designed especially for shorter timeframes.
+
+Look for simultaneous acceleration:
+
+ROC
+MACD histogram acceleration
+RVOL
+CVD
+order-book imbalance persistence
+spread stability
+volatility expansion
+
+Require sufficient liquidity.
+
+Avoid entries where expected slippage consumes the edge.
+
+==================================================
+11. VWAP / AVWAP RECLAIM
+==================================================
+
+LONG example:
+
+price below VWAP
+reclaims VWAP
+holds above
+flow improves
+structure turns bullish
+
+SHORT = inverse.
+
+Anchor quality matters.
+
+A major swing AVWAP may be more meaningful than arbitrary rolling VWAP.
+
+==================================================
+12. RELATIVE-STRENGTH BREAKOUT
+==================================================
+
+Stocks:
+
+asset outperforming:
+
+SPY
+sector
+relevant index
+
+Crypto:
+
+asset outperforming:
+
+BTC
+ETH
+relevant crypto basket
+
+Prefer breakouts accompanied by improving relative strength.
+
+Avoid buying nominal breakouts caused purely by broad beta.
+
+==================================================
+13. CRYPTO FUNDING / POSITIONING SQUEEZE
+==================================================
+
+Crypto-specific.
+
+Potential SHORT SQUEEZE:
+
+extreme negative funding
+large short positioning
+OI elevated
+price refuses to decline
+bullish structure break
+CVD turns positive
+
+Potential LONG SQUEEZE / LONG LIQUIDATION:
+
+extreme positive funding
+large long positioning
+OI elevated
+price loses structure
+CVD turns negative
+
+Funding alone must NEVER trigger the trade.
+
+==================================================
+14. CRYPTO LIQUIDATION CASCADE
+==================================================
+
+Use:
+
+liquidation clusters
+OI
+funding
+price structure
+CVD
+volatility
+
+Detect potential forced-move conditions.
+
+Example downside cascade:
+
+support breaks
+large long liquidation cluster below
+OI elevated
+sell CVD accelerates
+volatility expands
+
+Do not chase after the liquidation event has already exhausted itself.
+
+==================================================
+15. ORDER-FLOW ABSORPTION REVERSAL
+==================================================
+
+Where high-quality order-flow data exists:
+
+large aggressive selling
+price stops declining
+bid liquidity replenishes
+CVD continues falling
+price holds
+
+Potential seller absorption.
+
+Inverse for buyer absorption.
+
+Require persistence.
+
+One large order-book wall is insufficient.
+
+==================================================
+16. FOREX SESSION STRATEGIES
+==================================================
+
+Create FX-specific strategy contexts.
+
+ASIAN RANGE BREAK
+
+LONDON BREAKOUT
+
+LONDON SWEEP/REVERSAL
+
+NEW YORK CONTINUATION
+
+NEW YORK REVERSAL
+
+Use:
+
+session highs/lows
+currency strength
+ATR
+spread
+DXY context where appropriate
+previous-day high/low
+
+Be aware of spread widening around rollover.
+
+==================================================
+17. FUTURES SESSION STRATEGIES
+==================================================
+
+Use:
+
+overnight high/low
+previous settlement
+RTH open
+opening range
+VWAP
+volume profile
+initial balance
+
+Potential strategies:
+
+opening-range breakout
+overnight high/low rejection
+VWAP reclaim
+trend day
+balanced-day mean reversion
+
+Respect actual exchange sessions.
+
+==================================================
+18. STOCK OPENING STRATEGIES
+==================================================
+
+Support:
+
+gap-and-go
+gap fade
+opening-range breakout
+opening-range failure
+VWAP reclaim
+relative-strength continuation
+
+Use:
+
+premarket volume
+gap ATR
+RVOL by time of day
+sector strength
+SPY/QQQ context
+spread
+liquidity
+
+Do not treat the first 15 minutes like midday trading.
+
+==================================================
+19. MULTI-TIMEFRAME CONFIRMATION
+==================================================
+
+Implement explicit timeframe hierarchy.
+
+Example for 5m entry:
+
+1D = structural context
+4H = major trend
+1H = tactical trend
+15m = setup
+5m = entry
+1m/order book = execution
+
+Do NOT require every timeframe to point identically.
+
+Example:
+
+Daily uptrend
+4H pullback
+1H stabilization
+5m CHoCH upward
+
+can be an excellent trend-continuation entry.
+
+Represent:
+
+higher_timeframe_context
+setup_timeframe
+execution_timeframe
+
+==================================================
+20. SETUP STATE MACHINE
+==================================================
+
+Strategies should evolve through states.
+
+Example breakout:
+
+WATCHING
+-> APPROACHING
+-> BREAKING
+-> CONFIRMED
+-> RETESTING
+-> ENTRY_READY
+-> INVALIDATED
+
+Do not generate completely independent signals every candle.
+
+Maintain setup state.
+
+This reduces repeated entries and allows JARVIS to understand market sequences.
+
+==================================================
+21. STRATEGY CONFLUENCE
+==================================================
+
+Measure independent evidence categories.
+
+Example:
+
+STRUCTURE = bullish
+FLOW = bullish
+TREND = bullish
+VOLUME = bullish
+RELATIVE_STRENGTH = bullish
+VOLATILITY = supportive
+
+This is better than:
+
+RSI +5
+MACD +5
+Stochastic +5
+CCI +5
+
+because those four may describe the same underlying momentum.
+
+Create category-level confidence.
+
+==================================================
+22. CONTRADICTION ENGINE
+==================================================
+
+Explicitly identify disagreement.
+
+Example:
+
+Price trend: bullish
+Structure: bullish
+CVD: bearish divergence
+OI: rapidly increasing
+Funding: extreme positive
+RS: weakening
+
+Do not hide contradictory evidence inside an average.
+
+Expose:
+
+supporting_evidence
+contradicting_evidence
+
+Contradiction should affect confidence/EV.
+
+==================================================
+23. STRATEGY-SPECIFIC INVALIDATION
+==================================================
+
+Every strategy needs deterministic invalidation.
+
+Examples:
+
+breakout:
+close back inside range
+
+trend continuation:
+break of structural HL/LH
+
+VWAP reclaim:
+loss of VWAP + failed reclaim
+
+liquidity sweep:
+break beyond sweep extreme
+
+Do not rely solely on arbitrary percentage stops.
+
+==================================================
+24. EXPECTED VALUE
+==================================================
+
+Every recognized setup should be mapped to historical performance.
+
+Segment by:
+
+strategy
+asset class
+direction
+regime
+timeframe
+
+Use hierarchical fallback when samples are small.
+
+Calculate:
+
+P(win)
+Avg Win R
+Avg Loss R
+Gross EV
+Expected Costs
+Net EV
+Sample Size
+Confidence Interval
+
+A technically beautiful setup with negative net expectancy:
+
+NO_TRADE.
+
+==================================================
+25. COST-AWARE STRATEGY FILTERING
+==================================================
+
+Different strategies tolerate different costs.
+
+Example:
+
+5-minute scalp:
+spread/slippage extremely important
+
+4-hour swing:
+small spread less important
+
+Calculate costs relative to expected move.
+
+Include:
+
+fees
+spread
+slippage
+funding
+borrow
+market impact
+
+Reject setups whose expected edge is consumed by execution.
+
+==================================================
+26. STRATEGY PERFORMANCE
+==================================================
+
+Track independently:
+
+trend continuation
+breakout
+breakout retest
+failed breakout
+liquidity sweep
+mean reversion
+squeeze expansion
+momentum ignition
+VWAP reclaim
+relative-strength breakout
+funding squeeze
+liquidation cascade
+absorption reversal
+FX session strategies
+futures session strategies
+stock opening strategies
+
+For each track:
+
+trades
+win rate
+avg R
+profit factor
+EV
+net EV
+drawdown
+Sharpe/Sortino where meaningful
+recent performance
+regime performance
+
+==================================================
+27. STRATEGY ACTIVATION / DEMOTION
+==================================================
+
+Strategies should have lifecycle states:
+
+ACTIVE
+REDUCED
+EXPERIMENTAL
+SHADOW
+DISABLED
+
+If a strategy's out-of-sample expectancy deteriorates:
+
+reduce sizing or disable it.
+
+Do not permanently trust historical alpha.
+
+==================================================
+28. META-LABELING
+==================================================
+
+Once enough labeled history exists, create a secondary model deciding:
+
+TAKE
+SKIP
+REDUCE_SIZE
+
+Start with interpretable models.
+
+Potential features:
+
+strategy
+regime
+structure
+flow
+relative strength
+volatility
+spread
+signal age
+calibrated probability
+EV
+correlation
+recent strategy performance
+
+Do not introduce ML unless sample size is sufficient.
+
+==================================================
+29. EXPLAINABILITY
+==================================================
+
+Every decision should be explainable.
+
+Example:
+
+SOL/USD
+Strategy: Breakout Retest
+Direction: LONG
+
+Higher timeframe:
+4H uptrend
+
+Structure:
+15m bullish BOS
+5m retest held
+
+Flow:
+CVD positive
+
+Derivatives:
+OI +4.2%
+Funding neutral
+
+Relative strength:
+SOL outperforming BTC
+
+Volatility:
+expanding
+
+Contradictions:
+minor bearish 5m RSI divergence
+
+Historical:
+147 comparable trades
+
+Calibrated win probability:
+61%
+
+Expected gross R:
++0.34R
+
+Expected costs:
+-0.05R
+
+Expected net R:
++0.29R
+
+Decision:
+TRADE
+
+The LLM may explain this information.
+
+The LLM must NOT fabricate the underlying measurements.
+
+==================================================
+30. TESTING / BACKTESTING
+==================================================
+
+Every strategy must be testable independently.
+
+Run:
+
+historical backtest
+walk-forward
+out-of-sample
+shadow mode
+
+Measure:
+
+strategy alone
+strategy by asset
+strategy by timeframe
+strategy by regime
+
+Do not optimize thresholds against the entire dataset.
+
+Prevent lookahead bias.
+
+==================================================
+FINAL ARCHITECTURE
+==================================================
+
+MARKET DATA
+      ↓
+FEATURE ENGINE
+      ↓
+MARKET STATE
+      ↓
+REGIME ENGINE
+      ↓
+STRATEGY RECOGNITION
+      ↓
+CONFLUENCE + CONTRADICTION
+      ↓
+HISTORICAL CALIBRATION
+      ↓
+EXPECTED NET R
+      ↓
+PORTFOLIO RISK
+      ↓
+TRADE / NO_TRADE
+      ↓
+EXECUTION ENGINE
+      ↓
+OUTCOME
+      ↓
+LEARNING
+
+Do not optimize for the number of signals.
+
+Optimize for:
+
+COST-ADJUSTED EXPECTANCY
+DRAWDOWN
+RISK-ADJUSTED RETURN
+CALIBRATION
+ROBUSTNESS
+
+A high-quality NO_TRADE decision is as valuable as finding a trade.

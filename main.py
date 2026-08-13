@@ -234,15 +234,37 @@ def spa_fallback(full_path: str = ""):
         # The hashed assets under /assets/ are the opposite case: their names
         # change whenever their contents do, so they are safe to cache hard
         # and are left alone.
-        return FileResponse(
-            str(index),
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
+        return FileResponse(str(index))
     return {"error": "Frontend not found — run `npm run build` in frontend/"}
+
+
+@app.middleware("http")
+async def no_cache_html(request, call_next):
+    """Never let a browser cache the SPA shell.
+
+    index.html is the only file that names the content-hashed bundle, so a
+    cached copy pins the browser to a build that no longer exists on disk.
+    The UI silently stays one deploy behind and no amount of Ctrl+F5 helps
+    once the response is already in cache with no revalidation directive.
+    Observed: a new per-coin scan button was live in the built bundle while
+    the browser kept loading the previous one and rendered no button at all.
+
+    This is middleware rather than a header on spa_fallback because the same
+    index.html is served by TWO routes — spa_fallback AND the /next
+    StaticFiles mount, which builds its own response and ignored the fix
+    applied to the other. Anything that returns HTML gets the header, so a
+    third path added later cannot quietly reintroduce the problem.
+
+    The content-hashed assets under /assets/ are deliberately untouched:
+    their names change whenever their contents do, so they are safe to cache
+    hard, and doing so is the entire point of hashing them.
+    """
+    response = await call_next(request)
+    if "text/html" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 # ── Banner ─────────────────────────────────────────────────────────────────────

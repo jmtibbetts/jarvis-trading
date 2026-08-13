@@ -185,7 +185,14 @@ def run_mfe(train, val, test):
         mean_absolute_error(y_te, gb.predict(Xte))), 4)}
     out["mlp"] = _train_mlp(Xtr, y_tr, Xva, y_va, Xte, y_te, task="reg")
 
-    mlp_wins = out["mlp"]["mae"] < out["baseline_histgb"]["mae"] * 0.98
+    # Against the BEST baseline, not a chosen one. The first full-corpus
+    # run exposed the flaw: HistGB (2.669) was WORSE than the median
+    # (2.598), so "beats HistGB by 2%" declared victory for an MLP that
+    # edged the median by 0.3% — a verdict rule quietly comparing against
+    # the weaker opponent, which is exactly the flattery this harness
+    # exists to prevent.
+    best_baseline = min(out["baseline_median"]["mae"], out["baseline_histgb"]["mae"])
+    mlp_wins = out["mlp"]["mae"] < best_baseline * 0.98
     gb_wins = out["baseline_histgb"]["mae"] < out["baseline_median"]["mae"] * 0.98
     out["verdict"] = ("MLP earns shadow evaluation" if mlp_wins else
                       "HistGB is the honest choice" if gb_wins else

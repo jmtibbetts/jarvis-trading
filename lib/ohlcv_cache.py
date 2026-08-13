@@ -169,6 +169,11 @@ def _yf_fetch(symbol: str, tf: str, start: datetime, end: datetime) -> Optional[
 # symbol/timeframe/timestamp (e.g. a later yfinance fallback should never
 # clobber a bar we already got from Alpaca).
 _ALPACA_SOURCE_PRIORITY = 1000
+# Below Alpaca: a live SIP-fed bar should never be clobbered by a backfill.
+# Above every crypto aggregator and yfinance: Twelve Data is a licensed
+# consolidated feed, and it is the only source with 6-7 years of intraday
+# depth, which is the entire reason it is here.
+_TWELVEDATA_SOURCE_PRIORITY = 500
 _YFINANCE_SOURCE_PRIORITY = 10
 _DEFAULT_SOURCE_PRIORITY = 0
 
@@ -181,6 +186,8 @@ def _source_priority(source: Optional[str]) -> int:
     s = source.lower()
     if s == 'alpaca':
         return _ALPACA_SOURCE_PRIORITY
+    if s == 'twelvedata':
+        return _TWELVEDATA_SOURCE_PRIORITY
     if s == 'yfinance':
         return _YFINANCE_SOURCE_PRIORITY
     try:

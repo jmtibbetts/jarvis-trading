@@ -3411,8 +3411,15 @@ def analyze(body: AnalyzeRequest):
     try:
         from lib.ohlcv import fetch_multi_timeframe
         from lib.ta_engine import analyze_symbol, build_ta_prompt_block
-        bars=fetch_multi_timeframe(body.symbol.upper(), body.timeframes)
-        ta=analyze_symbol(bars); pb=build_ta_prompt_block(body.symbol.upper(),ta)
+        # The same venue-ticker resolution the watchlist and focus paths
+        # use. Without it the SAME input behaved three different ways
+        # depending on which endpoint saw it: SPCX/USD added fine and
+        # focused fine, then analyzed as "insufficient data" on every
+        # timeframe because nothing here mapped it to XSPCX/USD.
+        from lib.symbol_aliases import resolve as _resolve_alias
+        _sym, _alias_note = _resolve_alias(body.symbol)
+        bars=fetch_multi_timeframe(_sym, body.timeframes)
+        ta=analyze_symbol(bars); pb=build_ta_prompt_block(_sym,ta)
         signal=None
         if body.generate_signal:
             try:
@@ -3480,7 +3487,8 @@ def analyze(body: AnalyzeRequest):
                     signal["hold_estimate"] = hold_estimate(tf)
             except Exception as e:
                 signal={"error":str(e)}
-        return {"symbol":body.symbol.upper(),"ta":ta,"prompt_block":pb,"signal":signal}
+        return {"symbol":_sym,"ta":ta,"prompt_block":pb,"signal":signal,
+                "resolved_from":_alias_note}
     except Exception as e: raise HTTPException(500,str(e))
 
 

@@ -76,3 +76,26 @@ class NarrownessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppliedEverywhereTests(unittest.TestCase):
+    """A symbol must not mean different things at different endpoints.
+
+    SPCX/USD added fine and focused fine, then analyzed as "insufficient
+    data" on every timeframe — because two of the three paths resolved the
+    venue ticker and the third did not. The same input behaving three ways
+    is worse than it failing consistently: it looks like missing data
+    rather than a missing lookup.
+    """
+
+    ENTRY_POINTS = ("add_watchlist_symbol", "set_focus", "analyze")
+
+    def test_every_symbol_entry_point_resolves_aliases(self):
+        import inspect
+        from app import routes
+        for name in self.ENTRY_POINTS:
+            fn = getattr(routes, name, None)
+            self.assertIsNotNone(fn, f"{name} not found — did it get renamed?")
+            src = inspect.getsource(fn)
+            self.assertIn("symbol_aliases", src,
+                          f"{name} accepts a symbol but never resolves venue tickers")

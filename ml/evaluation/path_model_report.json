@@ -1,0 +1,97 @@
+{
+ "rows": 9246,
+ "features": 33,
+ "schema_hash": "2d3a8af9fce536ff",
+ "split": {
+  "train": 5547,
+  "val": 1849,
+  "test": 1850
+ },
+ "span": {
+  "train_end": "2026-08-11",
+  "test_start": "2026-08-12"
+ },
+ "targets": [
+  {
+   "target": "mfe_r",
+   "results": [
+    {
+     "model": "baseline_constant",
+     "pinball_q25": 0.15907,
+     "pinball_q50": 0.30208,
+     "pinball_q75": 0.34107,
+     "mean_pinball": 0.26741,
+     "mae": 0.60416,
+     "r2": -0.21573
+    },
+    {
+     "model": "gbm_quantile",
+     "pinball_q25": 0.19442,
+     "pinball_q50": 0.31811,
+     "pinball_q75": 0.28266,
+     "mean_pinball": 0.26506,
+     "mae": 0.63622,
+     "r2": -0.38786
+    },
+    {
+     "model": "mlp_quantile",
+     "pinball_q25": 0.23594,
+     "pinball_q50": 0.30256,
+     "pinball_q75": 0.25882,
+     "mean_pinball": 0.26577,
+     "mae": 0.60511,
+     "r2": -0.3594,
+     "device": "cuda",
+     "val_loss": 0.24969
+    }
+   ],
+   "winner": "gbm_quantile",
+   "verdict": "gbm_quantile beats baseline by 0.9%"
+  },
+  {
+   "target": "mae_r",
+   "results": [
+    {
+     "model": "baseline_constant",
+     "pinball_q25": 0.12744,
+     "pinball_q50": 0.22099,
+     "pinball_q75": 0.20077,
+     "mean_pinball": 0.18307,
+     "mae": 0.44198,
+     "r2": -0.64639
+    },
+    {
+     "model": "gbm_quantile",
+     "pinball_q25": 0.16456,
+     "pinball_q50": 0.26071,
+     "pinball_q75": 0.19406,
+     "mean_pinball": 0.20644,
+     "mae": 0.52142,
+     "r2": -1.26788
+    },
+    {
+     "model": "mlp_quantile",
+     "pinball_q25": 0.13523,
+     "pinball_q50": 0.23453,
+     "pinball_q75": 0.20355,
+     "mean_pinball": 0.1911,
+     "mae": 0.46906,
+     "r2": -0.88822,
+     "device": "cuda",
+     "val_loss": 0.18065
+    }
+   ],
+   "winner": "baseline_constant",
+   "verdict": "no model beat the constant baseline"
+  }
+ ],
+ "first_touch": {
+  "n_train": 2823,
+  "n_test": 942,
+  "base_rate_target_first": 0.4159,
+  "brier": 0.2286,
+  "brier_baseline": 0.23529,
+  "log_loss": 0.66288,
+  "beats_baseline": true
+ }
+}

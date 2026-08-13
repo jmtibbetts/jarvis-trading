@@ -23,3 +23,7 @@ backup-*/
 # which is already ignored — a database never belongs in git.
 /*.db
 /*.db-journal
+
+# ML datasets: reproducible from the DB, and large. Rebuild, do not commit.
+ml/datasets/*.npz
+ml/models/

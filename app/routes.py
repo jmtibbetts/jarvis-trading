@@ -1394,7 +1394,10 @@ def set_focus(body: FocusRequest):
     """Add or remove a symbol from the focus list. The symbol must already
     be a tracked asset (add it to the watchlist first) so prices exist."""
     from app.database import MarketAsset
-    sym = body.symbol.upper().strip()
+    # Same venue-ticker resolution as the watchlist add, or "watch SPCX/USD"
+    # would fail on a symbol the operator can see priced on their screen.
+    from lib.symbol_aliases import resolve as _resolve_alias
+    sym, _alias_note = _resolve_alias(body.symbol)
     with get_db() as db:
         row = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
         if not row:
@@ -1428,6 +1431,14 @@ def add_watchlist_symbol(body: WatchlistAdd):
     raw = (body.symbol or "").strip().upper()
     if not raw or len(raw) > 12:
         raise HTTPException(400, "Provide a symbol like NVDA or BTC/USD")
+
+    # A venue ticker resolves to the symbol the price feed actually quotes.
+    # BTCC shows SpaceX as SPCX/USD; the tracked symbol is XSPCX/USD, and the
+    # operator confirms the prices match. The substitution is reported back,
+    # never silent — asking for one instrument and holding another is not a
+    # convenience.
+    from lib.symbol_aliases import resolve as _resolve_alias
+    raw, alias_note = _resolve_alias(raw)
 
     is_crypto = "/" in raw or raw.endswith("USD") and len(raw) > 5
     name = None
@@ -1481,12 +1492,14 @@ def add_watchlist_symbol(body: WatchlistAdd):
     with get_db() as db:
         existing = db.query(MarketAsset).filter(MarketAsset.symbol == sym).first()
         if existing:
-            return {"ok": True, "symbol": sym, "already_tracked": True}
+            return {"ok": True, "symbol": sym, "already_tracked": True,
+                    "resolved_from": alias_note}
         db.add(MarketAsset(
             symbol=sym, name=name or sym, asset_class=asset_class,
             price=price, last_updated=datetime.now(timezone.utc).isoformat(),
         ))
-    return {"ok": True, "symbol": sym, "asset_class": asset_class, "verified_price": price}
+    return {"ok": True, "symbol": sym, "asset_class": asset_class,
+            "verified_price": price, "resolved_from": alias_note}
 
 
 @router.get("/watchlist/enriched")

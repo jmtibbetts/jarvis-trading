@@ -3110,6 +3110,23 @@ def expectancy_summary():
         return {"error": str(e), "buckets": []}
 
 
+@router.get("/strategies/lifecycle")
+def strategy_lifecycle():
+    """Which strategies may trade, judged on data the ranking never saw.
+
+    With fourteen strategies across several timeframes, one will look
+    excellent by chance and gets selected precisely because it got lucky.
+    Outcomes are split by TIME — older trains, newer validates — and the
+    verdict comes from the newer portion alone. `overfitted` marks a
+    strategy that was profitable in training and is not out of it.
+    """
+    try:
+        from lib.strategy_lifecycle import evaluate_all
+        return evaluate_all()
+    except Exception as e:
+        return {"error": str(e), "strategies": {}}
+
+
 @router.get("/llm/routing")
 def llm_routing(days: int = 30):
     """What the router decided, what it cost, and whether it paid off.

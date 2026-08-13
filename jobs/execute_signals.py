@@ -258,7 +258,15 @@ def run():
         cutoff_crypto = now_utc - timedelta(hours=24)
 
         sig_dicts = []
-        gated_rr = gated_conf = gated_ev = 0
+        gated_rr = gated_conf = gated_ev = gated_life = 0
+        # Built once for the whole batch: the walk-forward split reads every
+        # closed trade, and doing that per signal would dominate the run.
+        try:
+            from lib.strategy_lifecycle import evaluate_all
+            lifecycle_cache = evaluate_all()
+        except Exception as e:
+            logger.debug(f"[Execute] lifecycle table unavailable: {e}")
+            lifecycle_cache = {"strategies": {}}
         for s in sigs:
             if min_rr > 0 and float(s.rr_ratio or 0) < min_rr:
                 gated_rr += 1
@@ -287,6 +295,24 @@ def run():
                     continue
             except Exception as e:
                 logger.debug(f"[Execute] expectancy gate unavailable for {s.asset_symbol}: {e}")
+
+            # Strategy lifecycle, judged OUT OF SAMPLE. A strategy that was
+            # profitable on the trades used to rank it and is not on later
+            # ones was curve-fitted; SHADOW and DISABLED size to zero so it
+            # keeps being measured without risking money. An unmeasured
+            # strategy is EXPERIMENTAL, not blocked — refusing the unknown
+            # is how the system stops generating the evidence it needs.
+            try:
+                from lib.strategy_lifecycle import state_of
+                life = state_of(getattr(s, "strategy", None), cache=lifecycle_cache)
+                if life["size_multiplier"] <= 0:
+                    gated_life += 1
+                    logger.info("[Execute] %s blocked — strategy %s is %s: %s",
+                                s.asset_symbol, getattr(s, "strategy", None),
+                                life["state"], life["reason"])
+                    continue
+            except Exception as e:
+                logger.debug(f"[Execute] lifecycle gate unavailable: {e}")
             if min_ai_conf > 0 and float(s.confidence or 0) < min_ai_conf:
                 gated_conf += 1
                 continue
@@ -353,7 +379,8 @@ def run():
         f"[Execute] {len(sig_dicts)} active signals qualify "
         f"(score>={min_conf:g}, rr>={min_rr:g}, conf>={min_ai_conf:g}; "
         f"gated: {gated_rr} by R:R, {gated_conf} by confidence, "
-        f"{gated_ev} by negative net expectancy)"
+        f"{gated_ev} by negative net expectancy, "
+        f"{gated_life} by strategy lifecycle)"
     )
 
     candidates = sig_dicts

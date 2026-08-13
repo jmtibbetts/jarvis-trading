@@ -3094,6 +3094,22 @@ def llm_health():
     except Exception as e:
         return {"ok":False,"error":str(e)}
 
+@router.get("/expectancy")
+def expectancy_summary():
+    """What each bucket of setups is actually worth, in R.
+
+    A win rate is not an edge: 45% wins averaging +2R beats 60% averaging
+    +0.4R, and only one of those was visible before. Every row carries its
+    sample size and the Wilson interval on the win rate, because a point
+    estimate from 12 trades and one from 4,000 look identical otherwise.
+    """
+    try:
+        from lib.expectancy import summary
+        return summary()
+    except Exception as e:
+        return {"error": str(e), "buckets": []}
+
+
 @router.get("/llm/routing")
 def llm_routing(days: int = 30):
     """What the router decided, what it cost, and whether it paid off.

@@ -715,6 +715,28 @@ export type Calibration = {
   by_score: (CalibrationRow & { band: string })[];
 };
 
+// lib/expectancy.py. A win rate is not an edge: 45% wins averaging +2R
+// beats 60% averaging +0.4R, and only one of those was visible before.
+export type ExpectancyBucket = {
+  bucket: string;
+  bucket_values: Record<string, string>;
+  sample: number;
+  raw_sample: number;
+  p_win: number;
+  p_win_ci: [number, number];
+  avg_win_r: number;
+  avg_loss_r: number;
+  gross_expected_r: number;
+  gross_expected_r_lower: number;
+};
+export type Expectancy = {
+  min_sample: number;
+  min_net_r: number;
+  buckets: ExpectancyBucket[];
+  total_buckets: number;
+  error?: string;
+};
+
 // lib/llm_router.py telemetry. `effectiveness` stays empty until BOTH arms
 // of a task have enough closed trades to compare — an empty list means the
 // question is not yet answerable, not that thinking makes no difference.
@@ -1310,6 +1332,7 @@ export const api = {
   jobTrigger: (name: string) => post<{ ok: boolean; already_running?: boolean; detail?: string }>(`/jobs/${name}/trigger`),
 
   calibration: () => get<Calibration>(`/calibration`),
+  expectancy: () => get<Expectancy>(`/expectancy`),
   llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),

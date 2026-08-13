@@ -258,11 +258,35 @@ def run():
         cutoff_crypto = now_utc - timedelta(hours=24)
 
         sig_dicts = []
-        gated_rr = gated_conf = 0
+        gated_rr = gated_conf = gated_ev = 0
         for s in sigs:
             if min_rr > 0 and float(s.rr_ratio or 0) < min_rr:
                 gated_rr += 1
                 continue
+            # Net expectancy, re-evaluated HERE rather than trusted from
+            # generation time. Spread, funding and the measured win/loss
+            # distribution all move between a signal being written and it
+            # reaching the broker, and the number that matters is the one
+            # true at the moment money is committed.
+            #
+            # Refuses only on measured negative expectancy. UNKNOWN passes:
+            # a gate that blocks what it cannot evaluate stops the system
+            # trading entirely, which has happened here before.
+            try:
+                from lib.expectancy import evaluate as _ev
+                verdict = _ev({
+                    "asset_symbol": s.asset_symbol, "asset_class": s.asset_class,
+                    "direction": s.direction, "timeframe": s.timeframe,
+                    "entry_price": s.entry_price, "stop_loss": s.stop_loss,
+                    "strategy": getattr(s, "strategy", None),
+                })
+                if verdict.get("verdict") == "NO_TRADE":
+                    gated_ev += 1
+                    logger.info("[Execute] NO_TRADE %s — %s",
+                                s.asset_symbol, verdict.get("reason"))
+                    continue
+            except Exception as e:
+                logger.debug(f"[Execute] expectancy gate unavailable for {s.asset_symbol}: {e}")
             if min_ai_conf > 0 and float(s.confidence or 0) < min_ai_conf:
                 gated_conf += 1
                 continue
@@ -328,7 +352,8 @@ def run():
     logger.info(
         f"[Execute] {len(sig_dicts)} active signals qualify "
         f"(score>={min_conf:g}, rr>={min_rr:g}, conf>={min_ai_conf:g}; "
-        f"gated: {gated_rr} by R:R, {gated_conf} by confidence)"
+        f"gated: {gated_rr} by R:R, {gated_conf} by confidence, "
+        f"{gated_ev} by negative net expectancy)"
     )
 
     candidates = sig_dicts

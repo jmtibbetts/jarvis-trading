@@ -11,9 +11,10 @@
   // well-evidenced ones at the same visual weight. A win rate without a
   // denominator is a rumour.
   import Panel from "./Panel.svelte";
-  import { api, type Calibration, type LlmRouting } from "../api";
+  import { api, type Calibration, type Expectancy, type LlmRouting } from "../api";
 
   let cal = $state<Calibration | null>(null);
+  let expectancy = $state<Expectancy | null>(null);
   let routing = $state<LlmRouting | null>(null);
   let loading = $state(true);
   let failed = $state<string | null>(null);
@@ -22,11 +23,13 @@
     loading = true;
     failed = null;
     try {
-      const [c, r] = await Promise.all([
-        api.calibration().catch((e) => { throw e; }),
+      const [c, e, r] = await Promise.all([
+        api.calibration().catch((err) => { throw err; }),
+        api.expectancy().catch(() => null),
         api.llmRouting(30).catch(() => null),
       ]);
       cal = c;
+      expectancy = e;
       routing = r;
     } catch (e) {
       failed = String(e);
@@ -169,6 +172,60 @@
         appear as newly-tagged signals close.
       </p>
     {/if}
+  {/if}
+</Panel>
+
+<Panel
+  title="Expectancy"
+  meta={expectancy ? `${expectancy.total_buckets} buckets` : ""}
+>
+  {#if !expectancy}
+    <p class="muted">Expectancy unavailable.</p>
+  {:else if expectancy.error}
+    <p class="err">{expectancy.error}</p>
+  {:else if !expectancy.buckets.length}
+    <p class="muted">
+      No bucket has {expectancy.min_sample} closed trades yet. Rows appear as
+      trades close.
+    </p>
+  {:else}
+    <p class="muted">
+      A win rate is not an edge. 45% wins averaging +2R beats 60% averaging
+      +0.4R — these are the measured distributions, in R. Costs are subtracted
+      per setup at scoring time; a setup whose net falls below
+      {expectancy.min_net_r}R is refused.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Bucket</th><th class="r">Win</th><th class="r">Avg win</th>
+          <th class="r">Avg loss</th><th class="r">Gross EV</th><th class="r">n</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each expectancy.buckets.slice(0, 14) as b (b.bucket + JSON.stringify(b.bucket_values))}
+          <tr>
+            <td class="mono bkt">
+              {Object.values(b.bucket_values).join(" · ") || "overall"}
+              <span class="sub">{b.bucket}</span>
+            </td>
+            <td class="r mono">
+              {(b.p_win * 100).toFixed(0)}%
+              <span class="sub">
+                {(b.p_win_ci[0] * 100).toFixed(0)}–{(b.p_win_ci[1] * 100).toFixed(0)}
+              </span>
+            </td>
+            <td class="r mono" style:color="var(--good)">+{b.avg_win_r.toFixed(2)}R</td>
+            <td class="r mono" style:color="var(--bad)">−{b.avg_loss_r.toFixed(2)}R</td>
+            <td class="r mono"
+                style:color={b.gross_expected_r > 0 ? "var(--good)" : "var(--bad)"}>
+              {b.gross_expected_r > 0 ? "+" : ""}{b.gross_expected_r.toFixed(3)}R
+            </td>
+            <td class="r mono sub">{n0(b.raw_sample)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   {/if}
 </Panel>
 
@@ -353,6 +410,9 @@
   .tag.deep { border-color: var(--accent); color: var(--accent); }
   .tag.fast { border-color: var(--line-bright); color: var(--ink-dim); }
   .tag.auto { border-color: var(--warm); color: var(--warm); }
+
+  .bkt { display: flex; flex-direction: column; gap: 0; line-height: 1.35; }
+  .bkt .sub { font-size: 10px; }
 
   .cov { display: flex; flex-wrap: wrap; gap: var(--space-lg); }
   .cov > div { display: flex; flex-direction: column; gap: 1px; }

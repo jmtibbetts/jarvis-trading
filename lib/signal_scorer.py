@@ -390,6 +390,29 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     except Exception as e:
         logger.debug(f"[Scorer] strategy edge unavailable: {e}")
 
+    # ── Net expectancy, and whether to take the trade at all ─────────────
+    # Everything above ranks how much evidence supports a setup. This asks
+    # the different question of whether the setup makes money after what it
+    # costs — measured P(win) and average win/loss in R for the most
+    # specific bucket with enough closed trades, minus the modelled spread,
+    # fees, slippage and funding.
+    #
+    # A high-quality NO_TRADE is as valuable as finding a trade. It is
+    # returned only on MEASURED negative expectancy, never on missing data:
+    # refusing what it cannot evaluate is how a system talks itself into
+    # never trading, which this codebase has already done once.
+    expectancy = None
+    try:
+        from lib.expectancy import evaluate as _ev
+        signal_for_ev = dict(signal)
+        signal_for_ev["strategy"] = strategy_name
+        expectancy = _ev(signal_for_ev)
+        if expectancy.get("verdict") == "NO_TRADE":
+            signal["no_trade"] = True
+            signal["no_trade_reason"] = expectancy.get("reason")
+    except Exception as e:
+        logger.debug(f"[Scorer] expectancy unavailable: {e}")
+
     bar_times = [data.get("bar_time") for _, data in valid if data.get("bar_time")]
     market_data_at = max(bar_times) if bar_times else None
     setup_type = _setup_type(signal)
@@ -434,9 +457,19 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
                             or None),
             "regime_benchmark": (regime_axes or {}).get("benchmark"),
             "timeframe_hierarchy": hierarchy,
+            "expectancy": ({"verdict": expectancy["verdict"],
+                            "reason": expectancy["reason"],
+                            "robust": expectancy.get("robust"),
+                            "net_expected_r": (expectancy.get("net") or {}).get("net_expected_r"),
+                            "expected_cost_r": (expectancy.get("net") or {}).get("expected_cost_r"),
+                            "gross_expected_r": (expectancy.get("expectancy") or {}).get("gross_expected_r"),
+                            "bucket": (expectancy.get("expectancy") or {}).get("bucket"),
+                            "sample": (expectancy.get("expectancy") or {}).get("raw_sample")}
+                           if expectancy else None),
         },
         "evidence": evidence,
         "regime_axes": regime_axes,
+        "expectancy": expectancy,
         "data_quality_score": round(quality, 1),
         "freshness_score": round(freshness, 1),
         "news_confidence": round(news_score, 1),

@@ -1343,6 +1343,30 @@ def focus_scan_status(symbol: str):
     })
 
 
+@router.get("/kraken/account")
+def kraken_account():
+    """The operator's REAL Kraken account, read-only: balances, open
+    positions/orders, and the measured fee tier that replaces the assumed
+    one in the cost model. Requires only the read scopes already granted."""
+    from lib.kraken_sync import account_snapshot
+    return account_snapshot()
+
+
+@router.get("/kraken/fills")
+def kraken_fills():
+    """What the synced trades history says about the operator's actual
+    trading — the ground truth the execution model will train against."""
+    from lib.kraken_sync import fills_summary
+    return fills_summary()
+
+
+@router.post("/kraken/sync")
+def kraken_sync_now():
+    """Manual sync trigger — same read-only pull the 30-minute job does."""
+    from lib.kraken_sync import sync_trades
+    return sync_trades()
+
+
 @router.get("/calibration")
 def calibration_summary():
     """What the system has actually measured about its own accuracy.

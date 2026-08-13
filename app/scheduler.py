@@ -61,6 +61,7 @@ job_status = {
     'postmortem':{'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
     'candidates': {'status': 'idle', 'last': None, 'error': None},
+    'kraken_sync': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -615,6 +616,18 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('candidates', candidates_run),
                   'interval', minutes=30, id='candidates',
                   next_run_time=now + timedelta(minutes=6),
+                  replace_existing=True, max_instances=1)
+
+    # The operator's REAL Kraken fills, synced read-only. Ground truth the
+    # execution model trains against; also the real portfolio the Positions
+    # view was blind to while it showed only Alpaca's sliver. Uses only the
+    # read scopes the operator granted — no order placement exists here.
+    def kraken_sync_run():
+        from lib.kraken_sync import sync_trades
+        return sync_trades()
+    sched.add_job(make_job_runner('kraken_sync', kraken_sync_run),
+                  'interval', minutes=30, id='kraken_sync',
+                  next_run_time=now + timedelta(minutes=4),
                   replace_existing=True, max_instances=1)
 
 

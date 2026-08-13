@@ -205,6 +205,43 @@ def open_orders() -> dict:
     return {"ok": True, "orders": rows}
 
 
+def trades_history(start: float | None = None, offset: int = 0) -> dict:
+    """One page (50) of the operator's REAL fills, oldest-first pagination.
+
+    This is the data the execution model has been starving for: actual
+    prices, actual fees, actual sizes, from the account's genuine trading —
+    including manual trades Jarvis never saw. The paper book simulates
+    fills; these are the ground truth it simulates.
+
+    `start` is a unix timestamp lower bound; `offset` pages within the
+    window. Kraken returns newest-first inside a page; the caller sorts.
+    """
+    params: dict = {"ofs": offset, "trades": "false"}
+    if start:
+        params["start"] = start
+    out = _private("/0/private/TradesHistory", params)
+    if not out["ok"]:
+        return out
+    res = out["result"] or {}
+    rows = []
+    for tid, t in (res.get("trades") or {}).items():
+        rows.append({
+            "trade_id": tid,
+            "order_id": t.get("ordertxid"),
+            "pair": t.get("pair"),
+            "side": t.get("type"),                    # buy | sell
+            "order_type": t.get("ordertype"),
+            "price": float(t.get("price") or 0),
+            "cost": float(t.get("cost") or 0),        # quote currency
+            "fee": float(t.get("fee") or 0),
+            "volume": float(t.get("vol") or 0),
+            "margin": float(t.get("margin") or 0),
+            "executed_at": float(t.get("time") or 0), # unix
+        })
+    rows.sort(key=lambda r: r["executed_at"])
+    return {"ok": True, "trades": rows, "total": int(res.get("count") or 0)}
+
+
 def fee_tier(pair: str = "XXBTZUSD") -> dict:
     """The operator's ACTUAL fee tier and 30-day volume.
 

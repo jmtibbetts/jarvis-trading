@@ -1490,6 +1490,30 @@ class ExecutionSample(Base):
     resolved_at       = Column(String)
 
 
+class KrakenTrade(Base):
+    """One REAL fill from the operator's Kraken account, synced read-only.
+
+    Ground truth for the execution model: actual price, actual fee, actual
+    size — including manual trades Jarvis never placed. The Kraken trade id
+    is the primary key, so re-syncing an overlapping window is idempotent
+    and resume-after-downtime needs no bookkeeping.
+    """
+    __tablename__ = "kraken_trades"
+    trade_id         = Column(String, primary_key=True)   # Kraken's own id
+    order_id         = Column(String)
+    pair             = Column(String, index=True)         # Kraken pair name
+    side             = Column(String)                     # buy | sell
+    order_type       = Column(String)                     # market | limit | ...
+    price            = Column(Float)
+    cost             = Column(Float)                      # quote-ccy notional
+    fee              = Column(Float)
+    volume           = Column(Float)
+    margin           = Column(Float)
+    executed_at_unix = Column(Float, index=True)
+    executed_at      = Column(String)
+    synced_at        = Column(String, default=now_iso)
+
+
 class CandidateSignal(Base):
     """Every setup the system CONSIDERED — including the ones it refused.
 

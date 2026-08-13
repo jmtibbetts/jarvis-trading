@@ -184,6 +184,21 @@ def compute_timeframe(df: pd.DataFrame, tf_label: str) -> dict:
         "pct_change": round((last - prev) / prev * 100, 3) if prev else 0,
     }
 
+    # How much the market moved over the preceding 5 bars — the lateness
+    # measurement. Measured 2026-08-13: the composite score tracks this
+    # almost perfectly (80+ signals enter after a +1.97% median pre-move,
+    # <60 after +0.14% — 14x), while outcomes against it are U-shaped, so
+    # it is recorded as a FEATURE for models to learn from, never folded
+    # into the composite by hand.
+    try:
+        if len(close) >= 6:
+            base = float(close.iloc[-6])
+            result["preceding_return_5"] = round((last - base) / base * 100, 3) if base else None
+        else:
+            result["preceding_return_5"] = None
+    except Exception:
+        result["preceding_return_5"] = None
+
     # EMAs
     emas = {}
     for p in [9, 21, 50, 200]:

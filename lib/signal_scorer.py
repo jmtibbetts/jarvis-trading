@@ -198,6 +198,22 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     ta_confluence = min(100.0, aligned / len(valid) * 100) if valid else 50.0
     conflict_ratio = opposing / len(valid) if valid else 0.0
 
+    # Lateness, signed INTO the trade's direction: positive means the
+    # market already moved the way this signal points. Measured 2026-08-13:
+    # the composite tracks it almost monotonically (80+ band enters after a
+    # +1.97% median pre-move vs +0.14% for <60), while outcomes against it
+    # are U-shaped — so it rides along as a recorded feature for the shadow
+    # variants and future models, and is deliberately NOT folded into the
+    # composite by hand.
+    preceding_move_pct = None
+    try:
+        own_tf = (ta_data or {}).get(signal.get("timeframe")) or {}
+        pr = own_tf.get("preceding_return_5")
+        if pr is not None:
+            preceding_move_pct = round(-float(pr) if is_short else float(pr), 3)
+    except (TypeError, ValueError):
+        preceding_move_pct = None
+
     # ── Category evidence ────────────────────────────────────────────────
     # The confluence above counts per TIMEFRAME, which cannot see that RSI,
     # Stochastic, CCI, Williams %R and MFI are five restatements of one
@@ -437,6 +453,7 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             "strategy_match": strategy_info.get("reason"),
             "conflict_ratio": round(conflict_ratio, 3),
             "conflict_penalty": conflict_penalty,
+            "preceding_move_pct": preceding_move_pct,
             "stale_penalty": stale_penalty,
             "earnings_penalty": earnings_penalty,
             "failure_penalty": failure_penalty,

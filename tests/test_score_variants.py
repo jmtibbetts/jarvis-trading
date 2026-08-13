@@ -102,5 +102,49 @@ class ComputeVariantsTests(unittest.TestCase):
         self.assertNotIn("A", compute_variants(82.0, FULL))
 
 
+
+class LatenessFeatureTests(unittest.TestCase):
+    """preceding_move_pct rides in the breakdown as a recorded measurement.
+
+    It must NOT enter the composite: outcomes against it are U-shaped
+    (early entries and heavy momentum both win, the middle loses), so any
+    hand-chosen sign would be wrong for half the distribution. It exists
+    for the shadow variants and future models to learn from.
+    """
+
+    def test_it_is_recorded_signed_into_the_trade_direction(self):
+        from lib.signal_scorer import score_signal
+        ta = {"4H": {"bias": "bullish", "rsi": 60, "macd": {},
+                     "preceding_return_5": 2.5}}
+        long_sig = {"asset_symbol": "T/USD", "direction": "Long",
+                    "timeframe": "4H", "entry_price": 100, "target_price": 110,
+                    "stop_loss": 95, "confidence": 60}
+        out = score_signal(dict(long_sig), ta, {}, set())
+        self.assertEqual(out["score_breakdown"]["preceding_move_pct"], 2.5)
+        out = score_signal({**long_sig, "direction": "Short"}, ta, {}, set())
+        self.assertEqual(out["score_breakdown"]["preceding_move_pct"], -2.5)
+
+    def test_missing_ta_yields_none_not_zero(self):
+        """Zero would train as 'no preceding move', which is a claim."""
+        from lib.signal_scorer import score_signal
+        out = score_signal({"asset_symbol": "T/USD", "direction": "Long",
+                            "timeframe": "4H", "entry_price": 100,
+                            "target_price": 110, "stop_loss": 95,
+                            "confidence": 60}, {}, {}, set())
+        self.assertIsNone(out["score_breakdown"]["preceding_move_pct"])
+
+    def test_it_does_not_move_the_composite(self):
+        """The measurement is cargo, not a scoring input."""
+        from lib.signal_scorer import score_signal
+        base = {"asset_symbol": "T/USD", "direction": "Long", "timeframe": "4H",
+                "entry_price": 100, "target_price": 110, "stop_loss": 95,
+                "confidence": 60}
+        ta_a = {"4H": {"bias": "bullish", "rsi": 60, "macd": {},
+                       "preceding_return_5": 0.1}}
+        ta_b = {"4H": {"bias": "bullish", "rsi": 60, "macd": {},
+                       "preceding_return_5": 9.9}}
+        a = score_signal(dict(base), ta_a, {}, set())
+        b = score_signal(dict(base), ta_b, {}, set())
+        self.assertEqual(a["composite_score"], b["composite_score"])
 if __name__ == "__main__":
     unittest.main()

@@ -419,6 +419,14 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "id": row.id, "signal_id": row.signal_id, "symbol": row.symbol,
                 "asset_class": row.asset_class, "direction": row.direction,
                 "leverage": row.leverage, "entry_price": row.entry_price,
+                # How much of the asset is actually held, what it cost, and
+                # what it is worth. A position row without a quantity says
+                # nothing about size — the leverage and entry alone cannot
+                # tell you whether you hold 0.16 BTC or 70,000 ARB.
+                "qty": row.qty,
+                "margin_used": row.margin_used,
+                "notional": round(float(row.qty or 0) * float(row.entry_price or 0), 2),
+                "market_value": round(float(row.qty or 0) * float(row.current_price or row.entry_price or 0), 2),
                 "current_price": row.current_price, "target_price": row.target_price,
                 "stop_loss": row.stop_loss, "unrealized_pnl": row.unrealized_pnl,
                 "fees": row.fees, "fee_basis": row.fee_basis,
@@ -429,6 +437,8 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 "id": row.id, "signal_id": row.signal_id, "symbol": row.symbol,
                 "asset_class": row.asset_class, "direction": row.direction,
                 "leverage": row.leverage, "entry_price": row.entry_price,
+                "qty": row.qty,
+                "notional": round(float(row.qty or 0) * float(row.entry_price or 0), 2),
                 "exit_price": row.exit_price, "realized_pnl": row.realized_pnl,
                 "gross_pnl": row.gross_pnl, "fees": row.fees, "fee_basis": row.fee_basis,
                 "pnl_pct": row.pnl_pct, "close_reason": row.close_reason,

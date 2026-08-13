@@ -3537,6 +3537,12 @@ def _position_dict(p):
     return {
         "symbol":          sym,
         "qty":             float(p.qty or 0),
+        # Both spellings. The frontend type and every call site use
+        # avg_entry_price, so shipping only avg_entry left the Live table's
+        # Entry column blank and fed `undefined` into the exposure maths —
+        # silently, because an undefined price renders as nothing rather
+        # than as an error. avg_entry stays for any other consumer.
+        "avg_entry_price": float(p.avg_entry_price or 0),
         "avg_entry":       float(p.avg_entry_price or 0),
         "market_value":    float(p.market_value or 0),
         "unrealized_pl":   float(p.unrealized_pl or 0),

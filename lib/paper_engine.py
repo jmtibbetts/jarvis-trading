@@ -1306,8 +1306,16 @@ def get_paper_summary() -> dict:
                     "direction":    t.direction or "Long",
                     "side":         t.side or "long",
                     "leverage":     float(t.leverage or 1.0),
+                    # How much was actually traded, and what it cost. Omitting
+                    # qty left the closed-trades table with nothing to show
+                    # for size, and the fee columns had no source at all.
+                    "qty":          float(t.qty or 0),
+                    "notional":     float(t.notional or 0),
                     "entry_price":  float(t.entry_price or 0),
                     "exit_price":   float(t.exit_price or 0),
+                    "gross_pnl":    round(float(t.gross_pnl or 0), 2),
+                    "fees":         round(float(t.fees or 0), 2),
+                    "fee_basis":    t.fee_basis,
                     "realized_pnl": round(float(t.realized_pnl or 0), 2),
                     "pnl_pct":      round(float(t.pnl_pct or 0), 2),
                     "close_reason": t.close_reason or "manual",

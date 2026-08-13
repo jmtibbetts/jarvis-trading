@@ -243,6 +243,11 @@ export type PaperPosition = {
 export type PaperTrade = {
   id: string;
   symbol: string;
+  qty: number;
+  notional: number;
+  gross_pnl: number;
+  fees: number;
+  fee_basis: string | null;
   direction: string;
   realized_pnl: number;
   pnl_pct: number;
@@ -871,6 +876,48 @@ export type AutoSimSummary = {
     pnl_before_costs: number;
     cost_drag_pct: number | null;
   };
+  // The endpoint has always returned these; the type omitted them, so the
+  // 60 open Auto Sim positions had no way to reach the UI and the tab showed
+  // a summary with nothing under it.
+  positions: {
+    id: string;
+    signal_id: string | null;
+    symbol: string;
+    asset_class: string | null;
+    direction: string | null;
+    leverage: number;
+    qty: number;
+    margin_used: number | null;
+    notional: number | null;
+    market_value: number | null;
+    entry_price: number;
+    current_price: number | null;
+    target_price: number | null;
+    stop_loss: number | null;
+    unrealized_pnl: number | null;
+    fees: number | null;
+    fee_basis: string | null;
+    entry_slippage_pct: number | null;
+    opened_at: string;
+  }[];
+  trades: {
+    id: string;
+    symbol: string;
+    direction: string | null;
+    leverage: number;
+    qty: number;
+    notional: number | null;
+    entry_price: number;
+    exit_price: number;
+    gross_pnl: number | null;
+    fees: number | null;
+    fee_basis: string | null;
+    realized_pnl: number;
+    pnl_pct: number;
+    close_reason: string | null;
+    opened_at: string;
+    closed_at: string;
+  }[];
 };
 export type AnalyzeResult = {
   symbol: string;

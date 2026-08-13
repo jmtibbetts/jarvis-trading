@@ -271,6 +271,49 @@ Type FLATTEN to confirm:`,
 
   const fmtUsd = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const fmtPct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+
+  /** How much of the asset is held.
+   *
+   * A single decimal rule cannot serve this column: one book holds 0.1595 BTC
+   * and 70,161 ARB at the same time, five orders of magnitude apart. Fixed
+   * decimals would print "0.00" for the first or a wall of zeros for the
+   * second, so precision follows magnitude and trailing zeros are trimmed —
+   * the quantity should read as the number you would place an order for. */
+  const fmtQty = (n: number | null | undefined) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    if (a >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (a >= 1) return trimZeros(v.toFixed(4));
+    // Sub-unit holdings keep six significant figures, so a $0.0000045 coin
+    // and a $95,000 one are both legible.
+    return trimZeros(v.toPrecision(6));
+  };
+  const trimZeros = (s: string) =>
+    s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+
+  /** Money at work in a position, so a quantity has a scale beside it. */
+  const fmtValue = (qty: number | null | undefined, px: number | null | undefined) => {
+    const v = Number(qty) * Number(px);
+    return Number.isFinite(v) ? fmtUsd(v) : "—";
+  };
+
+  /** A price, without the float noise.
+   *
+   * Raw values reach the UI as `245.77142750000002` and `0.7709252354048964`
+   * — an artifact of dividing notional by price, not precision anyone
+   * trades on. Significant figures rather than fixed decimals, because a
+   * $0.0000045 coin and a $95,000 one share this column. */
+  const fmtPrice = (n: number | null | undefined) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    if (a >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (a >= 1) return trimZeros(v.toFixed(4));
+    return trimZeros(v.toPrecision(6));
+  };
 </script>
 
 <div class="page-head">
@@ -365,17 +408,20 @@ Type FLATTEN to confirm:`,
     {#if live && live.positions.length}
       <table class="tbl">
         <thead>
-          <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
+          <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
         </thead>
         <tbody>
           {#each live.positions as p (p.symbol)}
             <tr class="expandable" onclick={() => toggleExpand(p.symbol)}>
               <td class="sym">{expandedLive.has(p.symbol) ? "▾" : "▸"} {p.symbol}{#if earningsRisk(p.symbol)}<span class="earnings-tag" title="Reports earnings this week">EARNINGS</span>{/if}</td>
               <td><Pill label={p.side} tone={p.side === "long" ? "good" : "bad"} /></td>
-              <td class="num">{p.qty}</td>
-              <td class="num">{p.avg_entry_price}</td>
-              <td class="num">{p.current_price}</td>
-              <td class="num {p.unrealized_plpc >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(p.unrealized_plpc)}</td>
+              <td class="num qty">{fmtQty(p.qty)}</td>
+              <td class="num dim">{fmtUsd(p.market_value)}</td>
+              <td class="num">{fmtPrice(p.avg_entry_price)}</td>
+              <td class="num">{fmtPrice(p.current_price)}</td>
+              <td class="num {p.unrealized_plpc >= 0 ? 'pl-up' : 'pl-down'}">
+                {fmtUsd(p.unrealized_pl)}<em class="pl-pct">{fmtPct(p.unrealized_plpc)}</em>
+              </td>
               <td>
                 <button class="btn tiny bad" disabled={busy.has(p.symbol)} onclick={(e) => { e.stopPropagation(); closeLive(p.symbol); }}>Close</button>
               </td>
@@ -530,7 +576,7 @@ Type FLATTEN to confirm:`,
       {#if paper && paper.positions.length}
         <table class="tbl">
           <thead>
-            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
+            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th></th></tr>
           </thead>
           <tbody>
             {#each paper.positions as p (p.id)}
@@ -538,9 +584,13 @@ Type FLATTEN to confirm:`,
                 <td class="sym">{p.symbol}{#if earningsRisk(p.symbol)}<span class="earnings-tag" title="Reports earnings this week">EARNINGS</span>{/if}</td>
                 <td><Pill label={p.direction} tone={p.side === "long" ? "good" : "bad"} /></td>
                 <td class="num">{p.leverage}x</td>
-                <td class="num">{p.entry_price}</td>
-                <td class="num">{p.current_price}</td>
-                <td class="num {p.unrealized_pct >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(p.unrealized_pct)}</td>
+                <td class="num qty">{fmtQty(p.qty)}</td>
+                <td class="num dim">{fmtValue(p.qty, p.current_price)}</td>
+                <td class="num">{fmtPrice(p.entry_price)}</td>
+                <td class="num">{fmtPrice(p.current_price)}</td>
+                <td class="num {p.unrealized_pct >= 0 ? 'pl-up' : 'pl-down'}">
+                  {fmtUsd(p.unrealized_pnl)}<em class="pl-pct">{fmtPct(p.unrealized_pct)}</em>
+                </td>
                 <td><button class="btn tiny bad" disabled={busy.has(p.id)} onclick={() => closePaper(p.id, p.symbol)}>Close</button></td>
               </tr>
             {/each}
@@ -617,12 +667,13 @@ Type FLATTEN to confirm:`,
     {#if paper && paper.trades.length}
       <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
       <table class="tbl">
-        <thead><tr><th>Symbol</th><th>Direction</th><th>P&amp;L</th><th>Reason</th><th>Closed</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Direction</th><th>Qty</th><th>P&amp;L</th><th>Reason</th><th>Closed</th></tr></thead>
         <tbody>
           {#each paper.trades.slice(0, 15) as t (t.id)}
             <tr>
               <td class="sym">{t.symbol}</td>
               <td>{t.direction}</td>
+              <td class="num qty">{fmtQty(t.qty)}</td>
               <td class="num {t.realized_pnl >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(t.realized_pnl)} ({fmtPct(t.pnl_pct)})</td>
               <td>{t.close_reason}</td>
               <td class="num">{t.closed_at?.slice(0, 16).replace("T", " ")}</td>
@@ -637,11 +688,42 @@ Type FLATTEN to confirm:`,
   <Panel title="Auto Sim" meta="follows every eligible signal automatically — paper-only, no broker">
     <button class="btn small outline" style="margin-bottom:8px" onclick={resetAutoSim}>Reset Auto Sim</button>
     <p class="note">
-      Auto Sim is a separate always-on paper ledger that opens a $1,000-notional virtual position for every eligible
+      Auto Sim is a separate always-on paper ledger that opens a $1,000-margin virtual position for every eligible
       signal automatically, independent of manual paper trading above. {autosim?.summary.wins ?? 0} wins /
       {autosim?.summary.losses ?? 0} losses.
     </p>
   </Panel>
+  </div>
+  <div class="span-12">
+    <Panel title="Auto Sim Positions" meta="{autosim?.positions.length ?? 0} open">
+      {#if autosim && autosim.positions.length}
+        <table class="tbl">
+          <thead>
+            <tr><th>Symbol</th><th>Direction</th><th>Lev</th><th>Qty</th><th>Value</th><th>Entry</th><th>Current</th><th>Fees</th><th>P&amp;L</th></tr>
+          </thead>
+          <tbody>
+            {#each autosim.positions as p (p.id)}
+              <tr>
+                <td class="sym">{p.symbol}</td>
+                <td><Pill label={p.direction} tone={(p.direction ?? "").toLowerCase().includes("short") ? "bad" : "good"} /></td>
+                <td class="num">{p.leverage}x</td>
+                <td class="num qty">{fmtQty(p.qty)}</td>
+                <td class="num dim">{fmtValue(p.qty, p.current_price ?? p.entry_price)}</td>
+                <td class="num">{fmtPrice(p.entry_price)}</td>
+                <td class="num">{fmtPrice(p.current_price)}</td>
+                <td class="num dim" title={p.fee_basis ?? ""}>−{fmtUsd(p.fees ?? 0)}</td>
+                <td class="num {(p.unrealized_pnl ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">
+                  {fmtUsd(p.unrealized_pnl ?? 0)}
+                  <em class="pl-pct">{fmtPct(((p.unrealized_pnl ?? 0) / (p.margin_used || 1000)) * 100)}</em>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <div class="empty">No open Auto Sim positions</div>
+      {/if}
+    </Panel>
   </div>
   <div class="span-12">
     <Panel title="Danger Zone" dotColor="var(--bad)" meta="typed confirmation required for every action">
@@ -924,6 +1006,22 @@ Type FLATTEN to confirm:`,
   .num {
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
+  }
+  /* Quantity is the number you would place an order for, so it carries the
+     same weight as the symbol rather than reading as a secondary figure. */
+  .qty {
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  /* The percentage rides beside the cash figure instead of replacing it:
+     "+15.88%" alone never says whether that is eight dollars or eight
+     hundred. */
+  .pl-pct {
+    margin-left: 6px;
+    font-style: normal;
+    font-size: 0.85em;
+    opacity: 0.72;
   }
   .pl-up {
     color: var(--good);

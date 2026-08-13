@@ -579,6 +579,23 @@ class TradeOutcome(Base):
     # is systematically optimistic and must be weighted below live evidence
     # rather than pooled with it.
     outcome_source   = Column(String, default="live")
+    # ── Path labels ──────────────────────────────────────────────────────
+    # Entry and exit alone cannot distinguish a trade that ran straight to
+    # target from one that sat two bars from being stopped out first. Same
+    # P&L, entirely different risk, and only one of them is repeatable.
+    # Produced by lib/signal_replay.py, which already walks the bars.
+    mfe_r            = Column(Float)    # best excursion in favour, in R
+    mae_r            = Column(Float)    # worst excursion against, in R
+    mfe_bar          = Column(Integer)  # bars until MFE
+    mae_bar          = Column(Integer)  # bars until MAE
+    # STOP | TARGET | AMBIGUOUS | None. AMBIGUOUS means both levels sat
+    # inside one OHLC bar: intrabar ordering is unknowable, and choosing the
+    # profitable one is how a backtest manufactures an edge.
+    first_touch      = Column(String)
+    # REPLAY_OHLC | LIVE_OBSERVED. Replay assumes perfect fills and that a
+    # bar's high AND low were both reachable, so it is systematically
+    # optimistic and must never be pooled with observed paths.
+    path_source      = Column(String)
     entered_at       = Column(String)
     exited_at        = Column(String, default=now_iso)
 
@@ -1119,6 +1136,15 @@ def _migrate_columns():
         "trade_outcomes": [
             ("engine_epoch", "TEXT"),
             ("outcome_source", "TEXT DEFAULT 'live'"),
+            # Path labels — see the TradeOutcome model. Nullable on purpose:
+            # rows written before this existed genuinely have no path, and a
+            # zero would train as "never moved", which is a claim.
+            ("mfe_r", "REAL"),
+            ("mae_r", "REAL"),
+            ("mfe_bar", "INTEGER"),
+            ("mae_bar", "INTEGER"),
+            ("first_touch", "TEXT"),
+            ("path_source", "TEXT"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),

@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 # Marks an outcome as simulated rather than observed. Calibration must be
 # able to tell the difference — see the module docstring.
 SOURCE_REPLAY = "replay"
+
+# Where a path label came from. Kept separate from `outcome_source` because
+# a live TRADE can still have a replay-derived path (reconstructed from
+# bars) and the two provenances answer different questions.
+PATH_SOURCE_REPLAY = "REPLAY_OHLC"
+PATH_SOURCE_LIVE = "LIVE_OBSERVED"
 SOURCE_LIVE = "live"
 
 # Bars to walk forward before giving up on a signal. Beyond its own hold
@@ -101,10 +107,47 @@ def replay_signal(signal: dict, bars, margin: float = 1000.0) -> dict | None:
     from lib.trade_horizon import expected_hold_minutes
     _lo, hold_max = expected_hold_minutes(signal.get("timeframe"))
 
+    # ── Path tracking ────────────────────────────────────────────────────
+    # How far the trade went the RIGHT way before it resolved (MFE) and how
+    # far the wrong way (MAE). The outcome alone cannot distinguish a trade
+    # that went straight to target from one that spent two bars nearly
+    # stopped out first — same P&L, completely different risk, and only one
+    # of them is repeatable. `trade_outcomes` records entry and exit and
+    # nothing in between, so this loop is the only place these can be
+    # measured: it is already walking exactly the bars required.
+    max_favorable = max_adverse = 0.0
+    mfe_bar = mae_bar = None
+    first_touch = None
+
     exit_price, reason, bars_held = None, None, 0
     for i, (_, bar) in enumerate(future.iterrows(), start=1):
         bars_held = i
         hi, lo = float(bar["high"]), float(bar["low"])
+
+        if is_short:
+            favorable, adverse = entry - lo, hi - entry
+            stop_touched, target_touched = hi >= stop, lo <= target
+        else:
+            favorable, adverse = hi - entry, entry - lo
+            stop_touched, target_touched = lo <= stop, hi >= target
+
+        if favorable > max_favorable:
+            max_favorable, mfe_bar = favorable, i
+        if adverse > max_adverse:
+            max_adverse, mae_bar = adverse, i
+
+        if first_touch is None and (stop_touched or target_touched):
+            # Both inside one bar: OHLC cannot reveal intrabar ordering, and
+            # picking the profitable one is precisely how a backtest invents
+            # an edge. Recorded as AMBIGUOUS so the label can be excluded
+            # from first-touch training rather than silently biasing it.
+            if stop_touched and target_touched:
+                first_touch = "AMBIGUOUS"
+            elif stop_touched:
+                first_touch = "STOP"
+            else:
+                first_touch = "TARGET"
+
         if is_short:
             # Stop first: within a single bar the order of touches is
             # unknowable, and assuming the favourable one is how a backtest
@@ -140,6 +183,17 @@ def replay_signal(signal: dict, bars, margin: float = 1000.0) -> dict | None:
     except Exception:
         pass
     net = gross - fees
+
+    # In R, so a 15m scalp and a weekly position are comparable. Without a
+    # risk distance there is no R, and None is the honest answer rather than
+    # a zero that would train as "never moved".
+    risk_distance = abs(entry - stop)
+    if risk_distance > 0:
+        mfe_r = round(max_favorable / risk_distance, 4)
+        mae_r = round(max_adverse / risk_distance, 4)
+    else:
+        mfe_r = mae_r = None
+
     return {
         "signal_id": signal.get("id"),
         "symbol": signal.get("asset_symbol"),
@@ -158,6 +212,19 @@ def replay_signal(signal: dict, bars, margin: float = 1000.0) -> dict | None:
         "bars_held": bars_held,
         "hold_window_max_min": hold_max,
         "source": SOURCE_REPLAY,
+        # ── Path labels (Phase 1) ────────────────────────────────────────
+        "mfe_r": mfe_r,
+        "mae_r": mae_r,
+        "mfe_bar": mfe_bar,
+        "mae_bar": mae_bar,
+        "first_touch": first_touch,
+        "max_favorable_price": round(entry + (max_favorable * (-1 if is_short else 1)), 8),
+        "max_adverse_price": round(entry + (max_adverse * (1 if is_short else -1)), 8),
+        # Provenance travels WITH the label. Replay assumes perfect fills and
+        # that both a bar's high and low were reachable, so these are
+        # systematically optimistic and must never be pooled with live
+        # observations as though they were equivalent.
+        "path_source": PATH_SOURCE_REPLAY,
     }
 
 
@@ -297,6 +364,10 @@ def persist(outcomes: list) -> dict:
                 outcome=o.get("outcome"), exit_reason=o.get("exit_reason"),
                 paper_mode=True, engine_epoch=CURRENT_EPOCH,
                 outcome_source=SOURCE_REPLAY,
+                mfe_r=o.get("mfe_r"), mae_r=o.get("mae_r"),
+                mfe_bar=o.get("mfe_bar"), mae_bar=o.get("mae_bar"),
+                first_touch=o.get("first_touch"),
+                path_source=o.get("path_source"),
             ))
             written += 1
     return {"written": written}

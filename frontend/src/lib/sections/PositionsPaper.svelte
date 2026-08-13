@@ -248,10 +248,10 @@ Type FLATTEN to confirm:`,
   }
 
   async function resetAutoSim() {
-    if (!confirm("Reset the Auto Sim account? This wipes its positions and history.")) return;
+    if (!confirm("Reset the Auto Sim funds to $100,000? Open positions close into history; every past trade is kept for learning.")) return;
     try {
-      await api.autosimReset();
-      toastStore.ok("Auto Sim account reset");
+      const r = await api.autosimReset();
+      toastStore.ok(`Auto Sim reset to $100k — ${r.positions_closed ?? 0} position(s) closed into history`);
       await loadAll();
     } catch (e) {
       toastStore.err(`Auto Sim reset failed: ${e}`);
@@ -259,10 +259,10 @@ Type FLATTEN to confirm:`,
   }
 
   async function resetPaper() {
-    if (!confirm("Reset the paper portfolio to $100,000? This wipes all paper positions and trade history.")) return;
+    if (!confirm("Reset the paper funds to $100,000? Open positions close into history; every past trade is kept for learning.")) return;
     try {
-      await api.paperReset();
-      toastStore.ok("Paper portfolio reset to $100,000");
+      const r = await api.paperReset();
+      toastStore.ok(`Paper reset to $100k — ${r.positions_closed ?? 0} position(s) closed into history`);
       await loadAll();
     } catch (e) {
       toastStore.err(`Reset failed: ${e}`);
@@ -747,11 +747,11 @@ Type FLATTEN to confirm:`,
       <div class="dz-row">
         <div class="dz-item">
           <button class="btn small outline" onclick={resetPaper}>Reset Paper → $100k</button>
-          <span class="dz-desc">Wipes paper positions, trades, and history; fresh $100,000.</span>
+          <span class="dz-desc">Closes open positions into history, refills to $100,000. Every past trade is kept — the learning data survives.</span>
         </div>
         <div class="dz-item">
           <button class="btn small outline" onclick={resetAutoSim}>Reset Auto Sim → $100k</button>
-          <span class="dz-desc">Same, for the follow-everything simulator.</span>
+          <span class="dz-desc">Same, for the follow-everything simulator. History preserved.</span>
         </div>
       </div>
       <p class="dz-note">

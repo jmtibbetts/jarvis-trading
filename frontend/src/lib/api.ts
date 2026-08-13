@@ -1244,7 +1244,7 @@ export const api = {
       if (!r.ok) throw new Error(body?.detail ?? `flatten ${r.status}`);
       return body as { ok: boolean; scope: string; live?: { orders_cancelled: number; positions_closed: number; errors: string[] }; paper?: { positions_closed: number; errors: string[] }; autosim?: { closed: number; skipped_no_price?: string[]; error?: string }; signals_rejected: number };
     }),
-  autosimReset: () => post<{ ok: boolean }>(`/autosim/reset`),
+  autosimReset: () => post<{ ok: boolean; positions_closed?: number }>(`/autosim/reset`),
   congressActivity: (limit = 20, days = 180) =>
     get<CongressActivityResponse>(`/congress/activity/top?limit=${limit}&days=${days}`),
   institutionalAccumulation: (limit = 25) =>
@@ -1329,7 +1329,7 @@ export const api = {
 
   paperSummary: () => get<PaperSummary>(`/paper/summary`),
   paperClose: (id: string) => post<Record<string, unknown>>(`/paper/close/${id}`),
-  paperReset: () => post<{ ok: boolean }>(`/paper/reset`),
+  paperReset: () => post<{ ok: boolean; positions_closed?: number }>(`/paper/reset`),
   paperRunMtm: () => post<Record<string, unknown>>(`/paper/run-mtm`),
 
   autoSimSummary: () => get<AutoSimSummary>(`/auto-paper/summary`),

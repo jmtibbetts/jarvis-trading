@@ -1206,80 +1206,92 @@ class FocusRequest(BaseModel):
     note: Optional[str] = None
 
 
-_FOCUS_SCAN = {"running": False, "started_at": None, "finished_at": None,
-               "result": None, "error": None}
+# Scan state is PER SYMBOL, so interrogating one coin never blocks another
+# and each row reports only its own progress.
+_FOCUS_SCANS: dict[str, dict] = {}
 _FOCUS_SCAN_LOCK = threading.Lock()
 
 
-@router.post("/watchlist/focus/scan")
-def scan_focus():
-    """Run the focus track NOW and report what it found.
-
-    This is the same pipeline the scheduler runs, restricted to the focus
-    symbols: the cached multi-timeframe TA and indicators, each symbol's
-    accumulated behavioural profile, live threat/news/regime context, then
-    scoring, level provenance, ATR and cost gates. Deliberately NOT a
-    second implementation — a parallel scanner would eventually grade
-    setups by different rules than the ones that trade them.
-
-    Runs in a thread because a focus sweep is several LLM calls. Poll
-    GET /watchlist/focus/scan for the result.
-
-    Silence is a real answer here: focus setups must clear FOCUS_MIN_SCORE,
-    so "nothing ready" is the expected output most of the time.
-    """
-    from app.database import MarketAsset
+def _focus_signal_ids(symbol: str) -> set:
+    """Live signal ids for one focus symbol."""
     with get_db() as db:
-        n = db.query(MarketAsset).filter(MarketAsset.is_focus == True).count()  # noqa: E712
-    if not n:
-        raise HTTPException(400, "No coins on the focus list — add one first.")
-
-    with _FOCUS_SCAN_LOCK:
-        if _FOCUS_SCAN["running"]:
-            return {"status": "already_running", "started_at": _FOCUS_SCAN["started_at"]}
-        _FOCUS_SCAN.update({"running": True, "started_at": datetime.now(timezone.utc).isoformat(),
-                            "finished_at": None, "result": None, "error": None})
-
-    def _run():
-        try:
-            from jobs.generate_signals import run as gen_run
-            before = _focus_signal_ids()
-            gen_run(focus_only=True)
-            after = _focus_signal_ids()
-            _FOCUS_SCAN["result"] = {"new_signal_ids": sorted(after - before),
-                                     "new_signals": len(after - before),
-                                     "symbols_scanned": n}
-        except Exception as e:
-            logger.error(f"[Focus] scan failed: {e}", exc_info=True)
-            _FOCUS_SCAN["error"] = str(e)
-        finally:
-            _FOCUS_SCAN["finished_at"] = datetime.now(timezone.utc).isoformat()
-            _FOCUS_SCAN["running"] = False
-
-    threading.Thread(target=_run, daemon=True).start()
-    return {"status": "started", "symbols": n,
-            "note": ("Focus setups must clear the focus score floor. "
-                     "No new signals is a valid result, not a failure.")}
-
-
-def _focus_signal_ids() -> set:
-    """Live signal ids for symbols currently on the focus list."""
-    from app.database import MarketAsset
-    with get_db() as db:
-        syms = [r.symbol for r in
-                db.query(MarketAsset).filter(MarketAsset.is_focus == True).all()]  # noqa: E712
-        if not syms:
-            return set()
         return {s.id for s in db.query(TradingSignal).filter(
-            TradingSignal.asset_symbol.in_(syms),
+            TradingSignal.asset_symbol == symbol,
             TradingSignal.status.in_(("Active", "PendingApproval")),
         ).all()}
 
 
-@router.get("/watchlist/focus/scan")
-def focus_scan_status():
-    """Where the last on-demand focus scan got to."""
-    return dict(_FOCUS_SCAN)
+@router.post("/watchlist/focus/{symbol:path}/scan")
+def scan_focus_symbol(symbol: str):
+    """Interrogate ONE watched coin now, and report what it found.
+
+    Same pipeline the scheduler runs, narrowed to this symbol: the cached
+    multi-timeframe TA and indicators, the coin's accumulated behavioural
+    profile, live threat/news/regime context, then scoring, level
+    provenance, ATR and cost gates. Deliberately NOT a second
+    implementation — a parallel scanner would eventually grade setups by
+    different rules than the ones that trade them.
+
+    Per symbol rather than per list: asking about one coin should not spend
+    an LLM call on every other one, and two coins can be asked at once.
+
+    Runs in a thread; poll GET /watchlist/focus/{symbol}/scan.
+
+    Silence is a real answer — focus setups must clear FOCUS_MIN_SCORE, so
+    "nothing ready" is the expected output most of the time.
+    """
+    from app.database import MarketAsset
+    sym = (symbol or "").upper().strip()
+    with get_db() as db:
+        row = db.query(MarketAsset).filter(
+            MarketAsset.symbol == sym,
+            MarketAsset.is_focus == True,  # noqa: E712
+        ).first()
+    if not row:
+        raise HTTPException(404, f"{sym} is not on the coins-to-watch list.")
+
+    with _FOCUS_SCAN_LOCK:
+        state = _FOCUS_SCANS.get(sym)
+        if state and state.get("running"):
+            return {"status": "already_running", "symbol": sym,
+                    "started_at": state["started_at"]}
+        _FOCUS_SCANS[sym] = {
+            "symbol": sym, "running": True,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None, "result": None, "error": None,
+        }
+
+    def _run():
+        state = _FOCUS_SCANS[sym]
+        try:
+            from jobs.generate_signals import run as gen_run
+            before = _focus_signal_ids(sym)
+            gen_run(focus_only=True, only_symbols=[sym])
+            after = _focus_signal_ids(sym)
+            state["result"] = {"symbol": sym,
+                               "new_signal_ids": sorted(after - before),
+                               "new_signals": len(after - before)}
+        except Exception as e:
+            logger.error(f"[Focus] scan failed for {sym}: {e}", exc_info=True)
+            state["error"] = str(e)
+        finally:
+            state["finished_at"] = datetime.now(timezone.utc).isoformat()
+            state["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "symbol": sym,
+            "note": ("Focus setups must clear the focus score floor. "
+                     "No new signal is a valid result, not a failure.")}
+
+
+@router.get("/watchlist/focus/{symbol:path}/scan")
+def focus_scan_status(symbol: str):
+    """Where this coin's last on-demand scan got to."""
+    sym = (symbol or "").upper().strip()
+    return _FOCUS_SCANS.get(sym, {
+        "symbol": sym, "running": False, "started_at": None,
+        "finished_at": None, "result": None, "error": None,
+    })
 
 
 @router.get("/watchlist/focus")

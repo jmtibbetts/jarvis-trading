@@ -1080,22 +1080,27 @@ export const api = {
       min_score: number;
       note: string;
     }>(`/watchlist/focus`),
-  /** Run the focus track now — same pipeline the scheduler uses, restricted
-   *  to the coins to watch. Returns immediately; poll focusScanStatus. */
-  scanFocus: () =>
-    fetch(`/api/watchlist/focus/scan`, { method: "POST" }).then(async (r) => {
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `focus scan ${r.status}`);
-      return body as { status: string; symbols?: number; note?: string; started_at?: string };
-    }),
-  focusScanStatus: () =>
+  /** Interrogate ONE watched coin now — same pipeline the scheduler uses,
+   *  narrowed to this symbol. Returns immediately; poll focusScanStatus.
+   *  Per symbol rather than per list, so asking about one coin does not
+   *  spend an LLM call on every other one. */
+  scanFocus: (symbol: string) =>
+    fetch(`/api/watchlist/focus/${encodeURIComponent(symbol)}/scan`, { method: "POST" }).then(
+      async (r) => {
+        const body = await r.json();
+        if (!r.ok) throw new Error(body?.detail ?? `focus scan ${r.status}`);
+        return body as { status: string; symbol: string; note?: string; started_at?: string };
+      },
+    ),
+  focusScanStatus: (symbol: string) =>
     get<{
+      symbol: string;
       running: boolean;
       started_at: string | null;
       finished_at: string | null;
       error: string | null;
-      result: { new_signals: number; new_signal_ids: string[]; symbols_scanned: number } | null;
-    }>(`/watchlist/focus/scan`),
+      result: { symbol: string; new_signals: number; new_signal_ids: string[] } | null;
+    }>(`/watchlist/focus/${encodeURIComponent(symbol)}/scan`),
   setFocus: (symbol: string, focus: boolean, note?: string) =>
     fetch(`/api/watchlist/focus`, {
       method: "POST", headers: { "Content-Type": "application/json" },

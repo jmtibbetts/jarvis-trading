@@ -29,16 +29,21 @@
     focus = await api.focusList().catch(() => focus);
   }
 
-  // ── On-demand focus scan ────────────────────────────────────────────
+  // ── On-demand focus scan, per coin ──────────────────────────────────
   // The scheduled sweep decides when it looks; this answers "is anything
-  // ready right now?". It runs the SAME pipeline restricted to the focus
-  // list, so what it finds is graded by the rules that would trade it.
-  let scanBusy = $state(false);
-  let scanPct = $state(0);
-  let scanPhase = $state("");
-  let scanElapsed = $state("0.0");
-  let scanResult = $state<{ new_signals: number; symbols_scanned: number } | null>(null);
-  let scanError = $state<string | null>(null);
+  // ready right now?" for ONE coin. It runs the SAME pipeline narrowed to
+  // that symbol, so what it finds is graded by the rules that would trade
+  // it — and asking about one coin does not spend an LLM call on the rest.
+  //
+  // State is keyed by symbol so two coins can be interrogated at once and
+  // each row shows only its own progress.
+  type ScanState = {
+    busy: boolean; pct: number; phase: string; elapsed: string;
+    result: { new_signals: number } | null; error: string | null;
+  };
+  let scans = $state<Record<string, ScanState>>({});
+  const scanOf = (sym: string): ScanState =>
+    scans[sym] ?? { busy: false, pct: 0, phase: "", elapsed: "0.0", result: null, error: null };
 
   // The work the server actually does, with the elapsed time each reaches.
   // The bar holds short of full until the response lands — a focus sweep is
@@ -51,43 +56,47 @@
     [30_000, "scoring, level and cost gates"],
   ];
 
-  async function scanFocusNow() {
-    if (scanBusy) return;
+  function setScan(sym: string, patch: Partial<ScanState>) {
+    scans = { ...scans, [sym]: { ...scanOf(sym), ...patch } };
+  }
+
+  async function scanFocusNow(sym: string) {
+    if (scanOf(sym).busy) return;
     const { toastStore } = await import("../stores/toast.svelte");
-    scanBusy = true; scanResult = null; scanError = null; scanPct = 0;
+    setScan(sym, { busy: true, pct: 0, result: null, error: null });
     const t0 = Date.now();
     const tick = setInterval(() => {
       const ms = Date.now() - t0;
-      scanElapsed = (ms / 1000).toFixed(1);
-      scanPhase = ([...SCAN_PHASES].reverse().find(([at]) => ms >= at) ?? SCAN_PHASES[0])[1];
       const span = SCAN_PHASES[SCAN_PHASES.length - 1][0];
-      scanPct = ms < span ? (ms / span) * 70 : 90 - 20 * Math.exp(-(ms - span) / 25_000);
+      setScan(sym, {
+        elapsed: (ms / 1000).toFixed(1),
+        phase: ([...SCAN_PHASES].reverse().find(([at]) => ms >= at) ?? SCAN_PHASES[0])[1],
+        pct: ms < span ? (ms / span) * 70 : 90 - 20 * Math.exp(-(ms - span) / 25_000),
+      });
     }, 200);
     try {
-      const started = await api.scanFocus();
-      if (started.status === "already_running") toastStore.ok("A focus scan is already running");
-      // Poll until the server says it finished.
+      const started = await api.scanFocus(sym);
+      if (started.status === "already_running") toastStore.ok(`${sym}: a scan is already running`);
       for (;;) {
         await new Promise((r) => setTimeout(r, 1500));
-        const st = await api.focusScanStatus();
+        const st = await api.focusScanStatus(sym);
         if (st.running) continue;
         if (st.error) throw new Error(st.error);
-        scanResult = st.result;
+        setScan(sym, { result: st.result });
         break;
       }
-      scanPct = 100;
-      if (scanResult && scanResult.new_signals > 0) {
-        toastStore.ok(`Focus scan: ${scanResult.new_signals} new signal(s)`);
-      } else {
-        toastStore.ok("Focus scan: no setup cleared the focus score floor");
-      }
+      setScan(sym, { pct: 100 });
+      const found = scanOf(sym).result?.new_signals ?? 0;
+      toastStore.ok(found > 0
+        ? `${sym}: ${found} new signal${found === 1 ? "" : "s"}`
+        : `${sym}: no setup cleared the focus score floor`);
       await loadFocus();
     } catch (e) {
-      scanError = e instanceof Error ? e.message : String(e);
-      toastStore.err(`Focus scan failed: ${scanError}`);
+      setScan(sym, { error: e instanceof Error ? e.message : String(e) });
+      toastStore.err(`${sym} scan failed: ${scanOf(sym).error}`);
     } finally {
       clearInterval(tick);
-      scanBusy = false;
+      setScan(sym, { busy: false });
     }
   }
 
@@ -561,26 +570,6 @@
         </button>
       </form>
 
-      <div class="fc-scan">
-        <button
-          class="ask-btn scan-btn"
-          disabled={scanBusy || !focus?.focus.length}
-          title="Run the focus track now — cached multi-timeframe TA and indicators, each coin's accumulated profile, live threat/news/regime context, then the same scoring and cost gates the scheduled run uses"
-          onclick={scanFocusNow}
-        >{scanBusy ? "Scanning…" : "Scan for signals now"}</button>
-        {#if scanBusy}
-          <div class="scan-bar"><div class="scan-fill" style="width:{scanPct}%"></div></div>
-          <span class="scan-note dim">{scanPhase} · {scanElapsed}s</span>
-        {:else if scanResult}
-          <span class="scan-note {scanResult.new_signals > 0 ? 'pl-up' : 'dim'}">
-            {scanResult.new_signals > 0
-              ? `${scanResult.new_signals} new signal${scanResult.new_signals === 1 ? "" : "s"} from ${scanResult.symbols_scanned} coin${scanResult.symbols_scanned === 1 ? "" : "s"}`
-              : `nothing ready across ${scanResult.symbols_scanned} coin${scanResult.symbols_scanned === 1 ? "" : "s"} — silence is a real answer here`}
-          </span>
-        {:else if scanError}
-          <span class="scan-note pl-down">{scanError}</span>
-        {/if}
-      </div>
 
       {#if focus && focus.focus.length}
         {#each focus.focus as f (f.symbol)}
@@ -591,11 +580,35 @@
               {#if f.change_percent != null}
                 <span class="num {f.change_percent >= 0 ? 'pl-up' : 'pl-down'}">{f.change_percent >= 0 ? "+" : ""}{f.change_percent.toFixed(1)}%</span>
               {/if}
+              <button
+                class="fc-scan-btn"
+                disabled={scanOf(f.symbol).busy}
+                title="Scan {f.symbol} now — its cached multi-timeframe TA and indicators, its accumulated profile, live threat/news/regime context, then the same scoring and cost gates the scheduled run uses"
+                onclick={() => scanFocusNow(f.symbol)}
+              >{scanOf(f.symbol).busy ? "scanning…" : "scan"}</button>
               <button class="fc-more" onclick={() => (expandedFocus = expandedFocus === f.symbol ? null : f.symbol)}>
                 {expandedFocus === f.symbol ? "hide profile" : "profile"}
               </button>
               <button class="fc-rm" title="Stop watching" onclick={() => removeFocus(f.symbol)}>×</button>
             </div>
+            {#if scanOf(f.symbol).busy}
+              {@const sc = scanOf(f.symbol)}
+              <div class="fc-scan-row">
+                <div class="scan-bar"><div class="scan-fill" style="width:{sc.pct}%"></div></div>
+                <span class="scan-note dim">{sc.phase} · {sc.elapsed}s</span>
+              </div>
+            {:else if scanOf(f.symbol).result}
+              {@const n = scanOf(f.symbol).result?.new_signals ?? 0}
+              <div class="fc-scan-row">
+                <span class="scan-note {n > 0 ? 'pl-up' : 'dim'}">
+                  {n > 0
+                    ? `${n} new signal${n === 1 ? "" : "s"} — see Signals`
+                    : "nothing ready — silence is a real answer here"}
+                </span>
+              </div>
+            {:else if scanOf(f.symbol).error}
+              <div class="fc-scan-row"><span class="scan-note pl-down">{scanOf(f.symbol).error}</span></div>
+            {/if}
             {#if f.note}<div class="fc-note dim">{f.note}</div>{/if}
             {#if f.profile?.summary}
               <div class="fc-measured num">{f.profile.summary}</div>
@@ -878,6 +891,7 @@
   .fc-sym:hover {
     color: var(--accent);
   }
+  .fc-scan-btn,
   .fc-more,
   .fc-rm {
     background: none;
@@ -899,6 +913,31 @@
   .fc-rm:hover {
     border-color: var(--accent);
     color: var(--ink);
+  }
+  /* Scan is the one button on the row that DOES something rather than
+     revealing something, so it carries the accent while profile and remove
+     stay quiet. */
+  .fc-scan-btn {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .fc-scan-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .fc-scan-btn:disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+  /* Progress and result sit under the row they belong to, indented to the
+     symbol so a list of several coins stays readable while two scan. */
+  .fc-scan-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 3px 0 2px;
   }
   .fc-note {
     font-size: 10.5px;
@@ -931,18 +970,6 @@
     border-top: 1px solid var(--line);
     padding-top: 7px;
     line-height: 1.4;
-  }
-  /* On-demand focus scan. Sits directly under the add form so the panel
-     reads as one control surface: add what to watch, then ask it now. */
-  .fc-scan {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin: 2px 0 10px;
-  }
-  .scan-btn {
-    white-space: nowrap;
   }
   .scan-bar {
     flex: 1 1 120px;

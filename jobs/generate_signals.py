@@ -704,17 +704,22 @@ def watchlist_symbols(limit: int = 25) -> list:
     return picked
 
 
-def run(focus_only: bool = False):
-    """Full generation cycle, or just the FOCUS track.
+def run(focus_only: bool = False, only_symbols: list | None = None):
+    """Full generation cycle, or just the FOCUS track, or ONE focus coin.
 
     focus_only runs the identical pipeline — same cached TA and indicators,
     same accumulated focus profiles, same threat/news/regime context, same
     scoring, level clamping and cost gates — restricted to the "coins to
-    watch" set. It exists so the operator can ask "is anything ready RIGHT
-    NOW?" without waiting for the scheduled sweep, and without a second
-    code path that could drift from the real one and quietly grade setups
-    by different rules than the ones that trade them.
+    watch" set. only_symbols narrows it further to specific names, so the
+    operator can interrogate a single coin without spending an LLM call on
+    every other one.
+
+    It exists so the question "is anything ready RIGHT NOW?" can be asked
+    without waiting for the scheduled sweep, and without a second code path
+    that could drift from the real one and quietly grade setups by
+    different rules than the ones that trade them.
     """
+    only_set = {s.upper().strip() for s in (only_symbols or []) if s}
     global ta_profiles_global, asset_map_global
 
     logger.info("[Signals] Starting signal generation v7.0 (batch architecture)%s...",
@@ -798,6 +803,8 @@ def run(focus_only: bool = False):
         # just avoids computing indicators for several hundred symbols that
         # no batch will look at.
         _focus_syms = focus_symbols()
+        if only_set:
+            _focus_syms = [s for s in _focus_syms if s.upper() in only_set]
         all_syms_dedup = [s for s in all_syms_dedup if s in set(_focus_syms)] or _focus_syms
 
     logger.info(f"[Signals] Reading TA from cache for {len(all_syms_dedup)} symbols...")
@@ -878,6 +885,11 @@ def run(focus_only: bool = False):
 
     # Track FOCUS — "coins to watch": first, always, and held to a higher bar.
     focus = focus_symbols()
+    if only_set:
+        # Interrogating specific coins. Everything above stays shared, so a
+        # single-coin scan sees exactly the TA, indicators, profiles and
+        # context the scheduled run would give it.
+        focus = [s for s in focus if s.upper() in only_set]
     _focus_set = set(focus)
     for i, batch in enumerate(_chunk(focus, BATCH_SIZE)):
         focus_rule = (

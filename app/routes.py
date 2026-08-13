@@ -1343,6 +1343,20 @@ def focus_scan_status(symbol: str):
     })
 
 
+@router.get("/calibration")
+def calibration_summary():
+    """What the system has actually measured about its own accuracy.
+
+    Exists so "conf 83%" can be challenged. Raw model confidence was
+    INVERTED against outcomes — 90%+ signals won 28%, 60-69% signals won
+    44% — so every number the UI shows is now the measured rate for the
+    most specific bucket with enough evidence, and this endpoint is where
+    that evidence can be read directly.
+    """
+    from lib.calibration import summary
+    return summary()
+
+
 @router.get("/watchlist/focus")
 def list_focus():
     """The "coins to watch" list, with each symbol's accumulated profile."""

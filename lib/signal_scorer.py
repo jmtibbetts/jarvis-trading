@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 
 SIGNAL_VERSION = "v7.2"
@@ -60,8 +63,43 @@ def _data_quality(valid: list[tuple[str, dict]]) -> float:
 # weaker claim than a level the market itself drew.
 SELF_REFERENTIAL_RR_WEIGHT = 0.25
 
+# How much of a timeframe's measured edge enters the composite score. A
+# third: enough that 1H's +27.9 becomes a visible +9.3 and 4H's -10.7 a
+# real -3.6, without letting the horizon outweigh the evidence for the
+# individual setup.
+TIMEFRAME_EDGE_WEIGHT = 1.0 / 3.0
 
-def _calibrate_confidence(raw: float, historical: dict | None) -> tuple[float, dict]:
+
+def _calibrate_confidence(raw: float, historical: dict | None,
+                          timeframe: str | None = None,
+                          composite_score=None) -> tuple[float, dict]:
+    """Blend the model's stated confidence toward what actually happened.
+
+    Measured over 8,899 outcomes, raw confidence was INVERTED at the
+    extremes — 90%+ signals won 28% while 60-69% signals won 44% — so the
+    number the model reports carries essentially no information about
+    whether the trade works.
+
+    The previous implementation capped the evidence weight at 0.35, which
+    meant the model's guess kept 65% of the vote however much history
+    contradicted it: a 90% signal still reported ~68% against a measured
+    28%. Evidence now wins outright once there is enough of it, and the
+    bucket that answered travels with the number so "says who?" is always
+    answerable. See lib/calibration.py.
+    """
+    try:
+        from lib.calibration import calibrate as _cal
+        calibrated, why = _cal(raw, timeframe, composite_score, historical=historical)
+        return calibrated, {
+            "sample_size": why.get("sample"),
+            "empirical_win_rate": why.get("win_rate"),
+            "weight": why.get("weight"),
+            "bucket": why.get("bucket"),
+            "source": why.get("source"),
+        }
+    except Exception as e:
+        logger.debug(f"[Scorer] calibration unavailable ({e}) — falling back to per-symbol history")
+
     historical = historical or {}
     total = int(historical.get("total_trades") or 0)
     wins = int(historical.get("wins") or 0)
@@ -74,6 +112,7 @@ def _calibrate_confidence(raw: float, historical: dict | None) -> tuple[float, d
         "sample_size": total,
         "empirical_win_rate": round(empirical, 1),
         "weight": round(weight, 3),
+        "source": "per_symbol_fallback",
     }
 
 
@@ -105,7 +144,14 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
         now = now.replace(tzinfo=timezone.utc)
     valid = _valid_timeframes(ta_data)
     raw_confidence = max(0.0, min(100.0, float(signal.get("confidence") or 65)))
-    calibrated, calibration = _calibrate_confidence(raw_confidence, historical)
+    # Calibrated against outcomes for THIS timeframe, which is the strongest
+    # measured predictor: 1H wins 66.4% over 635 trades while 4H wins 27.8%
+    # over 3,222. Passing it was the difference between calibrating on
+    # something that predicts and calibrating on the symbol alone.
+    calibrated, calibration = _calibrate_confidence(
+        raw_confidence, historical, timeframe=signal.get("timeframe"),
+        composite_score=signal.get("composite_score"),
+    )
 
     direction = (signal.get("direction") or "Long").lower()
     is_short = direction.startswith("short")
@@ -220,6 +266,31 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
     composite = sum(values[key] * weights[key] for key in weights)
     composite += conflict_penalty + stale_penalty + earnings_penalty + failure_penalty
 
+    # ── Timeframe edge ──────────────────────────────────────────────────
+    # Nothing in scoring reflected that horizons perform differently, so a
+    # 4H signal claiming 85% outranked a 1H signal claiming 70% — while the
+    # measured ordering is the reverse:
+    #
+    #     1H   66.4% over   635 trades   edge +27.9
+    #     1D   42.2% over 4,597 trades   edge  +3.7
+    #     4H   27.8% over 3,222 trades   edge -10.7
+    #
+    # The generator picks 4H 60% of the time. This is what makes the 1H
+    # bucket visible next to it. Damped to a third of the raw edge so a
+    # timeframe cannot dominate the setup's own evidence, and applied only
+    # where the sample is large enough to mean something.
+    tf_edge_applied = 0.0
+    tf_edge_meta = None
+    try:
+        from lib.calibration import timeframe_edge
+        te = timeframe_edge(signal.get("timeframe"))
+        if te.get("win_rate") is not None:
+            tf_edge_applied = round(te["edge"] * TIMEFRAME_EDGE_WEIGHT, 2)
+            composite += tf_edge_applied
+            tf_edge_meta = te
+    except Exception as e:
+        logger.debug(f"[Scorer] timeframe edge unavailable: {e}")
+
     bar_times = [data.get("bar_time") for _, data in valid if data.get("bar_time")]
     market_data_at = max(bar_times) if bar_times else None
     setup_type = _setup_type(signal)
@@ -235,6 +306,8 @@ def score_signal(signal: dict, ta_data: dict, regime: dict,
             **{key: round(value, 1) for key, value in values.items()},
             "raw_llm_confidence": round(raw_confidence, 1),
             "calibration": calibration,
+            "timeframe_edge": tf_edge_applied,
+            "timeframe_evidence": tf_edge_meta,
             "conflict_ratio": round(conflict_ratio, 3),
             "conflict_penalty": conflict_penalty,
             "stale_penalty": stale_penalty,

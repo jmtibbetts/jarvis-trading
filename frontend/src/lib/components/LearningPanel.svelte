@@ -3,7 +3,10 @@
   import Pill from "./Pill.svelte";
   import {
     api,
+    type CalibrationSummary,
     type LearningFullSummary,
+    type ScoreVariantsReport,
+    type SelectionBiasReport,
     type TradeOutcome,
     type SignalAccuracy,
     type PatternMemory,
@@ -24,14 +27,21 @@
   let collapsedDays = $state<Set<string>>(new Set());
   let backfilling = $state(false);
 
+  let calibration = $state<CalibrationSummary | null>(null);
+  let variants = $state<ScoreVariantsReport | null>(null);
+  let selBias = $state<SelectionBiasReport | null>(null);
+
   async function loadAll() {
-    const [s, o, a, p, r, l] = await Promise.all([
+    const [s, o, a, p, r, l, cal, v, sb] = await Promise.all([
       api.learningSummary(mode).catch(() => null),
       api.learningOutcomes(mode, 300).catch(() => []),
       api.learningAccuracy().catch(() => []),
       api.learningPatterns().catch(() => []),
       api.learningRegimes().catch(() => []),
       api.learningLessons(30).catch(() => []),
+      api.calibration().catch(() => null),
+      api.scoreVariants().catch(() => null),
+      api.selectionBias().catch(() => null),
     ]);
     summary = s;
     outcomes = o;
@@ -39,6 +49,9 @@
     patterns = p;
     regimes = r;
     lessons = l;
+    calibration = cal;
+    variants = v;
+    selBias = sb;
   }
 
   $effect(() => {
@@ -110,6 +123,107 @@
   </div>
 
   <div class="learn-grid">
+    {#if calibration}
+      <div class="span-7">
+        <Panel title="Measured Calibration" meta="{calibration.sample.toLocaleString()} outcomes · rates are measured, not claimed">
+          <div class="cal-cols">
+            <div>
+              <div class="cal-h">By timeframe</div>
+              <table class="tbl">
+                <thead><tr><th>TF</th><th>Win%</th><th>n</th></tr></thead>
+                <tbody>
+                  {#each calibration.by_timeframe as r (r.timeframe)}
+                    <tr>
+                      <td class="sym">{r.timeframe}</td>
+                      <td class="num {r.win_rate >= 50 ? 'pl-up' : 'pl-down'}">{r.win_rate.toFixed(1)}%</td>
+                      <td class="num dim">{Math.round(r.sample).toLocaleString()}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div class="cal-h">By score band <span class="dim">(inverted = the bug)</span></div>
+              <table class="tbl">
+                <thead><tr><th>Band</th><th>Win%</th><th>n</th></tr></thead>
+                <tbody>
+                  {#each calibration.by_score as r (r.band)}
+                    <tr>
+                      <td class="sym">{r.band}</td>
+                      <td class="num {r.win_rate >= 50 ? 'pl-up' : 'pl-down'}">{r.win_rate.toFixed(1)}%</td>
+                      <td class="num dim">{Math.round(r.sample).toLocaleString()}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div class="cal-h">By strategy</div>
+              <table class="tbl">
+                <thead><tr><th>Strategy</th><th>Win%</th><th>n</th></tr></thead>
+                <tbody>
+                  {#each calibration.by_strategy as r (r.strategy)}
+                    <tr>
+                      <td class="sym">{r.strategy}</td>
+                      <td class="num {r.win_rate >= 50 ? 'pl-up' : 'pl-down'}">{r.win_rate.toFixed(1)}%</td>
+                      <td class="num dim">{Math.round(r.sample).toLocaleString()}</td>
+                    </tr>
+                  {:else}
+                    <tr><td colspan="3" class="empty">No classified outcomes yet</td></tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Panel>
+      </div>
+    {/if}
+
+    {#if variants}
+      <div class="span-5">
+        <Panel title="Shadow Score Variants" meta="gate {variants.gate} · {variants.schema}">
+          <table class="tbl">
+            <thead><tr><th>Variant</th><th>Selected</th><th>Win%</th><th>Avg P&amp;L</th><th>MFE</th><th>Stop-1st</th></tr></thead>
+            <tbody>
+              {#each Object.entries(variants.variants) as [name, v] (name)}
+                <tr>
+                  <td class="sym">{name === "A" ? "A · live" : name === "B" ? "B · inverted" : "C · calibrated"}</td>
+                  <td class="num">{v.n.toLocaleString()}</td>
+                  <td class="num">{v.win_rate != null ? v.win_rate.toFixed(1) + "%" : "—"}</td>
+                  <td class="num {(v.avg_pnl_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(v.avg_pnl_pct)}</td>
+                  <td class="num">{v.avg_mfe_r != null ? v.avg_mfe_r.toFixed(2) + "R" : "—"}</td>
+                  <td class="num">{v.stop_first_pct != null ? v.stop_first_pct.toFixed(0) + "%" : "—"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="cal-note">Retrospective over resolved outcomes. Shadow only — none of these gate real trades.</div>
+        </Panel>
+      </div>
+    {/if}
+
+    {#if selBias && selBias.by_verdict.length > 0}
+      <div class="span-5">
+        <Panel title="Selection Bias — Rejected vs Accepted" meta="counterfactually resolved candidates">
+          <table class="tbl">
+            <thead><tr><th>Verdict</th><th>n</th><th>Win%</th><th>Avg P&amp;L</th><th>MFE</th></tr></thead>
+            <tbody>
+              {#each selBias.by_verdict as r (r.verdict)}
+                <tr>
+                  <td class="sym">{r.verdict}</td>
+                  <td class="num">{r.n.toLocaleString()}</td>
+                  <td class="num">{r.win_rate?.toFixed(1)}%</td>
+                  <td class="num {(r.avg_pnl_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(r.avg_pnl_pct)}</td>
+                  <td class="num">{r.avg_mfe_r != null ? r.avg_mfe_r.toFixed(2) + "R" : "—"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="cal-note">If rejected beats persisted, the filters discard winners — the question this table exists to answer.</div>
+        </Panel>
+      </div>
+    {/if}
+
     <div class="span-5">
       <Panel title="Signal Accuracy by Symbol" meta="{accuracy.length} symbols">
         <div class="tbl-wrap">
@@ -383,6 +497,27 @@
     text-align: center;
     color: var(--ink-faint);
     font-size: 11.5px;
+  }
+
+  .cal-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px;
+  }
+  .cal-h {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-dim);
+    margin-bottom: 6px;
+  }
+  .cal-note {
+    margin-top: 8px;
+    font-size: 10.5px;
+    color: var(--ink-faint);
+  }
+  .dim {
+    color: var(--ink-faint);
   }
 
   .log-filters {

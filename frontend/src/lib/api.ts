@@ -800,6 +800,29 @@ export type ConfigCreate = {
   notes?: string;
 };
 
+export type CalibrationRow = { timeframe?: string; strategy?: string; band?: string; win_rate: number; sample: number };
+export type CalibrationSummary = {
+  overall_win_rate: number;
+  sample: number;
+  min_sample: number;
+  full_trust_sample: number;
+  by_timeframe: CalibrationRow[];
+  by_strategy: CalibrationRow[];
+  by_score: CalibrationRow[];
+};
+export type VariantStats = { n: number; win_rate?: number; avg_pnl_pct?: number; avg_mfe_r?: number; stop_first_pct?: number };
+export type ScoreVariantsReport = {
+  gate: number;
+  timeframe: string;
+  total_outcomes: number;
+  schema: string;
+  variants: Record<string, VariantStats>;
+};
+export type SelectionBiasReport = {
+  by_verdict: { verdict: string; n: number; win_rate: number; avg_pnl_pct: number; avg_mfe_r: number }[];
+  by_rejection_reason: { reason: string; n: number; win_rate: number; avg_pnl_pct: number }[];
+};
+
 export type LearningFullSummary = {
   total: number;
   wins: number;
@@ -1321,6 +1344,11 @@ export const api = {
   learningPatterns: () => get<PatternMemory[]>(`/learning/patterns`),
   learningRegimes: () => get<RegimeStat[]>(`/learning/regimes`),
   learningLessons: (limit = 50) => get<Lesson[]>(`/learning/lessons?limit=${limit}`),
+  // Measured evidence — what the system actually knows about its own accuracy.
+  calibration: () => get<CalibrationSummary>(`/calibration`),
+  scoreVariants: (gate = 55, timeframe?: string) =>
+    get<ScoreVariantsReport>(`/score-variants?gate=${gate}${timeframe ? `&timeframe=${timeframe}` : ""}`),
+  selectionBias: () => get<SelectionBiasReport>(`/candidates/selection-bias`),
   learningBackfillPaper: () => post<{ ok: boolean; imported?: number }>(`/learning/backfill-paper`),
 
   backtestRun: (body: { symbols: string[]; start_date: string; end_date: string; timeframes?: string[]; trade_mode?: string }) =>

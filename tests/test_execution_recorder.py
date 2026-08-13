@@ -184,3 +184,46 @@ class WiredIntoTheExecutionPathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrokerOrderIdIsCapturedTests(unittest.TestCase):
+    """The bug that silently disabled slippage measurement entirely.
+
+    submit_bracket_order RETURNS the broker order id. execute_signals.py
+    discarded the return value, so alpaca_order_id was only ever written by
+    the manual /signals/{id}/execute route. Measured on the live table: 643
+    signals marked Executed, 7 with an order id, 4 with a fill price.
+
+    _record_slippage gates on `if not sig.alpaca_order_id: return`, so every
+    automatically-executed fill was skipped — which is why slippage sat at
+    4 of 39,821 signals, and why the execution recorder would have collected
+    intents forever and never one fill.
+    """
+
+    def test_the_execution_job_keeps_the_return_value(self):
+        import inspect
+        from jobs import execute_signals
+        src = inspect.getsource(execute_signals.run)
+        self.assertNotIn("\n                submit_bracket_order(", src,
+                         "the return value of submit_bracket_order is discarded")
+        self.assertIn("= submit_bracket_order(", src)
+
+    def test_it_writes_the_id_onto_the_signal(self):
+        import inspect
+        from jobs import execute_signals
+        src = inspect.getsource(execute_signals.run)
+        self.assertIn("rec.alpaca_order_id", src)
+
+    def test_submit_bracket_order_actually_returns_one(self):
+        """If the client stopped returning an id, the capture above would
+        silently write None and we would be back where we started."""
+        import inspect
+        from lib import alpaca_client
+        src = inspect.getsource(alpaca_client.submit_bracket_order)
+        self.assertIn("'id'", src)
+
+    def test_the_snapshot_is_tagged_with_the_broker_id(self):
+        import inspect
+        from jobs import execute_signals
+        src = inspect.getsource(execute_signals.run)
+        self.assertIn("broker_order_id = broker_id", src.replace("es.", ""))

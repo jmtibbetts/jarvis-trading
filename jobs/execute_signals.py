@@ -543,14 +543,41 @@ def run():
                 except Exception as e:
                     logger.debug(f"[Execute] execution snapshot skipped for {sym}: {e}")
 
-                submit_bracket_order(
+                order = submit_bracket_order(
                     symbol=sym, qty=qty, entry_price=entry,
                     take_profit=target, stop_loss=stop
                 )
+                broker_id = str((order or {}).get("id") or "") or None
+
                 rec = db.query(TradingSignal).filter(TradingSignal.id == sig["id"]).first()
                 if rec:
                     rec.status = "Executed"
                     rec.updated_date = now_utc.isoformat()
+                    # The return value was previously discarded, so
+                    # alpaca_order_id was never set by this path — only the
+                    # manual /signals/{id}/execute route wrote it. Measured:
+                    # 643 signals marked Executed, 7 with an order id.
+                    #
+                    # That is not cosmetic. _record_slippage gates on
+                    # `if not sig.alpaca_order_id: return`, so every
+                    # automatically-executed fill was skipped — which is why
+                    # 4 of 39,821 signals carry a measured slippage, and why
+                    # the execution recorder would have collected intents
+                    # and never a single fill.
+                    if broker_id:
+                        rec.alpaca_order_id = broker_id
+
+                # Pair the broker id onto the pre-submit snapshot so the
+                # fill can later be joined to the book state that preceded it.
+                if exec_row and broker_id:
+                    try:
+                        from app.database import ExecutionSample
+                        es = db.query(ExecutionSample).filter(
+                            ExecutionSample.id == exec_row).first()
+                        if es is not None:
+                            es.broker_order_id = broker_id
+                    except Exception as e:
+                        logger.debug(f"[Execute] could not tag execution sample: {e}")
                 held.add(sym)
                 budget -= qty * entry
                 executed += 1

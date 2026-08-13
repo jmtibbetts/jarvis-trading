@@ -841,6 +841,26 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 logger.warning(f"[Paper] Insufficient cash — have ${portfolio.cash:.2f}, need ${margin:.2f}")
                 return {"error": f"Insufficient paper cash (${portfolio.cash:.0f}) for margin ${margin:.0f}. Use /api/paper/reset to restore $100k."}
 
+            # The catastrophic backstop is written onto the position as a
+            # PRICE the moment it opens, so it is enforced by the ordinary
+            # stop machinery rather than discovered by a 15-minute poll. The
+            # old dollar cap was only ever a comparison made when the job
+            # happened to look, which is why a "$15 limit" exited at -$55 on
+            # average and -$379 at worst.
+            #
+            # It only ever WIDENS nothing: the signal's own stop governs
+            # whenever it is tighter, and this catches the tail.
+            try:
+                from jobs.paper_trading import catastrophic_stop_price
+                hard = catastrophic_stop_price(entry, qty, margin, side == -1)
+                if hard and hard > 0:
+                    if side == -1:
+                        stop = min(stop, hard) if stop and stop > 0 else hard
+                    else:
+                        stop = max(stop, hard) if stop and stop > 0 else hard
+            except Exception as e:
+                logger.debug(f"[Paper] catastrophic stop unavailable for {sym}: {e}")
+
             from app.database import new_id
             pos = PaperPosition(
                 id            = new_id(),

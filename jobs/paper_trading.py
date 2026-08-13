@@ -51,7 +51,56 @@ def _env_float(name: str, default: float, min_value: float, max_value: float) ->
     return max(min_value, min(max_value, value))
 
 
+# ── Risk: a backstop, not a working stop ────────────────────────────────────
+# MAX_LOSS_PER_TRADE_USD was a FIXED $15 applied to positions carrying
+# $7,000-$12,000 of notional, i.e. a trigger at a 0.12-0.21% price move —
+# well inside ordinary crypto noise (ATR 2-5%). Measured over 218 closed
+# trades it was not a risk limit but a churn engine:
+#
+#   exit path              n   win%      net P&L     avg
+#   dollar cap ($15)     103     4%    -5,687.58  -55.22
+#   signal's own stop     67    27%    -3,602.87  -53.77
+#   AI EXIT (deep verify) 28    21%      -117.62   -4.20
+#   target / scale-out    17   100%    +4,097.30    +241
+#
+# Two lessons drove this rewrite. The dollar cap and the ATR stop bled at
+# the SAME rate, so widening one and keeping the other changes nothing —
+# the mechanical stops were the problem, not their calibration. And every
+# trade that reached its target won; only 17 of 218 ever got there because
+# the stops killed the rest first.
+#
+# So the dollar figure becomes a CATASTROPHIC BACKSTOP scaled to the margin
+# actually committed, the deep-verify exit becomes the primary decision, and
+# the signal's own levels do the day-to-day work.
+CATASTROPHIC_LOSS_PCT_OF_MARGIN = _env_float("CATASTROPHIC_LOSS_PCT_OF_MARGIN", 35.0, 10.0, 90.0)
+
+# Retained for the sizing helpers that still reason in dollars, but no longer
+# used as an exit trigger.
 MAX_LOSS_PER_TRADE_USD = _env_float("MAX_LOSS_PER_TRADE_USD", 15.0, 10.0, 20.0)
+
+
+def catastrophic_loss_usd(margin: float) -> float:
+    """The most a position may lose before it is closed regardless of what
+    any model thinks. Scaled to the capital committed, because a fixed
+    dollar figure cannot serve a $500 position and a $12,000 one at once."""
+    return abs(float(margin or 0)) * (CATASTROPHIC_LOSS_PCT_OF_MARGIN / 100.0)
+
+
+def catastrophic_stop_price(entry: float, qty: float, margin: float,
+                            is_short: bool) -> float | None:
+    """The PRICE at which that loss is reached.
+
+    This is the half that was missing. The cap was only ever a comparison
+    made when the 15-minute job happened to look, so a "$15 limit" exited at
+    -$55 on average and -$379 at worst — 25x its own stated bound. Expressed
+    as a price and written onto the position at open, it is enforced by the
+    same stop machinery as every other level, at the level rather than
+    whenever the poll next runs."""
+    q = abs(float(qty or 0))
+    if q <= 0 or entry <= 0:
+        return None
+    move = catastrophic_loss_usd(margin) / q
+    return entry + move if is_short else entry - move
 PROFIT_LOCK_USD = _env_float("PROFIT_LOCK_USD", 10.0, 0.0, 50.0)
 MIN_DYNAMIC_TRAIL_PCT = _env_float("MIN_DYNAMIC_TRAIL_PCT", 0.75, 0.1, 5.0)
 TARGET_REWARD_MULTIPLIER = _env_float("TARGET_REWARD_MULTIPLIER", 2.8, 1.2, 6.0)
@@ -269,13 +318,25 @@ def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data:
     entry = float(pos.get("entry_price") or 0)
     if qty <= 0 or entry <= 0 or current_price <= 0:
         return {"ok": False}
-    if pl_dollar <= -MAX_LOSS_PER_TRADE_USD:
-        return {"ok": True, "action": "EXIT", "reason": f"Max paper loss ${MAX_LOSS_PER_TRADE_USD:.2f} breached"}
+
+    # The catastrophic backstop. It should almost never be what closes a
+    # trade — the position carries this same level as a price-enforced stop
+    # from the moment it opens, so reaching it here means the price gapped
+    # past the level between polls.
+    margin = float(pos.get("margin_used") or 0) or (qty * entry / max(1.0, leverage))
+    hard_loss = catastrophic_loss_usd(margin)
+    if pl_dollar <= -hard_loss:
+        return {"ok": True, "action": "EXIT",
+                "reason": (f"catastrophic backstop — lost ${abs(pl_dollar):,.2f} of "
+                           f"${margin:,.2f} margin ({CATASTROPHIC_LOSS_PCT_OF_MARGIN:.0f}% cap)")}
 
     primary = _primary_ta(ta_data)
     atr = float(((primary.get("atr") or {}).get("value")) or current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
     trail = max(atr * 1.15, current_price * MIN_DYNAMIC_TRAIL_PCT / 100.0)
-    risk_per_unit = MAX_LOSS_PER_TRADE_USD / (qty * leverage)
+    # The widest the stop may sit from entry, in price. Previously this was
+    # $15 spread over the leveraged quantity, which pinned every stop to a
+    # ~0.15% move and guaranteed the noise-triggered exits above.
+    risk_per_unit = hard_loss / qty
     lock_per_unit = PROFIT_LOCK_USD / (qty * leverage) if PROFIT_LOCK_USD else 0
     direction = str(pos.get("direction") or "Long").lower()
     is_short = "short" in direction
@@ -426,9 +487,28 @@ def _manage_open_positions(prices: dict) -> dict:
                 r["adjusted"] += 1
                 logger.info(f"[PaperTrading] Risk guard {sym}: stop=${new_stop:.6g} target=${new_target:.6g}")
 
-        # ── Deterministic hard rules (same as real trading) ────────────────
+        # ── Deterministic hard rules ───────────────────────────────────────
+        # Split by direction, because the two halves earned opposite verdicts
+        # over 218 closed trades:
+        #
+        #   target / take-profit closes   17 trades, 100% win, +$4,097
+        #   mechanical loss cuts          170 trades,  ~5% win, -$9,290
+        #
+        # So a profit close still fires immediately — every trade that
+        # reached its target won, and there is nothing to deliberate about.
+        # A LOSS cut now waits for the deep verify below, which is the only
+        # exit path in the book that is not a disaster (-$4.20 average
+        # against -$55 for the mechanical stops).
+        #
+        # Caveat kept deliberately in view: that comparison is confounded.
+        # The LLM only ever judged positions the mechanical stops had not
+        # already killed, so it was working a different population. The
+        # change is a bet worth measuring, not a proven win — which is why
+        # the catastrophic backstop above still fires first and
+        # unconditionally.
         tier = _tier(plpc, is_c)
-        if tier and tier["action"] == "close":
+        tier_is_loss_cut = bool(tier and tier["action"] == "close" and plpc < 0)
+        if tier and tier["action"] == "close" and not tier_is_loss_cut:
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
             close_paper_position(pos["id"], current_price, reason=tier["label"])
@@ -453,6 +533,29 @@ def _manage_open_positions(prices: dict) -> dict:
             ) or "No symbol-specific news"
 
         tier_label = tier["label"] if tier else "No tier action"
+        _margin = float(pos.get("margin_used") or 0) or (abs(float(pos.get("qty") or 0)) * entry / max(1.0, float(pos.get("leverage") or 1)))
+        _hard = catastrophic_loss_usd(_margin)
+        _room = _hard - abs(min(0.0, pl_dollar))
+        # What is riding on this call, stated plainly. The model is now the
+        # deciding vote on whether a losing position is cut, so it needs to
+        # know that — and how much capital stands behind the trade, since a
+        # price move means nothing without the margin it is measured against.
+        risk_ctx = (
+            f"  Margin at risk:  ${_margin:,.2f}\n"
+            f"  Backstop:        position force-closes at ${_hard:,.2f} of loss "
+            f"({CATASTROPHIC_LOSS_PCT_OF_MARGIN:.0f}% of margin); "
+            f"${max(0.0, _room):,.2f} of room left\n"
+        )
+        authority_ctx = (
+            "YOUR CALL DECIDES THIS ONE. The deterministic rule above wants to cut "
+            "this loss, and it has been deferred to you. HOLD keeps the position "
+            "open; EXIT closes it now. Mechanical loss-cutting has performed badly "
+            "on this book (about a 5% win rate), so a setup that is still "
+            "structurally intact is worth holding — but do not hold a broken one "
+            "just because the stop was noisy."
+            if tier_is_loss_cut else
+            "No deterministic rule is pending; judge the setup on its merits."
+        )
 
         prompt = f"""You are managing an open PAPER trade position. Evaluate and decide what to do RIGHT NOW.
 
@@ -464,7 +567,9 @@ POSITION: {sym} ({'Crypto 24/7' if is_c else 'Equity'})
   Stop Loss:      ${pos['stop_loss']:.4f}
   Take Profit:    ${pos['target_price']:.4f}
   Leverage:       {pos['leverage']}x
-  Deterministic tier: {tier_label}
+{risk_ctx}  Deterministic tier: {tier_label}
+
+{authority_ctx}
 
 TECHNICAL ANALYSIS:
 {ta_block}
@@ -499,11 +604,24 @@ Respond ONLY with valid JSON (no markdown):
             action = str(result.get("action", "HOLD")).upper()
             reasoning = result.get("reasoning", "")
             new_stop_pct = result.get("new_stop_pct")
+            llm_ok = True
         except Exception as e:
-            logger.warning(f"[PaperTrading] LLM eval failed for {sym}: {e} — defaulting to HOLD")
+            logger.warning(f"[PaperTrading] LLM eval failed for {sym}: {e} — falling back to the deterministic tier")
             action = "HOLD"
             reasoning = "LLM unavailable"
             new_stop_pct = None
+            llm_ok = False
+
+        # The loss cut deferred above is the FALLBACK, not a rule that was
+        # deleted. If the deep verify could not be reached, the deterministic
+        # tier decides exactly as it used to — a losing position must never
+        # be held open merely because the model was unreachable.
+        if tier_is_loss_cut and not llm_ok:
+            logger.info(f"[PaperTrading] 🔒 Tier loss cut (LLM unavailable): {sym} {plpc:+.2f}% → {tier['label']}")
+            log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
+            close_paper_position(pos["id"], current_price, reason=tier["label"])
+            r["closed"] += 1
+            return r
 
         if action == "EXIT":
             logger.info(f"[PaperTrading] 🤖 LLM EXIT {sym} {plpc:+.2f}% | {reasoning}")
@@ -512,16 +630,32 @@ Respond ONLY with valid JSON (no markdown):
             r["closed"] += 1
         elif action == "TIGHTEN_STOP" and new_stop_pct:
             try:
-                new_stop = round(current_price * (1.0 - float(new_stop_pct) / 100.0), 6)
-                # Only tighten (raise stop), never loosen
-                if new_stop > pos["stop_loss"]:
+                # Direction-aware. A short's stop sits ABOVE the price, so
+                # tightening moves it DOWN — the old long-only arithmetic
+                # (current * (1 - pct), keep only if higher) could never
+                # satisfy that test on a short, so every TIGHTEN_STOP on a
+                # short was silently discarded. Most of this book is short.
+                pct = abs(float(new_stop_pct)) / 100.0
+                old_stop = float(pos["stop_loss"] or 0)
+                if side == -1:
+                    new_stop = round(current_price * (1.0 + pct), 6)
+                    tighter = old_stop <= 0 or new_stop < old_stop
+                    where = "above"
+                else:
+                    new_stop = round(current_price * (1.0 - pct), 6)
+                    tighter = new_stop > old_stop
+                    where = "below"
+                if tighter:
                     with get_db() as db:
                         p = db.query(PaperPosition).filter(PaperPosition.id == pos["id"]).first()
                         if p:
                             p.stop_loss = new_stop
-                    logger.info(f"[PaperTrading] 🤖 TIGHTEN_STOP {sym} stop → ${new_stop:.4f} ({new_stop_pct}% below ${current_price:.4f}) | {reasoning}")
+                    pos["stop_loss"] = new_stop
+                    logger.info(f"[PaperTrading] 🤖 TIGHTEN_STOP {sym} stop → ${new_stop:.6g} "
+                                f"({new_stop_pct}% {where} ${current_price:.6g}) | {reasoning}")
                 else:
-                    logger.debug(f"[PaperTrading] TIGHTEN_STOP for {sym} ignored — new stop ${new_stop:.4f} not above current ${pos['stop_loss']:.4f}")
+                    logger.debug(f"[PaperTrading] TIGHTEN_STOP for {sym} ignored — ${new_stop:.6g} "
+                                 f"is not tighter than ${old_stop:.6g}")
             except Exception as e:
                 logger.warning(f"[PaperTrading] TIGHTEN_STOP update failed for {sym}: {e}")
             r["held"] += 1

@@ -3094,6 +3094,28 @@ def llm_health():
     except Exception as e:
         return {"ok":False,"error":str(e)}
 
+@router.get("/predictive/status")
+def predictive_status():
+    """Inference devices, loaded models, latency, and the placement policy.
+
+    Named `predictive`, not `npu`: measured on this host the CPU runs these
+    model sizes ~20x faster than the NPU, so the layer is device-independent
+    and the NPU is used where its real advantage lies — sustained background
+    work that costs the CPU nothing.
+    """
+    try:
+        from lib.predictive import get_runtime
+        from lib.predictive.schemas import (CURRENT_SCHEMA, dimension,
+                                            schema_hash)
+        st = get_runtime().status()
+        st["schema"] = {"version": CURRENT_SCHEMA, "features": dimension(),
+                        "hash": schema_hash()}
+        return st
+    except Exception as e:
+        # openvino absent is normal — the trading path must run without it.
+        return {"available": False, "reason": str(e), "devices": [], "models": {}}
+
+
 @router.get("/expectancy")
 def expectancy_summary():
     """What each bucket of setups is actually worth, in R.

@@ -1080,6 +1080,22 @@ export const api = {
       min_score: number;
       note: string;
     }>(`/watchlist/focus`),
+  /** Run the focus track now — same pipeline the scheduler uses, restricted
+   *  to the coins to watch. Returns immediately; poll focusScanStatus. */
+  scanFocus: () =>
+    fetch(`/api/watchlist/focus/scan`, { method: "POST" }).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail ?? `focus scan ${r.status}`);
+      return body as { status: string; symbols?: number; note?: string; started_at?: string };
+    }),
+  focusScanStatus: () =>
+    get<{
+      running: boolean;
+      started_at: string | null;
+      finished_at: string | null;
+      error: string | null;
+      result: { new_signals: number; new_signal_ids: string[]; symbols_scanned: number } | null;
+    }>(`/watchlist/focus/scan`),
   setFocus: (symbol: string, focus: boolean, note?: string) =>
     fetch(`/api/watchlist/focus`, {
       method: "POST", headers: { "Content-Type": "application/json" },

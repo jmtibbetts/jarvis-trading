@@ -704,10 +704,21 @@ def watchlist_symbols(limit: int = 25) -> list:
     return picked
 
 
-def run():
+def run(focus_only: bool = False):
+    """Full generation cycle, or just the FOCUS track.
+
+    focus_only runs the identical pipeline — same cached TA and indicators,
+    same accumulated focus profiles, same threat/news/regime context, same
+    scoring, level clamping and cost gates — restricted to the "coins to
+    watch" set. It exists so the operator can ask "is anything ready RIGHT
+    NOW?" without waiting for the scheduled sweep, and without a second
+    code path that could drift from the real one and quietly grade setups
+    by different rules than the ones that trade them.
+    """
     global ta_profiles_global, asset_map_global
 
-    logger.info("[Signals] Starting signal generation v7.0 (batch architecture)...")
+    logger.info("[Signals] Starting signal generation v7.0 (batch architecture)%s...",
+                " — FOCUS ONLY" if focus_only else "")
     preference = get_user_preference()
     trade_mode = preference["trade_mode"]
     horizon_rule = {
@@ -780,6 +791,14 @@ def run():
     all_syms = ALL_SYMBOLS + opp_syms + TRACK_E_PAPER
     all_syms_dedup = list(dict.fromkeys(all_syms))
     logger.info(f"[Signals] {len(opp_syms)} opportunistic tickers: {opp_syms}")
+
+    if focus_only:
+        # Only the focus names are analysed, so only their TA is read. The
+        # SOURCE is unchanged — the same cache the scheduled run uses — this
+        # just avoids computing indicators for several hundred symbols that
+        # no batch will look at.
+        _focus_syms = focus_symbols()
+        all_syms_dedup = [s for s in all_syms_dedup if s in set(_focus_syms)] or _focus_syms
 
     logger.info(f"[Signals] Reading TA from cache for {len(all_syms_dedup)} symbols...")
     bars = _read_ta_from_cache(all_syms_dedup)
@@ -994,7 +1013,12 @@ def run():
             threat_ctx, (futures_news_ctx or news_ctx) + fx_ctx, regime, "",
             futures_rule, FUTURES_PAPER_SCHEMA, futures_profiles=futures_ta_profiles
         )
-        all_batches.append((f"F{i}", batch, prompt, True))
+        # "FX" — the futures/forex track. It used F{i}, colliding with the
+        # FOCUS track's ids, and the guard meant to separate them tested for
+        # a three-letter prefix this line never emitted, so it matched
+        # nothing. Harmless while the prefix only affected ordering; wrong
+        # the moment it SELECTS batches, which the on-demand focus scan does.
+        all_batches.append((f"FX{i}", batch, prompt, True))
 
     # Track D — opportunistic
     if opp_syms:
@@ -1099,10 +1123,20 @@ def run():
     # deadline on a slow model — trading one blind spot for another.
     # Interleaving gives the watchlist the FIRST slot of every pair while
     # guaranteeing discovery batches run early enough to matter.
-    _focus = [b for b in all_batches if b[0].startswith("F") and not b[0].startswith("FUT")]
+    # Exactly the focus track. The old test excluded "FUT", a prefix that was
+    # never emitted, while the futures/forex track actually used "F{i}" and
+    # so was silently counted as focus.
+    _focus = [b for b in all_batches if re.fullmatch(r"F\d+", b[0])]
     _wl = [b for b in all_batches if b[0].startswith("W")]
     _rest = [b for b in all_batches if b not in _focus and not b[0].startswith("W")]
-    if _wl and _rest:
+    if focus_only:
+        # Everything above this point was shared, which is the point: the
+        # on-demand scan sees exactly the TA, indicators, profiles and
+        # context the scheduled run does. Only the batch list narrows.
+        all_batches = _focus
+        logger.info(f"[Signals] FOCUS-ONLY scan: {len(_focus)} batch(es), "
+                    f"{sum(len(b[1]) for b in _focus)} symbol(s)")
+    elif _wl and _rest:
         interleaved = []
         wi = ri = 0
         while wi < len(_wl) or ri < len(_rest):

@@ -2,7 +2,7 @@
 FastAPI routes v6.7 — all /api/* endpoints.
 Added: /regime, /portfolio/equity, /market/full, /positions/close, /signals/clear/expired
 """
-import json, logging, re, uuid
+import json, logging, re, threading, uuid
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from fastapi import APIRouter, HTTPException, Request
@@ -1204,6 +1204,82 @@ class FocusRequest(BaseModel):
     symbol: str
     focus: bool = True
     note: Optional[str] = None
+
+
+_FOCUS_SCAN = {"running": False, "started_at": None, "finished_at": None,
+               "result": None, "error": None}
+_FOCUS_SCAN_LOCK = threading.Lock()
+
+
+@router.post("/watchlist/focus/scan")
+def scan_focus():
+    """Run the focus track NOW and report what it found.
+
+    This is the same pipeline the scheduler runs, restricted to the focus
+    symbols: the cached multi-timeframe TA and indicators, each symbol's
+    accumulated behavioural profile, live threat/news/regime context, then
+    scoring, level provenance, ATR and cost gates. Deliberately NOT a
+    second implementation — a parallel scanner would eventually grade
+    setups by different rules than the ones that trade them.
+
+    Runs in a thread because a focus sweep is several LLM calls. Poll
+    GET /watchlist/focus/scan for the result.
+
+    Silence is a real answer here: focus setups must clear FOCUS_MIN_SCORE,
+    so "nothing ready" is the expected output most of the time.
+    """
+    from app.database import MarketAsset
+    with get_db() as db:
+        n = db.query(MarketAsset).filter(MarketAsset.is_focus == True).count()  # noqa: E712
+    if not n:
+        raise HTTPException(400, "No coins on the focus list — add one first.")
+
+    with _FOCUS_SCAN_LOCK:
+        if _FOCUS_SCAN["running"]:
+            return {"status": "already_running", "started_at": _FOCUS_SCAN["started_at"]}
+        _FOCUS_SCAN.update({"running": True, "started_at": datetime.now(timezone.utc).isoformat(),
+                            "finished_at": None, "result": None, "error": None})
+
+    def _run():
+        try:
+            from jobs.generate_signals import run as gen_run
+            before = _focus_signal_ids()
+            gen_run(focus_only=True)
+            after = _focus_signal_ids()
+            _FOCUS_SCAN["result"] = {"new_signal_ids": sorted(after - before),
+                                     "new_signals": len(after - before),
+                                     "symbols_scanned": n}
+        except Exception as e:
+            logger.error(f"[Focus] scan failed: {e}", exc_info=True)
+            _FOCUS_SCAN["error"] = str(e)
+        finally:
+            _FOCUS_SCAN["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _FOCUS_SCAN["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "symbols": n,
+            "note": ("Focus setups must clear the focus score floor. "
+                     "No new signals is a valid result, not a failure.")}
+
+
+def _focus_signal_ids() -> set:
+    """Live signal ids for symbols currently on the focus list."""
+    from app.database import MarketAsset
+    with get_db() as db:
+        syms = [r.symbol for r in
+                db.query(MarketAsset).filter(MarketAsset.is_focus == True).all()]  # noqa: E712
+        if not syms:
+            return set()
+        return {s.id for s in db.query(TradingSignal).filter(
+            TradingSignal.asset_symbol.in_(syms),
+            TradingSignal.status.in_(("Active", "PendingApproval")),
+        ).all()}
+
+
+@router.get("/watchlist/focus/scan")
+def focus_scan_status():
+    """Where the last on-demand focus scan got to."""
+    return dict(_FOCUS_SCAN)
 
 
 @router.get("/watchlist/focus")

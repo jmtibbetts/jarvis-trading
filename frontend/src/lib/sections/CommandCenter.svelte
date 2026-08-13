@@ -29,6 +29,68 @@
     focus = await api.focusList().catch(() => focus);
   }
 
+  // ── On-demand focus scan ────────────────────────────────────────────
+  // The scheduled sweep decides when it looks; this answers "is anything
+  // ready right now?". It runs the SAME pipeline restricted to the focus
+  // list, so what it finds is graded by the rules that would trade it.
+  let scanBusy = $state(false);
+  let scanPct = $state(0);
+  let scanPhase = $state("");
+  let scanElapsed = $state("0.0");
+  let scanResult = $state<{ new_signals: number; symbols_scanned: number } | null>(null);
+  let scanError = $state<string | null>(null);
+
+  // The work the server actually does, with the elapsed time each reaches.
+  // The bar holds short of full until the response lands — a focus sweep is
+  // several LLM calls and the client cannot know when they finish.
+  const SCAN_PHASES: [number, string][] = [
+    [0, "reading cached TA and indicators"],
+    [3_000, "loading focus profiles"],
+    [7_000, "gathering threat, news and regime context"],
+    [12_000, "asking the model for setups"],
+    [30_000, "scoring, level and cost gates"],
+  ];
+
+  async function scanFocusNow() {
+    if (scanBusy) return;
+    const { toastStore } = await import("../stores/toast.svelte");
+    scanBusy = true; scanResult = null; scanError = null; scanPct = 0;
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      const ms = Date.now() - t0;
+      scanElapsed = (ms / 1000).toFixed(1);
+      scanPhase = ([...SCAN_PHASES].reverse().find(([at]) => ms >= at) ?? SCAN_PHASES[0])[1];
+      const span = SCAN_PHASES[SCAN_PHASES.length - 1][0];
+      scanPct = ms < span ? (ms / span) * 70 : 90 - 20 * Math.exp(-(ms - span) / 25_000);
+    }, 200);
+    try {
+      const started = await api.scanFocus();
+      if (started.status === "already_running") toastStore.ok("A focus scan is already running");
+      // Poll until the server says it finished.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const st = await api.focusScanStatus();
+        if (st.running) continue;
+        if (st.error) throw new Error(st.error);
+        scanResult = st.result;
+        break;
+      }
+      scanPct = 100;
+      if (scanResult && scanResult.new_signals > 0) {
+        toastStore.ok(`Focus scan: ${scanResult.new_signals} new signal(s)`);
+      } else {
+        toastStore.ok("Focus scan: no setup cleared the focus score floor");
+      }
+      await loadFocus();
+    } catch (e) {
+      scanError = e instanceof Error ? e.message : String(e);
+      toastStore.err(`Focus scan failed: ${scanError}`);
+    } finally {
+      clearInterval(tick);
+      scanBusy = false;
+    }
+  }
+
   async function addFocus() {
     const sym = focusSym.trim().toUpperCase();
     if (!sym || focusBusy) return;
@@ -499,6 +561,27 @@
         </button>
       </form>
 
+      <div class="fc-scan">
+        <button
+          class="ask-btn scan-btn"
+          disabled={scanBusy || !focus?.focus.length}
+          title="Run the focus track now — cached multi-timeframe TA and indicators, each coin's accumulated profile, live threat/news/regime context, then the same scoring and cost gates the scheduled run uses"
+          onclick={scanFocusNow}
+        >{scanBusy ? "Scanning…" : "Scan for signals now"}</button>
+        {#if scanBusy}
+          <div class="scan-bar"><div class="scan-fill" style="width:{scanPct}%"></div></div>
+          <span class="scan-note dim">{scanPhase} · {scanElapsed}s</span>
+        {:else if scanResult}
+          <span class="scan-note {scanResult.new_signals > 0 ? 'pl-up' : 'dim'}">
+            {scanResult.new_signals > 0
+              ? `${scanResult.new_signals} new signal${scanResult.new_signals === 1 ? "" : "s"} from ${scanResult.symbols_scanned} coin${scanResult.symbols_scanned === 1 ? "" : "s"}`
+              : `nothing ready across ${scanResult.symbols_scanned} coin${scanResult.symbols_scanned === 1 ? "" : "s"} — silence is a real answer here`}
+          </span>
+        {:else if scanError}
+          <span class="scan-note pl-down">{scanError}</span>
+        {/if}
+      </div>
+
       {#if focus && focus.focus.length}
         {#each focus.focus as f (f.symbol)}
           <div class="fc-row">
@@ -848,6 +931,42 @@
     border-top: 1px solid var(--line);
     padding-top: 7px;
     line-height: 1.4;
+  }
+  /* On-demand focus scan. Sits directly under the add form so the panel
+     reads as one control surface: add what to watch, then ask it now. */
+  .fc-scan {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 10px;
+  }
+  .scan-btn {
+    white-space: nowrap;
+  }
+  .scan-bar {
+    flex: 1 1 120px;
+    height: 3px;
+    min-width: 80px;
+    border-radius: 2px;
+    background: var(--stroke-faint, rgba(127, 127, 127, 0.22));
+    overflow: hidden;
+  }
+  .scan-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent, #4c8dff), var(--warm, #e0a33e));
+    transition: width 200ms linear;
+  }
+  .scan-note {
+    font-size: 10px;
+    line-height: 1.3;
+    flex: 1 1 100%;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .scan-fill {
+      transition: none;
+    }
   }
   .wl-add {
     display: flex;

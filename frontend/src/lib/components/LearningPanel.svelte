@@ -136,14 +136,32 @@
       <Panel title="Gate Experiment — legacy vs v8"
              meta="{gateExp.overlap.candidates_with_both_verdicts.toLocaleString()} candidates carry both verdicts · judged by the same resolver">
         <div class="gate-grid num">
-          <div class="gate-col-h"></div><div class="gate-col-h">selected</div><div class="gate-col-h">resolved</div><div class="gate-col-h">win %</div><div class="gate-col-h">avg P&L %</div><div class="gate-col-h">avg MFE R</div>
+          <div class="gate-col-h"></div><div class="gate-col-h" title="raw picks (distinct symbol-days) — five same-day corn candidates are one market opinion, not five samples">selected (eff)</div><div class="gate-col-h">resolved</div><div class="gate-col-h">win %</div><div class="gate-col-h">avg P&L %</div><div class="gate-col-h">avg MFE R</div>
           <div class="gate-row-h" title="what the retired composite>=threshold gate WOULD have taken — records only, executes nothing">legacy (records)</div>
-          <div>{L.selected.toLocaleString()}</div><div>{L.resolved.toLocaleString()}</div>
+          <div>{L.selected.toLocaleString()}{#if L.effective_n != null}<span class="dim"> ({L.effective_n})</span>{/if}</div><div>{L.resolved.toLocaleString()}</div>
           <div>{L.win_rate ?? "—"}</div><div>{L.avg_pnl_pct ?? "—"}</div><div>{L.avg_mfe_r ?? "—"}</div>
           <div class="gate-row-h" title="validity + measured expectancy with robust lower bound — the arm that actually executes">v8 (executes)</div>
-          <div>{V.selected.toLocaleString()}</div><div>{V.resolved.toLocaleString()}</div>
+          <div>{V.selected.toLocaleString()}{#if V.effective_n != null}<span class="dim"> ({V.effective_n})</span>{/if}</div><div>{V.resolved.toLocaleString()}</div>
           <div>{V.win_rate ?? "—"}</div><div>{V.avg_pnl_pct ?? "—"}</div><div>{V.avg_mfe_r ?? "—"}</div>
         </div>
+        {@const tfKeys = [...new Set([...(L.by_timeframe ?? []), ...(V.by_timeframe ?? [])].map((r: any) => r.timeframe))]}
+        {#if tfKeys.length > 1}
+          {@const lByTf = Object.fromEntries((L.by_timeframe ?? []).map((r: any) => [r.timeframe, r]))}
+          {@const vByTf = Object.fromEntries((V.by_timeframe ?? []).map((r: any) => [r.timeframe, r]))}
+          <div class="gate-strat-head dim" title="the arms compose differently by timeframe — v8's picks skew to daily futures while its rejections skew intraday, so pooled rows compare different markets">by timeframe — compare arms within a row, never across the pooled headline</div>
+          <div class="gate-grid gate-grid-tf num">
+            <div class="gate-col-h">tf</div><div class="gate-col-h">legacy sel (eff)</div><div class="gate-col-h">res · win%</div><div class="gate-col-h">v8 sel (eff)</div><div class="gate-col-h">res · win%</div>
+            {#each tfKeys as tf (tf)}
+              {@const lr = lByTf[tf]}
+              {@const vr = vByTf[tf]}
+              <div class="gate-row-h">{tf}</div>
+              <div>{lr ? `${lr.selected} (${lr.effective_n})` : "—"}</div>
+              <div>{lr?.resolved ? `${lr.resolved} · ${lr.win_rate ?? "—"}%` : lr ? "0 · —" : "—"}</div>
+              <div>{vr ? `${vr.selected} (${vr.effective_n})` : "—"}</div>
+              <div>{vr?.resolved ? `${vr.resolved} · ${vr.win_rate ?? "—"}%` : vr ? "0 · —" : "—"}</div>
+            {/each}
+          </div>
+        {/if}
         <div class="gate-foot dim">
           agree on {gateExp.overlap.both_take.toLocaleString()} · legacy-only {gateExp.overlap.legacy_only.toLocaleString()} · v8-only {gateExp.overlap.v8_only.toLocaleString()}
           {#if gateExp.v8_decision_mix}
@@ -705,6 +723,8 @@
   .promo-badge.warn { background: rgba(250, 204, 21, 0.12); color: #facc15; }
   .promo-fail { font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .gate-grid { display: grid; grid-template-columns: 1.4fr repeat(5, 1fr); gap: 6px 10px; padding: 4px 0; }
+  .gate-grid-tf { grid-template-columns: 0.7fr repeat(4, 1fr); }
+  .gate-strat-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 10px; }
   .gate-col-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.55; }
   .gate-row-h { font-weight: 600; }
   .gate-foot { font-size: 11px; margin-top: 6px; }

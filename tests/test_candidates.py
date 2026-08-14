@@ -133,5 +133,110 @@ class ResolutionContractTests(unittest.TestCase):
             self.assertIn(f"cand.{field} =", src)
 
 
+class ResolutionQueueTests(unittest.TestCase):
+    """The head-of-line starvation fix (2026-08-14): 440 permanently
+    barless candidates sat oldest-first eating the resolution limit while
+    resolvable candidates behind them aged unjudged. The limit now
+    budgets replay ATTEMPTS; barless rows cost a lookup, and after 14
+    days they leave the queue as resolved-with-NULL-outcome."""
+
+    def setUp(self):
+        self.prefix = f"TEST-Q{uuid.uuid4().hex[:6]}"
+        self._clean()
+
+    def tearDown(self):
+        self._clean()
+
+    def _clean(self):
+        with get_db() as db:
+            db.query(CandidateSignal).filter(
+                CandidateSignal.symbol.like(f"{self.prefix}%")).delete(
+                synchronize_session=False)
+            db.commit()
+
+    def _seed(self, symbol, days_old, n=1):
+        from datetime import datetime, timedelta, timezone
+        ids = []
+        with get_db() as db:
+            for i in range(n):
+                row = CandidateSignal(
+                    dedup_hash=f"{self.prefix}-{symbol}-{i}-{uuid.uuid4().hex[:6]}",
+                    symbol=symbol, asset_class="Crypto", timeframe="4H",
+                    direction="Long", entry_price=100.0, stop_loss=96.0,
+                    target_price=112.0, verdict="rejected",
+                    created_at=(datetime.now(timezone.utc)
+                                - timedelta(days=days_old)).isoformat())
+                db.add(row)
+                db.flush()
+                ids.append(row.id)
+            db.commit()
+        return ids
+
+    def test_barless_flood_cannot_starve_resolvable_candidates(self):
+        from unittest.mock import patch
+
+        import pandas as pd
+
+        from lib.candidates import resolve_pending
+
+        barless = f"{self.prefix}-VOID/USD"
+        resolvable = f"{self.prefix}-LIVE/USD"
+        self._seed(barless, days_old=5, n=40)      # older: head of queue
+        live_ids = self._seed(resolvable, days_old=1, n=3)
+
+        fake_bars = pd.DataFrame({"close": [1.0] * 10})
+
+        def bars_for(symbol, timeframe):
+            return fake_bars if symbol == resolvable else None
+
+        def fake_replay(sig, bars):
+            return {"outcome": "WIN", "pnl_pct": 1.0, "mfe_r": 0.5,
+                    "mae_r": -0.2, "first_touch": "TARGET",
+                    "exit_reason": "take_profit"}
+
+        with patch("lib.signal_replay.load_cached_bars", side_effect=bars_for), \
+             patch("lib.signal_replay.replay_signal", side_effect=fake_replay):
+            # Limit smaller than the flood: pre-fix, barless rows consumed
+            # it entirely and the LIVE candidates never got a replay.
+            out = resolve_pending(limit=3)
+        self.assertGreaterEqual(out["resolved"], 3)
+        with get_db() as db:
+            for cid in live_ids:
+                row = db.query(CandidateSignal).filter(
+                    CandidateSignal.id == cid).first()
+                self.assertTrue(row.resolved)
+                self.assertEqual(row.outcome, "WIN")
+
+    def test_ancient_barless_rows_expire_out_of_the_queue(self):
+        from unittest.mock import patch
+
+        from lib.candidates import resolve_pending
+
+        old_ids = self._seed(f"{self.prefix}-GONE/USD", days_old=20, n=2)
+        with patch("lib.signal_replay.load_cached_bars", return_value=None):
+            out = resolve_pending(limit=5)
+        self.assertGreaterEqual(out["expired"], 2)
+        with get_db() as db:
+            for cid in old_ids:
+                row = db.query(CandidateSignal).filter(
+                    CandidateSignal.id == cid).first()
+                self.assertTrue(row.resolved)
+                self.assertIsNone(row.outcome)      # never a fake result
+                self.assertEqual(row.exit_reason, "expired_no_bars")
+
+    def test_expired_rows_never_pollute_selection_stats(self):
+        from unittest.mock import patch
+
+        from lib.candidates import resolve_pending, selection_bias_summary
+
+        self._seed(f"{self.prefix}-GONE/USD", days_old=20, n=2)
+        with patch("lib.signal_replay.load_cached_bars", return_value=None):
+            resolve_pending(limit=5)
+        rows = selection_bias_summary()["by_verdict"]
+        # NULL-pnl rows must not appear as zero-win losses anywhere.
+        for r in rows:
+            self.assertIsNotNone(r["avg_pnl_pct"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -120,17 +120,35 @@ def resolve_pending(limit: int = 500) -> dict:
     from app.database import CandidateSignal, get_db
     from lib.signal_replay import MIN_BARS_TO_RESOLVE, load_cached_bars, replay_signal
 
-    checked = resolved = no_bars = too_young = 0
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    checked = resolved = no_bars = too_young = expired = 0
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=30)).isoformat()
+    # A candidate with no cached bars after this long will never get them
+    # (unlisted crypto the bar pipeline doesn't fetch). It leaves the
+    # queue as resolved-with-NULL-outcome so it can't poison stats, and —
+    # the bug this exists to prevent — can't sit at the head of the
+    # oldest-first queue eating the limit forever. 440 of them starved
+    # every resolvable candidate behind them for a day (measured
+    # 2026-08-14: a manual wide pass resolved 128 the scheduled job's
+    # capped passes never reached).
+    expire_before = (now - timedelta(days=14)).isoformat()
 
     with get_db() as db:
+        # The limit budgets REPLAY ATTEMPTS, not rows scanned: barless
+        # rows are one dict lookup each and must not count against it.
+        # The scan window is floored so a barless flood larger than a
+        # small limit's multiple can't reintroduce the starvation the
+        # multiplier exists to prevent.
         rows = (db.query(CandidateSignal)
                   .filter(CandidateSignal.resolved == False)  # noqa: E712
                   .filter(CandidateSignal.created_at < cutoff)
                   .order_by(CandidateSignal.created_at.asc())
-                  .limit(limit).all())
+                  .limit(max(limit * 6, 2000)).all())
         bars_cache = {}
+        attempted = 0
         for cand in rows:
+            if attempted >= limit:
+                break
             checked += 1
             key = (cand.symbol, cand.timeframe)
             if key not in bars_cache:
@@ -138,7 +156,13 @@ def resolve_pending(limit: int = 500) -> dict:
             bars = bars_cache[key]
             if bars is None or len(bars) == 0:
                 no_bars += 1
+                if cand.created_at < expire_before:
+                    cand.resolved = True
+                    cand.resolved_at = now.isoformat()
+                    cand.exit_reason = "expired_no_bars"
+                    expired += 1
                 continue
+            attempted += 1
             result = replay_signal({
                 "id": cand.id,
                 "asset_symbol": cand.symbol,
@@ -167,7 +191,7 @@ def resolve_pending(limit: int = 500) -> dict:
         db.commit()
 
     out = {"checked": checked, "resolved": resolved,
-           "no_bars": no_bars, "too_young": too_young}
+           "no_bars": no_bars, "too_young": too_young, "expired": expired}
     logger.info(f"[Candidates] resolution pass: {out}")
     return out
 
@@ -186,11 +210,14 @@ def selection_bias_summary() -> dict:
 
     out = {"by_verdict": [], "by_rejection_reason": [], "by_gate_decision": []}
     with engine.connect() as c:
+        # pnl_pct IS NOT NULL everywhere below: expired_no_bars rows are
+        # resolved (so they leave the queue) but carry no outcome, and a
+        # NULL falling into an ELSE 0 would count them as losses.
         for verdict, n, wr, pnl, mfe in c.execute(text("""
             SELECT verdict, COUNT(*),
                    ROUND(AVG(CASE WHEN pnl_pct > 0 THEN 100.0 ELSE 0 END), 1),
                    ROUND(AVG(pnl_pct), 3), ROUND(AVG(mfe_r), 3)
-            FROM candidate_signals WHERE resolved = 1
+            FROM candidate_signals WHERE resolved = 1 AND pnl_pct IS NOT NULL
             GROUP BY verdict
         """)):
             out["by_verdict"].append({

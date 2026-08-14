@@ -96,6 +96,13 @@ class SQLiteEventStore(EventStore):
                 )""")
             c.execute("""CREATE INDEX IF NOT EXISTS ix_events_lookup
                          ON events (symbol, kind, ingest_ts)""")
+            # Idempotency for slow official releases: a COT report synced
+            # twice must be one row. NULL keys (stream events) never collide.
+            cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
+            if "dedup_key" not in cols:
+                c.execute("ALTER TABLE events ADD COLUMN dedup_key TEXT")
+            c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_events_dedup
+                         ON events (dedup_key) WHERE dedup_key IS NOT NULL""")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=10)
@@ -103,6 +110,8 @@ class SQLiteEventStore(EventStore):
         return conn
 
     def append(self, events: list[dict]) -> int:
+        """Returns rows ACTUALLY inserted — a deduped replay of an official
+        release reports 0, not a flattering len(events)."""
         if not events:
             return 0
         rows = []
@@ -114,14 +123,16 @@ class SQLiteEventStore(EventStore):
                 e.get("process_ts"), e.get("clock_skew_ms"),
                 e.get("source_schema_version"), e.get("ingest_version"),
                 payload, len(payload.encode("utf-8")),
+                e.get("dedup_key"),
             ))
         with self._lock, self._conn() as c:
-            c.executemany("""INSERT INTO events
+            before = c.total_changes
+            c.executemany("""INSERT OR IGNORE INTO events
                 (kind, symbol, source, exchange_ts, ingest_ts, process_ts,
                  clock_skew_ms, source_schema_version, ingest_version,
-                 payload, payload_bytes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", rows)
-        return len(rows)
+                 payload, payload_bytes, dedup_key)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+            return c.total_changes - before
 
     def read(self, symbol: str, kind: str, since_ts: float,
              limit: int = 1000) -> list[dict]:

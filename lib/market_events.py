@@ -128,6 +128,23 @@ class DerivativesObservation:
 
 
 @dataclass(frozen=True)
+class OfficialStat:
+    """One value from an official release (CFTC COT, FINRA short volume,
+    EIA storage). `as_of` is the period the statistic DESCRIBES;
+    meta.exchange_ts is when it became PUBLIC — for COT those differ by
+    three days, and joining on the wrong one hands replay a crystal ball.
+    `dedup_key` makes re-syncing an overlapping window idempotent at the
+    storage layer instead of trusting every caller's bookkeeping."""
+    meta: EventMeta
+    symbol: str          # instrument it informs (GC=F, BTC/USD, NVDA…)
+    series: str          # cot_noncomm_net | finra_short_ratio | …
+    value: float
+    as_of: str
+    dedup_key: str | None = None
+    kind: str = "official_stat"
+
+
+@dataclass(frozen=True)
 class OnChainEvent:
     """A chain-level observation (flow, balance change, contract event)."""
     meta: EventMeta

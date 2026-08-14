@@ -64,6 +64,7 @@ job_status = {
     'kraken_sync': {'status': 'idle', 'last': None, 'error': None},
     'feature_snapshots': {'status': 'idle', 'last': None, 'error': None},
     'feature_labels': {'status': 'idle', 'last': None, 'error': None},
+    'official_data': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -652,6 +653,18 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('feature_labels', feature_labels_run),
                   'interval', minutes=15, id='feature_labels',
                   next_run_time=now + timedelta(minutes=8),
+                  replace_existing=True, max_instances=1)
+
+    # Official releases (4A): COT weekly, FINRA short volume daily, EIA
+    # weekly. Six-hourly polling of slow sources is deliberate slack — the
+    # dedup key makes every overlap idempotent, and a release delayed by a
+    # holiday is caught within hours without any schedule cleverness.
+    def official_data_run():
+        from lib.official_data import sync_all
+        return sync_all()
+    sched.add_job(make_job_runner('official_data', official_data_run),
+                  'interval', hours=6, id='official_data',
+                  next_run_time=now + timedelta(minutes=10),
                   replace_existing=True, max_instances=1)
 
 

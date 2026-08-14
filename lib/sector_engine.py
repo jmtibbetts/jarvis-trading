@@ -1,4 +1,10 @@
-"""Energy sector engine (4C) — stored facts become named shadow features.
+"""Sector engines (4C) — stored facts become named shadow features.
+
+One engine, a registry of sectors. Energy shipped first because its
+fundamentals run deepest (44 years of EIA history); metals and index are
+the SAME machinery pointed at their own COT rows and curve roots — a
+sector without a fundamentals feed says so by omission, it does not get
+a fabricated one.
 
 Everything here is DERIVED, deterministically, from release-stamped rows
 in the raw event store — which is what makes it point-in-time by
@@ -191,26 +197,55 @@ def _curve_block(root: str, asof: datetime) -> dict:
             "front": c.get("front_code"), "age_hours": age_h}
 
 
-def energy_snapshot(asof: datetime | None = None) -> dict:
-    """The engine's one product: everything the desk knows about energy
+# ── Sector registry ──────────────────────────────────────────────────────────
+# Instruments per sector; `fundamentals` names a stored official series
+# where one exists. Its ABSENCE for metals/index is deliberate honesty:
+# COMEX warehouse stocks and index flow data have no keyless feed wired,
+# and a sector without fundamentals must look like one, not carry a proxy.
+SECTORS = {
+    "energy": {
+        "crude": {"stat_symbol": "CL=F", "curve_root": "CL",
+                  "fundamentals": ("eia_crude_stocks_kbbl", "kbbl")},
+        "natgas": {"stat_symbol": "NG=F", "curve_root": "NG",
+                   "fundamentals": ("eia_natgas_storage_bcf", "bcf")},
+    },
+    "metals": {
+        "gold": {"stat_symbol": "GC=F", "curve_root": "GC"},
+        "silver": {"stat_symbol": "SI=F", "curve_root": "SI"},
+        "copper": {"stat_symbol": "HG=F", "curve_root": "HG"},
+    },
+    "index": {
+        "spx": {"stat_symbol": "ES=F", "curve_root": "ES"},
+        "ndx": {"stat_symbol": "NQ=F", "curve_root": "NQ"},
+    },
+}
+
+
+def sector_snapshot(sector: str, asof: datetime | None = None) -> dict:
+    """The engine's one product: everything the desk knows about a sector
     AS OF a moment, from released data only. Call with a past `asof` and
     it replays that moment's information set exactly."""
+    cfg = SECTORS.get(sector)
+    if cfg is None:
+        raise KeyError(f"unknown sector {sector!r} — "
+                       f"registered: {sorted(SECTORS)}")
     asof = asof or _now()
-    return {
-        "sector": "energy",
-        "asof": asof.isoformat(),
-        "crude": {
-            "fundamentals": _fundamental_block(
-                "CL=F", "eia_crude_stocks_kbbl", asof, "kbbl"),
-            "positioning": _positioning_block("CL=F", asof),
-            "curve": _curve_block("CL", asof),
-        },
-        "natgas": {
-            "fundamentals": _fundamental_block(
-                "NG=F", "eia_natgas_storage_bcf", asof, "bcf"),
-            "positioning": _positioning_block("NG=F", asof),
-            "curve": _curve_block("NG", asof),
-        },
-        "note": ("point-in-time: filtered on release timestamps; derived "
-                 "on demand from the raw event store; shadow-only"),
-    }
+    out = {"sector": sector, "asof": asof.isoformat(),
+           "instruments": {},
+           "note": ("point-in-time: filtered on release timestamps; derived "
+                    "on demand from the raw event store; shadow-only")}
+    for key, inst in cfg.items():
+        block = {
+            "positioning": _positioning_block(inst["stat_symbol"], asof),
+            "curve": _curve_block(inst["curve_root"], asof),
+        }
+        if "fundamentals" in inst:
+            series, unit = inst["fundamentals"]
+            block["fundamentals"] = _fundamental_block(
+                inst["stat_symbol"], series, asof, unit)
+        out["instruments"][key] = block
+    return out
+
+
+def energy_snapshot(asof: datetime | None = None) -> dict:
+    return sector_snapshot("energy", asof)

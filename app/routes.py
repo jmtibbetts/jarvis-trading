@@ -1504,13 +1504,17 @@ def feature_snapshots_summary():
     return snapshot_summary()
 
 
-@router.get("/sector/energy")
-def sector_energy():
-    """The 4C energy engine: EIA fundamentals with seasonal context, COT
-    positioning percentiles, curve structure — point-in-time from
-    released data, abstaining where sources are stale. Shadow-only."""
-    from lib.sector_energy import energy_snapshot
-    return energy_snapshot()
+@router.get("/sector/{sector}")
+def sector_view(sector: str):
+    """4C sector engines: fundamentals with seasonal context (where a
+    feed exists), COT positioning percentiles, curve structure —
+    point-in-time from released data, abstaining where sources are
+    stale. Shadow-only."""
+    from lib.sector_engine import SECTORS, sector_snapshot
+    if sector not in SECTORS:
+        raise HTTPException(404, f"unknown sector '{sector}' — "
+                                 f"registered: {sorted(SECTORS)}")
+    return sector_snapshot(sector)
 
 
 @router.get("/data-platform/health")

@@ -8,7 +8,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 
 from lib.market_events import OfficialStat, event_to_dict, make_meta
-from lib.sector_energy import (
+from lib.sector_engine import (
     _change_z,
     _pctile,
     _seasonal_z,
@@ -103,28 +103,28 @@ class PointInTimeTests(unittest.TestCase):
         self._seed_weekly(weeks=8)
         now = datetime.now(timezone.utc)
         latest_asof_visible = energy_snapshot(asof=now)[
-            "crude"]["fundamentals"].get("as_of")
+            "instruments"]["crude"]["fundamentals"].get("as_of")
         # Rewind to before the newest release: its row must vanish.
         earlier = now - timedelta(days=6)
-        earlier_view = energy_snapshot(asof=earlier)["crude"]["fundamentals"]
+        earlier_view = energy_snapshot(asof=earlier)["instruments"]["crude"]["fundamentals"]
         if "as_of" in earlier_view:
             self.assertNotEqual(earlier_view["as_of"], latest_asof_visible)
 
     def test_stale_source_abstains(self):
         self._seed_weekly(weeks=8,
                           end=datetime.now(timezone.utc) - timedelta(days=40))
-        block = energy_snapshot()["crude"]["fundamentals"]
+        block = energy_snapshot()["instruments"]["crude"]["fundamentals"]
         self.assertIn("abstain", block)
 
     def test_empty_store_abstains_everywhere(self):
-        snap = energy_snapshot()
+        snap = energy_snapshot()["instruments"]
         self.assertIn("abstain", snap["crude"]["fundamentals"])
         self.assertIn("abstain", snap["crude"]["positioning"])
         self.assertIn("abstain", snap["crude"]["curve"])
 
     def test_fresh_data_produces_the_named_features(self):
         self._seed_weekly(weeks=12)
-        block = energy_snapshot()["crude"]["fundamentals"]
+        block = energy_snapshot()["instruments"]["crude"]["fundamentals"]
         self.assertNotIn("abstain", block)
         # The NEWEST seeded week releases 5 days after its as_of — i.e.
         # in the future — so the visible latest is the PRIOR week (i=10:
@@ -133,6 +133,50 @@ class PointInTimeTests(unittest.TestCase):
         self.assertEqual(block["wow_change"], 950.0)     # 410,000 - 409,050
         self.assertEqual(block["history_n"], 11)
         self.assertIsNotNone(block["change_z_3y"])
+
+
+class SectorRegistryTests(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("JARVIS_EVENTS_DB_PATH")
+        d = tempfile.mkdtemp(prefix="jarvis-test-events-")
+        os.environ["JARVIS_EVENTS_DB_PATH"] = os.path.join(d, "ev.db")
+
+    def tearDown(self):
+        if self._prev is not None:
+            os.environ["JARVIS_EVENTS_DB_PATH"] = self._prev
+
+    def test_metals_and_index_serve_positioning_and_curve_only(self):
+        from lib.sector_engine import sector_snapshot
+        for sector, keys in (("metals", {"gold", "silver", "copper"}),
+                             ("index", {"spx", "ndx"})):
+            snap = sector_snapshot(sector)
+            self.assertEqual(set(snap["instruments"]), keys)
+            for block in snap["instruments"].values():
+                # No fundamentals feed wired -> no fundamentals key. A
+                # sector without one must look like it, never carry a proxy.
+                self.assertNotIn("fundamentals", block)
+                self.assertIn("positioning", block)
+                self.assertIn("curve", block)
+
+    def test_metals_positioning_flows_from_stored_cot(self):
+        from lib.event_store import get_store
+        from lib.sector_engine import sector_snapshot
+        now = datetime.now(timezone.utc)
+        evs = []
+        for i in range(160):
+            d = (now - timedelta(weeks=160 - i)).date()
+            evs.append(_stat("GC=F", "cot_noncomm_net", d.isoformat(),
+                             1000.0 * i, (now - timedelta(weeks=160 - i)
+                                          ).timestamp()))
+        get_store().append(evs)
+        p = sector_snapshot("metals")["instruments"]["gold"]["positioning"]
+        self.assertEqual(p["spec_net"], 159_000.0)
+        self.assertEqual(p["spec_pctile_3y"], 100.0)   # monotone rise
+
+    def test_unknown_sector_raises(self):
+        from lib.sector_engine import sector_snapshot
+        with self.assertRaises(KeyError):
+            sector_snapshot("shipping")
 
 
 if __name__ == "__main__":

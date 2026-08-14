@@ -165,7 +165,7 @@
       manualOpen = { symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" };
       showManualOpen = false;
       await loadAll();
-    loadOrders();
+      loadOrders();
     } catch (e) {
       toastStore.err(`Open failed: ${e}`);
     }
@@ -173,7 +173,12 @@
 
   $effect(() => {
     loadAll();
-    const poll = setInterval(loadAll, 20_000);
+    // loadOrders was only ever called from openManualPosition's success
+    // path — a stray indent — so the Open Orders panel showed 0 forever
+    // while the account held 50 working orders. It belongs to the mount
+    // and the poll, like everything else on this page.
+    loadOrders();
+    const poll = setInterval(() => { loadAll(); loadOrders(); }, 20_000);
     return () => clearInterval(poll);
   });
 

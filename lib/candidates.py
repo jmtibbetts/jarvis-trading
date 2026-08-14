@@ -76,7 +76,19 @@ def record_candidate(db, scored: dict, verdict: str,
                      "gate_v8_take": None, "gate_v8_reason": f"gate error: {ge}",
                      "gate_v8_net_r": None}
 
+        # Macro context at the moment of judgment (4C shadow features):
+        # stored at birth like the variants, so the eventual ablation
+        # joins on what the desk actually knew, never on hindsight.
+        try:
+            from lib.candidate_context import context_for_candidate
+            ctx = context_for_candidate(scored.get("asset_symbol"))
+            market_context = json.dumps(ctx, sort_keys=True) if ctx else None
+        except Exception as ce:
+            logger.debug(f"[Candidates] context failed (non-fatal): {ce}")
+            market_context = None
+
         row = CandidateSignal(
+            market_context=market_context,
             gate_legacy_take=gates["gate_legacy_take"],
             gate_v8_decision=gates["gate_v8_decision"],
             gate_v8_take=gates["gate_v8_take"],

@@ -1200,6 +1200,10 @@ def _migrate_columns():
             ("gate_v8_take",     "INTEGER"),
             ("gate_v8_reason",   "TEXT"),
             ("gate_v8_net_r",    "REAL"),
+            # Point-in-time macro context at the moment of judgment
+            # (funding, COT percentile, curve, short ratio) — the join
+            # the 4C ablation needs. NULL = nothing was known, honestly.
+            ("market_context",   "TEXT"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),
@@ -1630,6 +1634,7 @@ class CandidateSignal(Base):
     gate_v8_take     = Column(Boolean)
     gate_v8_reason   = Column(String)
     gate_v8_net_r    = Column(Float)
+    market_context   = Column(Text)      # ctx_v1: macro state at judgment
     # counterfactual resolution — the only fields ever updated
     resolved         = Column(Boolean, default=False)
     resolved_at      = Column(String)

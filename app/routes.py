@@ -1504,6 +1504,15 @@ def feature_snapshots_summary():
     return snapshot_summary()
 
 
+@router.get("/sector/energy")
+def sector_energy():
+    """The 4C energy engine: EIA fundamentals with seasonal context, COT
+    positioning percentiles, curve structure — point-in-time from
+    released data, abstaining where sources are stale. Shadow-only."""
+    from lib.sector_energy import energy_snapshot
+    return energy_snapshot()
+
+
 @router.get("/data-platform/health")
 def data_platform_health():
     """Phase 3 observability: bounded-queue drop counts (a pipeline that

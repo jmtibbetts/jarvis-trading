@@ -16,36 +16,64 @@
     performance: '<path d="M4 20V10M12 20V4M20 20v-7"/>',
     ops: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/>',
   };
+
+  // The desk's three concerns. Sections not named here (future additions)
+  // fall into the last group rather than vanishing from the rail.
+  const NAMED_GROUPS: { label: string; ids: string[] }[] = [
+    { label: "Trade", ids: ["command", "signals", "positions"] },
+    { label: "Intel", ids: ["intelligence", "smartmoney", "macro", "cryptodesk"] },
+    { label: "System", ids: ["performance", "ops"] },
+  ];
+  const bySection = Object.fromEntries(
+    SECTIONS.map((s, i) => [s.id, { section: s, n: i + 1 }]),
+  );
+  const named = new Set(NAMED_GROUPS.flatMap((g) => g.ids));
+  const GROUPS = NAMED_GROUPS.map((g, i) =>
+    i === NAMED_GROUPS.length - 1
+      ? { ...g, ids: [...g.ids, ...SECTIONS.filter((s) => !named.has(s.id)).map((s) => s.id)] }
+      : g,
+  );
 </script>
 
+<!-- Nine sections outgrew a flat list (Phase 6 IA). Grouped by the
+     desk's three concerns; keyboard shortcuts keep their GLOBAL numbers
+     so muscle memory built on the flat rail survives the grouping. -->
 <nav class="rail">
-  {#each SECTIONS as section, i (section.id)}
-    {#if i === SECTIONS.length - 1}<div class="sep"></div>{/if}
-    <div class="slot">
-      <a
-        href="#{section.id}"
-        class:on={sectionStore.current === section.id}
-        class:disabled={!section.ready}
-        title={section.ready ? `${section.label} (${i + 1})` : `${section.label} — coming soon`}
-        onclick={(e) => {
-          e.preventDefault();
-          if (section.ready) sectionStore.go(section.id);
-        }}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-          {@html icons[section.id]}
-        </svg>
-      </a>
-      <button
-        class="pop"
-        title="Open {section.label} in its own window"
-        aria-label="Open {section.label} in a new window"
-        onclick={() => openPopout(section.id)}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M7 17L17 7M9 7h8v8" />
-        </svg>
-      </button>
+  {#each GROUPS as group (group.label)}
+    <div class="group" role="group" aria-label={group.label}>
+      <div class="glabel">{group.label}</div>
+      {#each group.ids as id (id)}
+        {@const entry = bySection[id]}
+        {#if entry}
+          {@const section = entry.section}
+          <div class="slot">
+            <a
+              href="#{section.id}"
+              class:on={sectionStore.current === section.id}
+              class:disabled={!section.ready}
+              title={section.ready ? `${section.label} (${entry.n})` : `${section.label} — coming soon`}
+              onclick={(e) => {
+                e.preventDefault();
+                if (section.ready) sectionStore.go(section.id);
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                {@html icons[section.id]}
+              </svg>
+            </a>
+            <button
+              class="pop"
+              title="Open {section.label} in its own window"
+              aria-label="Open {section.label} in a new window"
+              onclick={() => openPopout(section.id)}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M7 17L17 7M9 7h8v8" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+      {/each}
     </div>
   {/each}
 </nav>
@@ -124,10 +152,24 @@
     color: var(--accent);
     border-color: var(--accent-dim);
   }
-  .sep {
-    width: 26px;
-    height: 1px;
-    background: var(--line);
-    margin: 8px 0;
+  .group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .group + .group {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+  .glabel {
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-faint);
+    opacity: 0.75;
+    user-select: none;
+    margin-bottom: 2px;
   }
 </style>

@@ -12,7 +12,40 @@ from contextlib import contextmanager
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-DB_PATH = DATA_DIR / "jarvis.db"
+_OPERATOR_DB = DATA_DIR / "jarvis.db"
+
+
+def _resolve_db_path() -> Path:
+    """The operator database is structurally unreachable from pytest.
+
+    A test once reset the active paper book, and this week a test's
+    fixture rows leaked into the live candidate tables — per-test
+    discipline demonstrably isn't enough. The rule is enforced HERE, at
+    engine construction, so no amount of forgotten cleanup in a test file
+    can touch real state:
+
+      - JARVIS_DB_PATH overrides the location (tests point it at a temp
+        dir; deployments may relocate the data directory).
+      - Under pytest (JARVIS_UNDER_PYTEST, set by conftest.py before any
+        app import), resolving to the operator database is a hard error
+        unless JARVIS_ALLOW_OPERATOR_DB=1 is set EXPLICITLY — the
+        integration-test escape hatch, never a default.
+    """
+    override = os.getenv("JARVIS_DB_PATH", "").strip()
+    path = Path(override) if override else _OPERATOR_DB
+    under_pytest = os.getenv("JARVIS_UNDER_PYTEST") == "1"
+    allowed = os.getenv("JARVIS_ALLOW_OPERATOR_DB") == "1"
+    if under_pytest and not allowed and path.resolve() == _OPERATOR_DB.resolve():
+        raise RuntimeError(
+            "Refusing to open the operator database under pytest. "
+            "conftest.py should have pointed JARVIS_DB_PATH at a temp dir; "
+            "set JARVIS_ALLOW_OPERATOR_DB=1 only for explicit integration runs."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DB_PATH = _resolve_db_path()
 DEFAULT_USER_ID = "local"
 
 engine = create_engine(

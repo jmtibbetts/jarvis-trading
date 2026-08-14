@@ -1641,6 +1641,55 @@ class CandidateSignal(Base):
     exit_reason      = Column(String)
 
 
+class FeatureSnapshot(Base):
+    """One feature vector as it stood at one moment — immutable (P4 §52).
+
+    Clock-driven rows are the scientifically important ones: taken on a
+    fixed cadence whether or not anything looked interesting, so the corpus
+    is free of pick-the-moment selection bias. The vector is stored under
+    its schema hash; a model trained later can verify it is reading the
+    contract it was trained on, and nothing ever recomputes these values
+    from newer code against older markets.
+    """
+    __tablename__ = "feature_snapshots"
+    id               = Column(String, primary_key=True, default=new_id)
+    created_at       = Column(String, default=now_iso, index=True)
+    symbol           = Column(String, index=True)
+    timeframe        = Column(String)
+    trigger          = Column(String)     # clock | signal
+    signal_id        = Column(String)     # when trigger == signal
+    schema_version   = Column(String)
+    schema_hash      = Column(String)
+    values_json      = Column(Text)       # list[float], clipped+scaled
+    mask_json        = Column(Text)       # list[float], 1.0 = observed
+    missing_fraction = Column(Float)
+    quality          = Column(String)     # ok | degraded  (§43 flag, not a filter)
+    bar_time         = Column(String)     # anchor bar the features describe
+    anchor_price     = Column(Float)      # close at anchor — forward returns
+
+
+class FeatureLabel(Base):
+    """One horizon's outcome for one snapshot — resolved independently (§57).
+
+    A snapshot schedules several of these at birth (1h/4h/1d). Each becomes
+    due on its own clock and resolves on its own evidence: the 1h label can
+    be RESOLVED while the 1d label is still pending, and a horizon without
+    enough forward bars ABSTAINS with a reason instead of fabricating a
+    return from partial coverage.
+    """
+    __tablename__ = "feature_labels"
+    id              = Column(String, primary_key=True, default=new_id)
+    snapshot_id     = Column(String, index=True)
+    horizon_min     = Column(Integer)
+    due_at          = Column(String, index=True)
+    status          = Column(String, default="pending")  # pending | resolved | abstained
+    resolved_at     = Column(String)
+    forward_ret_pct = Column(Float)
+    max_up_pct      = Column(Float)
+    max_down_pct    = Column(Float)
+    abstain_reason  = Column(String)
+
+
 class ScoreChampion(Base):
     """The champion artifact ledger (§4.3) — append-only, never updated.
 

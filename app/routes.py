@@ -1496,6 +1496,14 @@ def promotion_champions():
     return {"champions": champion_history()}
 
 
+@router.get("/feature-snapshots/summary")
+def feature_snapshots_summary():
+    """P4 corpus state: clock-driven snapshots by quality, labels by
+    horizon and status. The unbiased training corpus, accumulating."""
+    from lib.feature_snapshots import snapshot_summary
+    return snapshot_summary()
+
+
 @router.get("/data-platform/health")
 def data_platform_health():
     """Phase 3 observability: bounded-queue drop counts (a pipeline that

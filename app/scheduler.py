@@ -62,6 +62,8 @@ job_status = {
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
     'candidates': {'status': 'idle', 'last': None, 'error': None},
     'kraken_sync': {'status': 'idle', 'last': None, 'error': None},
+    'feature_snapshots': {'status': 'idle', 'last': None, 'error': None},
+    'feature_labels': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -628,6 +630,28 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('kraken_sync', kraken_sync_run),
                   'interval', minutes=30, id='kraken_sync',
                   next_run_time=now + timedelta(minutes=4),
+                  replace_existing=True, max_instances=1)
+
+    # Clock-driven feature snapshots + independent-horizon labels (P4).
+    # The cadence matches the 15m bar: each pass snapshots any Tier-1
+    # symbol whose newest bar hasn't been captured yet, and resolves every
+    # label whose own horizon has elapsed. Selection bias is removed at
+    # capture time — this corpus exists whether or not anything was
+    # "interesting", which is exactly what makes it trainable.
+    def feature_snapshots_run():
+        from lib.feature_snapshots import run_clock_snapshots
+        return run_clock_snapshots()
+    sched.add_job(make_job_runner('feature_snapshots', feature_snapshots_run),
+                  'interval', minutes=15, id='feature_snapshots',
+                  next_run_time=now + timedelta(minutes=5),
+                  replace_existing=True, max_instances=1)
+
+    def feature_labels_run():
+        from lib.feature_snapshots import resolve_due_labels
+        return resolve_due_labels()
+    sched.add_job(make_job_runner('feature_labels', feature_labels_run),
+                  'interval', minutes=15, id='feature_labels',
+                  next_run_time=now + timedelta(minutes=8),
                   replace_existing=True, max_instances=1)
 
 

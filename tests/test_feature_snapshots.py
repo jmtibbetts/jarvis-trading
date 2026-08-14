@@ -86,6 +86,23 @@ class SnapshotTests(unittest.TestCase):
         r = self._take(None)
         self.assertEqual(r.get("skipped"), "no_bars")
 
+    def test_regime_axes_lift_clock_snapshots_out_of_degraded(self):
+        """Market-state features a clock tick CAN know must be present;
+        regime axes are computable without a signal, and with them the
+        mask coverage crosses the degraded threshold."""
+        axes = {"axes": {k: {"score": 55.0} for k in
+                         ("trend", "volatility", "liquidity", "flow")}}
+        with patch("lib.regime_axes.for_symbol", return_value=axes):
+            r = self._take(_bars())
+        self.assertIn("snapshot_id", r)
+        self.assertEqual(r["quality"], "ok")
+
+    def test_regime_failure_masks_never_breaks_the_snapshot(self):
+        with patch("lib.regime_axes.for_symbol",
+                   side_effect=RuntimeError("bench down")):
+            r = self._take(_bars())
+        self.assertIn("snapshot_id", r)   # snapshot survives, degraded
+
 
 class LabelResolutionTests(SnapshotTests):
     def _make_due(self, snapshot_id, hours_ago=30):

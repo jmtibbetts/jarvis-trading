@@ -314,6 +314,18 @@ def _get_bar_count(symbol: str, tf: str) -> int:
         return int(status.bar_count or 0) if status else 0
 
 
+def cached_earliest_ts(symbol: str, tf: str):
+    """Oldest cached bar timestamp for a series, or None. Lets a deep
+    backfill answer 'is this series already done?' with one indexed query
+    instead of re-fetching pages it already paid credits for."""
+    from sqlalchemy import func
+    with get_cache_db() as db:
+        v = (db.query(func.min(OHLCVBar.timestamp))
+               .filter(OHLCVBar.symbol == symbol, OHLCVBar.timeframe == tf)
+               .scalar())
+        return v
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 TF_CONFIG = {

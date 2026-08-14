@@ -72,8 +72,21 @@ def take_clock_snapshot(symbol: str, timeframe: str = CLOCK_TIMEFRAME) -> dict:
                 FeatureSnapshot.bar_time == bar_time).first():
             return {"symbol": symbol, "skipped": "bar_already_snapshotted"}
 
+        # Regime axes are market state, not signal state — computable for
+        # a clock snapshot and worth 4 features of mask coverage. The
+        # evidence and signal-proposal features stay honestly masked:
+        # a clock tick has no direction hypothesis to score.
+        regime = None
+        try:
+            from lib.regime_axes import for_symbol
+            regime = for_symbol(symbol)
+        except Exception as e:
+            logger.debug(f"[FeatureSnapshots] regime unavailable for "
+                         f"{symbol} (masked, not fabricated): {e}")
+
         vec = build(ta=ta, signal={"asset_symbol": symbol,
                                    "timeframe": timeframe},
+                    regime=regime,
                     max_source_age_s=float(ta.get("bar_age_seconds") or 0))
         anchor = ta.get("price") or {}
         row = FeatureSnapshot(

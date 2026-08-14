@@ -164,6 +164,25 @@ def backfill_symbol(symbol: str, timeframe: str, years: float = 3.0,
     if floor is not None and pd.Timestamp(floor) > target_start:
         target_start = pd.Timestamp(floor)
 
+    # Resume cheaply: if the cache already reaches the effective target
+    # (vendor floor included — a coin listed in 2023 can never satisfy a
+    # 2021 ask), this series is done for one local query plus the floor
+    # call above, instead of re-paying every page it already fetched.
+    # Week of tolerance so slight vendor drift can't force eternal top-ups.
+    try:
+        from lib.ohlcv_cache import cached_earliest_ts
+        have = cached_earliest_ts(cache_symbol or symbol, timeframe)
+        if have is not None:
+            have_ts = pd.Timestamp(have)
+            have_ts = (have_ts.tz_localize("UTC") if have_ts.tzinfo is None
+                       else have_ts.tz_convert("UTC"))
+            if have_ts <= target_start + pd.Timedelta(days=7):
+                return {"bars_stored": 0, "pages": 0,
+                        "earliest": str(have_ts),
+                        "skipped": "cache already at target depth"}
+    except Exception:
+        pass  # a failed check costs a re-fetch, never a lost series
+
     stored = calls = 0
     end_cursor: str | None = None
     earliest_seen = None

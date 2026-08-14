@@ -95,6 +95,15 @@ def main() -> int:
                 # crypto universe.)
                 logger.warning(f"  {sym}/{tf}: {e}")
                 failed += 1
+            except Exception as e:
+                # The 2026-08-15 lesson: a mid-response connection drop
+                # (httpx.RemoteProtocolError) escaped the catches above and
+                # killed the whole run with 555 credits still on the table.
+                # A transient network failure costs ONE series and a log
+                # line, never the day's budget.
+                logger.warning(f"  {sym}/{tf}: transient failure, moving on "
+                               f"({type(e).__name__}: {e})")
+                failed += 1
 
     logger.info(f"backfill complete: {done} series, {failed} failed, "
                 f"{credits_remaining()} credits left today")

@@ -61,64 +61,72 @@ def gate_legacy(signal: dict, live_min_score: float = 55.0) -> dict:
             "threshold": live_min_score}
 
 
-def gate_v8(signal: dict) -> dict:
-    """Validity, then measured edge. Returns decision + take + the numbers.
+def decide(signal: dict) -> "TradeDecision":
+    """The typed decision (Phase 1): ObservedEvidence -> MeasuredEdge ->
+    verdict, with the reason trail attached. gate_v8 below is the dict
+    veneer over this for existing callers.
 
-    take=True requires ALL of:
+    take requires ALL of:
       - an affirmatively parsed side and coherent stop/target layout
       - expectancy verdict TRADE (net expected R above the bar)
       - the ROBUST condition: the same arithmetic at the lower confidence
-        bound of the win rate still clears the bar. When the point
-        estimate says TRADE and the lower bound disagrees, the edge is
-        inside the noise — that is TENTATIVE, and TENTATIVE trades paper,
-        not live (P0.11: do not compute uncertainty and then ignore it at
-        the capital boundary).
+        bound of the win rate still clears the bar (P0.11: do not compute
+        uncertainty and then ignore it at the capital boundary).
     """
-    from lib.trade_side import parse_side_strict, validate_levels
+    from lib.decision_types import MeasuredEdge, ObservedEvidence, TradeDecision
+    from lib.trade_side import validate_levels
 
-    side = parse_side_strict(signal.get("direction"))
-    if side is None:
-        return {"decision": NO_TRADE, "take": False,
-                "reason": f"unparseable direction {signal.get('direction')!r}"}
+    evidence = ObservedEvidence.from_signal(signal)
+    if evidence.side is None:
+        return TradeDecision(NO_TRADE, (f"unparseable direction {signal.get('direction')!r}",),
+                             evidence=evidence)
 
-    ok, why = validate_levels(signal.get("direction"), signal.get("entry_price"),
-                              signal.get("stop_loss"), signal.get("target_price"))
+    ok, why = validate_levels(signal.get("direction"), evidence.entry,
+                              evidence.stop, evidence.target)
     if not ok:
-        return {"decision": NO_TRADE, "take": False, "reason": f"levels: {why}"}
+        return TradeDecision(NO_TRADE, (f"levels: {why}",), evidence=evidence)
 
     try:
         from lib.expectancy import evaluate
-        ev = evaluate(signal)
+        edge = MeasuredEdge.from_expectancy(evaluate(signal))
     except Exception as e:
         # The edge engine failing is not a license to trade blind.
         logger.warning(f"[Gate] expectancy unavailable: {e}")
-        return {"decision": UNKNOWN, "take": allow_experimental_live(),
-                "reason": f"expectancy engine unavailable: {e}"}
+        return TradeDecision(UNKNOWN, (f"expectancy engine unavailable: {e}",),
+                             evidence=evidence)
 
-    verdict = ev.get("verdict")
-    net = (ev.get("net") or {}).get("net_expected_r")
-    net_lower = (ev.get("net_lower") or {}).get("net_expected_r")
-
-    if verdict == "TRADE":
-        if ev.get("robust"):
-            return {"decision": TRADE, "take": True, "reason": ev.get("reason"),
-                    "net_r": net, "net_r_lower": net_lower}
-        return {"decision": TENTATIVE, "take": False,
-                "reason": (f"point net {net:+.3f}R clears but lower bound "
-                           f"{net_lower if net_lower is None else format(net_lower, '+.3f')}R "
-                           "does not — edge inside the noise; paper collects it"),
-                "net_r": net, "net_r_lower": net_lower}
-    if verdict == "NO_TRADE":
-        return {"decision": NO_TRADE, "take": False, "reason": ev.get("reason"),
-                "net_r": net, "net_r_lower": net_lower}
+    if edge.verdict == "TRADE":
+        if edge.robust:
+            return TradeDecision(TRADE, (edge.reason or "measured edge clears robustly",),
+                                 evidence=evidence, edge=edge)
+        nl = edge.net_expected_r_lower
+        return TradeDecision(
+            TENTATIVE,
+            ((f"point net {edge.net_expected_r:+.3f}R clears but lower bound "
+              f"{nl if nl is None else format(nl, '+.3f')}R does not — edge inside "
+              "the noise; paper collects it"),),
+            evidence=evidence, edge=edge)
+    if edge.verdict == "NO_TRADE":
+        return TradeDecision(NO_TRADE, (edge.reason or "measured negative expectancy",),
+                             evidence=evidence, edge=edge)
 
     # UNKNOWN: no bucket has enough evidence. Paper/sim generate that
     # evidence for free; live capital does not (P0.10).
-    take = allow_experimental_live()
-    return {"decision": UNKNOWN, "take": take,
-            "reason": (ev.get("reason") or "no measured evidence")
-                      + (" [ALLOW_EXPERIMENTAL_LIVE override]" if take else ""),
-            "net_r": net, "net_r_lower": net_lower}
+    reasons = [edge.reason or "no measured evidence"]
+    if allow_experimental_live():
+        reasons.append("[ALLOW_EXPERIMENTAL_LIVE override]")
+    return TradeDecision(UNKNOWN, tuple(reasons), evidence=evidence, edge=edge)
+
+
+def gate_v8(signal: dict) -> dict:
+    """Dict veneer over decide() for existing callers and JSON surfaces."""
+    d = decide(signal)
+    take = d.decision == TRADE or (d.decision == UNKNOWN and allow_experimental_live())
+    edge = d.edge
+    return {"decision": d.decision, "take": take,
+            "reason": "; ".join(d.reasons) or None,
+            "net_r": edge.net_expected_r if edge else None,
+            "net_r_lower": edge.net_expected_r_lower if edge else None}
 
 
 def record_both(signal: dict, live_min_score: float = 55.0) -> dict:

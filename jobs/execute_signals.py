@@ -541,23 +541,41 @@ def run():
             else:
                 raw_qty = per_trade_cap / entry
                 if raw_qty < 1:
-                    # Forcing a minimum of 1 share can blow well past the risk-sized
-                    # allocation for expensive stocks — only round up to 1 when the
-                    # overshoot is minor; otherwise the entry price is simply too high
-                    # for this trade's risk budget and it should be skipped.
-                    if entry > trade_budget * 1.25:
-                        logger.warning(
-                            f"[Execute] Skip {sym} — entry ${entry:.2f} exceeds risk-sized "
-                            f"budget ${trade_budget:.0f} for even 1 share"
-                        )
-                        continue
-                    qty = 1
-                else:
-                    qty = int(raw_qty)
+                    # One share costs more than the approved budget. The old
+                    # code rounded UP to 1 with a 25% overshoot tolerance —
+                    # execution enlarging a risk decision, exactly what
+                    # invariant #10 forbids. The correct size for a trade
+                    # too small to express is zero.
+                    logger.warning(
+                        f"[Execute] Skip {sym} — one share (${entry:.2f}) exceeds "
+                        f"the approved budget ${per_trade_cap:.0f}"
+                    )
+                    continue
+                qty = int(raw_qty)
                 cost = qty * entry
                 if cost > budget:
                     logger.warning(f"[Execute] Skip {sym} — cost ${cost:.0f} > budget ${budget:.0f}")
                     continue
+
+            # ── The plan, checked against the approval (invariant #10) ────
+            # Typed and explicit: whatever the paths above produced, the
+            # order that leaves this function cannot exceed what the risk
+            # engine approved. This is the last gate before the venue.
+            from lib.decision_types import OrderPlan, RiskDecision
+            approved = RiskDecision(
+                allowed_risk_usd=float(getattr(sz, "dollar_size", 0) or 0),
+                stop_distance=abs(entry - stop), qty=float(sz.dollar_size / entry),
+                notional=float(sz.dollar_size), margin=float(sz.dollar_size),
+                leverage=1.0)
+            plan = OrderPlan(symbol=sym, venue="alpaca", side="long",
+                             order_type="market", qty=float(qty), entry=entry,
+                             initial_stop=stop, target=target,
+                             notional=float(qty) * entry)
+            if not plan.within(approved):
+                logger.error(f"[Execute] INVARIANT VIOLATION blocked for {sym}: "
+                             f"plan qty={plan.qty:g}/notional=${plan.notional:,.0f} "
+                             f"exceeds approved ${approved.notional:,.0f} — skipping")
+                continue
 
             try:
                 # Book and tape as they stand BEFORE the order goes out.

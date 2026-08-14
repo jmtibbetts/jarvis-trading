@@ -14,6 +14,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
@@ -32,4 +35,23 @@ jobs:
       - name: Run suite
         env:
           JARVIS_DISABLE_SCHEDULER: "1"
-        run: pytest -q
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest.log
+      # Failure forensics without a login: the log tail lands as a commit
+      # comment, which is readable through the anonymous API on a public
+      # repo — job logs are not.
+      - name: Publish failure tail
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let tail = '(no pytest.log produced)';
+            try { tail = fs.readFileSync('pytest.log', 'utf8').slice(-6000); } catch (e) {}
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: '### CI failure tail\n```\n' + tail + '\n```',
+            });

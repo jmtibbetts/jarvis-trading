@@ -57,8 +57,16 @@
 
   async function onToggle() {
     if (enabled === null) return;
-    const reason = enabled ? window.prompt("Reason for pausing live trading?") ?? "Manually paused" : undefined;
-    if (enabled && reason === null) return; // user cancelled the prompt
+    let reason: string | undefined = undefined;
+    if (enabled) {
+      // Null check BEFORE the fallback: the old code coalesced to
+      // "Manually paused" on the same line, which made `reason === null`
+      // unreachable — pressing Cancel still paused trading. A cancelled
+      // prompt must perform no mutation.
+      const raw = window.prompt("Reason for pausing live trading?");
+      if (raw === null) return; // user cancelled — do nothing
+      reason = raw.trim() || "Manually paused";
+    }
     await killSwitchStore.toggle(reason);
   }
 </script>

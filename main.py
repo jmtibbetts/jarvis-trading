@@ -160,7 +160,17 @@ app = FastAPI(
     lifespan=lifespan,
     default_response_class=SafeJSONResponse,
 )
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS is restricted, not wildcard: this API exposes state-changing trade
+# endpoints with no authentication, so `allow_origins=["*"]` meant any web
+# page the operator's browser visited could fire mutating requests at the
+# desk. The UI is same-origin (served by this process), so CORS only needs
+# the dev-server origins; anything else is opt-in via env.
+_cors_origins = [o.strip() for o in os.getenv(
+    "JARVIS_CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173",
+).split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
+                   allow_methods=["*"], allow_headers=["*"])
 
 # ── API request/error tracking (in-memory, resets on restart — this is a
 # live-ops signal, not an audit record, so it doesn't need to survive a
@@ -320,4 +330,13 @@ if __name__ == "__main__":
             pass
     threading.Thread(target=open_browser, daemon=True).start()
 
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, log_level="warning")
+    # Loopback by default. `0.0.0.0` exposed an unauthenticated API with
+    # trade-mutation and destructive-admin endpoints to the whole LAN;
+    # "probably behind a firewall" is not a security boundary. Operators
+    # who genuinely want LAN access opt in explicitly — and should front
+    # it with authentication when they do.
+    bind_host = os.getenv("JARVIS_BIND_HOST", "127.0.0.1")
+    if bind_host != "127.0.0.1":
+        logger.warning(f"[Server] binding {bind_host} — API is unauthenticated; "
+                       "ensure network-level access control")
+    uvicorn.run("main:app", host=bind_host, port=port, reload=False, log_level="warning")

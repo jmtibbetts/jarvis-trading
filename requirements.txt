@@ -35,3 +35,6 @@ pydantic-settings==2.7.0
 pytz==2024.1
 
 yfinance>=0.2.40
+
+# Phase 5 cryptofeed prototype (Windows: order_book needs vendor/patches/order_book-1.0.1-msvc.patch)
+cryptofeed==2.5.0

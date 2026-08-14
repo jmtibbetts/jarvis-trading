@@ -1517,6 +1517,16 @@ def sector_view(sector: str):
     return sector_snapshot(sector)
 
 
+@router.get("/data-platform/parity")
+def data_platform_parity(symbol: str = "BTC", window_min: int = 60):
+    """Phase 5's gate: independent feeds of the same instrument compared
+    as time-aligned mids, in bps. Cross-venue pairs are the standing
+    health baseline; a candidate adapter must pass the tight same-venue
+    threshold before it may replace an incumbent."""
+    from lib.feed_parity import parity_report
+    return parity_report(symbol_base=symbol, window_min=window_min)
+
+
 @router.get("/data-platform/health")
 def data_platform_health():
     """Phase 3 observability: bounded-queue drop counts (a pipeline that

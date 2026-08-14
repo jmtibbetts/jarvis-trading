@@ -21,8 +21,13 @@ class SymbolVariantTests(unittest.TestCase):
     def test_both_broker_formats_are_produced(self):
         self.assertEqual(set(_symbol_variants("LINK/USD")), {"LINK/USD", "LINKUSD"})
 
-    def test_slashless_input_yields_one(self):
-        self.assertEqual(_symbol_variants("LINKUSD"), ["LINKUSD"])
+    def test_slashless_input_yields_both_forms(self):
+        """Phase 1 registry upgrade: the old helper returned only
+        {"LINKUSD"} for slashless input, so an order sweep fed a
+        position-style symbol could never match order-style "LINK/USD" —
+        the exact gap behind the wash-trade incident. The identity
+        registry produces every venue spelling from either input."""
+        self.assertEqual(set(_symbol_variants("LINKUSD")), {"LINKUSD", "LINK/USD"})
 
 
 class EntryGuardTests(unittest.TestCase):

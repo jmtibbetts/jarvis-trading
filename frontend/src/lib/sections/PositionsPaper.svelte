@@ -66,10 +66,10 @@
   });
 
   const exposure = $derived.by(() => {
-    type Row = { symbol: string; asset_class: string; direction: "long" | "short"; value: number };
+    type Row = { symbol: string; asset_class: string; direction: "long" | "short"; value: number; book: "live" | "paper" };
     const rows: Row[] = [];
-    if (live) for (const p of live.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.market_value) });
-    if (paper) for (const p of paper.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.qty * p.current_price) });
+    if (live) for (const p of live.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.market_value), book: "live" });
+    if (paper) for (const p of paper.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.qty * p.current_price), book: "paper" });
     const totalEquity = (live?.account.equity ?? 0) + (paper?.portfolio.equity ?? 0);
     const byClass = new Map<string, number>();
     let long = 0, short = 0;
@@ -86,7 +86,7 @@
       long, short,
       longPct: totalEquity ? (long / totalEquity) * 100 : 0,
       shortPct: totalEquity ? (short / totalEquity) * 100 : 0,
-      topConcentration: topConcentration ? { symbol: topConcentration.symbol, pct: totalEquity ? (topConcentration.value / totalEquity) * 100 : 0 } : null,
+      topConcentration: topConcentration ? { symbol: topConcentration.symbol, book: topConcentration.book, pct: totalEquity ? (topConcentration.value / totalEquity) * 100 : 0 } : null,
     };
   });
 
@@ -366,7 +366,7 @@ Type FLATTEN to confirm:`,
             {/each}
           </div>
           {#if exposure.topConcentration && exposure.topConcentration.pct >= 20}
-            <p class="risk-warning">⚠ {exposure.topConcentration.symbol} is {exposure.topConcentration.pct.toFixed(1)}% of combined equity — concentrated.</p>
+            <p class="risk-warning">⚠ {exposure.topConcentration.symbol} <span class="dim">({exposure.topConcentration.book} book)</span> is {exposure.topConcentration.pct.toFixed(1)}% of combined live+paper equity — concentrated. Find it on the {exposure.topConcentration.book === "paper" ? "Paper" : "Live"} tab.</p>
           {/if}
         {:else}
           <div class="empty">No open exposure</div>

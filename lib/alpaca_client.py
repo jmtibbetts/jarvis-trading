@@ -209,9 +209,10 @@ def tradable_crypto_symbols() -> set[str] | None:
 
 def _symbol_variants(sym: str) -> list[str]:
     """Alpaca is inconsistent about the slash: POSITIONS come back as
-    'LINKUSD', ORDERS as 'LINK/USD' (verified live 2026-08-13). Anything
-    matching a symbol against broker state must try both."""
-    return list({sym, sym.replace("/", "")})
+    'LINKUSD', ORDERS as 'LINK/USD' (verified live 2026-08-13). Delegated
+    to the identity registry — one authority for every spelling."""
+    from lib.instruments import variants
+    return list(variants(sym))
 
 
 def submit_bracket_order(symbol: str, qty: float, entry_price: float,

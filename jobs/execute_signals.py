@@ -15,14 +15,10 @@ from sqlalchemy import or_, func
 logger = logging.getLogger(__name__)
 
 def _both_formats(sym: str) -> set:
-    """A symbol in BOTH shapes Alpaca uses: SOL/USD and SOLUSD."""
-    sym = str(sym).upper().strip()
-    out = {sym}
-    if len(sym) > 3 and sym.endswith("USD") and sym[:-3].isalpha():
-        out.add(f"{sym[:-3]}/USD")
-    if "/" in sym:
-        out.add(sym.replace("/", ""))
-    return out
+    """A symbol in every shape Alpaca uses — delegated to the identity
+    registry (lib/instruments.variants), the one authority for this."""
+    from lib.instruments import variants
+    return variants(sym)
 
 
 def _normalize_held(positions):

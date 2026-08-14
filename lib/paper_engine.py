@@ -21,7 +21,7 @@ from lib.learning_engine import record_trade_outcome as _record_outcome
 logger = logging.getLogger(__name__)
 
 PAPER_STARTING_CAPITAL = 100_000.0   # $100k virtual account
-MAX_LEVERAGE           = 20.0         # Max leverage multiplier (5x/10x/20x supported)
+MAX_LEVERAGE           = 25.0         # hard cap — matches the operator's target broker (1-25x)
 MARGIN_CALL_THRESHOLD  = 0.15         # Liquidate if equity < 15% of margin (lost 85% of capital)
 DEFAULT_POSITION_SIZE  = 3_000.0      # legacy fallback when risk sizing is impossible
 

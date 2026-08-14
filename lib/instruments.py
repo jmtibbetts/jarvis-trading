@@ -36,6 +36,74 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# ── Instrument identity (Phase 1 §6) ─────────────────────────────────────────
+# One authority for "which instrument is this string", replacing three
+# scattered implementations: jobs/execute_signals._both_formats,
+# lib/alpaca_client._symbol_variants, and per-module slash heuristics. The
+# LINK incident is why: Alpaca returns POSITIONS as "LINKUSD" and ORDERS as
+# "LINK/USD", one module compared the wrong shape, and a protective
+# stop-loss was nearly cancelled so a duplicate long could pyramid in.
+
+def canonical(symbol: str | None) -> str:
+    """The one spelling the rest of the system uses.
+
+    crypto  BASE/QUOTE upper ("BTC/USD" — slash restored if a venue
+            stripped it), routed through symbol_aliases first
+    futures =F / =X / ^ formats upper, untouched
+    equity  bare ticker upper
+    """
+    s = str(symbol or "").upper().strip()
+    if not s:
+        return s
+    try:
+        from lib.symbol_aliases import ALIASES
+        s = ALIASES.get(s, s)
+    except Exception:
+        pass
+    if s.endswith(("=F", "=X")) or s.startswith("^") or "/" in s:
+        return s
+    # Slashless crypto ("LINKUSD") -> slashed, but only when the base is a
+    # known crypto asset — "SPCX" the equity must not become "SP/CX".
+    if len(s) > 4 and s.endswith(("USD", "USDT", "USDC")):
+        quote = "USDT" if s.endswith("USDT") else "USDC" if s.endswith("USDC") else "USD"
+        base = s[: -len(quote)]
+        try:
+            from lib.crypto_market_data import is_crypto_symbol
+            if base and is_crypto_symbol(base):
+                return f"{base}/{quote}"
+        except Exception:
+            pass
+    return s
+
+
+def variants(symbol: str | None) -> set[str]:
+    """Every spelling a venue might use for this instrument — for matching
+    against broker state, which is inconsistent about the slash."""
+    c = canonical(symbol)
+    out = {c, str(symbol or "").upper().strip()}
+    if "/" in c:
+        out.add(c.replace("/", ""))
+    elif len(c) > 3 and c.endswith("USD") and c[:-3].isalpha():
+        out.add(f"{c[:-3]}/USD")
+    out.discard("")
+    return out
+
+
+def asset_class_of(symbol: str | None) -> str:
+    """Equity | Crypto | Futures | Forex — from the symbol's shape and the
+    known-crypto registry, one rule for every module."""
+    c = canonical(symbol)
+    if not c:
+        return "Equity"
+    if c.endswith("=F") or c.startswith("^"):
+        return "Futures"
+    if c.endswith("=X"):
+        return "Forex"
+    if "/" in c:
+        return "Crypto"
+    return "Equity"
+
+
 @dataclass(frozen=True)
 class ContractSpec:
     symbol: str

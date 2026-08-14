@@ -1,0 +1,35 @@
+# The suite is the desk's immune system — 1,649 tests pinning risk
+# invariants, gate semantics, calendar rules and point-in-time honesty.
+# Until this file existed they only ran when a developer remembered.
+#
+# Ubuntu on purpose: order_book (cryptofeed's C extension) compiles clean
+# under GCC; the MSVC story lives in vendor/patches/. Tests are hermetic
+# by construction (conftest.py redirects both databases to temp files and
+# refuses the operator DB), so no secrets are configured here — a test
+# that needs a real key is a test that's wrong.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run suite
+        env:
+          JARVIS_DISABLE_SCHEDULER: "1"
+        run: pytest -q

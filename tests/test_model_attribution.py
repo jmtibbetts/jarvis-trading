@@ -29,6 +29,44 @@ class ServedModelCaptureTests(unittest.TestCase):
             self.assertIsNone(_llm_model_for_batch())
 
 
+class ResolveCacheTtlTests(unittest.TestCase):
+    """A permanent resolve cache holds the PREVIOUS model's name after a
+    load swap — and naming an unloaded model triggers LM Studio's JIT
+    loading: two models in VRAM the GPU may not have. The TTL is the
+    guard: within minutes the desk follows the operator's swap."""
+
+    def test_cache_expires_after_ttl(self):
+        import time as _time
+
+        import lib.lmstudio as lm
+        url = "http://test-ttl:1234/v1"
+        with lm._model_cache_lock:
+            lm._resolved_model_cache[url] = ("old-model",
+                                             _time.time() - 301.0)
+        with patch("lib.lmstudio.httpx.get") as g:
+            g.return_value.status_code = 200
+            g.return_value.json.return_value = {
+                "data": [{"id": "newly-loaded-model"}]}
+            got = lm._resolve_model({"model": "", "url": url})
+        self.assertEqual(got, "newly-loaded-model")
+        with lm._model_cache_lock:
+            lm._resolved_model_cache.pop(url, None)
+
+    def test_fresh_cache_is_served_without_a_network_hop(self):
+        import time as _time
+
+        import lib.lmstudio as lm
+        url = "http://test-fresh:1234/v1"
+        with lm._model_cache_lock:
+            lm._resolved_model_cache[url] = ("current-model", _time.time())
+        with patch("lib.lmstudio.httpx.get") as g:
+            got = lm._resolve_model({"model": "local-model", "url": url})
+            g.assert_not_called()
+        self.assertEqual(got, "current-model")
+        with lm._model_cache_lock:
+            lm._resolved_model_cache.pop(url, None)
+
+
 class ComparisonGroupingTests(unittest.TestCase):
     def setUp(self):
         init_db()

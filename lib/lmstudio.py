@@ -115,8 +115,15 @@ _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 # ── Model auto-resolution cache ───────────────────────────────────────────────
 # When the DB/env model is the generic placeholder, we query /v1/models and cache
 # the first real loaded model ID so we don't hit LM Studio on every call.
-_resolved_model_cache: dict = {}   # keyed by base_url → resolved model id
+#
+# The cache EXPIRES (TTL below). A permanent cache holds the PREVIOUS
+# model's name after the operator swaps loads — and a request naming an
+# unloaded model triggers LM Studio's just-in-time loading, putting TWO
+# models in VRAM the GPU may not have room for. Following the loaded
+# model within minutes is the whole point of the placeholder config.
+_resolved_model_cache: dict = {}   # keyed by base_url → (model id, resolved_at)
 _model_cache_lock = threading.Lock()
+MODEL_RESOLVE_TTL_S = 300.0
 
 # ── Provider detection ─────────────────────────────────────────────────────────
 OPENAI_COMPAT_PLATFORMS = {'lmstudio', 'ollama', 'openai', 'groq', 'deepseek', 'other'}
@@ -167,8 +174,9 @@ def _resolve_model(cfg: dict) -> str:
 
     base_url = cfg.get('url', DEFAULT_URL)
     with _model_cache_lock:
-        if base_url in _resolved_model_cache:
-            return _resolved_model_cache[base_url]
+        hit = _resolved_model_cache.get(base_url)
+        if hit and (time.time() - hit[1]) < MODEL_RESOLVE_TTL_S:
+            return hit[0]
 
     try:
         headers = {}
@@ -181,7 +189,7 @@ def _resolve_model(cfg: dict) -> str:
                 real_model = models[0].get('id', model)
                 logger.info(f"[LLM] Auto-resolved model '{model}' → '{real_model}' from {base_url}/models")
                 with _model_cache_lock:
-                    _resolved_model_cache[base_url] = real_model
+                    _resolved_model_cache[base_url] = (real_model, time.time())
                 return real_model
     except Exception as e:
         logger.warning(f"[LLM] Could not auto-resolve model from {base_url}/models: {e}")

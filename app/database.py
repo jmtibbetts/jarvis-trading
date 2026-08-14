@@ -1641,6 +1641,25 @@ class CandidateSignal(Base):
     exit_reason      = Column(String)
 
 
+class ScoreChampion(Base):
+    """The champion artifact ledger (§4.3) — append-only, never updated.
+
+    One row per promotion event; the current champion is the latest row.
+    The evidence that justified each promotion is frozen INTO the row, so
+    "why did we believe this?" is answerable years later even after the
+    underlying candidate data ages out. Rewriting or deleting a row here
+    would be rewriting the system's own scientific record — nothing in the
+    codebase does it, and nothing should.
+    """
+    __tablename__ = "score_champions"
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    promoted_at    = Column(String, default=now_iso)
+    variant        = Column(String)   # A | B | C | MS | ...
+    schema_version = Column(String)   # lib/score_variants.VARIANT_SCHEMA_VERSION at promotion
+    evidence       = Column(Text)     # JSON: the full evaluation that justified this
+    note           = Column(String)
+
+
 class LlmCall(Base):
     """One row per LLM call, so "does thinking mode help?" is a query.
 

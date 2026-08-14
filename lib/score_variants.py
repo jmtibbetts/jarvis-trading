@@ -31,8 +31,19 @@ logger = logging.getLogger(__name__)
 
 # Pinned per the feature-versioning rule (§58): a variant's meaning may
 # never silently change. New weights = new version string, never an edit
-# to an existing one.
-VARIANT_SCHEMA_VERSION = "shadow_v1_2026-08-13"
+# to an existing one. v2 ADDS variant MS; B and C are byte-identical to v1.
+VARIANT_SCHEMA_VERSION = "shadow_v2_2026-08-14"
+
+# When each variant's definition was frozen. The promotion framework uses
+# these as leakage cutoffs: a variant may only be judged on candidates
+# created AFTER its definition existed — C was calibrated on data through
+# 2026-08-13, so any candidate from before that date is in-sample for C
+# and counting it would let the variant grade its own homework.
+VARIANT_DEFINED = {
+    "B": "2026-08-13T00:00:00+00:00",
+    "C": "2026-08-13T00:00:00+00:00",
+    "MS": "2026-08-14T00:00:00+00:00",
+}
 
 # Variant C weights, derived from the 2026-08-13 quintile decomposition.
 # Components measured INVERTED enter as (100 - value); the conflict ratio —
@@ -117,6 +128,47 @@ def variant_c(breakdown: dict) -> float | None:
     return round(score / used, 2)
 
 
+# Variant MS — the §4.2 decomposition made falsifiable: a point-in-time
+# evidence score built from CURRENT MARKET STATE ONLY. Two exclusions
+# define it:
+#   calibrated_confidence  outcome history — belongs to the statistical-
+#                          edge layer (expectancy), and feeding it here AND
+#                          into EV is the double-count §4.2 forbids
+#   rr                     the proposal's level geometry — the same market
+#                          must produce the same evidence score regardless
+#                          of where someone drew entry/stop/target
+# Orientation follows the same 2026-08-13 measurements as C (inverted
+# components flipped); weights renormalized over the market-state subset.
+MS_WEIGHTS = {
+    "volatility":    (0.25, False),
+    "conflict_pct":  (0.20, False),
+    "ta_confluence": (0.20, True),
+    "regime":        (0.10, True),
+    "news":          (0.075, True),
+    "freshness":     (0.075, True),
+    "data_quality":  (0.05, False),
+    "liquidity":     (0.05, False),
+}
+assert abs(sum(w for w, _ in MS_WEIGHTS.values()) - 1.0) < 1e-9
+
+
+def variant_ms(breakdown: dict) -> float | None:
+    """Market-state-only evidence score (§4.2 separation, run in shadow)."""
+    comps = _components(breakdown)
+    if comps is None:
+        return None
+    score, used = 0.0, 0.0
+    for key, (weight, flip) in MS_WEIGHTS.items():
+        v = comps.get(key)
+        if v is None:
+            continue
+        score += ((100.0 - v) if flip else v) * weight
+        used += weight
+    if used < 0.6:
+        return None
+    return round(score / used, 2)
+
+
 def compute_variants(composite: float | None, breakdown: dict) -> dict:
     """All shadow variants for one signal. A (the control) is the live
     composite itself and is stored by the signal row already."""
@@ -124,6 +176,7 @@ def compute_variants(composite: float | None, breakdown: dict) -> dict:
         "schema": VARIANT_SCHEMA_VERSION,
         "B": variant_b(composite),
         "C": variant_c(breakdown or {}),
+        "MS": variant_ms(breakdown or {}),
     }
 
 
@@ -185,15 +238,17 @@ def evaluate_variants(gate: float = 55.0, timeframe: str | None = None) -> dict:
     out = {"gate": gate, "timeframe": timeframe or "all",
            "total_outcomes": len(rows),
            "schema": VARIANT_SCHEMA_VERSION, "variants": {}}
-    for name in ("A", "B", "C"):
+    for name in ("A", "B", "C", "MS"):
         selected = []
         for comp, bd, pnl, mfe, ft in rows:
             if name == "A":
                 v = comp
             elif name == "B":
                 v = variant_b(comp)
-            else:
+            elif name == "C":
                 v = variant_c(bd)
+            else:
+                v = variant_ms(bd)
             if v is not None and v >= gate:
                 selected.append((pnl, mfe, ft))
         out["variants"][name] = _score_set(selected)

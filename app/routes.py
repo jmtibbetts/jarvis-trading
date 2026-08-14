@@ -1479,6 +1479,23 @@ def candidates_selection_bias():
     return selection_bias_summary()
 
 
+@router.get("/promotion/status")
+def promotion_status(gate: float = 55.0):
+    """§4.3 scoreboard: every shadow variant vs the current champion on
+    out-of-sample resolved candidates, criterion by criterion. INSUFFICIENT
+    until the forward stream has enough span and sample — by design."""
+    from lib.promotion import evaluate_promotion
+    return evaluate_promotion(gate=gate)
+
+
+@router.get("/promotion/champions")
+def promotion_champions():
+    """The append-only champion ledger — who held live-scoring authority,
+    since when, and on what frozen evidence."""
+    from lib.promotion import champion_history
+    return {"champions": champion_history()}
+
+
 @router.get("/watchlist/focus")
 def list_focus():
     """The "coins to watch" list, with each symbol's accumulated profile."""

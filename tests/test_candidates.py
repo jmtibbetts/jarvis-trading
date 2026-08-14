@@ -72,7 +72,10 @@ class RecordingTests(unittest.TestCase):
         row = self._record(_scored(composite_score=61.5))
         self.assertEqual(row.composite_score, 61.5)
         self.assertIn("ta_confluence", row.score_breakdown)
-        self.assertIn("shadow_v1", row.shadow_variants)
+        # Pinned to the exact current schema on purpose: adding a variant
+        # (v1 -> v2 added MS) must arrive here as a conscious edit, never
+        # as a silent redefinition of stored rows.
+        self.assertIn("shadow_v2_2026-08-14", row.shadow_variants)
 
     def test_regenerated_setups_collapse_to_one_row(self):
         """Generators re-emit the same setup every cycle — 12,845 of 39,235

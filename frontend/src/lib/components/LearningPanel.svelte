@@ -31,9 +31,10 @@
   let gateExp = $state<any | null>(null);
   let variants = $state<ScoreVariantsReport | null>(null);
   let selBias = $state<SelectionBiasReport | null>(null);
+  let promo = $state<any | null>(null);
 
   async function loadAll() {
-    const [s, o, a, p, r, l, cal, ge, v, sb] = await Promise.all([
+    const [s, o, a, p, r, l, cal, ge, v, sb, pr] = await Promise.all([
       api.learningSummary(mode).catch(() => null),
       api.learningOutcomes(mode, 300).catch(() => []),
       api.learningAccuracy().catch(() => []),
@@ -44,6 +45,7 @@
       fetch("/api/gate-experiment").then(r => r.ok ? r.json() : null).catch(() => null),
       api.scoreVariants().catch(() => null),
       api.selectionBias().catch(() => null),
+      fetch("/api/promotion/status").then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
     summary = s;
     outcomes = o;
@@ -55,6 +57,7 @@
     gateExp = ge;
     variants = v;
     selBias = sb;
+    promo = pr;
   }
 
   $effect(() => {
@@ -216,7 +219,7 @@
             <tbody>
               {#each Object.entries(variants.variants) as [name, v] (name)}
                 <tr>
-                  <td class="sym">{name === "A" ? "A · live" : name === "B" ? "B · inverted" : "C · calibrated"}</td>
+                  <td class="sym">{name === "A" ? "A · live" : name === "B" ? "B · inverted" : name === "C" ? "C · calibrated" : "MS · market-state"}</td>
                   <td class="num">{v.n.toLocaleString()}</td>
                   <td class="num">{v.win_rate != null ? v.win_rate.toFixed(1) + "%" : "—"}</td>
                   <td class="num {(v.avg_pnl_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fmtPct(v.avg_pnl_pct)}</td>
@@ -249,6 +252,38 @@
             </tbody>
           </table>
           <div class="cal-note">If rejected beats persisted, the filters discard winners — the question this table exists to answer.</div>
+        </Panel>
+      </div>
+    {/if}
+
+    {#if promo && promo.challengers}
+      <div class="span-7">
+        <Panel title="Promotion Framework — §4.3"
+               meta="champion: {promo.champion?.variant} · {promo.resolved_universe?.toLocaleString?.() ?? promo.resolved_universe} resolved candidates · gate {promo.gate}">
+          <table class="tbl">
+            <thead><tr><th>Challenger</th><th>Verdict</th><th>OOS n</th><th>Sel freq</th><th>Net R (ch / champ)</th><th>Folds won</th><th>Blocking</th></tr></thead>
+            <tbody>
+              {#each Object.entries(promo.challengers) as [name, ev] (name)}
+                {@const cs = ev.challenger_stats}
+                {@const ps = ev.champion_stats}
+                {@const wf = ev.criteria?.walk_forward}
+                <tr>
+                  <td class="sym">{name}</td>
+                  <td>
+                    <span class="promo-badge" class:ok={ev.verdict === "PROMOTE_ELIGIBLE"} class:warn={ev.verdict === "INSUFFICIENT_DATA"}>
+                      {ev.verdict === "PROMOTE_ELIGIBLE" ? "ELIGIBLE" : ev.verdict === "INSUFFICIENT_DATA" ? "GATHERING" : "NOT ELIGIBLE"}
+                    </span>
+                  </td>
+                  <td class="num">{ev.oos_universe?.toLocaleString?.() ?? "—"}</td>
+                  <td class="num">{ev.criteria?.selection_frequency ? (ev.criteria.selection_frequency.challenger * 100).toFixed(1) + "%" : "—"}</td>
+                  <td class="num">{cs?.mean_net_r != null && ps?.mean_net_r != null ? `${cs.mean_net_r.toFixed(2)} / ${ps.mean_net_r.toFixed(2)}` : "—"}</td>
+                  <td class="num">{wf ? `${wf.folds_won}/${wf.valid_folds}` : "—"}</td>
+                  <td class="dim promo-fail">{ev.verdict === "INSUFFICIENT_DATA" ? "needs span + sample" : (ev.failed ?? []).join(", ") || "none"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="cal-note">Chronological walk-forward on stored-at-birth scores only — a variant is never graded on the data that calibrated it. Promotion writes an immutable champion artifact; nothing rewires live scoring until Phase 8.</div>
         </Panel>
       </div>
     {/if}
@@ -665,6 +700,10 @@
     }
   }
 
+  .promo-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 3px; background: var(--bg-3, rgba(255,255,255,0.06)); color: var(--text-dim, #8b93a7); }
+  .promo-badge.ok { background: rgba(52, 211, 153, 0.14); color: var(--up, #34d399); }
+  .promo-badge.warn { background: rgba(250, 204, 21, 0.12); color: #facc15; }
+  .promo-fail { font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .gate-grid { display: grid; grid-template-columns: 1.4fr repeat(5, 1fr); gap: 6px 10px; padding: 4px 0; }
   .gate-col-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.55; }
   .gate-row-h { font-weight: 600; }

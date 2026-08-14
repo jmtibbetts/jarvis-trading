@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference } from "../api";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
 
@@ -18,6 +18,9 @@
   let errorRate = $state<ErrorRateSummary | null>(null);
   let execPrefs = $state<TradingPreference | null>(null);
   let execSaving = $state(false);
+  let platform = $state<DataPlatformHealth | null>(null);
+  let parity = $state<ParityReport | null>(null);
+  let corpus = $state<FeatureCorpus | null>(null);
 
   async function loadExecPrefs() {
     execPrefs = await api.tradingPreference().catch(() => null);
@@ -54,7 +57,34 @@
     cacheStats = await api.cacheStats().catch(() => null);
     orders = await api.alpacaOrders().catch(() => []);
     errorRate = await api.errorRate(15).catch(() => null);
+    platform = await api.dataPlatformHealth().catch(() => null);
+    parity = await api.dataParity().catch(() => null);
+    corpus = await api.featureCorpus().catch(() => null);
   }
+
+  // Bytes/day per event kind — the §46 measurement, summed across symbols.
+  const bytesByKind = $derived.by(() => {
+    const acc: Record<string, { events: number; bytes: number }> = {};
+    for (const r of platform?.bytes_by_day ?? []) {
+      const k = (acc[r.kind] ??= { events: 0, bytes: 0 });
+      k.events += r.events;
+      k.bytes += r.bytes;
+    }
+    return Object.entries(acc).sort((a, b) => b[1].bytes - a[1].bytes);
+  });
+
+  const labelRows = $derived.by(() => {
+    const acc: Record<number, Record<string, number> & { avg?: number | null }> = {};
+    for (const l of corpus?.labels ?? []) {
+      const h = (acc[l.horizon_min] ??= {});
+      h[l.status] = l.n;
+      if (l.status === "resolved") h.avg = l.avg_forward_ret_pct;
+    }
+    return Object.entries(acc).map(([h, v]) => ({ horizon: Number(h), ...v }));
+  });
+
+  const mb = (b: number) => (b / 1048576).toFixed(1);
+  const fmtHorizon = (m: number) => (m >= 1440 ? `${m / 1440}d` : m >= 60 ? `${m / 60}h` : `${m}m`);
 
   async function runBackfill() {
     backfilling = true;
@@ -280,6 +310,73 @@ Save anyway?`)) return;
           {backfilling ? "Starting…" : "Backfill Now"}
         </button>
       {/snippet}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <Panel title="Event Platform" dotColor={platform && platform.queues.every((q) => q.dropped_total === 0) ? "var(--good)" : "var(--warn)"} meta={platform ? `${platform.store.events.toLocaleString()} events · ${mb(platform.store.file_bytes)} MB` : ""}>
+      {#if platform}
+        <div class="stat-list">
+          {#each platform.books as b (b.stream)}
+            <div class="stat">
+              <span>{b.stream} <Pill label={b.valid ? "ok" : b.reason} tone={b.valid ? "good" : "bad"} /></span>
+              <b class="num">{b.age_seconds < 10 ? "live" : `${b.age_seconds.toFixed(0)}s`}</b>
+            </div>
+          {/each}
+          {#each bytesByKind as [kind, v] (kind)}
+            <div class="stat"><span>{kind} /day</span><b class="num">{v.events.toLocaleString()} · {mb(v.bytes)} MB</b></div>
+          {/each}
+          {#each platform.queues.filter((q) => q.dropped_total > 0) as q (q.name)}
+            <div class="stat"><span>{q.name} drops</span><b class="num pl-down">{q.dropped_total}</b></div>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">Loading…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <Panel title="Feed Parity" dotColor={parity && parity.pairs.every((p) => p.verdict === "parity") ? "var(--good)" : "var(--warn)"} meta={parity ? `${parity.symbol} · ${parity.window_min}m window` : ""}>
+      {#if parity}
+        {#if parity.pairs.length}
+          <div class="stat-list">
+            {#each parity.pairs as p (`${p.a}-${p.b}`)}
+              <div class="stat">
+                <span>{p.a} ↔ {p.b} <Pill label={p.verdict} tone={p.verdict === "parity" ? "good" : p.verdict === "divergent" ? "bad" : "neutral"} /></span>
+                <b class="num">{p.median_bps.toFixed(1)} bps</b>
+              </div>
+            {/each}
+          </div>
+          <div class="parity-note">median mid-price gap; two venues measuring one market should agree within {parity.pairs[0]?.threshold_bps ?? 20} bps</div>
+        {:else}
+          <div class="empty">No overlapping venue data in window</div>
+        {/if}
+      {:else}
+        <div class="empty">Loading…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <Panel title="Feature Corpus" meta={corpus ? `${Object.values(corpus.snapshots).reduce((a, b) => a + b, 0)} snapshots` : ""}>
+      {#if corpus}
+        <div class="stat-list">
+          {#each Object.entries(corpus.snapshots) as [k, n] (k)}
+            <div class="stat"><span>{k}</span><b class="num">{n}</b></div>
+          {/each}
+          {#each labelRows as r (r.horizon)}
+            <div class="stat">
+              <span>{fmtHorizon(r.horizon)} labels</span>
+              <b class="num">
+                {r.resolved ?? 0} resolved{r.avg != null ? ` (${r.avg > 0 ? "+" : ""}${r.avg}%)` : ""} · {r.pending ?? 0} pend{r.abstained ? ` · ${r.abstained} abst` : ""}
+              </b>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">Loading…</div>
+      {/if}
     </Panel>
   </div>
 
@@ -653,6 +750,13 @@ Save anyway?`)) return;
     text-align: center;
     color: var(--ink-faint);
     font-size: 12px;
+  }
+
+  .parity-note {
+    margin-top: 8px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--ink-faint);
   }
 
   @media (max-width: 1180px) {

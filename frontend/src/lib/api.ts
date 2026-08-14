@@ -776,6 +776,25 @@ export type CacheStats = {
   db_size_mb: number;
 };
 
+export type DataPlatformHealth = {
+  queues: { name: string; size: number; maxsize: number; pushed: number; dropped_total: number }[];
+  store: { path: string; events: number; payload_bytes: number; file_bytes: number };
+  bytes_by_day: { day: string; symbol: string; kind: string; events: number; bytes: number }[];
+  books: { stream: string; tier: number; valid: boolean; reason: string; age_seconds: number }[];
+};
+
+export type ParityReport = {
+  symbol: string;
+  window_min: number;
+  venues: Record<string, number>;
+  pairs: { a: string; b: string; verdict: string; median_bps: number; p95_bps: number; max_bps: number; shared_buckets: number; coverage: number; threshold_bps: number }[];
+};
+
+export type FeatureCorpus = {
+  snapshots: Record<string, number>;
+  labels: { horizon_min: number; status: string; n: number; avg_forward_ret_pct: number | null }[];
+};
+
 export type PlatformConfig = {
   id: string;
   key: string;
@@ -1370,6 +1389,10 @@ export const api = {
   llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),
+  dataPlatformHealth: () => get<DataPlatformHealth>(`/data-platform/health`),
+  dataParity: (symbol = "BTC", windowMin = 60) =>
+    get<ParityReport>(`/data-platform/parity?symbol=${symbol}&window_min=${windowMin}`),
+  featureCorpus: () => get<FeatureCorpus>(`/feature-snapshots/summary`),
   cacheBackfill: () => post<{ ok: boolean; message: string }>(`/cache/backfill`),
 
   telegramDetectChat: (body: { config_id?: string; bot_token?: string; chat_id?: string }) =>

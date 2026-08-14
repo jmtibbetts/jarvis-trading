@@ -375,7 +375,12 @@ def run():
                 "asset_symbol": sym_raw,
                 "asset_class":  s.asset_class or "Equity",
                 "direction":    s.direction or "Long",
-                "confidence":   float(s.composite_score or s.confidence or 65),
+                # The actual LLM confidence, DIAGNOSTIC ONLY. This field
+                # used to receive the composite score, which risk_manager
+                # then clamped into a Kelly win probability — a number
+                # measured inverted against outcomes, bet as if it were
+                # p(win). Nothing sizes from this field anymore.
+                "confidence":   float(s.confidence or 0),
                 "entry_price":  s.entry_price,
                 "target_price": s.target_price,
                 "stop_loss":    s.stop_loss,
@@ -496,33 +501,37 @@ def run():
                 logger.warning(f"[Execute] Skip {sym} — invalid: target ${target} <= entry ${entry}")
                 continue
 
-            # Position sizing
-            trade_budget = budget
+            # Position sizing. FAIL CLOSED: if the risk engine errors, the
+            # answer is no trade — the old fallback priced a budget from
+            # "confidence" when sizing crashed, which meant the safety
+            # layer could fail and the system traded anyway (P0.3).
             try:
                 from lib.risk_manager import calculate_position_size
-                sz = calculate_position_size(sig, equity, regime)
+                from lib.strategy_lifecycle import state_of
+                life_mult = 1.0
+                try:
+                    life_mult = float(state_of(sig.get("strategy"),
+                                               cache=lifecycle_cache)["size_multiplier"])
+                except Exception:
+                    life_mult = 1.0   # unmeasured strategy ≠ blocked; sizing floor is P0.10's job
+                sz = calculate_position_size(sig, equity, regime,
+                                             lifecycle_multiplier=life_mult)
                 if sz.rejection_reason:
                     logger.info(f"[Execute] Skip {sym} — risk mgr: {sz.rejection_reason}")
                     continue
                 trade_budget = min(sz.dollar_size, budget)
             except Exception as e:
-                conf = float(sig.get("confidence", 65))
-                trade_budget = max(100, min(1500, 500 + (conf - 55) / 45 * 1000))
-                trade_budget = min(trade_budget, budget)
+                logger.error(f"[Execute] RISK ENGINE ERROR for {sym} — NO_TRADE "
+                             f"(fail closed, never priced from confidence): {e}")
+                continue
 
+            # Downstream may only REDUCE the approved size (P0.4) — slot
+            # division and the global budget shrink it; nothing enlarges it.
+            # The old "conviction multiplier" (1-2x from the score, applied
+            # AFTER risk approval) is deleted: execution never increases a
+            # risk decision (invariant #10).
             remaining_slots = max(1, slots - executed)
             per_trade_cap = min(trade_budget, budget / remaining_slots, budget)
-            per_trade_cap = max(50.0, per_trade_cap)
-
-            # Conviction sizing (Alpaca's realistic leverage band): the same
-            # score->leverage idea the virtual books use at 5-100x, expressed
-            # here as 1x-2x notional scaling. Equities only — Alpaca margin
-            # covers 2x on stocks; crypto is non-marginable and stays 1x.
-            score = float(sig.get("confidence", 55))
-            conviction_mult = max(1.0, min(2.0, 1.0 + (score - 55.0) / 45.0))
-            if not crypto and conviction_mult > 1.0:
-                per_trade_cap = min(per_trade_cap * conviction_mult, budget)
-                logger.debug(f"[Execute] {sym}: conviction x{conviction_mult:.2f} (score {score:.0f})")
 
             if crypto:
                 qty = round(per_trade_cap / entry, 6)

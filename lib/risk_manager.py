@@ -56,15 +56,19 @@ def kelly_fraction(win_rate: float, win_loss_ratio: float) -> float:
     return max(0.0, f)  # never negative
 
 def calculate_position_size(signal: dict, equity: float, regime: dict,
-                             max_risk_per_trade: float = 0.02) -> SizedSignal:
+                             max_risk_per_trade: float = 0.02,
+                             lifecycle_multiplier: float = 1.0) -> SizedSignal:
     """
-    Calculate risk-adjusted position size using:
-    1. Fixed fractional risk (2% of equity max loss per trade)
-    2. Kelly Criterion (halved for conservatism = half-Kelly)
+    Risk-adjusted position size:
+    1. Fixed fractional risk (2% of equity max loss, scaled by the
+       strategy's lifecycle multiplier BEFORE quantity is solved)
+    2. Quarter-Kelly from MEASURED evidence only — lower Wilson bound of
+       the observed win rate, measured payoff ratio, 25-trade sample
+       floor; no valid statistics means no Kelly contribution at all
     3. Regime multiplier (reduce in bear/choppy markets)
-    4. Confidence multiplier
-    
-    Returns the SMALLER of the two (fixed fractional vs half-Kelly).
+
+    Model confidence has NO sizing effect. The field survives on
+    SizedSignal as a diagnostic only.
     """
     sym     = signal['asset_symbol']
     entry   = float(signal['entry_price'] or 0)
@@ -143,18 +147,41 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
         logger.debug(f"[Risk] Cost gate skipped for {sym}: {e}")
 
     # ── Fixed Fractional ──────────────────────────────────────────────────────
-    # Max loss = 2% of equity
-    max_loss_dollars = equity * max_risk_per_trade
+    # Max loss = 2% of equity, scaled by the strategy's lifecycle state
+    # (REDUCED 0.50 / EXPERIMENTAL 0.25) — applied to the RISK BUDGET so
+    # quantity is solved from reduced risk, never multiplied onto an
+    # already-rounded order afterward (P0.5).
+    max_loss_dollars = equity * max_risk_per_trade * max(0.0, min(1.0, lifecycle_multiplier))
     shares_by_risk   = max_loss_dollars / risk_per_share
     dollar_by_risk   = shares_by_risk * entry
-    
-    # ── Kelly ─────────────────────────────────────────────────────────────────
-    # Estimate win rate from confidence (confidence = model's estimate of success)
-    # We use half-Kelly to avoid overbetting
-    win_rate = max(50.0, min(90.0, conf))  # clamp between 50-90%
-    kf       = kelly_fraction(win_rate, rr_ratio)
-    half_kelly_dollars = equity * kf * 0.5  # half-Kelly
-    
+
+    # ── Kelly, from MEASURED evidence only (P0.2) ─────────────────────────────
+    # The old path clamped the signal's "confidence" to 50-90% and called
+    # it a win probability — and the executor was writing the COMPOSITE
+    # SCORE into that field, so a number measured inverted against
+    # outcomes was being bet as if it were p(win). Kelly now feeds
+    # exclusively from the expectancy table: the LOWER Wilson bound of the
+    # measured win rate (uncertainty shrinks size), measured payoff ratio,
+    # a 25-trade sample floor, and a quarter-Kelly cap. No statistically
+    # valid probability -> Kelly contributes NOTHING (fixed-fractional
+    # alone), never a flattering default.
+    kelly_dollars = None
+    kf = 0.0
+    try:
+        from lib.expectancy import MIN_SAMPLE as _EV_MIN
+        from lib.expectancy import lookup as _ev_lookup
+        stats = _ev_lookup(signal.get("strategy"), signal.get("asset_class"),
+                           direction, signal.get("timeframe"))
+        if stats and stats.get("raw_sample", 0) >= _EV_MIN:
+            p_lower = float((stats.get("p_win_ci") or [0, 0])[0]) * 100.0
+            avg_win = float(stats.get("avg_win_r") or 0)
+            avg_loss = abs(float(stats.get("avg_loss_r") or 0))
+            if avg_win > 0 and avg_loss > 0:
+                kf = kelly_fraction(p_lower, avg_win / avg_loss)
+                kelly_dollars = equity * kf * 0.25 * max(0.0, min(1.0, lifecycle_multiplier))
+    except Exception as e:
+        logger.debug(f"[Risk] measured-Kelly unavailable for {sym}: {e}")
+
     # ── Regime Multiplier ─────────────────────────────────────────────────────
     risk_level = regime.get('risk', 'medium')
     regime_mult = {
@@ -164,21 +191,25 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
         'high':        0.4,
         'unknown':     0.7,
     }.get(risk_level, 0.7)
-    
-    # ── Confidence Multiplier ─────────────────────────────────────────────────
-    conf_mult = 0.5 + (conf - 50) / 100.0  # 50% conf = 0.5x, 90% conf = 0.9x
-    
+
     # ── Final Size ────────────────────────────────────────────────────────────
-    # Take min of fixed-fractional and half-Kelly, then apply multipliers
-    base_dollars = min(dollar_by_risk, half_kelly_dollars)
-    final_dollars = base_dollars * regime_mult * conf_mult
+    # Fixed-fractional bounded by measured Kelly when one exists. The old
+    # confidence multiplier (0.5-0.9x from the same poisoned field) is
+    # deleted: model self-belief has no sizing effect (invariant #1).
+    base_dollars = min(dollar_by_risk, kelly_dollars) if kelly_dollars is not None else dollar_by_risk
+    final_dollars = base_dollars * regime_mult
     
     # Cap by equity share. The old line also applied max(200.0, ...), a FLOOR
     # that overrode the risk budget: when the risk math said $50, it deployed
     # $200 anyway — four times the intended risk. A minimum position size is
     # not a risk control, it is a violation of one. The correct size for a
     # trade too small to express is zero (Phase 3: NO_TRADE).
-    final_dollars = min(final_dollars, equity * 0.05)
+    # The notional cap scales with the lifecycle multiplier too — with
+    # tight stops this cap binds before the risk budget does, and a
+    # REDUCED strategy that sizes identically to an ACTIVE one whenever
+    # the cap binds would make invariant #11 true on paper only.
+    final_dollars = min(final_dollars,
+                        equity * 0.05 * max(0.0, min(1.0, lifecycle_multiplier)))
 
     shares = final_dollars / entry if entry > 0 else 0.0
     is_crypto = '/' in sym

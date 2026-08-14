@@ -124,6 +124,14 @@ ANTHROPIC_PLATFORMS     = {'anthropic'}
 
 PLACEHOLDER_MODELS = {'local-model', 'default', '', None}
 
+# The model named in the most recent RESPONSE (not the request) — see the
+# capture in call_llm. None until the first successful call.
+_last_served_model: str | None = None
+
+
+def last_served_model() -> str | None:
+    return _last_served_model
+
 
 def _strip_thinking_tokens(text: str) -> str:
     """
@@ -380,6 +388,15 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         data    = r.json()
         choice  = data['choices'][0]
         raw_content = choice['message']['content'] or ''
+        # Attribution: the server names the model that ACTUALLY answered —
+        # which the configured name can't promise while LM Studio swaps
+        # loads. Recorded per call (serialized by the global call lock) so
+        # signals can stamp which brain generated them; per-model outcome
+        # comparison is impossible without this.
+        served = data.get('model')
+        if served:
+            global _last_served_model
+            _last_served_model = str(served)
         usage   = data.get('usage') or {}
         tokens  = usage.get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')

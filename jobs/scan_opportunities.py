@@ -98,6 +98,16 @@ MIN_ATR_PCT        = 0.8   # min ATR% for a trade to be worth taking
 SCALP_TIMEFRAMES   = ("1m", "3m", "5m", "15m", "30m")
 
 
+def _scan_llm_model() -> str | None:
+    """Same attribution as generate_signals: the model that ACTUALLY
+    answered, read from the response side of the shared client."""
+    try:
+        from lib.lmstudio import last_served_model
+        return last_served_model()
+    except Exception:
+        return None
+
+
 def _resample_intraday(df_1m):
     """Build the scalp timeframe ladder from one provider request."""
     if df_1m is None or df_1m.empty:
@@ -623,6 +633,7 @@ def _save_signals(signals: list, scan_mode: str):
                     setup_type = sig.get("setup_type"),
                     invalidation = sig.get("invalidation"),
                     signal_version = sig.get("signal_version", "v7.2"),
+                    llm_model = _scan_llm_model(),
                     market_data_at = sig.get("market_data_at"),
                     expires_at = sig.get("expires_at"),
                     trade_horizon = sig.get("trade_horizon"),

@@ -127,6 +127,10 @@ class TradingSignal(Base):
     strategy_score   = Column(Float)
     invalidation     = Column(Text)
     signal_version   = Column(String, default="v7.2")
+    # Which brain actually answered — from the LLM RESPONSE, not the
+    # request config (LM Studio swaps loads under the desk's feet). The
+    # join key for per-model outcome comparison.
+    llm_model        = Column(String)
     market_data_at   = Column(String)
     expires_at       = Column(String)
     trade_horizon    = Column(String, default="all")
@@ -1067,6 +1071,7 @@ def _migrate_columns():
             ("strategy_score", "REAL"),
             ("invalidation", "TEXT"),
             ("signal_version", "TEXT DEFAULT 'v7.2'"),
+            ("llm_model", "TEXT"),
             ("market_data_at", "TEXT"),
             ("expires_at", "TEXT"),
             ("trade_horizon", "TEXT DEFAULT 'all'"),

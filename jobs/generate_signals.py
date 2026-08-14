@@ -61,6 +61,18 @@ TRACK_E_PAPER = ["NVDA","AMD","TSLA","COIN","MSTR","PLTR","SOXS","SQQQ","TQQQ","
 # what gets analysed; the full-size contract stays out of the universe.
 # Instruments with no micro remain at full size and are refused by sizing
 # on their own merits, which is the honest outcome rather than a hidden one.
+def _llm_model_for_batch() -> str | None:
+    """The model that ACTUALLY answered the batch's LLM calls, from the
+    response side of the client. Attribution, not configuration: when
+    the operator swaps LM Studio loads, per-model outcome comparison is
+    only possible because each signal carries the brain that wrote it."""
+    try:
+        from lib.lmstudio import last_served_model
+        return last_served_model()
+    except Exception:
+        return None
+
+
 def _tradeable_contract(sym: str) -> str:
     """Substitute the micro when one exists — that is the contract a retail
     account can size."""
@@ -1397,6 +1409,7 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
                         setup_type=scored.get("setup_type"),
                         invalidation=scored.get("invalidation"),
                         signal_version=scored.get("signal_version", "v7.2"),
+                        llm_model=_llm_model_for_batch(),
                         market_data_at=scored.get("market_data_at"),
                         expires_at=scored.get("expires_at"),
                         trade_horizon=scored.get("trade_horizon"),

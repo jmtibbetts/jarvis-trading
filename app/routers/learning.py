@@ -184,6 +184,37 @@ def cost_reconciliation():
     return reconciliation_summary()
 
 
+@router.get("/learning/model-comparison")
+def llm_model_comparison():
+    """Outcomes grouped by the LLM that AUTHORED each signal (stamped
+    from the response at generation). The question this answers: did
+    swapping the LM Studio load change signal quality? Rows accumulate
+    from the moment attribution landed; pre-attribution history is
+    honestly 'unattributed', never guessed."""
+    from sqlalchemy import text as _t
+
+    from app.database import engine
+
+    out = {"models": [], "note": ("attribution starts 2026-08-16; older "
+                                  "signals are unattributed by design")}
+    with engine.connect() as c:
+        for model, n_sig, n_out, wr, pnl, mfe in c.execute(_t("""
+            SELECT COALESCE(s.llm_model, 'unattributed'),
+                   COUNT(DISTINCT s.id), COUNT(o.id),
+                   ROUND(AVG(CASE WHEN o.pnl_pct > 0 THEN 100.0
+                                  WHEN o.pnl_pct IS NOT NULL THEN 0.0 END), 1),
+                   ROUND(AVG(o.pnl_pct), 3), ROUND(AVG(o.mfe_r), 3)
+            FROM trading_signals s
+            LEFT JOIN trade_outcomes o ON o.signal_id = s.id
+            GROUP BY COALESCE(s.llm_model, 'unattributed')
+            ORDER BY COUNT(DISTINCT s.id) DESC
+        """)):
+            out["models"].append({
+                "model": model, "signals": n_sig, "outcomes": n_out,
+                "win_rate": wr, "avg_pnl_pct": pnl, "avg_mfe_r": mfe})
+    return out
+
+
 @router.get("/context-ablation")
 def context_ablation():
     """Does the macro context a candidate was born under predict how it

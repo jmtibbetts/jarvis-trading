@@ -28,10 +28,38 @@ SHORT = "short"
 # Directions that mean "short" regardless of decoration (_5x, _Leveraged...).
 _SHORT_MARKERS = ("short", "bear", "put")
 
+# Directions that affirmatively mean "long". Strict parsing requires a
+# POSITIVE match on one of these — absence of "short" is not evidence of
+# "long", it is evidence of a malformed direction.
+_LONG_MARKERS = ("long", "bull", "call", "buy", "bounce", "breakout_up")
+
+
+def parse_side_strict(direction: str | None) -> str | None:
+    """LONG, SHORT, or None — and None means REFUSE, never assume.
+
+    Order creation must use this. The permissive normalize_side below
+    turns any unrecognized string — a typo, an empty field, a new LLM
+    phrasing nobody mapped — into a LONG position. That is a fine reading
+    rule for legacy display rows; as an order path it means garbage input
+    buys things. Unknown direction on an order is a validation error, not
+    a long.
+    """
+    d = str(direction or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not d:
+        return None
+    if any(m in d for m in _SHORT_MARKERS):
+        return SHORT
+    if any(m in d for m in _LONG_MARKERS):
+        return LONG
+    return None
+
 
 def normalize_side(direction: str | None) -> str:
-    """Any direction string -> LONG or SHORT. Unknown defaults to LONG,
-    matching the historical behaviour of every call site this replaces."""
+    """Any direction string -> LONG or SHORT. Unknown defaults to LONG.
+
+    PERMISSIVE — for reading legacy rows and display only. Every order
+    path (live executor, paper engine, auto sim) must use
+    parse_side_strict and treat None as NO_TRADE."""
     d = str(direction or "").strip().lower().replace("-", "_").replace(" ", "_")
     return SHORT if any(m in d for m in _SHORT_MARKERS) else LONG
 

@@ -692,8 +692,14 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
     if not sym:
         return {"error": "No asset_symbol provided"}
 
-    # Normalize direction — handle any LLM output variant
-    raw_dir = signal.get("paper_direction") or signal.get("direction") or "Long"
+    # Strict side first: an order path never assumes. A missing or
+    # unparseable direction used to default to "Long", which meant garbage
+    # input BOUGHT things. Unknown is a rejection with a reason.
+    from lib.trade_side import parse_side_strict
+    raw_dir = signal.get("paper_direction") or signal.get("direction")
+    if parse_side_strict(raw_dir) is None:
+        return {"error": f"unparseable direction {raw_dir!r} — refusing to "
+                         "assume a side for an order"}
     dir_key = _normalize_direction(raw_dir)
 
     side, leverage = DIRECTION_LEVERAGE[dir_key]

@@ -358,6 +358,11 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
             if ratio < 0.2 or ratio > 5.0:
                 skipped += 1
                 continue
+            # Strict: an unparseable direction is skipped, never traded as
+            # a long (the permissive default this replaced).
+            if trade_side.parse_side_strict(signal.direction) is None:
+                skipped += 1
+                continue
             side = _side(signal.direction)
             leverage = score_leverage(signal.composite_score or signal.confidence,
                                       asset_class=signal.asset_class, direction=signal.direction)

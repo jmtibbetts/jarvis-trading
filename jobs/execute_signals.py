@@ -440,6 +440,20 @@ def run():
                     logger.debug(f"[Execute] Skip {sym} — equity, market just closed")
                     continue
 
+            # Strict side, before anything else touches this signal. The
+            # live path is long-only (shorts route to paper at creation),
+            # so the ONLY acceptable parse here is an affirmative LONG.
+            # The old check accepted any direction starting with "long" or
+            # the letter b — which mapped "Bounce" to buy, but also
+            # "Bearish". Unknown is a validation failure, never a long.
+            from lib.trade_side import LONG, parse_side_strict
+            side_strict = parse_side_strict(sig.get("direction"))
+            if side_strict != LONG:
+                logger.warning(f"[Execute] Skip {sym} — direction "
+                               f"{sig.get('direction')!r} is not an affirmative "
+                               f"long (parsed: {side_strict}); live path is long-only")
+                continue
+
             entry  = float(sig.get("entry_price")  or 0)
             target = float(sig.get("target_price") or 0)
             stop   = float(sig.get("stop_loss")    or 0)
@@ -534,8 +548,7 @@ def run():
                     from lib.execution_recorder import record_intent
                     exec_row = record_intent(
                         signal_id=sig.get("id"), symbol=sym,
-                        side="buy" if str(sig.get("direction", "")).lower().startswith(("long", "b"))
-                             else "sell",
+                        side="buy",   # strict-parsed LONG above; this path is long-only
                         order_type="market", intended_price=entry, qty=qty,
                         stop_loss=stop, asset_class=sig.get("asset_class"),
                         venue="alpaca",

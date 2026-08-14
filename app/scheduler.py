@@ -65,6 +65,7 @@ job_status = {
     'feature_snapshots': {'status': 'idle', 'last': None, 'error': None},
     'feature_labels': {'status': 'idle', 'last': None, 'error': None},
     'official_data': {'status': 'idle', 'last': None, 'error': None},
+    'futures_curve': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -665,6 +666,17 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('official_data', official_data_run),
                   'interval', hours=6, id='official_data',
                   next_run_time=now + timedelta(minutes=10),
+                  replace_existing=True, max_instances=1)
+
+    # Futures term structure (4B): one snapshot per root per 4h bucket.
+    # The dedup bucket makes restarts harmless; front_code in every
+    # snapshot is the roll-provenance record.
+    def futures_curve_run():
+        from lib.futures_curve import sync_curves
+        return sync_curves()
+    sched.add_job(make_job_runner('futures_curve', futures_curve_run),
+                  'interval', hours=4, id='futures_curve',
+                  next_run_time=now + timedelta(minutes=12),
                   replace_existing=True, max_instances=1)
 
 

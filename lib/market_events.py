@@ -145,6 +145,24 @@ class OfficialStat:
 
 
 @dataclass(frozen=True)
+class CurveSnapshot:
+    """A futures term structure at an instant: the enterable strip with
+    per-contract prices. front_code doubles as roll provenance — which
+    contract the continuous symbol actually meant on this date."""
+    meta: EventMeta
+    symbol: str                  # root, e.g. "CL"
+    points: tuple                # ((code, price, dte), ...) front first
+    front_code: str
+    structure: str | None        # contango | backwardation
+    spread_pct: float | None     # front -> second
+    annualized_roll_pct: float | None   # positive = roll pays a long
+    slope_pct: float | None      # front -> last point
+    as_of: str
+    dedup_key: str | None = None
+    kind: str = "curve_snapshot"
+
+
+@dataclass(frozen=True)
 class OnChainEvent:
     """A chain-level observation (flow, balance change, contract event)."""
     meta: EventMeta

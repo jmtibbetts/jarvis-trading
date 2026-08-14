@@ -98,17 +98,33 @@ def split_by_time(rows: list, train_fraction: float = TRAIN_FRACTION) -> tuple[l
 
 
 def _expectancy(rows: list) -> dict:
-    """P(win), average win/loss in R and expectancy for a set of trades."""
-    rs = [_f(r.get("r")) for r in rows if r.get("r") is not None]
-    if not rs:
-        return {"trades": 0, "p_win": 0.0, "avg_win_r": 0.0,
+    """P(win), average win/loss in R and expectancy for a set of trades.
+
+    Replay evidence counts at REPLAY_WEIGHT (matching lib/expectancy and
+    lib/calibration — P0.5's "also fix"): a strategy's LIVE-capital state
+    was previously judged on replayed bars at full weight, so 500 replays
+    could promote a strategy 3 live fills would have kept EXPERIMENTAL.
+    The live/replay mix is surfaced so the UI can say what the verdict
+    stands on."""
+    from lib.expectancy import REPLAY_WEIGHT
+    pairs = [(_f(r.get("r")), REPLAY_WEIGHT if r.get("replay") else 1.0)
+             for r in rows if r.get("r") is not None]
+    if not pairs:
+        return {"trades": 0, "trades_live": 0, "trades_replay": 0,
+                "p_win": 0.0, "avg_win_r": 0.0,
                 "avg_loss_r": 0.0, "expected_r": 0.0}
-    wins = [r for r in rs if r > 0]
-    losses = [abs(r) for r in rs if r <= 0]
-    p = len(wins) / len(rs)
-    aw = sum(wins) / len(wins) if wins else 0.0
-    al = sum(losses) / len(losses) if losses else 1.0
-    return {"trades": len(rs), "p_win": round(p, 4),
+    n = sum(w for _, w in pairs)
+    wins = [(r, w) for r, w in pairs if r > 0]
+    losses = [(abs(r), w) for r, w in pairs if r <= 0]
+    win_w = sum(w for _, w in wins)
+    loss_w = sum(w for _, w in losses)
+    p = win_w / n if n else 0.0
+    aw = sum(r * w for r, w in wins) / win_w if win_w else 0.0
+    al = sum(r * w for r, w in losses) / loss_w if loss_w else 1.0
+    n_replay = sum(1 for r in rows if r.get("r") is not None and r.get("replay"))
+    n_live = sum(1 for r in rows if r.get("r") is not None) - n_replay
+    return {"trades": round(n, 1), "trades_live": n_live,
+            "trades_replay": n_replay, "p_win": round(p, 4),
             "avg_win_r": round(aw, 3), "avg_loss_r": round(al, 3),
             "expected_r": round(p * aw - (1 - p) * al, 4)}
 
@@ -164,23 +180,26 @@ def _load_rows() -> list[dict]:
     try:
         from app.database import get_db, TradeOutcome, TradingSignal
         from lib.calibration import CURRENT_EPOCH
-        from lib.expectancy import _r_of
+        from lib.expectancy import _placed_stops, _r_of
         with get_db() as db:
             rows = db.query(
                 TradeOutcome.entry_price, TradeOutcome.exit_price,
                 TradeOutcome.direction, TradeOutcome.exited_at,
                 TradeOutcome.outcome_source, TradeOutcome.timeframe,
                 TradingSignal.stop_loss, TradingSignal.strategy,
+                TradeOutcome.signal_id,
             ).outerjoin(
                 TradingSignal, TradingSignal.id == TradeOutcome.signal_id
             ).filter(TradeOutcome.engine_epoch == CURRENT_EPOCH).all()
+            placed = _placed_stops(db)
     except Exception as e:
         logger.warning(f"[Lifecycle] could not read outcomes: {e}")
         return []
 
     out = []
-    for entry, exit_price, direction, exited_at, src, tf, stop, strategy in rows:
-        r = _r_of(entry, stop, exit_price, direction)
+    for entry, exit_price, direction, exited_at, src, tf, stop, strategy, sig_id in rows:
+        # R against the stop AS PLACED, matching expectancy (P0.12).
+        r = _r_of(entry, placed.get(sig_id) or stop, exit_price, direction)
         if r is None:
             continue
         out.append({

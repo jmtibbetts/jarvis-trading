@@ -111,6 +111,23 @@ def _r_of(entry, stop, exit_price, direction) -> float | None:
     return move / risk
 
 
+def _placed_stops(db) -> dict:
+    """signal_id -> the stop AS PLACED at position open (immutable,
+    Phase 0's initial_stop_loss). The learning ledger must compute R
+    against the risk actually taken: the signal's stop and the placed
+    stop diverge whenever the horizon cap clamped it or a spread-adjusted
+    fill moved the entry — and every R computed from the wrong one is a
+    lie about risk (P0.12 consumer side)."""
+    try:
+        from app.database import PaperPosition
+        rows = db.query(PaperPosition.signal_id, PaperPosition.initial_stop_loss).filter(
+            PaperPosition.signal_id.isnot(None),
+            PaperPosition.initial_stop_loss.isnot(None)).all()
+        return {sid: float(stop) for sid, stop in rows if stop}
+    except Exception:
+        return {}
+
+
 def build_table(force: bool = False) -> dict:
     """Measured R-distribution per bucket, from closed trades."""
     with _LOCK:
@@ -127,15 +144,19 @@ def build_table(force: bool = False) -> dict:
                 TradeOutcome.timeframe, TradeOutcome.direction, TradeOutcome.asset_class,
                 TradeOutcome.entry_price, TradeOutcome.exit_price,
                 TradeOutcome.outcome_source, TradingSignal.stop_loss, TradingSignal.strategy,
+                TradeOutcome.signal_id,
             ).outerjoin(
                 TradingSignal, TradingSignal.id == TradeOutcome.signal_id
             ).filter(TradeOutcome.engine_epoch == CURRENT_EPOCH).all()
+            placed = _placed_stops(db)
     except Exception as e:
         logger.warning(f"[Expectancy] could not read outcomes: {e}")
         return table
 
-    for tf, direction, cls, entry, exit_price, src, stop, strategy in rows:
-        r = _r_of(entry, stop, exit_price, direction)
+    for tf, direction, cls, entry, exit_price, src, stop, strategy, sig_id in rows:
+        # Prefer the stop as PLACED over the signal's proposal.
+        stop_used = placed.get(sig_id) or stop
+        r = _r_of(entry, stop_used, exit_price, direction)
         if r is None:
             continue
         # An outcome worse than -1R usually means the stop was gapped or
@@ -154,9 +175,11 @@ def build_table(force: bool = False) -> dict:
             key = (level, tuple(key_values[k] for k in level))
             cell = table.setdefault(key, {"n": 0.0, "wins": 0.0,
                                           "win_r": 0.0, "loss_r": 0.0,
-                                          "win_n": 0.0, "loss_n": 0.0, "raw": 0})
+                                          "win_n": 0.0, "loss_n": 0.0, "raw": 0,
+                                          "raw_live": 0, "raw_replay": 0})
             cell["n"] += w
             cell["raw"] += 1
+            cell["raw_replay" if src == "replay" else "raw_live"] += 1
             if r > 0:
                 cell["wins"] += w
                 cell["win_r"] += r * w
@@ -188,6 +211,11 @@ def _summarise(cell: dict, level: tuple, values: tuple) -> dict:
         "bucket_values": dict(zip(level, values)) if level else {},
         "sample": round(n, 1),
         "raw_sample": cell["raw"],
+        # The evidence MIX, always visible (doc §1.2): a bucket built from
+        # 500 replayed bars and 3 live fills must never present itself as
+        # 503 equivalent observations.
+        "sample_live": cell.get("raw_live", 0),
+        "sample_replay": cell.get("raw_replay", 0),
         "p_win": round(p_win, 4),
         "p_win_ci": [round(lo, 4), round(hi, 4)],
         "avg_win_r": round(avg_win_r, 3),

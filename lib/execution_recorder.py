@@ -101,7 +101,8 @@ def record_intent(*, signal_id: str | None, symbol: str, side: str,
                   order_type: str, intended_price: float, qty: float,
                   venue: str = "alpaca", stop_loss: float | None = None,
                   broker_order_id: str | None = None,
-                  asset_class: str | None = None) -> str | None:
+                  asset_class: str | None = None,
+                  approved_notional: float | None = None) -> str | None:
     """Store the order and the market it was sent into. Returns a row id.
 
     Called BEFORE submission. Nothing here may raise into the execution
@@ -119,6 +120,15 @@ def record_intent(*, signal_id: str | None, symbol: str, side: str,
                 asset_class=asset_class, venue=venue, side=side,
                 order_type=order_type, intended_price=_f(intended_price),
                 qty=_f(qty), stop_loss=_f(stop_loss),
+                # Immutable at birth (P0.12): initial stop as approved,
+                # and the risk/notional that approval implied.
+                initial_stop_loss=_f(stop_loss),
+                approved_risk_usd=(abs(_f(intended_price) - _f(stop_loss)) * _f(qty)
+                                   if _f(stop_loss) and _f(intended_price) and _f(qty)
+                                   else None),
+                approved_notional=_f(approved_notional) or (
+                    _f(intended_price) * _f(qty)
+                    if _f(intended_price) and _f(qty) else None),
                 broker_order_id=broker_order_id, status=PENDING,
                 submitted_at=_now(), microstructure=json.dumps(snap, default=str),
                 spread_pct_at_submit=snap.get("spread_pct"),

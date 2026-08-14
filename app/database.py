@@ -1189,6 +1189,11 @@ def _migrate_columns():
         # The gate experiment: both arms' verdicts, recorded at candidate
         # birth. Nullable — rows from before the experiment simply have no
         # verdicts, and the scoreboard only compares rows that carry both.
+        "execution_samples": [
+            ("initial_stop_loss", "REAL"),
+            ("approved_risk_usd", "REAL"),
+            ("approved_notional", "REAL"),
+        ],
         "candidate_signals": [
             ("gate_legacy_take", "INTEGER"),
             ("gate_v8_decision", "TEXT"),
@@ -1523,6 +1528,15 @@ class ExecutionSample(Base):
     intended_price    = Column(Float)
     qty               = Column(Float)
     stop_loss         = Column(Float)
+    # ── Immutable approved facts at trade birth (P0.12) ────────────────
+    # The stop AS APPROVED for submission, the risk the approval implied,
+    # and the notional it authorized. Written once, never trailed, never
+    # recomputed — every later R and learning read uses THESE, because the
+    # signal's stop and the live stop can both diverge from what was
+    # actually placed.
+    initial_stop_loss = Column(Float)
+    approved_risk_usd = Column(Float)
+    approved_notional = Column(Float)
     broker_order_id   = Column(String)
     status            = Column(String, default="PENDING")
     # ── market state AT SUBMIT ────────────────────────────────────────

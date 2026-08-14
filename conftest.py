@@ -23,6 +23,12 @@ if not os.getenv("JARVIS_DB_PATH", "").strip():
     _tmp = Path(tempfile.mkdtemp(prefix="jarvis-test-db-"))
     os.environ["JARVIS_DB_PATH"] = str(_tmp / "test.db")
 
+# The raw-event store (Phase 3) is a separate file with the same rule: a
+# test run must never append to the operator's event log.
+if not os.getenv("JARVIS_EVENTS_DB_PATH", "").strip():
+    _tmp_ev = Path(tempfile.mkdtemp(prefix="jarvis-test-events-"))
+    os.environ["JARVIS_EVENTS_DB_PATH"] = str(_tmp_ev / "events.db")
+
 
 def pytest_configure(config):
     """Create the full schema once per session, exactly as the app would."""

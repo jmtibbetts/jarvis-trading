@@ -46,8 +46,22 @@ phases.
 
 ### Running continuously (no action)
 Gate experiment scoreboard; candidate/counterfactual resolution; shadow
-variants; Kraken read-only sync; v2 dataset builds (verdict pending);
-execution/slippage sampling.
+variants; Kraken read-only sync; execution/slippage sampling.
+
+### Path-model v2 verdict (RESOLVED 2026-08-14 — null, protocol complete)
+Both v2 datasets trained and judged by the beats-the-BEST-baseline rule:
+- 1H v2: 208,062 rows, 5.6y span — stop-first AUC 0.505 (GB) / 0.496
+  (MLP) vs 0.5 prior; MFE: nothing beats the median.
+- 15m v2: 319,494 rows, 3.1y span — stop-first AUC 0.504 / 0.497; MLP
+  MFE MAE 2.576 vs median 2.595 (+0.7%, under the 2% materiality bar).
+Four consecutive honest nulls (v1 + v2 features, both timeframes). The
+OHLCV-derived feature space — confirmation TA, extension/lateness, vol
+ratio, tf-conflict, session — carries no exploitable intrabar path signal
+under stop-first-conservative labeling. Phase 8's v2 challenger lane stays
+open only for NEW information (order-flow/depth from Phase 3 raw capture,
+positioning from 4A), not for re-arrangements of these inputs. The
+measured edge remains in selection (expectancy gate), and effort follows
+the evidence.
 
 ---
 

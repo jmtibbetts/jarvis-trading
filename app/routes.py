@@ -1496,6 +1496,31 @@ def promotion_champions():
     return {"champions": champion_history()}
 
 
+@router.get("/data-platform/health")
+def data_platform_health():
+    """Phase 3 observability: bounded-queue drop counts (a pipeline that
+    drops silently reports completeness it doesn't have), the raw-event
+    store's size, the §46 bytes/day measurement that decides any storage
+    migration, and each live book's health verdict."""
+    from lib.event_store import get_store, tier_of
+    from lib.market_events import all_queue_stats
+    from lib.orderbook_stream import _latest_snapshot
+
+    store = get_store()
+    books = []
+    for key, snap in _latest_snapshot.items():
+        h = snap.get("health") or {}
+        books.append({"stream": key, "tier": tier_of(snap.get("symbol")),
+                      "valid": h.get("valid"), "reason": h.get("reason"),
+                      "age_seconds": h.get("age_seconds")})
+    return {
+        "queues": all_queue_stats(),
+        "store": store.summary(),
+        "bytes_by_day": store.bytes_by_day()[:30],
+        "books": books,
+    }
+
+
 @router.get("/watchlist/focus")
 def list_focus():
     """The "coins to watch" list, with each symbol's accumulated profile."""

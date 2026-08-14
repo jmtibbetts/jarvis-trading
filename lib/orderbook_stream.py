@@ -40,6 +40,20 @@ RECONNECT_BASE_SECONDS = 2.0
 RECONNECT_MAX_SECONDS = 60.0
 
 
+BOOK_STALE_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class BookHealth:
+    """The §9 contract: derived numbers carry the state of the book they
+    came from. `valid=False` means MANDATORY ABSTENTION — imbalance and
+    spread from a crossed, one-sided or stale book are not noisy, they are
+    fabricated, and every consumer must see None rather than a number."""
+    valid: bool
+    reason: str            # ok | crossed | empty_side | stale | never_updated
+    age_seconds: float
+
+
 @dataclass
 class OrderBook:
     """Bids/asks as {price: size} — a plain dict is fine at the depth these
@@ -49,6 +63,20 @@ class OrderBook:
     bids: dict[float, float] = field(default_factory=dict)
     asks: dict[float, float] = field(default_factory=dict)
     updated_at: float = 0.0
+
+    def health(self) -> BookHealth:
+        if not self.updated_at:
+            return BookHealth(False, "never_updated", float("inf"))
+        age = time.time() - self.updated_at
+        if age > BOOK_STALE_SECONDS:
+            return BookHealth(False, "stale", age)
+        if not self.bids or not self.asks:
+            return BookHealth(False, "empty_side", age)
+        if max(self.bids) >= min(self.asks):
+            # A crossed book is a venue-side glitch or a broken diff
+            # stream — either way the depth numbers are fiction.
+            return BookHealth(False, "crossed", age)
+        return BookHealth(True, "ok", age)
 
     def apply_snapshot(self, bids: list[tuple[float, float]], asks: list[tuple[float, float]]):
         self.bids = {p: q for p, q in bids if q > 0}
@@ -66,10 +94,22 @@ class OrderBook:
     def top_levels(self, n: int = 20) -> dict:
         top_bids = sorted(self.bids.items(), key=lambda kv: -kv[0])[:n]
         top_asks = sorted(self.asks.items(), key=lambda kv: kv[0])[:n]
+        h = self.health()
+        if h.valid:
+            stats = self.compute_stats(top_bids, top_asks)
+        else:
+            # Abstention is the contract, not an optimization: every derived
+            # number from an invalid book is None, and the reason rides
+            # along so the UI can say WHY there is no imbalance right now.
+            stats = {k: None for k in ("best_bid", "best_ask", "spread",
+                                       "spread_bps", "bid_depth",
+                                       "ask_depth", "imbalance")}
         return {
             "bids": [[p, q] for p, q in top_bids],
             "asks": [[p, q] for p, q in top_asks],
-            **self.compute_stats(top_bids, top_asks),
+            **stats,
+            "health": {"valid": h.valid, "reason": h.reason,
+                       "age_seconds": round(min(h.age_seconds, 9e9), 3)},
         }
 
     @staticmethod
@@ -97,6 +137,75 @@ _latest_snapshot: dict[str, dict] = {}  # f"{exchange}:{display_symbol}" -> top_
 
 def get_latest_snapshot(exchange: str, display_symbol: str) -> dict | None:
     return _latest_snapshot.get(f"{exchange}:{display_symbol.upper()}")
+
+
+# ── Tier-1 persistence (Phase 3) ─────────────────────────────────────────────
+# Display refreshes at 0.5s; the raw-event log takes one health-stamped
+# snapshot per TIER_1_SNAPSHOT_INTERVAL_SEC per stream, pushed through a
+# bounded queue so the WebSocket reader can never block on SQLite. The
+# flusher drains to the event store off the hot path.
+_persist_marks: dict[str, float] = {}
+EVENT_FLUSH_INTERVAL_SECONDS = 10.0
+
+
+def _maybe_persist_snapshot(exchange: str, display_symbol: str,
+                            snapshot: dict, exchange_ts: float | None):
+    try:
+        from lib.event_store import TIER_1_SNAPSHOT_INTERVAL_SEC, tier_of
+        from lib.market_events import BookSnapshotEvent, get_queue, make_meta
+
+        if tier_of(display_symbol) != 1:
+            return
+        key = f"{exchange}:{display_symbol}"
+        now = time.time()
+        if now - _persist_marks.get(key, 0.0) < TIER_1_SNAPSHOT_INTERVAL_SEC:
+            return
+        _persist_marks[key] = now
+        h = snapshot.get("health") or {}
+        ev = BookSnapshotEvent(
+            meta=make_meta(exchange, f"{exchange}_l2_v1", exchange_ts),
+            symbol=display_symbol,
+            bids=tuple(tuple(l) for l in snapshot.get("bids") or ()),
+            asks=tuple(tuple(l) for l in snapshot.get("asks") or ()),
+            health_valid=bool(h.get("valid")),
+            health_reason=h.get("reason"),
+        )
+        get_queue("book_snapshots").push(ev)
+    except Exception as e:
+        # Persistence must never be able to take down the display stream.
+        logger.debug(f"[OrderBook] snapshot persist skipped: {e}")
+
+
+async def _flush_events_loop():
+    """Drains the snapshot queue into the event store. SQLite writes run
+    in a worker thread — this coroutine shares the request-serving loop."""
+    from lib.event_store import get_store
+    from lib.market_events import event_to_dict, get_queue
+
+    q = get_queue("book_snapshots")
+    while True:
+        await asyncio.sleep(EVENT_FLUSH_INTERVAL_SECONDS)
+        batch = q.drain(limit=2000)
+        if not batch:
+            continue
+        try:
+            rows = [event_to_dict(e) for e in batch]
+            await asyncio.to_thread(get_store().append, rows)
+        except Exception as e:
+            logger.warning(f"[OrderBook] event flush failed ({len(batch)} events): {e}")
+
+
+def _parse_iso_ts(s) -> float | None:
+    """Coinbase l2update carries an ISO8601 event time; snapshots don't.
+    None for anything unparseable — a wrong exchange_ts poisons the skew
+    measurement, absence just leaves it unknown."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
 
 
 async def _reconnect_loop(name: str, run_once):
@@ -135,6 +244,9 @@ async def run_binance_stream(binance_symbol: str, display_symbol: str, on_update
                     last_broadcast = now
                     snapshot = {"exchange": "binance", "symbol": display_symbol, **book.top_levels(20), "ts": now}
                     _latest_snapshot[f"binance:{display_symbol}"] = snapshot
+                    # depth20 partial-book messages carry no venue event
+                    # time; None is the honest exchange_ts (skew unknown).
+                    _maybe_persist_snapshot("binance", display_symbol, snapshot, None)
                     if on_update:
                         await on_update(snapshot)
 
@@ -167,6 +279,8 @@ async def run_coinbase_stream(coinbase_product: str, display_symbol: str, on_upd
                     last_broadcast = now
                     snapshot = {"exchange": "coinbase", "symbol": display_symbol, **book.top_levels(20), "ts": now}
                     _latest_snapshot[f"coinbase:{display_symbol}"] = snapshot
+                    _maybe_persist_snapshot("coinbase", display_symbol, snapshot,
+                                            _parse_iso_ts(data.get("time")))
                     if on_update:
                         await on_update(snapshot)
 
@@ -192,4 +306,7 @@ def start_orderbook_streams(watchlist: dict[str, tuple[str, str]] | None = None,
     for display_symbol, (binance_symbol, coinbase_product) in watchlist.items():
         tasks.append(asyncio.create_task(run_binance_stream(binance_symbol, display_symbol, on_update)))
         tasks.append(asyncio.create_task(run_coinbase_stream(coinbase_product, display_symbol, on_update)))
+    # One flusher for all streams: drains Tier-1 snapshot events to the
+    # raw-event store off the hot path (Phase 3).
+    tasks.append(asyncio.create_task(_flush_events_loop()))
     return tasks

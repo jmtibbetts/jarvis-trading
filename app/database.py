@@ -1115,6 +1115,7 @@ def _migrate_columns():
         "paper_positions": [
             ("fees",      "REAL DEFAULT 0.0"),
             ("fee_basis", "TEXT"),
+            ("initial_stop_loss", "REAL"),
         ],
         "paper_trades": [
             ("gross_pnl", "REAL DEFAULT 0.0"),
@@ -1393,6 +1394,14 @@ class PaperPosition(Base):
     current_price = Column(Float)
     target_price  = Column(Float)
     stop_loss     = Column(Float)
+    # The stop AS PLACED at open, never mutated afterward. stop_loss above
+    # is trailed by the position manager, so by close it often sits at
+    # breakeven — and anything that divides by |entry - stop| (R multiples)
+    # then divides by pennies. A ^VIX short that lost $19.29 reported
+    # R = -1,063,462 because its trailed stop differed from entry by
+    # $0.00000004. Initial risk is a fact about the trade at birth; it
+    # must be recorded at birth.
+    initial_stop_loss = Column(Float)
     notional      = Column(Float)           # total exposure = qty * entry_price * leverage
     margin_used   = Column(Float)           # cash reserved = notional / leverage
     fees          = Column(Float, default=0.0)   # venue round trip, reserved at open

@@ -3024,7 +3024,12 @@ def get_r_multiples(limit: int = 200):
         stop_by_pos = {}
         if position_ids:
             positions = db.query(PaperPosition).filter(PaperPosition.id.in_(position_ids)).all()
-            stop_by_pos = {p.id: p.stop_loss for p in positions}
+            # initial_stop_loss, NEVER the live stop_loss: the manager trails
+            # stops, so by close the live stop often sits at breakeven and
+            # |entry - stop| measures the trail, not the risk. A ^VIX short
+            # that lost $19.29 reported R = -1,063,462 this way.
+            stop_by_pos = {p.id: (p.initial_stop_loss or p.stop_loss)
+                           for p in positions}
         trades = [{
             "id": t.id,
             "symbol": t.symbol,

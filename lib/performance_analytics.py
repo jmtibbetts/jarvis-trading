@@ -149,8 +149,25 @@ def compute_r_multiples(trades: list[dict]) -> dict:
         if not entry or not stop or not qty or pnl is None or entry == stop:
             skipped += 1
             continue
-        risk_dollars = abs(entry - stop) * qty
-        if risk_dollars <= 0:
+        # Futures quote in price units, not dollars: one point of HG=F is
+        # $25,000 of copper per contract. realized_pnl already includes the
+        # multiplier (paper_engine applies it), so the risk denominator must
+        # too — without it, a 1-contract copper trade computes its R against
+        # $6.58 of "notional" and a $235 win reports as 10,707R.
+        # No try/except: the first version of this imported a function that
+        # doesn't exist and the guard swallowed the ImportError, leaving the
+        # 10,707R copper row on screen while the code LOOKED fixed. If the
+        # spec table is unavailable, failing loudly beats lying quietly.
+        from lib.instruments import get_spec
+        mult = float(get_spec(t.get("symbol") or "").multiplier or 1.0)
+        risk_dollars = abs(entry - stop) * qty * mult
+        # A stop within 0.05% of entry is not a risk decision, it's a
+        # degenerate record (a trailed stop that leaked in, or one of the
+        # historical 1.00/1.00/1.00 signals). Dividing by it manufactures
+        # six-figure R values from twenty-dollar losses; refusing to is the
+        # honest treatment, counted in `skipped` like any other unusable row.
+        notional = abs(entry) * qty * mult
+        if risk_dollars <= 0 or (notional > 0 and risk_dollars < notional * 0.0005):
             skipped += 1
             continue
         r = pnl / risk_dollars

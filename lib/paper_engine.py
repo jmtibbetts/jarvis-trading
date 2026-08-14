@@ -901,6 +901,8 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 current_price = entry,
                 target_price  = target,
                 stop_loss     = stop,
+                # As placed at open, never trailed: the R denominator.
+                initial_stop_loss = stop,
                 notional      = notional,
                 margin_used   = margin,
                 # The round trip is reserved at OPEN, so an untouched position

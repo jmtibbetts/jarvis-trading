@@ -119,6 +119,79 @@ def get_options_summary(symbol: str, current_price: float = None, dte_max: int =
     return summary
 
 
+@router.get("/market/{symbol:path}/chart")
+def market_chart(symbol: str, timeframe: str = "1H", limit: int = 3000):
+    """Everything the chart surface needs in one read: cached bars plus
+    this symbol's signals and open paper positions, so a trade can be
+    SEEN on price — entries, stops and targets where they actually sit.
+    Serves the deep-history cache; no external fetch happens here."""
+    from datetime import datetime, timedelta, timezone
+
+    from lib.instruments import canonical, variants
+    from lib.signal_replay import load_cached_bars
+
+    sym = canonical(symbol)
+    limit = max(50, min(int(limit), 20_000))
+    bars_df = load_cached_bars(sym, timeframe)
+    bars = []
+    if bars_df is not None and len(bars_df):
+        tail = bars_df.tail(limit)
+        for ts, row in tail.iterrows():
+            bars.append({
+                "time": int(ts.timestamp()),
+                "open": float(row["open"]), "high": float(row["high"]),
+                "low": float(row["low"]), "close": float(row["close"]),
+                "volume": float(row.get("volume") or 0),
+            })
+
+    forms = list(variants(sym))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    with get_db() as db:
+        sigs = (db.query(TradingSignal)
+                  .filter(TradingSignal.asset_symbol.in_(forms))
+                  .filter(TradingSignal.generated_at > cutoff)
+                  .order_by(TradingSignal.generated_at.desc())
+                  .limit(200).all())
+        signals = [{
+            "id": s.id, "direction": s.direction,
+            "entry_price": s.entry_price, "stop_loss": s.stop_loss,
+            "target_price": s.target_price, "status": s.status,
+            "generated_at": s.generated_at, "timeframe": s.timeframe,
+            "llm_model": s.llm_model,
+        } for s in sigs]
+        from app.database import PaperPosition
+        poss = (db.query(PaperPosition)
+                  .filter(PaperPosition.symbol.in_(forms))
+                  .filter(PaperPosition.status == "open").all())
+        positions = [{
+            "id": p.id, "direction": p.direction, "qty": p.qty,
+            "entry_price": p.entry_price, "stop_loss": p.stop_loss,
+            "target_price": p.target_price,
+            "initial_stop_loss": p.initial_stop_loss,
+            "opened_at": p.opened_at,
+        } for p in poss]
+    return {"symbol": sym, "timeframe": timeframe, "bars": bars,
+            "signals": signals, "positions": positions,
+            "bar_count": len(bars)}
+
+
+@router.get("/market/chart-symbols")
+def market_chart_symbols():
+    """Distinct (symbol, timeframe) coverage of the bar cache — the chart
+    surface's picker is honest about what it can actually draw."""
+    from sqlalchemy import text as _t
+
+    from lib.ohlcv_cache import get_cache_db
+
+    out: dict[str, list[str]] = {}
+    with get_cache_db() as conn:
+        for sym, tf in conn.execute(
+                _t("SELECT DISTINCT symbol, timeframe FROM ohlcv_bars")):
+            out.setdefault(sym, []).append(tf)
+    return {"symbols": [{"symbol": s, "timeframes": sorted(tfs)}
+                        for s, tfs in sorted(out.items())]}
+
+
 @router.get("/orderbook/{symbol}")
 def get_orderbook(symbol: str):
     """Latest in-memory Level 2 snapshot for a symbol from both exchanges

@@ -4,6 +4,7 @@
   import Toaster from "./lib/components/Toaster.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import Brief from "./lib/sections/Brief.svelte";
+  import Charts from "./lib/sections/Charts.svelte";
   import CommandCenter from "./lib/sections/CommandCenter.svelte";
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
@@ -48,6 +49,8 @@
       <SignalsScanner />
     {:else if sectionStore.current === "positions"}
       <PositionsPaper />
+    {:else if sectionStore.current === "charts"}
+      <Charts />
     {:else if sectionStore.current === "intelligence"}
       <Intelligence view="world" />
     {:else if sectionStore.current === "smartmoney"}

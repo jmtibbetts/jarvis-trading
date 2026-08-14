@@ -776,6 +776,43 @@ export type CacheStats = {
   db_size_mb: number;
 };
 
+export type ChartBar = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type ChartPayload = {
+  symbol: string;
+  timeframe: string;
+  bars: ChartBar[];
+  bar_count: number;
+  signals: {
+    id: string;
+    direction: string | null;
+    entry_price: number | null;
+    stop_loss: number | null;
+    target_price: number | null;
+    status: string | null;
+    generated_at: string;
+    timeframe: string | null;
+    llm_model: string | null;
+  }[];
+  positions: {
+    id: string;
+    direction: string | null;
+    qty: number | null;
+    entry_price: number | null;
+    stop_loss: number | null;
+    target_price: number | null;
+    initial_stop_loss: number | null;
+    opened_at: string | null;
+  }[];
+};
+
 export type MorningBrief = {
   generated_at: string;
   window_hours: number;
@@ -1426,6 +1463,14 @@ export const api = {
   dataPlatformHealth: () => get<DataPlatformHealth>(`/data-platform/health`),
   morningBrief: (windowHours = 24) =>
     get<MorningBrief>(`/brief?window_hours=${windowHours}`),
+  marketChart: (symbol: string, timeframe: string, limit = 3000) =>
+    get<ChartPayload>(
+      `/market/${encodeURIComponent(symbol).replace(/%2F/g, "/")}/chart?timeframe=${timeframe}&limit=${limit}`,
+    ),
+  chartSymbols: () =>
+    get<{ symbols: { symbol: string; timeframes: string[] }[] }>(
+      `/market/chart-symbols`,
+    ),
   dataParity: (symbol = "BTC", windowMin = 60) =>
     get<ParityReport>(`/data-platform/parity?symbol=${symbol}&window_min=${windowMin}`),
   featureCorpus: () => get<FeatureCorpus>(`/feature-snapshots/summary`),

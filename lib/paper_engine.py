@@ -131,13 +131,64 @@ def _consecutive_losses() -> int:
         return 0
 
 
+# The stop must sit inside this fraction of the liquidation distance. A
+# position at leverage L is wiped by a 1/L adverse move; a stop at 100% of
+# that distance fills at the same moment the venue force-closes you.
+LIQ_STOP_BUFFER = 0.80
+
+
+def max_safe_leverage(entry: float, stop: float, symbol: str = "",
+                      requested: float | None = None,
+                      notional_hint: float = 10_000.0) -> dict:
+    """Leverage DERIVED from the stop and the venue — never the reverse.
+
+    The old order was backwards (P0.6): the composite score chose leverage
+    (2-20x by conviction), and the stop was then TIGHTENED to fit inside
+    that leverage's liquidation distance — the score literally moved the
+    risk decision. Here the stop is an input that never moves:
+
+        liq cap    = LIQ_STOP_BUFFER / stop_fraction
+        venue cap  = what the real venue permits at this size
+        hard cap   = MAX_LEVERAGE
+        cap        = min(all three)
+        selected   = min(requested, cap)   when the direction carried an
+                                            explicit instruction (Long_10x)
+                     cap                    otherwise — the caller sizes
+                                            qty from risk and derives the
+                                            margin actually needed
+
+    0 risk distance yields 1x, and callers reject such setups upstream.
+    """
+    try:
+        entry, stop = float(entry or 0), float(stop or 0)
+    except (TypeError, ValueError):
+        return {"leverage": 1.0, "cap": 1.0, "why": "non-numeric levels"}
+    if entry <= 0 or stop <= 0 or abs(entry - stop) <= 0:
+        return {"leverage": 1.0, "cap": 1.0, "why": "no risk distance"}
+    stop_frac = abs(entry - stop) / entry
+    liq_cap = LIQ_STOP_BUFFER / stop_frac
+    venue_cap, venue_why = venue_max_leverage(symbol, notional_hint)
+    cap = max(1.0, min(liq_cap, venue_cap, MAX_LEVERAGE))
+    if requested and requested > 1.0:
+        lev = min(float(requested), cap)
+        why = (f"explicit {requested:g}x, capped to {cap:.1f}x "
+               f"(liq {liq_cap:.1f}x, venue {venue_cap:g}x)" if lev < requested
+               else f"explicit {requested:g}x within the {cap:.1f}x cap")
+    else:
+        lev, why = cap, (f"cap: min(liq {liq_cap:.1f}x at {stop_frac:.2%} stop, "
+                         f"venue {venue_cap:g}x, hard {MAX_LEVERAGE:g}x)")
+    return {"leverage": round(lev, 2), "cap": round(cap, 2), "why": why,
+            "liq_cap": round(liq_cap, 2), "venue_cap": venue_cap}
+
+
 def score_leverage(score: float | None, *, asset_class: str | None = None,
                    direction: str | None = None, atr_pct: float | None = None,
                    explain: bool = False):
-    """Leverage for a signal: 1x at the configured floor rising to 25x at
-    100, then reduced by regime, realized win rate, losing streak, and
-    volatility. See lib/leverage_policy.py — nothing can raise it above
-    what conviction alone earned."""
+    """DEPRECATED FOR SIZING (P0.6, invariant #3): the composite score is
+    measured inverted against outcomes, so "conviction earns leverage" was
+    granting the most leverage to the worst setups. No order path may call
+    this; it survives only for UI explain endpoints until they migrate to
+    max_safe_leverage. See lib/leverage_policy.py."""
     from lib.leverage_policy import decide
     regime = None
     try:
@@ -341,22 +392,72 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
     if margin <= 0:
         return {"ok": False, "reason": "no free cash to commit"}
 
-    # Clamp to the venue's real limit BEFORE computing notional, so the
-    # practice position is one that could actually be placed.
-    venue_cap, cap_why = venue_max_leverage(symbol, margin * max(1.0, leverage))
-    leverage_capped = False
-    if venue_cap < leverage:
-        leverage, leverage_capped = venue_cap, True
-
-    notional = margin * max(1.0, leverage)
-    # One unit of a futures contract is price * MULTIPLIER, not price. Using
-    # price alone produced 0.37-contract positions that no venue can fill and
-    # notional figures wrong by up to 1000x.
     from lib.instruments import (get_spec, is_futures, whole_contracts,
                                  margin_required, suggest_micro)
     spec = get_spec(symbol) if symbol else None
     unit_value = entry * (spec.multiplier if spec else 1.0)
-    qty = notional / unit_value if unit_value > 0 else 0.0
+
+    # ── Risk-first for EVERY asset class (P0.8) ──────────────────────────
+    # The futures branch below has said it for weeks: "the slice IS the
+    # risk budget" — quantity comes from what the stop can lose, margin is
+    # merely the financing. Non-futures was still margin-first
+    # (margin × leverage / price), which meant loss-at-stop was whatever
+    # fell out of the leverage choice rather than a budgeted number.
+    #
+    #     qty        = risk_budget / risk_per_unit
+    #     notional   = qty × unit value
+    #     leverage   = derived: enough to finance the notional from the
+    #                  margin slice, capped by max_safe_leverage (stop
+    #                  inside the liquidation buffer, venue limit) and by
+    #                  any EXPLICIT request (Long_10x). Requested leverage
+    #                  is a ceiling — it can shrink the financing, never
+    #                  widen the risk.
+    #     margin     = notional / leverage; if that busts the free-cash
+    #                  cap, QTY scales DOWN (execution reduces, never
+    #                  enlarges — same rule as live).
+    stop_distance = abs(entry - stop) if stop > 0 else 0.0
+    if margin_override > 0 and not (symbol and is_futures(symbol)):
+        # EXPLICIT operator margin ("commit $435 at 9.6x") is a deliberate
+        # instruction, like Long_10x — the manual-trade path keeps
+        # margin-first semantics. The venue cap still applies, and the
+        # liquidation-safe cap still bounds leverage against the stop.
+        safe = max_safe_leverage(entry, stop, symbol,
+                                 requested=leverage if leverage > 1.0 else None,
+                                 notional_hint=margin * max(1.0, leverage))
+        # The operator's leverage passes through, capped by safety — never
+        # inflated: a manual 1x stays 1x.
+        leverage = max(1.0, min(float(leverage or 1.0), safe["cap"]))
+        notional = margin * max(1.0, leverage)
+        qty = notional / unit_value if unit_value > 0 else 0.0
+    elif not (symbol and is_futures(symbol)):
+        risk_per_unit = stop_distance * (spec.multiplier if spec else 1.0)
+        if risk_per_unit <= 0:
+            return {"ok": False, "reason": f"{symbol or 'position'}: no stop distance, cannot size by risk"}
+        risk_budget = margin
+        qty = risk_budget / risk_per_unit
+        notional = qty * unit_value
+
+        safe = max_safe_leverage(entry, stop, symbol,
+                                 requested=leverage if leverage > 1.0 else None,
+                                 notional_hint=notional)
+        leverage = max(1.0, safe["leverage"])
+        margin_needed = notional / leverage
+        if cap > 0 and margin_needed > cap:
+            scale = cap / margin_needed
+            qty *= scale
+            notional *= scale
+            margin_needed = cap
+            capped = True
+        margin = margin_needed
+        if margin <= 0 or qty <= 0:
+            return {"ok": False, "reason": "sized to zero after caps"}
+    else:
+        # Futures keep their existing risk-per-contract path below.
+        venue_cap, cap_why = venue_max_leverage(symbol, margin * max(1.0, leverage))
+        if venue_cap < leverage:
+            leverage = venue_cap
+        notional = margin * max(1.0, leverage)
+        qty = notional / unit_value if unit_value > 0 else 0.0
 
     if symbol and is_futures(symbol):
         # Futures size by RISK PER CONTRACT, not by a margin percentage.
@@ -398,8 +499,6 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         "margin": margin,
         "notional": notional,
         "leverage": leverage,
-        "leverage_capped_by_venue": leverage_capped,
-        "leverage_cap_reason": cap_why if leverage_capped else None,
         "round_trip_fees": round(fees, 2),
         "fees_pct_of_margin": round(fees / margin * 100, 2) if margin else 0.0,
         "fee_basis": fee_why,
@@ -761,43 +860,37 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
         _horizon = horizon_for_timeframe(signal.get("timeframe"))
     except Exception:
         _horizon = "all"
+    # The horizon cap is Jarvis's OWN risk policy (scalps risk <=3% of
+    # entry, longer trades <=10%) and may clamp the stop. What may NOT
+    # clamp the stop anymore is leverage: the old code picked leverage
+    # from the composite score and then tightened the stop to fit inside
+    # that leverage's liquidation distance — the score literally moved the
+    # risk decision (P0.6). Now the stop is fixed first, and leverage is
+    # derived from it inside size_position (max_safe_leverage).
     _horizon_cap = 0.03 if _horizon == "scalp" else 0.10
-    _prelim_lev = leverage if leverage > 1.0 else score_leverage(
-        signal.get("composite_score") or signal.get("confidence"),
-        asset_class=asset_class, direction=dir_key,
-        atr_pct=float(signal.get("atr_pct") or 0) or None)
-    _liq_cap = 0.80 / max(1.0, _prelim_lev)          # 80% of margin, never 100%
-    _max_stop_frac = min(_horizon_cap, _liq_cap)
-    _max_move = entry * _max_stop_frac
+    _max_move = entry * _horizon_cap
     if side == 1:
         _floor = entry - _max_move
         if stop < _floor:
             logger.info(f"[Paper] {sym} stop {stop:g} -> {_floor:g} "
-                        f"({_max_stop_frac:.1%} cap at {_prelim_lev:g}x, {_horizon})")
+                        f"({_horizon_cap:.0%} {_horizon} horizon cap)")
             stop = round(_floor, 8)
     else:
         _ceil = entry + _max_move
         if stop > _ceil:
             logger.info(f"[Paper] {sym} stop {stop:g} -> {_ceil:g} "
-                        f"({_max_stop_frac:.1%} cap at {_prelim_lev:g}x, {_horizon})")
+                        f"({_horizon_cap:.0%} {_horizon} horizon cap)")
             stop = round(_ceil, 8)
 
-    # ── Sizing: the SIGNAL decides quantity ──────────────────────────────
-    # Leverage comes from conviction (2x-20x), quantity from the setup's own
-    # stop distance, so every position risks the same slice of equity.
-    # An explicit direction like Long_10x still wins — that is a deliberate
-    # instruction, not an inference.
+    # ── Sizing: risk decides quantity, the stop decides leverage ─────────
+    # An explicit direction like Long_10x is a deliberate instruction and
+    # survives as a CEILING passed into sizing; conviction-derived leverage
+    # is gone (invariant #3 — the score is measured inverted, so
+    # "conviction earns leverage" granted the most leverage to the worst
+    # setups).
     ac_lower = asset_class.lower()
     override_margin = float(signal.get("margin_override") or 0)
-    explicit_leverage = leverage > 1.0
-    conviction = signal.get("composite_score") or signal.get("confidence")
-    if not explicit_leverage:
-        leverage = score_leverage(
-            conviction, asset_class=asset_class, direction=dir_key,
-            atr_pct=float(signal.get("atr_pct") or 0) or None,
-        )
 
-    sizing = {"ok": False}
     try:
         with get_db() as _db:
             _pf = _get_portfolio_cash(_db)
@@ -808,28 +901,29 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
             sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
                                    margin_override=override_margin, symbol=sym)
     except Exception as e:
-        logger.warning(f"[Paper] Risk sizing unavailable ({e}) — falling back to flat margin")
+        # FAIL CLOSED (P0.3's paper twin): a sizing crash is not a license
+        # to open a flat-size position.
+        logger.error(f"[Paper] sizing crashed for {sym} — refusing to open: {e}")
+        return {"error": f"sizing unavailable for {sym}: {e}"}
 
-    if sizing.get("ok"):
-        qty = round(sizing["qty"], 6)
-        margin = round(sizing["margin"], 2)
-        notional = sizing["notional"]
-        logger.info(
-            f"[Paper] {sym}: ${margin:,.0f} committed @ {leverage:g}x = ${notional:,.0f} exposure | "
-            f"qty={qty:g} | stop-out costs ${sizing['loss_at_stop']:,.0f} "
-            f"({sizing['loss_pct_of_margin']:.0f}% of the ${margin:,.0f} committed)"
-            + (" [capped by free cash]" if sizing.get("capped_by_cash") else "")
-        )
-    else:
-        base_margin = (override_margin if override_margin > 0
-                       else ASSET_CLASS_MARGIN.get(ac_lower, DEFAULT_POSITION_SIZE))
-        margin   = base_margin
-        notional = margin * leverage
-        if entry < 2.0 and ac_lower == "forex":
-            qty = round(notional / (entry * 1000), 2) if entry > 0 else 0.0
-            qty = max(qty, 0.01)
-        else:
-            qty = round(notional / entry, 6)
+    if not sizing.get("ok"):
+        # A deterministic rejection stays a rejection (P0.7). The old code
+        # fell back to a flat ASSET_CLASS_MARGIN position here, silently
+        # overriding reasons like "one contract exceeds the risk budget"
+        # and "no free cash to commit".
+        logger.info(f"[Paper] {sym} NOT opened — sizing rejected: {sizing.get('reason')}")
+        return {"error": f"paper sizing rejected: {sizing.get('reason')}"}
+
+    qty = round(sizing["qty"], 6)
+    margin = round(sizing["margin"], 2)
+    notional = sizing["notional"]
+    leverage = float(sizing.get("leverage") or leverage or 1.0)
+    logger.info(
+        f"[Paper] {sym}: ${margin:,.0f} committed @ {leverage:g}x = ${notional:,.0f} exposure | "
+        f"qty={qty:g} | stop-out costs ${sizing['loss_at_stop']:,.0f} "
+        f"({sizing['loss_pct_of_margin']:.0f}% of the ${margin:,.0f} committed)"
+        + (" [capped by free cash]" if sizing.get("capped_by_cash") else "")
+    )
 
     # NOTE on the duplicate-open race: the "already open?" check below and the
     # INSERT further down happen in the same SQLAlchemy session/transaction,

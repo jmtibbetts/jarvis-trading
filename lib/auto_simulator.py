@@ -59,18 +59,21 @@ def _leverage(direction: str | None) -> float:
 MAX_MARGIN_LOSS_FRAC = 0.9
 
 
-def score_leverage(composite_score: float | None, asset_class: str | None = None,
-                   direction: str | None = None) -> float:
-    """Same policy the paper engine uses — 1x at the operator's configured
-    floor up to 25x, reduced by regime, realized win rate, losing streak and
-    volatility. Auto Sim previously ran its own 5x-100x ladder, which made
-    its results incomparable with the book it exists to be measured against."""
+def safe_leverage(entry: float, stop: float, symbol: str,
+                  direction: str | None = None) -> float:
+    """Leverage from the STOP, mirroring the paper engine (P0.6). The old
+    path scored conviction into leverage — and the composite is measured
+    inverted, so the worst setups got the most leverage. An explicit
+    direction instruction (Long_10x) survives as a ceiling; otherwise a
+    modest simulator default, always inside the liquidation-safe cap."""
     try:
-        from lib.paper_engine import score_leverage as _policy
-        return float(_policy(composite_score, asset_class=asset_class, direction=direction))
+        from lib.paper_engine import max_safe_leverage
+        requested = trade_side.leverage_from_direction(direction)
+        safe = max_safe_leverage(entry, stop, symbol, requested=requested)
+        return float(min(safe["leverage"], safe["cap"], requested or 3.0))
     except Exception as e:
-        logger.debug(f"[AutoSim] Leverage policy unavailable ({e}) — defaulting to 2x")
-        return 2.0
+        logger.debug(f"[AutoSim] leverage derivation unavailable ({e}) — 1x")
+        return 1.0
 
 
 # Max stop distance as a fraction of entry, by trade horizon: scalps get a
@@ -364,8 +367,8 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
                 skipped += 1
                 continue
             side = _side(signal.direction)
-            leverage = score_leverage(signal.composite_score or signal.confidence,
-                                      asset_class=signal.asset_class, direction=signal.direction)
+            leverage = safe_leverage(entry, float(signal.stop_loss or 0),
+                                     signal.asset_symbol, signal.direction)
             # Fill crosses half the spread; the stop is measured from the price
             # actually paid, not from mid.
             entry, half_spread = _fill_price(signal.asset_symbol, entry, side, entering=True)

@@ -51,18 +51,19 @@ class TestLeverageLadder:
     TestLeveragePolicy — Auto Sim delegates to it rather than running its
     own 5x-100x scale, which made the two books incomparable."""
 
-    def test_autosim_delegates_to_the_shared_policy(self, monkeypatch):
-        import lib.paper_engine as pe
-        import lib.auto_simulator as asim
-        monkeypatch.setattr(pe, "score_leverage",
-                            lambda *a, **k: 7.0)
-        assert asim.score_leverage(88, "Crypto", "Long") == 7.0
+    def test_autosim_leverage_comes_from_the_stop_not_the_score(self):
+        """P0.6: conviction no longer earns leverage anywhere. Auto Sim
+        derives leverage from the stop's liquidation-safe cap, with a
+        modest simulator ceiling; an explicit Long_10x is a ceiling."""
+        from lib.auto_simulator import safe_leverage
+        tight = safe_leverage(100.0, 99.0, "TEST/USD", "Long")
+        wide = safe_leverage(100.0, 90.0, "TEST/USD", "Long")
+        assert 1.0 <= wide <= tight <= 20.0
 
-    def test_autosim_leverage_stays_in_range(self):
-        from lib.auto_simulator import score_leverage
-        for sc in (0, 55, 70, 88, 100):
-            lev = score_leverage(sc, "Crypto", "Long")
-            assert 1.0 <= lev <= 25.0
+    def test_autosim_explicit_direction_is_a_ceiling(self):
+        from lib.auto_simulator import safe_leverage
+        lev = safe_leverage(100.0, 99.0, "TEST/USD", "Long_10x")
+        assert lev <= 10.0
 
     def test_liquidation_cap_beats_wide_stops(self):
         from lib.auto_simulator import leverage_capped_stop
@@ -108,13 +109,22 @@ class TestPaperMarginSizing:
         assert r["qty"] == 1.0
         assert r["loss_at_stop"] == 2.0          # a 2% move costs 20% of the $10
 
-    def test_leverage_scales_exposure_not_committed_capital(self):
+    def test_risk_is_constant_regardless_of_requested_leverage(self):
+        """The new doctrine (P0.8): quantity comes from the RISK BUDGET, so
+        requesting more leverage cannot buy more risk — it only changes the
+        margin needed to finance the same position."""
         from lib.paper_engine import size_position
-        low = size_position(100_000, 100.0, 98.0, 2, 100_000)
-        high = size_position(100_000, 100.0, 98.0, 20, 100_000)
-        assert low["margin"] == high["margin"] == 1000     # same capital committed
-        assert high["notional"] == low["notional"] * 10    # 10x the exposure
-        assert high["loss_at_stop"] == low["loss_at_stop"] * 10
+        low = size_position(100_000, 100.0, 98.0, 2, 100_000, symbol="TEST/USD")
+        high = size_position(100_000, 100.0, 98.0, 20, 100_000, symbol="TEST/USD")
+        assert low["ok"] and high["ok"]
+        budget = 100_000 * 0.01
+        # Neither arm may ever exceed the risk budget...
+        assert low["loss_at_stop"] <= budget + 1.0
+        assert high["loss_at_stop"] <= budget + 1.0
+        # ...and LOW leverage can only lose financing capacity (the cash
+        # cap binds and the position scales DOWN), never gain risk.
+        assert low["loss_at_stop"] <= high["loss_at_stop"]
+        assert high["margin"] < low["margin"]    # more leverage = less cash locked
 
     def test_notional_never_exceeds_committed_times_leverage(self):
         from lib.paper_engine import size_position

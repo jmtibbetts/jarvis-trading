@@ -548,10 +548,8 @@ def _save_signals(signals: list, scan_mode: str):
 
     now_utc = datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
-    weekday = now_utc.weekday()
-    market_open = (weekday < 5 and
-                   (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30))
-                   and now_utc.hour < 20)
+    from lib.market_clock import is_equity_market_open
+    market_open = is_equity_market_open()
 
     saved = updated = skipped = 0
     trade_mode = get_user_preference()["trade_mode"]
@@ -779,10 +777,8 @@ def run_intraday():
     Focuses on breakouts + volume surges happening RIGHT NOW.
     """
     now_utc = datetime.now(timezone.utc)
-    weekday = now_utc.weekday()
-    market_open = (weekday < 5 and
-                   (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30))
-                   and now_utc.hour < 20)
+    from lib.market_clock import is_equity_market_open
+    market_open = is_equity_market_open()
 
     if not market_open:
         logger.debug("[Scanner:INTRADAY] Market closed — skipping")

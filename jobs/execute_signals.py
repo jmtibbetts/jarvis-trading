@@ -215,10 +215,12 @@ def run():
     except Exception as e:
         logger.debug(f"[Execute] Portfolio heat check skipped: {e}")
 
-    # Market hours check
+    # Market hours from the venue's own calendar (holidays, half-days,
+    # DST) — the hard-coded UTC window this replaced was only correct
+    # during US daylight time and traded straight through holidays.
     now_utc     = datetime.now(timezone.utc)
-    weekday     = now_utc.weekday()
-    market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
+    from lib.market_clock import is_equity_market_open
+    market_open = is_equity_market_open()
     logger.info(f"[Execute] Market: {'OPEN' if market_open else 'CLOSED'}")
 
     # Pull Active signals + PendingApproval equities (promote them when market opens)
@@ -433,10 +435,7 @@ def run():
             # By the time a signal reaches here with status=Active, it is safe to execute.
             # Extra guard: if somehow an equity Active signal exists but market is NOW closed, skip it.
             if not crypto:
-                now_check = datetime.now(timezone.utc)
-                wd = now_check.weekday()
-                mkt_now = wd < 5 and (now_check.hour > 13 or (now_check.hour == 13 and now_check.minute >= 30)) and now_check.hour < 20
-                if not mkt_now:
+                if not is_equity_market_open():
                     logger.debug(f"[Execute] Skip {sym} — equity, market just closed")
                     continue
 

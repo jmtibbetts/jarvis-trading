@@ -1234,8 +1234,8 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
         return {"saved": 0, "skipped": 0, "regime": regime.get("label"), "error": "no_llm_output"}
 
     now_utc  = datetime.now(timezone.utc)
-    weekday  = now_utc.weekday()
-    market_open = weekday < 5 and (now_utc.hour > 13 or (now_utc.hour == 13 and now_utc.minute >= 30)) and now_utc.hour < 20
+    from lib.market_clock import is_equity_market_open
+    market_open = is_equity_market_open()
 
     now_iso = now_utc.isoformat()
     saved = updated = skipped = 0

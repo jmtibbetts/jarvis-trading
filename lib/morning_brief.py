@@ -150,18 +150,153 @@ def _releases_today() -> list[str]:
     return out
 
 
+PULSE_SYMBOLS = ("BTC/USD", "ETH/USD", "SOL/USD", "SPY", "QQQ",
+                 "CL=F", "GC=F", "NG=F", "EURUSD=X")
+
+
+def _market_pulse() -> list[dict]:
+    """Last close vs prior close across the desk's core instruments —
+    1D bars preferred, last-24-1H fallback where dailies are thin."""
+    from lib.signal_replay import load_cached_bars
+
+    out = []
+    for sym in PULSE_SYMBOLS:
+        try:
+            bars = load_cached_bars(sym, "1D")
+            if bars is None or len(bars) < 2:
+                hourly = load_cached_bars(sym, "1H")
+                if hourly is None or len(hourly) < 25:
+                    continue
+                last, prev = float(hourly["close"].iloc[-1]), float(
+                    hourly["close"].iloc[-25])
+            else:
+                last, prev = float(bars["close"].iloc[-1]), float(
+                    bars["close"].iloc[-2])
+            if prev > 0:
+                out.append({"symbol": sym, "last": round(last, 4),
+                            "change_pct": round((last - prev) / prev * 100, 2)})
+        except Exception:
+            continue
+    return out
+
+
+def _derivatives_now() -> list[dict]:
+    """Latest stored funding/OI/long-short per Tier-1 base — the perp
+    market's current lean, from rows the derivatives job keeps fresh."""
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    out = []
+    with engine.connect() as c:
+        for base in ("BTC", "ETH"):
+            row = c.execute(text("""
+                SELECT funding_rate, open_interest_usd, long_short_ratio,
+                       fetched_at
+                FROM crypto_derivatives_snapshots
+                WHERE symbol = :b AND venue = 'okx'
+                ORDER BY fetched_at DESC LIMIT 1"""), {"b": base}).fetchone()
+            if row:
+                out.append({"symbol": base, "funding_rate_8h": row[0],
+                            "oi_usd": row[1], "long_short_ratio": row[2],
+                            "as_of": row[3]})
+    return out
+
+
+def _positioning_table() -> list[dict]:
+    """EVERY sector instrument's positioning + curve — the full table,
+    not just the tails (the tails stay in positioning_extremes)."""
+    out = []
+    try:
+        from lib.sector_engine import SECTORS, sector_snapshot
+        for sector in SECTORS:
+            snap = sector_snapshot(sector)
+            for key, inst in snap["instruments"].items():
+                p, cv = inst.get("positioning", {}), inst.get("curve", {})
+                if "abstain" in p and "abstain" in cv:
+                    continue
+                out.append({
+                    "sector": sector, "instrument": key,
+                    "spec_pctile_3y": p.get("spec_pctile_3y"),
+                    "spec_net": p.get("spec_net"),
+                    "curve": cv.get("structure"),
+                    "roll_pct": cv.get("annualized_roll_pct"),
+                })
+    except Exception as e:
+        logger.debug(f"[Brief] positioning table unavailable: {e}")
+    return out
+
+
+def _analog_reads() -> list[dict]:
+    """The flagship two lines: what followed the moments most similar
+    to RIGHT NOW for the Tier-1 symbols. History, not prediction."""
+    out = []
+    try:
+        from lib.analogs import analogs_for
+        for sym in ("BTC/USD", "ETH/USD"):
+            a = analogs_for(sym, "15m")
+            if not a:
+                continue
+            day = a["forward_summary"].get("fwd_96b", {})
+            hour4 = a["forward_summary"].get("fwd_16b", {})
+            out.append({
+                "symbol": sym, "n_analogs": day.get("n"),
+                "candidates_searched": a["candidates_searched"],
+                "fwd_1d_median_pct": day.get("median_pct"),
+                "fwd_1d_up_rate": day.get("up_rate"),
+                "fwd_4h_median_pct": hour4.get("median_pct"),
+                "fwd_4h_up_rate": hour4.get("up_rate"),
+            })
+    except Exception as e:
+        logger.debug(f"[Brief] analogs unavailable: {e}")
+    return out
+
+
+def _alerts_in_window(cutoff: str) -> dict:
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    with engine.connect() as c:
+        rows = c.execute(text("""
+            SELECT severity, COUNT(*) FROM alerts
+            WHERE created_at > :c GROUP BY severity"""),
+            {"c": cutoff}).fetchall()
+    return {sev: n for sev, n in rows}
+
+
 def build_brief(window_hours: int = 24) -> dict:
     now = _now()
     cutoff_dt = now - timedelta(hours=window_hours)
     cutoff = cutoff_dt.isoformat()
+    from lib.incubator import incubator_report
+    from lib.threat_transmission import transmission_watch
+
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception as e:
+            logger.debug(f"[Brief] section failed (served empty): {e}")
+            return default
+
     return {
         "generated_at": now.isoformat(),
         "window_hours": window_hours,
+        "market_pulse": _safe(_market_pulse, []),
         "gate_experiment": _gate_movement(cutoff),
+        "analog_reads": _safe(_analog_reads, []),
+        "derivatives_now": _safe(_derivatives_now, []),
+        "positioning": _safe(_positioning_table, []),
+        "positioning_extremes": _extremes(),
+        # Price-transmission hypotheses only — the geographic threat view
+        # lives in the ThreatMap and is deliberately not duplicated here.
+        "threat_transmission": _safe(
+            lambda: transmission_watch(hours=48)[:8], []),
+        "incubator": _safe(lambda: incubator_report(limit=8), {}),
+        "alerts": _safe(lambda: _alerts_in_window(cutoff), {}),
         "corpus": _corpus_movement(cutoff),
         "book": _book_movement(cutoff),
         "platform": _platform_movement(cutoff_dt.timestamp()),
-        "positioning_extremes": _extremes(),
         "releases_today": _releases_today(),
         "note": ("assembled from the owning endpoints' own numbers; "
                  "nothing computed fresh here"),

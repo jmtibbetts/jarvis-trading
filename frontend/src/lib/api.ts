@@ -813,9 +813,69 @@ export type ChartPayload = {
   }[];
 };
 
+export type AnalogSummary = {
+  symbol: string;
+  timeframe: string;
+  window_bars: number;
+  candidates_searched: number;
+  analogs: { time: string; distance: number; [k: string]: number | string }[];
+  forward_summary: Record<
+    string,
+    { median_pct: number; iqr_pct: [number, number]; up_rate: number; n: number }
+  >;
+  note: string;
+};
+
 export type MorningBrief = {
   generated_at: string;
   window_hours: number;
+  market_pulse: { symbol: string; last: number; change_pct: number }[];
+  analog_reads: {
+    symbol: string;
+    n_analogs: number | null;
+    candidates_searched: number;
+    fwd_1d_median_pct: number | null;
+    fwd_1d_up_rate: number | null;
+    fwd_4h_median_pct: number | null;
+    fwd_4h_up_rate: number | null;
+  }[];
+  derivatives_now: {
+    symbol: string;
+    funding_rate_8h: number | null;
+    oi_usd: number | null;
+    long_short_ratio: number | null;
+    as_of: string;
+  }[];
+  positioning: {
+    sector: string;
+    instrument: string;
+    spec_pctile_3y: number | null;
+    spec_net: number | null;
+    curve: string | null;
+    roll_pct: number | null;
+  }[];
+  threat_transmission: {
+    rule: string;
+    instrument: string;
+    pressure: string;
+    rationale: string;
+    threat: string;
+    severity: string;
+    detected_at: string;
+  }[];
+  incubator: {
+    graduation_bars_1h: number;
+    incubating: {
+      symbol: string;
+      bars_1h: number;
+      first_bar: string;
+      age_days: number;
+      progress_pct: number;
+    }[];
+    coverage_gaps: { symbol: string; bars_1h: number }[];
+    counts: { incubating: number; coverage_gaps: number };
+  };
+  alerts: Record<string, number>;
   gate_experiment: {
     arms: Record<string, { candidates: number; resolved: number }>;
     resolved_in_window: Record<
@@ -1470,6 +1530,10 @@ export const api = {
   chartSymbols: () =>
     get<{ symbols: { symbol: string; timeframes: string[] }[] }>(
       `/market/chart-symbols`,
+    ),
+  marketAnalogs: (symbol: string, timeframe: string) =>
+    get<AnalogSummary>(
+      `/market/${encodeURIComponent(symbol).replace(/%2F/g, "/")}/analogs?timeframe=${timeframe}`,
     ),
   dataParity: (symbol = "BTC", windowMin = 60) =>
     get<ParityReport>(`/data-platform/parity?symbol=${symbol}&window_min=${windowMin}`),

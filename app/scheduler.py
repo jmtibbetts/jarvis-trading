@@ -66,6 +66,7 @@ job_status = {
     'feature_labels': {'status': 'idle', 'last': None, 'error': None},
     'official_data': {'status': 'idle', 'last': None, 'error': None},
     'futures_curve': {'status': 'idle', 'last': None, 'error': None},
+    'brief_push': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -663,6 +664,16 @@ def create_scheduler() -> BackgroundScheduler:
     def official_data_run():
         from lib.official_data import sync_all
         return sync_all()
+    # The Brief meets the operator at breakfast: 13:00 UTC = 6am Pacific.
+    # Same build_brief() the UI serves — the push cannot disagree with
+    # the page.
+    def brief_push_run():
+        from jobs.push_brief import run as push_brief
+        return push_brief()
+    sched.add_job(make_job_runner('brief_push', brief_push_run),
+                  'cron', hour=13, minute=0, id='brief_push',
+                  timezone='UTC', replace_existing=True, max_instances=1)
+
     sched.add_job(make_job_runner('official_data', official_data_run),
                   'interval', hours=6, id='official_data',
                   next_run_time=now + timedelta(minutes=10),

@@ -175,6 +175,22 @@ def market_chart(symbol: str, timeframe: str = "1H", limit: int = 3000):
             "bar_count": len(bars)}
 
 
+@router.get("/market/{symbol:path}/analogs")
+def market_analogs(symbol: str, timeframe: str = "15m", top_k: int = 12):
+    """Historical analogs of the current moment — what followed the most
+    similar non-overlapping past shapes. History, not prediction."""
+    from lib.analogs import analogs_for
+    from lib.instruments import canonical
+
+    out = analogs_for(canonical(symbol), timeframe,
+                      top_k=max(5, min(top_k, 25)))
+    if out is None:
+        raise HTTPException(
+            404, f"not enough cached history for {symbol}@{timeframe} — "
+                 "analogs need a deep corpus, not anecdotes")
+    return out
+
+
 @router.get("/market/chart-symbols")
 def market_chart_symbols():
     """Distinct (symbol, timeframe) coverage of the bar cache — the chart

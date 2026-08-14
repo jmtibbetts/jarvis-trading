@@ -68,6 +68,105 @@
     <p class="muted">assembling…</p>
   {:else if brief}
     <div class="grid">
+      <Panel title="Market Pulse" meta="last close vs prior — the desk's core instruments">
+        <div class="pulse">
+          {#each brief.market_pulse as p}
+            <div class="pt">
+              <span class="sym">{p.symbol.replace("/USD", "").replace("=X", "").replace("=F", "")}</span>
+              <span class:pos={p.change_pct > 0} class:neg={p.change_pct < 0}>
+                {p.change_pct > 0 ? "+" : ""}{p.change_pct}%
+              </span>
+            </div>
+          {:else}
+            <p class="muted">no pulse data cached yet</p>
+          {/each}
+        </div>
+      </Panel>
+
+      <Panel title="Analogs" meta="what followed the most similar past moments — history, not prediction">
+        {#each brief.analog_reads as a}
+          <div class="analog-row">
+            <b>{a.symbol}</b>
+            <span class="muted">n={a.n_analogs} of {a.candidates_searched.toLocaleString()} searched</span>
+            <span>4h: <b class:pos={(a.fwd_4h_median_pct ?? 0) > 0} class:neg={(a.fwd_4h_median_pct ?? 0) < 0}>{a.fwd_4h_median_pct}%</b> ({a.fwd_4h_up_rate}% up)</span>
+            <span>1d: <b class:pos={(a.fwd_1d_median_pct ?? 0) > 0} class:neg={(a.fwd_1d_median_pct ?? 0) < 0}>{a.fwd_1d_median_pct}%</b> ({a.fwd_1d_up_rate}% up)</span>
+          </div>
+        {:else}
+          <p class="muted">corpus too thin for analogs yet</p>
+        {/each}
+      </Panel>
+
+      <Panel title="Perp State" meta="OKX funding / OI / account skew — the crowd's current lean">
+        <table>
+          <thead><tr><th>coin</th><th>funding 8h</th><th>OI</th><th>L/S accts</th></tr></thead>
+          <tbody>
+            {#each brief.derivatives_now as d}
+              <tr>
+                <td><b>{d.symbol}</b></td>
+                <td class:neg={(d.funding_rate_8h ?? 0) < 0}>{d.funding_rate_8h == null ? "—" : (d.funding_rate_8h * 100).toFixed(4) + "%"}</td>
+                <td>{d.oi_usd == null ? "—" : "$" + (d.oi_usd / 1e9).toFixed(2) + "B"}</td>
+                <td>{d.long_short_ratio?.toFixed(2) ?? "—"}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </Panel>
+
+      <Panel title="Positioning" meta="COT spec percentile (3y) + curve, every tracked market">
+        <table>
+          <thead><tr><th>market</th><th>pctile</th><th>net</th><th>curve</th><th>roll/yr</th></tr></thead>
+          <tbody>
+            {#each brief.positioning as p}
+              <tr>
+                <td class="cap">{p.instrument}</td>
+                <td class:pos={(p.spec_pctile_3y ?? 50) >= 90} class:neg={(p.spec_pctile_3y ?? 50) <= 10}>
+                  {p.spec_pctile_3y ?? "—"}
+                </td>
+                <td>{p.spec_net?.toLocaleString() ?? "—"}</td>
+                <td>{p.curve ?? "—"}</td>
+                <td>{p.roll_pct == null ? "—" : p.roll_pct + "%"}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </Panel>
+
+      <Panel title="Threat → Price Pressure" meta="rule-mapped hypotheses from active threats — the map stays in Intelligence">
+        {#if brief.threat_transmission.length}
+          <ul class="tw">
+            {#each brief.threat_transmission as t}
+              <li>
+                <span class="sym">{t.instrument}</span>
+                <span class="press press-{t.pressure}">{t.pressure}</span>
+                <span class="muted">{t.rule} [{t.severity}]</span>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="muted">no active threats map to tracked instruments</p>
+        {/if}
+      </Panel>
+
+      <Panel title="Incubator" meta="{brief.incubator.counts?.incubating ?? 0} coins building history toward the {brief.incubator.graduation_bars_1h}-bar graduation">
+        {#if brief.incubator.incubating?.length}
+          <ul class="inc">
+            {#each brief.incubator.incubating as c}
+              <li>
+                <span class="sym">{c.symbol}</span>
+                <span class="muted">{c.age_days}d old · {c.bars_1h} bars</span>
+                <span class="prog"><span class="fill" style="width:{c.progress_pct}%"></span></span>
+                <span>{c.progress_pct}%</span>
+              </li>
+            {/each}
+          </ul>
+          {#if brief.incubator.counts?.coverage_gaps}
+            <p class="note">{brief.incubator.counts.coverage_gaps} older coins have thin history (backfill gaps, not new listings)</p>
+          {/if}
+        {:else}
+          <p class="muted">nothing incubating — every tracked coin has graduated</p>
+        {/if}
+      </Panel>
+
       <Panel title="Gate Experiment" meta="arms judged by the same resolver — compare within timeframe, mind effective n">
         <table>
           <thead>
@@ -139,6 +238,16 @@
         {:else}
           <p class="muted">nothing at the tails</p>
         {/if}
+      </Panel>
+
+      <Panel title="Alerts" meta="raised in window, by severity">
+        <div class="kinds">
+          {#each Object.entries(brief.alerts) as [sev, n]}
+            <span class="kind" class:crit={sev === "CRITICAL"}>{sev} <b>{n}</b></span>
+          {:else}
+            <p class="muted">quiet window</p>
+          {/each}
+        </div>
       </Panel>
 
       <Panel title="Data Platform" meta="events ingested in window, by kind">
@@ -255,4 +364,69 @@
     color: var(--ink-faint);
   }
   .kind b { color: var(--ink); }
+  .kind.crit { border-color: var(--bad); color: var(--bad); }
+  .pulse {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 8px;
+  }
+  .pt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  .analog-row {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  .tw, .inc {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 13px;
+  }
+  .tw li, .inc li {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .press {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .press-up { color: var(--good); border-color: var(--good); }
+  .press-down { color: var(--bad); border-color: var(--bad); }
+  .press-vol { color: var(--warn); border-color: var(--warn); }
+  .prog {
+    flex: 1;
+    max-width: 120px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .prog .fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+  }
+  .cap { text-transform: capitalize; }
 </style>

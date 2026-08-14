@@ -397,24 +397,12 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
     spec = get_spec(symbol) if symbol else None
     unit_value = entry * (spec.multiplier if spec else 1.0)
 
-    # ── Risk-first for EVERY asset class (P0.8) ──────────────────────────
-    # The futures branch below has said it for weeks: "the slice IS the
-    # risk budget" — quantity comes from what the stop can lose, margin is
-    # merely the financing. Non-futures was still margin-first
-    # (margin × leverage / price), which meant loss-at-stop was whatever
-    # fell out of the leverage choice rather than a budgeted number.
-    #
-    #     qty        = risk_budget / risk_per_unit
-    #     notional   = qty × unit value
-    #     leverage   = derived: enough to finance the notional from the
-    #                  margin slice, capped by max_safe_leverage (stop
-    #                  inside the liquidation buffer, venue limit) and by
-    #                  any EXPLICIT request (Long_10x). Requested leverage
-    #                  is a ceiling — it can shrink the financing, never
-    #                  widen the risk.
-    #     margin     = notional / leverage; if that busts the free-cash
-    #                  cap, QTY scales DOWN (execution reduces, never
-    #                  enlarges — same rule as live).
+    # ── Risk-first for EVERY asset class (P0.8 / Phase 1 §5) ─────────────
+    # The ARITHMETIC lives in lib/risk_engine.solve_position — the single
+    # authority live, paper, and Auto Sim all call, so no book can drift
+    # back into margin-first sizing alone. This wrapper supplies paper's
+    # POLICY: the equity slice as risk budget, the free-cash financing
+    # fraction, and the venue fee model.
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
     if margin_override > 0 and not (symbol and is_futures(symbol)):
         # EXPLICIT operator margin ("commit $435 at 9.6x") is a deliberate
@@ -429,66 +417,22 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         leverage = max(1.0, min(float(leverage or 1.0), safe["cap"]))
         notional = margin * max(1.0, leverage)
         qty = notional / unit_value if unit_value > 0 else 0.0
-    elif not (symbol and is_futures(symbol)):
-        risk_per_unit = stop_distance * (spec.multiplier if spec else 1.0)
-        if risk_per_unit <= 0:
-            return {"ok": False, "reason": f"{symbol or 'position'}: no stop distance, cannot size by risk"}
-        risk_budget = margin
-        qty = risk_budget / risk_per_unit
-        notional = qty * unit_value
-
-        safe = max_safe_leverage(entry, stop, symbol,
-                                 requested=leverage if leverage > 1.0 else None,
-                                 notional_hint=notional)
-        leverage = max(1.0, safe["leverage"])
-        margin_needed = notional / leverage
-        if cap > 0 and margin_needed > cap:
-            scale = cap / margin_needed
-            qty *= scale
-            notional *= scale
-            margin_needed = cap
-            capped = True
-        margin = margin_needed
-        if margin <= 0 or qty <= 0:
-            return {"ok": False, "reason": "sized to zero after caps"}
     else:
-        # Futures keep their existing risk-per-contract path below.
-        venue_cap, cap_why = venue_max_leverage(symbol, margin * max(1.0, leverage))
-        if venue_cap < leverage:
-            leverage = venue_cap
-        notional = margin * max(1.0, leverage)
-        qty = notional / unit_value if unit_value > 0 else 0.0
-
-    if symbol and is_futures(symbol):
-        # Futures size by RISK PER CONTRACT, not by a margin percentage.
-        # Margin is set by the exchange in dollars and has nothing to do with
-        # how much the trade can lose; what bounds the loss is the stop:
-        #
-        #     risk per contract = stop distance x multiplier
-        #     contracts         = risk budget / risk per contract
-        #
-        # Sizing futures off a 1%-of-equity margin slice instead produced
-        # zero contracts for every instrument — even a Micro E-mini needs
-        # $1,320 of margin against a $1,000 slice — which is why the futures
-        # track could never open a position.
-        risk_budget = margin                      # the 1% slice IS the risk budget
-        risk_per_contract = stop_distance_for_futures = abs(entry - stop) * spec.multiplier
-        if risk_per_contract <= 0:
-            return {"ok": False, "reason": f"{symbol}: no stop distance, cannot size by risk"}
-        qty = whole_contracts(symbol, risk_budget / risk_per_contract)
-        if qty < 1:
-            micro = suggest_micro(symbol)
-            hint = f" Try {micro}." if micro else ""
-            return {"ok": False,
-                    "reason": (f"{symbol}: one contract risks ${risk_per_contract:,.0f} at this stop, "
-                               f"over the ${risk_budget:,.0f} budget.{hint}")}
-        needed_margin = margin_required(symbol, qty)
-        if needed_margin > free_cash * (MAX_MARGIN_PCT_OF_CASH / 100.0):
-            return {"ok": False,
-                    "reason": (f"{symbol}: {qty:.0f} contract(s) need ${needed_margin:,.0f} margin, "
-                               f"over the {MAX_MARGIN_PCT_OF_CASH:.0f}% free-cash cap")}
-        margin = needed_margin
-        notional = entry * qty * spec.multiplier
+        # The shared engine solves everything else — futures included.
+        from lib.risk_engine import solve_position
+        decision = solve_position(
+            entry=entry, stop=stop, risk_budget_usd=margin,
+            free_cash=free_cash, symbol=symbol,
+            requested_leverage=leverage if leverage > 1.0 else None,
+            max_margin_frac_of_cash=MAX_MARGIN_PCT_OF_CASH / 100.0,
+        )
+        if decision.rejected:
+            return {"ok": False, "reason": decision.rejection_reason}
+        qty = decision.qty
+        notional = decision.notional
+        margin = decision.margin
+        leverage = decision.leverage
+        capped = capped or decision.limiting_constraint == "cash"
 
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
     loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)

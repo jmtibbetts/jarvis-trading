@@ -39,7 +39,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-FEATURE_SCHEMA = "path_features_v1_2026-08-13"
+# v2 adds what the v1 null run said was missing. 527k examples across two
+# timeframes showed the confirmation-TA set (RSI/MACD/EMA/BB/volume) carries
+# NO path signal — while the score decomposition measured volatility state,
+# cross-timeframe conflict, and extension/lateness as the dimensions that
+# actually separate outcomes. v2 adds exactly those, all computable from the
+# same cached bars. Derivatives posture cannot be backfilled (snapshots are
+# days old) and joins the live stream instead.
+FEATURE_SCHEMA = "path_features_v2_2026-08-13"
 LABEL_SCHEMA = "path_labels_v1_2026-08-13"
 
 # The book's standard geometry: ~1.5R. Held fixed across the dataset so the
@@ -124,6 +131,80 @@ def flatten_features(ta: dict) -> dict:
     for k in ("support", "resistance", "vwap"):
         out[f"dist_{k}_atr"] = _f(dist.get(f"to_{k}"))
     return out
+
+
+def extra_features(window, atr: float) -> dict:
+    """The v2 dimensions, computed from the raw bar window (bars <= anchor).
+
+    Everything here is a 'where in the move are we' measurement rather than
+    a 'does the indicator agree' one — the distinction the v1 null and the
+    score decomposition both pointed at: agreement measured nothing, but
+    volatility state (+1.05%/trade top-to-bottom quintile), conflict
+    (+0.76%) and lateness were where outcomes actually separated.
+    """
+    import numpy as np
+    out = {}
+    try:
+        close = window["close"].astype(float)
+        high = window["high"].astype(float)
+        low = window["low"].astype(float)
+        px = float(close.iloc[-1])
+        a = atr if atr and atr > 0 else max(1e-12, px * 0.001)
+
+        # ── Extension / lateness ─────────────────────────────────────────
+        lo20, hi20 = float(low.tail(20).min()), float(high.tail(20).max())
+        lo96, hi96 = float(low.tail(96).min()), float(high.tail(96).max())
+        out["ext_from_low20_atr"] = (px - lo20) / a
+        out["ext_from_high20_atr"] = (hi20 - px) / a
+        out["range96_consumed"] = ((px - lo96) / (hi96 - lo96)) if hi96 > lo96 else None
+        # How much of the last 96 bars' total travel happened recently —
+        # a climax detector: near 1.0 means the move just happened.
+        r5 = abs(px - float(close.iloc[-6])) if len(close) > 6 else 0.0
+        r96 = abs(px - float(close.iloc[-min(96, len(close) - 1) - 1]))
+        out["recent_share_of_move"] = (r5 / r96) if r96 > 1e-12 else None
+        # Bars since the 20-bar extreme was set (breakout age).
+        hi_idx = int(np.argmax(high.tail(20).to_numpy()))
+        lo_idx = int(np.argmin(low.tail(20).to_numpy()))
+        out["bars_since_high20"] = float(19 - hi_idx)
+        out["bars_since_low20"] = float(19 - lo_idx)
+        # Return z-scores: is the recent move an outlier of its own history?
+        rets = close.pct_change().dropna()
+        if len(rets) >= 40:
+            mu, sd = float(rets.mean()), float(rets.std() or 1e-9)
+            out["ret1_zscore"] = (float(rets.iloc[-1]) - mu) / sd
+            r5s = rets.tail(5).sum()
+            out["ret5_zscore"] = (float(r5s) - 5 * mu) / (sd * (5 ** 0.5))
+
+        # ── Volatility regime ────────────────────────────────────────────
+        if len(rets) >= 100:
+            v20 = float(rets.tail(20).std() or 0)
+            v100 = float(rets.tail(100).std() or 1e-9)
+            out["vol_ratio_20_100"] = v20 / v100 if v100 > 0 else None
+
+        # ── Cross-timeframe conflict, deterministically from the window ──
+        # Resample 4:1 (15m->1H, 1H->4H) and compare EMA-stack direction.
+        # The composite PENALIZED disagreement; measurement said high
+        # conflict outperformed by +0.76%/trade. Recorded neutrally here —
+        # the model decides what it means.
+        if len(close) >= 80:
+            own_dir = 1.0 if float(close.ewm(span=9).mean().iloc[-1]) > \
+                float(close.ewm(span=21).mean().iloc[-1]) else -1.0
+            c4 = close.iloc[::-1].iloc[::4].iloc[::-1]     # every 4th bar, aligned to end
+            hi_dir = 1.0 if float(c4.ewm(span=9).mean().iloc[-1]) > \
+                float(c4.ewm(span=21).mean().iloc[-1]) else -1.0
+            out["own_tf_dir"] = own_dir
+            out["higher_tf_dir"] = hi_dir
+            out["tf_conflict"] = 1.0 if own_dir != hi_dir else 0.0
+
+        # ── Session ──────────────────────────────────────────────────────
+        ts = window.index[-1]
+        hour = float(getattr(ts, "hour", 0)) + float(getattr(ts, "minute", 0)) / 60
+        out["session_sin"] = float(np.sin(2 * np.pi * hour / 24))
+        out["session_cos"] = float(np.cos(2 * np.pi * hour / 24))
+        out["day_of_week"] = float(getattr(ts, "dayofweek", 0))
+    except Exception:
+        pass
+    return {k: _f(v) for k, v in out.items()}
 
 
 def path_labels(future, entry: float, stop: float, target: float,
@@ -217,6 +298,7 @@ def build(timeframe: str, symbols: list[str], stride: int, window: int,
             if ta.get("error"):
                 continue
             feats = flatten_features(ta)
+            feats.update(extra_features(past, _f(_g(ta, "atr", "value"))))
             atr = _f(_g(ta, "atr", "value"))
             entry = _f(_g(ta, "price", "last"))
             if not atr or not entry:

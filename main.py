@@ -126,6 +126,20 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         logger.warning(f"[Server] Kraken stream failed to start: {e}")
 
+    # Twelve Data WebSocket: live forex majors — the one asset class with
+    # no real-time feed (Kraken covers crypto, Alpaca covers equities).
+    # Same daemon-thread pattern; inert without a TD key.
+    try:
+        from lib.td_forex_stream import start as start_td_forex
+        fx = start_td_forex()
+        if fx.get("ok"):
+            logger.info(f"[Server] TD forex stream started — "
+                        f"{len(fx.get('streaming', []))} pairs")
+        else:
+            logger.info(f"[Server] TD forex stream unavailable: {fx.get('reason')}")
+    except Exception as e:
+        logger.warning(f"[Server] TD forex stream failed to start: {e}")
+
     yield  # ← App runs here
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
@@ -134,6 +148,12 @@ async def lifespan(app_: FastAPI):
     try:
         from lib.kraken_stream import stop as stop_kraken_stream
         stop_kraken_stream()
+    except Exception:
+        pass
+
+    try:
+        from lib.td_forex_stream import stop as stop_td_forex
+        stop_td_forex()
     except Exception:
         pass
 

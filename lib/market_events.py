@@ -128,6 +128,19 @@ class DerivativesObservation:
 
 
 @dataclass(frozen=True)
+class PriceTick:
+    """A single last-price observation with no book context — what a
+    consolidated forex feed actually sends. Deliberately NOT shoehorned
+    into QuoteEvent (bid=ask=price would fabricate a zero spread) or
+    TradeEvent (there is no size and no aggressor side): an event kind
+    should say exactly what was observed, nothing more."""
+    meta: EventMeta
+    symbol: str
+    price: float
+    kind: str = "price_tick"
+
+
+@dataclass(frozen=True)
 class OfficialStat:
     """One value from an official release (CFTC COT, FINRA short volume,
     EIA storage). `as_of` is the period the statistic DESCRIBES;

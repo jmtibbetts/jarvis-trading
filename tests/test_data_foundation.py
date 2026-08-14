@@ -301,6 +301,50 @@ class TestDerivativesObservations(unittest.TestCase):
         self.assertEqual(self._drain(), [])
 
 
+class TestTdForexAdapter(unittest.TestCase):
+    """TD price events -> canonical PriceTicks under desk =X identity,
+    venue-clocked, throttled to the 30s persist cadence."""
+
+    def setUp(self):
+        from lib.td_forex_stream import _persist_marks, _ticks
+        _persist_marks.clear()
+        _ticks.clear()
+        self._drain()
+
+    def _drain(self):
+        from lib.market_events import get_queue
+        return get_queue("td_forex_ticks").drain(limit=10_000)
+
+    def test_tick_lands_under_desk_identity_with_venue_clock(self):
+        from lib.td_forex_stream import handle_price_event, latest_price
+        handle_price_event({"event": "price", "symbol": "EUR/USD",
+                            "price": 1.0842, "timestamp": 1755300000})
+        evs = self._drain()
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].symbol, "EURUSD=X")   # never TD's slash
+        self.assertEqual(evs[0].price, 1.0842)
+        self.assertEqual(evs[0].meta.exchange_ts, 1755300000.0)
+        self.assertIsNotNone(evs[0].meta.clock_skew_ms)
+        self.assertEqual(latest_price("EURUSD=X")["price"], 1.0842)
+
+    def test_tick_firehose_throttles_but_memory_stays_fresh(self):
+        from lib.td_forex_stream import handle_price_event, latest_price
+        for i in range(20):
+            handle_price_event({"event": "price", "symbol": "GBP/USD",
+                                "price": 1.28 + i * 0.0001,
+                                "timestamp": 1755300000 + i})
+        self.assertEqual(len(self._drain()), 1)       # one persisted
+        self.assertAlmostEqual(latest_price("GBPUSD=X")["price"], 1.2819)
+
+    def test_unknown_symbol_and_junk_price_are_dropped(self):
+        from lib.td_forex_stream import handle_price_event
+        handle_price_event({"event": "price", "symbol": "USD/TRY",
+                            "price": 33.1, "timestamp": 1})
+        handle_price_event({"event": "price", "symbol": "EUR/USD",
+                            "price": "n/a", "timestamp": 1})
+        self.assertEqual(self._drain(), [])
+
+
 class TestTierPersistenceHook(unittest.TestCase):
     def test_tier3_symbol_never_reaches_the_queue(self):
         from lib.market_events import get_queue

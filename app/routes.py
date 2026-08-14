@@ -1524,6 +1524,15 @@ def promotion_champions():
     return {"champions": champion_history()}
 
 
+@router.get("/cost-reconciliation")
+def cost_reconciliation():
+    """Modeled vs realized costs: Kraken fill ledger (fee ground truth),
+    recorded slippage, and the headline cell's net R under both fee
+    schedules it might pay. Read-only — shows what verdicts are made of."""
+    from lib.cost_reconciliation import reconciliation_summary
+    return reconciliation_summary()
+
+
 @router.get("/context-ablation")
 def context_ablation():
     """Does the macro context a candidate was born under predict how it

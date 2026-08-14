@@ -240,16 +240,26 @@ def selection_bias_summary() -> dict:
         # gate_v8, so its decisions get the same counterfactual treatment.
         # If NO_TRADE resolves better than TRADE out of sample, the gate is
         # wrong and this row is where that shows first.
-        for decision, n, wr, pnl, mfe in c.execute(text("""
-            SELECT gate_v8_decision, COUNT(*),
+        #
+        # STRATIFIED by timeframe (audit 2026-08-15): the decisions compose
+        # differently — TRADE was 87% 1D futures while NO_TRADE was mostly
+        # intraday, so a pooled TRADE-vs-NO_TRADE row would compare daily
+        # corn against 15-minute crypto and call it a gate verdict.
+        # effective_n counts distinct (symbol, day): five same-day ZC=F
+        # candidates are one market opinion, not five samples.
+        for decision, tf, n, eff, wr, pnl, mfe in c.execute(text("""
+            SELECT gate_v8_decision, timeframe, COUNT(*),
+                   COUNT(DISTINCT symbol || '|' || date(created_at)),
                    ROUND(AVG(CASE WHEN pnl_pct > 0 THEN 100.0 ELSE 0 END), 1),
                    ROUND(AVG(pnl_pct), 3), ROUND(AVG(mfe_r), 3)
             FROM candidate_signals
             WHERE resolved = 1 AND gate_v8_decision IS NOT NULL
-            GROUP BY gate_v8_decision
+            GROUP BY gate_v8_decision, timeframe
+            ORDER BY gate_v8_decision, COUNT(*) DESC
         """)):
             out["by_gate_decision"].append({
-                "decision": decision, "n": n, "win_rate": wr,
+                "decision": decision, "timeframe": tf, "n": n,
+                "effective_n": eff, "win_rate": wr,
                 "avg_pnl_pct": pnl, "avg_mfe_r": mfe})
         for reason, n, wr, pnl in c.execute(text("""
             SELECT rejection_reason, COUNT(*),

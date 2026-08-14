@@ -1427,9 +1427,16 @@ def gate_experiment():
     from app.database import engine
 
     def arm(col: str) -> dict:
+        # Stratified by timeframe because the arms COMPOSE differently:
+        # measured 2026-08-15, v8's TRADE picks were 87% 1D futures while
+        # its NO_TRADEs were mostly intraday — pooled arm stats would
+        # compare daily corn replays against 15-minute crypto ones and
+        # call it a verdict. effective_n counts distinct (symbol, day):
+        # five same-day ZC=F rows are one market opinion, not five.
         with engine.connect() as c:
             row = c.execute(_t(f"""
                 SELECT COUNT(*),
+                       COUNT(DISTINCT symbol || '|' || date(created_at)),
                        SUM(CASE WHEN resolved=1 THEN 1 ELSE 0 END),
                        AVG(CASE WHEN resolved=1 AND pnl_pct > 0 THEN 100.0
                                 WHEN resolved=1 THEN 0.0 END),
@@ -1437,11 +1444,29 @@ def gate_experiment():
                        AVG(CASE WHEN resolved=1 THEN mfe_r END)
                 FROM candidate_signals
                 WHERE {col} = 1""")).fetchone()
-        n, res, wr, pnl, mfe = row
-        return {"selected": int(n or 0), "resolved": int(res or 0),
+            tf_rows = c.execute(_t(f"""
+                SELECT timeframe, COUNT(*),
+                       COUNT(DISTINCT symbol || '|' || date(created_at)),
+                       SUM(CASE WHEN resolved=1 THEN 1 ELSE 0 END),
+                       AVG(CASE WHEN resolved=1 AND pnl_pct > 0 THEN 100.0
+                                WHEN resolved=1 THEN 0.0 END),
+                       AVG(CASE WHEN resolved=1 THEN pnl_pct END)
+                FROM candidate_signals
+                WHERE {col} = 1
+                GROUP BY timeframe ORDER BY COUNT(*) DESC""")).fetchall()
+        n, eff, res, wr, pnl, mfe = row
+        return {"selected": int(n or 0), "effective_n": int(eff or 0),
+                "resolved": int(res or 0),
                 "win_rate": round(wr, 1) if wr is not None else None,
                 "avg_pnl_pct": round(pnl, 3) if pnl is not None else None,
-                "avg_mfe_r": round(mfe, 3) if mfe is not None else None}
+                "avg_mfe_r": round(mfe, 3) if mfe is not None else None,
+                "by_timeframe": [
+                    {"timeframe": tf, "selected": int(tn or 0),
+                     "effective_n": int(teff or 0),
+                     "resolved": int(tres or 0),
+                     "win_rate": round(twr, 1) if twr is not None else None,
+                     "avg_pnl_pct": round(tpnl, 3) if tpnl is not None else None}
+                    for tf, tn, teff, tres, twr, tpnl in tf_rows]}
 
     with engine.connect() as c:
         overlap = c.execute(_t("""
@@ -1459,7 +1484,10 @@ def gate_experiment():
     return {
         "note": ("both arms judged by the same counterfactual resolver; "
                  "non-executed picks resolve with perfect fills — the bias "
-                 "applies to both arms equally"),
+                 "applies to both arms equally. Compare arms WITHIN a "
+                 "timeframe row, never across the pooled headline: the "
+                 "arms compose differently by timeframe, and effective_n "
+                 "(distinct symbol-days) is the honest sample size."),
         "legacy": arm("gate_legacy_take"),
         "v8": arm("gate_v8_take"),
         "overlap": {"both_take": int(overlap[0] or 0),

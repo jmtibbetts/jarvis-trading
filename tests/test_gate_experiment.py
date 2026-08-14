@@ -117,5 +117,65 @@ class ExecutorWiringTests(unittest.TestCase):
         self.assertIn("record_both", inspect.getsource(candidates))
 
 
+class StratifiedScoreboardTests(unittest.TestCase):
+    """The 2026-08-15 audit: TRADE picks were 87% 1D futures while
+    NO_TRADEs were mostly intraday, and same-day repeats (five ZC=F rows
+    in one session) inflate raw n. The scoreboard must stratify by
+    timeframe and report effective_n (distinct symbol-days), or the
+    judgment window's verdict compares daily corn to 15-minute crypto.
+    """
+
+    def setUp(self):
+        from app.database import init_db
+        init_db()
+        self._clean()
+
+    def tearDown(self):
+        self._clean()
+
+    def _clean(self):
+        from app.database import CandidateSignal, get_db
+        with get_db() as db:
+            db.query(CandidateSignal).filter(
+                CandidateSignal.symbol.like("TEST-STRAT%")).delete(
+                synchronize_session=False)
+            db.commit()
+
+    def test_gate_rows_stratify_and_count_symbol_days(self):
+        from datetime import datetime, timezone
+
+        from app.database import CandidateSignal, get_db
+        from lib.candidates import selection_bias_summary
+
+        now = datetime.now(timezone.utc).isoformat()
+        with get_db() as db:
+            # Three same-day 1D TRADE rows on ONE symbol: n=3, eff_n=1.
+            for i in range(3):
+                db.add(CandidateSignal(
+                    dedup_hash=f"TEST-STRAT-T{i}", symbol="TEST-STRAT-ZC",
+                    timeframe="1D", direction="Long", verdict="persisted",
+                    gate_v8_decision="TRADE", resolved=True,
+                    pnl_pct=1.0, mfe_r=0.5, created_at=now))
+            # Two 15m NO_TRADEs on different symbols: n=2, eff_n=2.
+            for i in range(2):
+                db.add(CandidateSignal(
+                    dedup_hash=f"TEST-STRAT-N{i}", symbol=f"TEST-STRAT-{i}",
+                    timeframe="15m", direction="Long", verdict="rejected",
+                    gate_v8_decision="NO_TRADE", resolved=True,
+                    pnl_pct=-0.5, mfe_r=0.1, created_at=now))
+            db.commit()
+
+        rows = selection_bias_summary()["by_gate_decision"]
+        trade_1d = next(r for r in rows if r["decision"] == "TRADE"
+                        and r["timeframe"] == "1D")
+        nt_15m = next(r for r in rows if r["decision"] == "NO_TRADE"
+                      and r["timeframe"] == "15m")
+        self.assertGreaterEqual(trade_1d["n"], 3)
+        self.assertLess(trade_1d["effective_n"], trade_1d["n"])
+        self.assertGreaterEqual(nt_15m["effective_n"], 2)
+        # Stratification means no pooled TRADE row without a timeframe.
+        self.assertTrue(all("timeframe" in r for r in rows))
+
+
 if __name__ == "__main__":
     unittest.main()

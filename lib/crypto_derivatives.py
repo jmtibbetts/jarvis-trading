@@ -165,6 +165,44 @@ def _ms_to_iso(ms) -> str | None:
         return None
 
 
+# ── Canonical-event emission (Phase 3 P3) ────────────────────────────────────
+# Until now every funding/OI number was fetched, served, and discarded —
+# history over these observations is exactly what the platform doc's derived
+# features (funding-vs-price divergence, cross-venue dispersion drift) need
+# and could never have. Emission rides the EXISTING fetch paths: whatever
+# polls the snapshot (UI, scanner, analyst) feeds the log as a side effect,
+# throttled per (venue, symbol, metric) so a hot dashboard can't multiply
+# a slow-moving observation into duplicate rows. Tier-1 symbols only, same
+# gate as every other raw persist.
+_obs_marks: dict[tuple, float] = {}
+OBS_PERSIST_INTERVAL_SEC = 300.0
+
+
+def _emit_observation(venue: str, symbol: str, metric: str, value,
+                      obs_iso: str | None = None) -> None:
+    try:
+        import time as _time
+
+        from lib.event_store import tier_of
+        from lib.market_events import (DerivativesObservation, get_queue,
+                                       make_meta, parse_iso_ts)
+
+        if value is None or tier_of(symbol) != 1:
+            return
+        key = (venue, str(symbol).upper(), metric)
+        now = _time.time()
+        if now - _obs_marks.get(key, 0.0) < OBS_PERSIST_INTERVAL_SEC:
+            return
+        _obs_marks[key] = now
+        get_queue("derivatives_obs").push(DerivativesObservation(
+            meta=make_meta(venue, f"{venue}_rest_v1", parse_iso_ts(obs_iso)),
+            symbol=str(symbol).upper().split("/")[0],
+            metric=metric, value=float(value)))
+    except Exception as e:
+        # Serving the caller must survive any persistence problem.
+        logger.debug(f"[CryptoDerivatives] observation event skipped: {e}")
+
+
 def fetch_derivatives_snapshot(symbol: str) -> dict | None:
     """One live pull of funding rate + OI + long/short ratio for a symbol.
     Returns None if OKX doesn't have a listed perpetual for it (not every
@@ -182,6 +220,16 @@ def fetch_derivatives_snapshot(symbol: str) -> dict | None:
         return None
     if not funding and not oi:
         return None
+    # OKX's funding/OI payloads carry no observation time in the fields we
+    # parse — None, not fetch time masquerading as the venue's clock. The
+    # long/short ratio row does carry its own timestamp.
+    _emit_observation("okx", symbol, "funding_rate",
+                      funding["funding_rate"] if funding else None)
+    _emit_observation("okx", symbol, "open_interest_usd",
+                      oi["open_interest_usd"] if oi else None)
+    _emit_observation("okx", symbol, "long_short_ratio",
+                      ls["ratio"] if ls else None,
+                      obs_iso=ls.get("ts") if ls else None)
     return {
         "symbol": symbol.upper().split("/")[0],
         "inst_id": inst_id,
@@ -267,6 +315,12 @@ def fetch_cryptocom_snapshot(symbol: str) -> dict | None:
         return None
     if not tick:
         return None
+    # Crypto.com stamps both payloads with the venue's own ms clock.
+    _emit_observation("cryptocom", symbol, "funding_rate",
+                      funding["funding_rate"] if funding else None,
+                      obs_iso=funding.get("ts") if funding else None)
+    _emit_observation("cryptocom", symbol, "open_interest_usd",
+                      tick["open_interest_usd"], obs_iso=tick.get("ts"))
     return {
         "symbol": symbol.upper().split("/")[0],
         "inst_id": inst,

@@ -257,6 +257,50 @@ class TestKrakenAdapter(unittest.TestCase):
         self.assertEqual(evs[0].bid_size, 2.0)
 
 
+class TestDerivativesObservations(unittest.TestCase):
+    """Funding/OI/long-short used to be fetched, served and discarded —
+    emission rides the fetch path, throttled, tier-gated, venue-clocked."""
+
+    def setUp(self):
+        from lib.crypto_derivatives import _obs_marks
+        _obs_marks.clear()
+        self._drain()
+
+    def _drain(self):
+        from lib.market_events import get_queue
+        return get_queue("derivatives_obs").drain(limit=10_000)
+
+    def test_observation_carries_venue_clock_when_supplied(self):
+        from lib.crypto_derivatives import _emit_observation
+        _emit_observation("cryptocom", "BTC/USD", "funding_rate", 0.0001,
+                          obs_iso="2026-08-14T07:00:00Z")
+        evs = self._drain()
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].metric, "funding_rate")
+        self.assertEqual(evs[0].symbol, "BTC")
+        self.assertIsNotNone(evs[0].meta.exchange_ts)
+
+    def test_no_venue_clock_stores_none_not_fetch_time(self):
+        from lib.crypto_derivatives import _emit_observation
+        _emit_observation("okx", "ETH/USD", "open_interest_usd", 5e9)
+        evs = self._drain()
+        self.assertEqual(len(evs), 1)
+        self.assertIsNone(evs[0].meta.exchange_ts)
+        self.assertIsNone(evs[0].meta.clock_skew_ms)
+
+    def test_hot_dashboard_cannot_multiply_slow_observations(self):
+        from lib.crypto_derivatives import _emit_observation
+        for _ in range(5):
+            _emit_observation("okx", "BTC/USD", "funding_rate", 0.0002)
+        self.assertEqual(len(self._drain()), 1)
+
+    def test_tier3_and_missing_values_stay_off_the_log(self):
+        from lib.crypto_derivatives import _emit_observation
+        _emit_observation("okx", "DOGE/USD", "funding_rate", 0.001)
+        _emit_observation("okx", "BTC/USD", "funding_rate", None)
+        self.assertEqual(self._drain(), [])
+
+
 class TestTierPersistenceHook(unittest.TestCase):
     def test_tier3_symbol_never_reaches_the_queue(self):
         from lib.market_events import get_queue

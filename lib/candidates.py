@@ -184,7 +184,7 @@ def selection_bias_summary() -> dict:
 
     from app.database import engine
 
-    out = {"by_verdict": [], "by_rejection_reason": []}
+    out = {"by_verdict": [], "by_rejection_reason": [], "by_gate_decision": []}
     with engine.connect() as c:
         for verdict, n, wr, pnl, mfe in c.execute(text("""
             SELECT verdict, COUNT(*),
@@ -195,6 +195,22 @@ def selection_bias_summary() -> dict:
         """)):
             out["by_verdict"].append({
                 "verdict": verdict, "n": n, "win_rate": wr,
+                "avg_pnl_pct": pnl, "avg_mfe_r": mfe})
+        # Aligned to the ACTUAL live gate (Phase 2): persisted-vs-rejected
+        # measures the old persistence filter; what decides capital now is
+        # gate_v8, so its decisions get the same counterfactual treatment.
+        # If NO_TRADE resolves better than TRADE out of sample, the gate is
+        # wrong and this row is where that shows first.
+        for decision, n, wr, pnl, mfe in c.execute(text("""
+            SELECT gate_v8_decision, COUNT(*),
+                   ROUND(AVG(CASE WHEN pnl_pct > 0 THEN 100.0 ELSE 0 END), 1),
+                   ROUND(AVG(pnl_pct), 3), ROUND(AVG(mfe_r), 3)
+            FROM candidate_signals
+            WHERE resolved = 1 AND gate_v8_decision IS NOT NULL
+            GROUP BY gate_v8_decision
+        """)):
+            out["by_gate_decision"].append({
+                "decision": decision, "n": n, "win_rate": wr,
                 "avg_pnl_pct": pnl, "avg_mfe_r": mfe})
         for reason, n, wr, pnl in c.execute(text("""
             SELECT rejection_reason, COUNT(*),

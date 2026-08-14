@@ -373,15 +373,29 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
             # actually paid, not from mid.
             entry, half_spread = _fill_price(signal.asset_symbol, entry, side, entering=True)
             stop = leverage_capped_stop(entry, signal.stop_loss, side, leverage, signal.timeframe)
-            qty = MARGIN_PER_SIGNAL * leverage / entry
-            fees, fee_basis = _round_trip_fee(signal.asset_symbol, qty * entry, leverage, entry)
+            # The shared engine (Phase 1 §5): the $1,000 slice is the RISK
+            # BUDGET, qty solved from the stop — the last margin-first
+            # sizing in the codebase (qty = margin x lev / entry) died
+            # here. Capital caps are Auto Sim's own deployment checks
+            # above, so the engine's cash constraint is disabled.
+            from lib.risk_engine import solve_position
+            sized = solve_position(
+                entry=entry, stop=stop, risk_budget_usd=MARGIN_PER_SIGNAL,
+                free_cash=MARGIN_PER_SIGNAL * 1000, symbol=signal.asset_symbol,
+                requested_leverage=leverage, max_margin_frac_of_cash=1.0)
+            if sized.rejected:
+                skipped += 1
+                continue
+            qty = sized.qty
+            fees, fee_basis = _round_trip_fee(signal.asset_symbol, sized.notional,
+                                              sized.leverage, entry)
             db.add(AutoSimPosition(
                 id=new_id(), user_id=user_id, signal_id=signal.id,
                 symbol=signal.asset_symbol, asset_class=signal.asset_class,
-                direction=signal.direction, side=side, leverage=leverage,
+                direction=signal.direction, side=side, leverage=sized.leverage,
                 qty=qty, entry_price=entry, current_price=entry,
                 target_price=signal.target_price, stop_loss=stop,
-                margin_used=MARGIN_PER_SIGNAL, fees=round(fees, 6),
+                margin_used=round(sized.margin, 2), fees=round(fees, 6),
                 fee_basis=fee_basis, entry_slippage_pct=round(half_spread, 8),
                 unrealized_pnl=round(-fees, 6),
                 signal_updated_at=signal.updated_date, opened_at=now.isoformat(),

@@ -108,9 +108,14 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
 
     # Leverage from the stop and the venue — never from a score, and an
     # explicit request only ever lowers the cap.
-    safe = max_safe_leverage(entry, stop, symbol,
-                             requested=requested_leverage, notional_hint=notional)
-    leverage = max(1.0, float(safe["leverage"]))
+    if requested_leverage is not None and requested_leverage <= 1.0:
+        # A cash account: leverage is a FACT of the venue relationship,
+        # not something to derive. 1x means the notional is fully funded.
+        leverage = 1.0
+    else:
+        safe = max_safe_leverage(entry, stop, symbol,
+                                 requested=requested_leverage, notional_hint=notional)
+        leverage = max(1.0, float(safe["leverage"]))
 
     # Financing: margin at the derived leverage, bounded by free cash.
     cash_cap = free_cash * max(0.0, min(1.0, max_margin_frac_of_cash))

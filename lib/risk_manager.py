@@ -152,8 +152,6 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
     # quantity is solved from reduced risk, never multiplied onto an
     # already-rounded order afterward (P0.5).
     max_loss_dollars = equity * max_risk_per_trade * max(0.0, min(1.0, lifecycle_multiplier))
-    shares_by_risk   = max_loss_dollars / risk_per_share
-    dollar_by_risk   = shares_by_risk * entry
 
     # ── Kelly, from MEASURED evidence only (P0.2) ─────────────────────────────
     # The old path clamped the signal's "confidence" to 50-90% and called
@@ -182,7 +180,10 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
     except Exception as e:
         logger.debug(f"[Risk] measured-Kelly unavailable for {sym}: {e}")
 
-    # ── Regime Multiplier ─────────────────────────────────────────────────────
+    # ── Regime Multiplier — applied to the RISK BUDGET ────────────────────────
+    # Account policy (base %, lifecycle, regime) all scales the budget;
+    # quantity is then solved from that budget by the shared engine, so
+    # policy and arithmetic cannot be interleaved out of order again.
     risk_level = regime.get('risk', 'medium')
     regime_mult = {
         'low':         1.0,
@@ -191,36 +192,45 @@ def calculate_position_size(signal: dict, equity: float, regime: dict,
         'high':        0.4,
         'unknown':     0.7,
     }.get(risk_level, 0.7)
+    budget = max_loss_dollars * regime_mult
 
-    # ── Final Size ────────────────────────────────────────────────────────────
-    # Fixed-fractional bounded by measured Kelly when one exists. The old
-    # confidence multiplier (0.5-0.9x from the same poisoned field) is
-    # deleted: model self-belief has no sizing effect (invariant #1).
-    base_dollars = min(dollar_by_risk, kelly_dollars) if kelly_dollars is not None else dollar_by_risk
-    final_dollars = base_dollars * regime_mult
-    
-    # Cap by equity share. The old line also applied max(200.0, ...), a FLOOR
-    # that overrode the risk budget: when the risk math said $50, it deployed
-    # $200 anyway — four times the intended risk. A minimum position size is
-    # not a risk control, it is a violation of one. The correct size for a
-    # trade too small to express is zero (Phase 3: NO_TRADE).
-    # The notional cap scales with the lifecycle multiplier too — with
-    # tight stops this cap binds before the risk budget does, and a
-    # REDUCED strategy that sizes identically to an ACTIVE one whenever
-    # the cap binds would make invariant #11 true on paper only.
-    final_dollars = min(final_dollars,
-                        equity * 0.05 * max(0.0, min(1.0, lifecycle_multiplier)))
+    # Notional caps: the 5%-of-equity share (lifecycle-scaled, see the
+    # invariant-#11 note in git history) and the measured-Kelly bound when
+    # one exists. Kelly is deliberately NOT regime-scaled — its lower-bound
+    # win rate and quarter cap already price uncertainty once; scaling it
+    # again would double-count caution the way the old pipeline
+    # double-counted history.
+    notional_cap = equity * 0.05 * max(0.0, min(1.0, lifecycle_multiplier))
+    if kelly_dollars is not None:
+        notional_cap = min(notional_cap, kelly_dollars)
 
-    shares = final_dollars / entry if entry > 0 else 0.0
-    is_crypto = '/' in sym
-    if not is_crypto:
-        # Whole shares only; rounding DOWN so the risk invariant cannot be
-        # breached by rounding up into a bigger position than budgeted.
-        shares = float(int(shares))
-        final_dollars = shares * entry
-    else:
-        shares = round(shares, 8)
-        final_dollars = shares * entry
+    # ── The shared engine (Phase 1 §5): one arithmetic for every book ────
+    # Live Alpaca is a CASH account: leverage pinned at 1, financing
+    # handled by the executor's own budget checks (free_cash constraint
+    # disabled here so the same dollars aren't gated twice).
+    from lib.risk_engine import solve_position
+    decision = solve_position(
+        entry=entry, stop=stop, risk_budget_usd=budget,
+        free_cash=equity, symbol=sym,
+        requested_leverage=1.0,
+        max_margin_frac_of_cash=1.0,
+        notional_cap_usd=notional_cap,
+        whole_units=('/' not in sym),
+        lifecycle_multiplier=lifecycle_multiplier,
+    )
+    if decision.rejected:
+        return SizedSignal(
+            symbol=sym, direction=direction, confidence=conf,
+            entry=entry, target=target, stop=stop,
+            kelly_fraction=round(kf, 4), kelly_capped=0, dollar_size=0, shares=0,
+            risk_reward=round(rr_ratio, 2), regime_adjusted=True,
+            rejection_reason=decision.rejection_reason,
+            decision="NO_TRADE", side=side,
+            loss_at_stop=0.0, max_allowed_loss=round(budget, 2),
+        )
+    shares = decision.qty
+    final_dollars = decision.notional
+    max_loss_dollars = budget   # the number the invariant check below reads
 
     # ── The invariant: loss at the stop must not exceed the risk budget ──
     realized_loss_at_stop = trade_side.loss_at_stop(shares, entry, stop)

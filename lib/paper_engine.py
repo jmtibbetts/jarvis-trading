@@ -494,67 +494,29 @@ DIRECTION_LEVERAGE = {
     "Short_20x":          (-1, 20.0),
 }
 
-# Exhaustive mapping for LLM output normalization
-_DIR_ALIASES = {
-    "long":              "Long",
-    "bounce":            "Bounce",
-    "long_leveraged":    "Long_Leveraged",
-    "longleveraged":     "Long_Leveraged",
-    "long leveraged":    "Long_Leveraged",
-    "long-leveraged":    "Long_Leveraged",
-    "leveraged long":    "Long_Leveraged",
-    "leveraged_long":    "Long_Leveraged",
-    "long_2x":           "Long_Leveraged",
-    "long_5x":           "Long_5x",
-    "long5x":            "Long_5x",
-    "long 5x":           "Long_5x",
-    "long-5x":           "Long_5x",
-    "long_10x":          "Long_10x",
-    "long10x":           "Long_10x",
-    "long 10x":          "Long_10x",
-    "long_20x":          "Long_20x",
-    "long20x":           "Long_20x",
-    "long 20x":          "Long_20x",
-    "short":             "Short",
-    "short_leveraged":   "Short_Leveraged",
-    "shortleveraged":    "Short_Leveraged",
-    "short leveraged":   "Short_Leveraged",
-    "short-leveraged":   "Short_Leveraged",
-    "leveraged short":   "Short_Leveraged",
-    "leveraged_short":   "Short_Leveraged",
-    "short_2x":          "Short_Leveraged",
-    "short_5x":          "Short_5x",
-    "short5x":           "Short_5x",
-    "short 5x":          "Short_5x",
-    "short-5x":          "Short_5x",
-    "short_10x":         "Short_10x",
-    "short10x":          "Short_10x",
-    "short 10x":         "Short_10x",
-    "short_20x":         "Short_20x",
-    "short20x":          "Short_20x",
-    "short 20x":         "Short_20x",
-}
-
-
 def _normalize_direction(raw: str) -> str:
-    """Normalize any LLM direction output to a canonical DIRECTION_LEVERAGE key."""
-    if not raw:
-        return "Long"
-    cleaned = raw.strip().replace(" ", "_").replace("-", "_")
-    # Try direct match first
-    if cleaned in DIRECTION_LEVERAGE:
-        return cleaned
-    # Try alias map (case-insensitive)
-    lower = cleaned.lower().replace("_", " ")
-    for alias, canonical in _DIR_ALIASES.items():
-        if lower == alias:
-            return canonical
-    # Fallback: if "short" anywhere → Short
-    if "short" in cleaned.lower():
-        return "Short_Leveraged" if "lever" in cleaned.lower() else "Short"
-    if "lever" in cleaned.lower():
-        return "Long_Leveraged"
-    return "Long"
+    """Canonical DIRECTION_LEVERAGE key from the TWO facts a direction
+    string actually carries — side and leverage — both extracted by
+    lib/trade_side, the sole parsing authority (Phase 1 dedup). This
+    replaces a 40-line alias table that was a third independent
+    implementation of the same two regexes, one variant spelling away
+    from disagreeing with the others."""
+    from lib import trade_side
+    raw_str = str(raw or "").strip()
+    side = trade_side.parse_side_strict(raw_str) or trade_side.normalize_side(raw_str)
+    prefix = "Short" if side == trade_side.SHORT else "Long"
+    lev = trade_side.leverage_from_direction(raw_str)
+    if lev is None or lev <= 1.0:
+        # Bounce keeps its own ledger key — it is a setup taxonomy the
+        # UI and history rely on, not a side or a leverage.
+        return "Bounce" if raw_str.lower() == "bounce" else prefix
+    if lev <= 2.0:
+        return f"{prefix}_Leveraged"
+    if lev <= 5.0:
+        return f"{prefix}_5x"
+    if lev <= 10.0:
+        return f"{prefix}_10x"
+    return f"{prefix}_20x"
 
 
 def _now(): return datetime.now(timezone.utc).isoformat()

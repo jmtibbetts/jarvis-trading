@@ -37,11 +37,11 @@ def _side(direction: str | None) -> str:
 
 
 def _leverage(direction: str | None) -> float:
-    value = str(direction or "")
-    explicit = re.search(r"(?:^|_)(\d+)x(?:_|$)", value, re.I)
-    if explicit:
-        return min(20.0, max(1.0, float(explicit.group(1))))
-    return 2.0 if "leverag" in value.lower() else 1.0
+    """Delegates to trade_side, the sole direction-parsing authority
+    (Phase 1 dedup) — this was a second regex one edge case away from
+    disagreeing with the first."""
+    lev = trade_side.leverage_from_direction(direction)
+    return min(25.0, max(1.0, float(lev))) if lev else 1.0
 
 
 # ── Leverage (virtual books only) ───────────────────────────────────────────

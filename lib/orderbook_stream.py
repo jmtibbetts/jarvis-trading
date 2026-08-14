@@ -177,15 +177,16 @@ def _maybe_persist_snapshot(exchange: str, display_symbol: str,
 
 
 async def _flush_events_loop():
-    """Drains the snapshot queue into the event store. SQLite writes run
-    in a worker thread — this coroutine shares the request-serving loop."""
+    """Drains EVERY registered event queue into the store — book snapshots
+    here, the Kraken adapter's trades and quotes, whatever registers next.
+    SQLite writes run in a worker thread — this coroutine shares the
+    request-serving loop."""
     from lib.event_store import get_store
-    from lib.market_events import event_to_dict, get_queue
+    from lib.market_events import drain_all, event_to_dict
 
-    q = get_queue("book_snapshots")
     while True:
         await asyncio.sleep(EVENT_FLUSH_INTERVAL_SECONDS)
-        batch = q.drain(limit=2000)
+        batch = drain_all(limit_per_queue=2000)
         if not batch:
             continue
         try:
@@ -196,16 +197,9 @@ async def _flush_events_loop():
 
 
 def _parse_iso_ts(s) -> float | None:
-    """Coinbase l2update carries an ISO8601 event time; snapshots don't.
-    None for anything unparseable — a wrong exchange_ts poisons the skew
-    measurement, absence just leaves it unknown."""
-    if not s:
-        return None
-    try:
-        from datetime import datetime
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return None
+    """Coinbase l2update carries an ISO8601 event time; snapshots don't."""
+    from lib.market_events import parse_iso_ts
+    return parse_iso_ts(s)
 
 
 async def _reconnect_loop(name: str, run_once):

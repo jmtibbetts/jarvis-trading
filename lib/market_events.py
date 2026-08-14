@@ -62,6 +62,19 @@ def make_meta(source: str, source_schema_version: str,
                      exchange_ts=exchange_ts, ingest_ts=now, process_ts=now)
 
 
+def parse_iso_ts(s) -> float | None:
+    """ISO8601 -> epoch seconds; None for anything unparseable. A wrong
+    exchange_ts poisons the skew measurement; absence just leaves it
+    unknown, which clock_skew_ms already knows how to say."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class TradeEvent:
     """One print: a trade that actually happened at a venue."""
@@ -191,3 +204,13 @@ def get_queue(name: str, maxsize: int = 10_000) -> BoundedEventQueue:
 
 def all_queue_stats() -> list[dict]:
     return [q.stats() for q in _queues.values()]
+
+
+def drain_all(limit_per_queue: int = 2000) -> list:
+    """One drain across every registered queue — the flusher's view. New
+    queues (a new adapter's trades, quotes) get persistence for free the
+    moment they register; no flusher edit, no forgotten drain."""
+    out = []
+    for q in list(_queues.values()):
+        out.extend(q.drain(limit_per_queue))
+    return out

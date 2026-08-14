@@ -186,6 +186,77 @@ class TestEventStore(unittest.TestCase):
         self.assertEqual(tier_of("NVDA"), 3)
 
 
+class TestIsoParse(unittest.TestCase):
+    def test_z_suffix_and_junk(self):
+        from lib.market_events import parse_iso_ts
+        ts = parse_iso_ts("2026-08-14T07:48:36.925533Z")
+        self.assertIsNotNone(ts)
+        self.assertGreater(ts, 1.7e9)
+        self.assertIsNone(parse_iso_ts(None))
+        self.assertIsNone(parse_iso_ts("not-a-time"))
+
+
+class TestDrainAll(unittest.TestCase):
+    def test_flusher_sees_every_registered_queue(self):
+        from lib.market_events import drain_all, get_queue
+        drain_all()  # start clean
+        a = get_queue("t_drain_a", maxsize=10)
+        b = get_queue("t_drain_b", maxsize=10)
+        ev = TradeEvent(meta=make_meta("x", "v1", None),
+                        symbol="BTC/USD", price=1.0, size=1.0)
+        a.push(ev)
+        b.push(ev)
+        batch = drain_all()
+        self.assertGreaterEqual(len(batch), 2)
+        self.assertEqual(a.stats()["size"], 0)
+        self.assertEqual(b.stats()["size"], 0)
+
+
+class TestKrakenAdapter(unittest.TestCase):
+    """Provider parsing stays in the adapter; what leaves is canonical."""
+
+    def _drain(self, name):
+        from lib.market_events import get_queue
+        return get_queue(name).drain(limit=10_000)
+
+    def test_tier3_symbol_stays_off_the_event_log(self):
+        from lib.kraken_stream import _emit_trade_event
+        self._drain("kraken_trades")
+        _emit_trade_event("SOL/USD", {"price": 200.0, "qty": 1.0,
+                                      "side": "buy",
+                                      "timestamp": "2026-08-14T07:00:00Z"})
+        self.assertEqual(self._drain("kraken_trades"), [])
+
+    def test_trade_event_carries_venue_clock_and_skew(self):
+        from lib.kraken_stream import _emit_trade_event
+        self._drain("kraken_trades")
+        _emit_trade_event("BTC/USD", {"price": 50_000.0, "qty": 0.25,
+                                      "side": "sell",
+                                      "timestamp": "2026-08-14T07:00:00Z"})
+        evs = self._drain("kraken_trades")
+        self.assertEqual(len(evs), 1)
+        ev = evs[0]
+        self.assertEqual(ev.meta.source, "kraken")
+        self.assertIsNotNone(ev.meta.exchange_ts)
+        self.assertIsNotNone(ev.meta.clock_skew_ms)
+        self.assertEqual(ev.side, "sell")
+        self.assertEqual(ev.price, 50_000.0)
+
+    def test_quotes_throttle_to_persist_cadence(self):
+        from lib.kraken_stream import _emit_quote_event, _quote_marks
+        self._drain("kraken_quotes")
+        _quote_marks.pop("ETH/USD", None)
+        q = {"bid": 3000.0, "ask": 3001.0, "bid_qty": 2.0, "ask_qty": 1.5}
+        _emit_quote_event("ETH/USD", q)
+        _emit_quote_event("ETH/USD", q)     # inside the interval — dropped
+        evs = self._drain("kraken_quotes")
+        self.assertEqual(len(evs), 1)
+        # Ticker carries no venue time: None, never a fake zero.
+        self.assertIsNone(evs[0].meta.exchange_ts)
+        self.assertIsNone(evs[0].meta.clock_skew_ms)
+        self.assertEqual(evs[0].bid_size, 2.0)
+
+
 class TestTierPersistenceHook(unittest.TestCase):
     def test_tier3_symbol_never_reaches_the_queue(self):
         from lib.market_events import get_queue

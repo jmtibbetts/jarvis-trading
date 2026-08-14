@@ -99,6 +99,62 @@ def status() -> dict:
             "tracked_trades": {k: len(v) for k, v in _trades.items()}}
 
 
+# ── Canonical-event adapter (Phase 3 P3) ─────────────────────────────────────
+# Provider-specific parsing stays HERE; what leaves this module is the
+# canonical shape. Kraken v2 trade messages carry the venue's own event
+# time — the first stream in the system where clock_skew_ms is actually
+# measurable rather than unknown. Tier-1 symbols only; the in-memory tape
+# above still serves every streamed symbol.
+
+_quote_marks: dict[str, float] = {}
+
+
+def _emit_trade_event(sym: str, d: dict) -> None:
+    try:
+        from lib.event_store import tier_of
+        from lib.market_events import TradeEvent, get_queue, make_meta, parse_iso_ts
+
+        if tier_of(sym) != 1:
+            return
+        get_queue("kraken_trades").push(TradeEvent(
+            meta=make_meta("kraken", "kraken_ws_v2",
+                           parse_iso_ts(d.get("timestamp"))),
+            symbol=sym,
+            price=float(d.get("price") or 0),
+            size=float(d.get("qty") or 0),
+            side=str(d.get("side") or "").lower() or None,
+        ))
+    except Exception as e:
+        # The tape must survive any persistence problem.
+        logger.debug(f"[KrakenWS] trade event skipped: {e}")
+
+
+def _emit_quote_event(sym: str, d: dict) -> None:
+    try:
+        from datetime import datetime, timezone
+
+        from lib.event_store import TIER_1_SNAPSHOT_INTERVAL_SEC, tier_of
+        from lib.market_events import QuoteEvent, get_queue, make_meta
+
+        if tier_of(sym) != 1:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if now - _quote_marks.get(sym, 0.0) < TIER_1_SNAPSHOT_INTERVAL_SEC:
+            return
+        _quote_marks[sym] = now
+        # Ticker messages carry no venue timestamp in v2 — None, not 0.
+        get_queue("kraken_quotes").push(QuoteEvent(
+            meta=make_meta("kraken", "kraken_ws_v2", None),
+            symbol=sym,
+            bid=float(d.get("bid") or 0),
+            ask=float(d.get("ask") or 0),
+            bid_size=float(d["bid_qty"]) if d.get("bid_qty") is not None else None,
+            ask_size=float(d["ask_qty"]) if d.get("ask_qty") is not None else None,
+        ))
+    except Exception as e:
+        logger.debug(f"[KrakenWS] quote event skipped: {e}")
+
+
 async def _consume(symbols: list[str]) -> None:
     import websockets
     while _state["running"]:
@@ -124,6 +180,7 @@ async def _consume(symbols: list[str]) -> None:
                                 "bid": d.get("bid"), "ask": d.get("ask"),
                                 "last": d.get("last"), "at": datetime.now(timezone.utc),
                             }
+                            _emit_quote_event(sym, d)
                     elif channel == "trade":
                         for d in msg.get("data") or []:
                             sym = str(d.get("symbol", "")).upper()
@@ -134,6 +191,7 @@ async def _consume(symbols: list[str]) -> None:
                                 "side": str(d.get("side") or "").lower(),
                                 "at": datetime.now(timezone.utc),
                             })
+                            _emit_trade_event(sym, d)
         except Exception as e:
             _state.update(connected=False, error=f"{type(e).__name__}: {str(e)[:80]}")
             logger.info(f"[KrakenWS] disconnected ({e}); retry in {RECONNECT_DELAY_SECONDS}s")

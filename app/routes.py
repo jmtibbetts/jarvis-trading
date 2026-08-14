@@ -110,7 +110,29 @@ def get_signals(status: str = None, limit: int = 150):
             q = q.filter(
                 TradingSignal.status.notin_(["Superseded", "Rejected"])
             )
-        return [_sig_dict(s) for s in q.order_by(TradingSignal.generated_at.desc()).limit(limit).all()]
+        rows = q.order_by(TradingSignal.generated_at.desc()).limit(limit).all()
+        out = [_sig_dict(s) for s in rows]
+        # Attach the stored v8 gate verdict (decision/net R/reason) from the
+        # candidate ledger — recorded at signal birth, so the card can lead
+        # with the DECISION instead of the composite score, at zero extra
+        # computation. Signals predating the experiment simply carry none.
+        try:
+            from app.database import CandidateSignal
+            ids = [s.id for s in rows if s.id]
+            if ids:
+                gates = {c.signal_id: c for c in db.query(CandidateSignal).filter(
+                    CandidateSignal.signal_id.in_(ids),
+                    CandidateSignal.gate_v8_decision.isnot(None)).all()}
+                for d in out:
+                    g = gates.get(d.get("id"))
+                    if g is not None:
+                        d["gate_decision"] = g.gate_v8_decision
+                        d["gate_net_r"] = g.gate_v8_net_r
+                        d["gate_reason"] = g.gate_v8_reason
+                        d["gate_legacy_take"] = bool(g.gate_legacy_take)
+        except Exception as e:
+            logger.debug(f"[Signals] gate verdict join failed: {e}")
+        return out
 
 
 @router.get("/signals/performance")

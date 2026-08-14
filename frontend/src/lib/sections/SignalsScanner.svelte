@@ -725,12 +725,31 @@ The original signal will be superseded. Levels are recomputed server-side at sub
                 </div>
               {/if}
               <div class="sc-score">
-                <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} size={46} />
+                {#if sig.gate_decision}
+                  <div class="gate-badge gate-{sig.gate_decision.toLowerCase()}"
+                       title={sig.gate_reason ?? ""}>
+                    <span class="gate-word">{sig.gate_decision === "TENTATIVE" ? "WATCH" : sig.gate_decision.replace("_", " ")}</span>
+                    {#if sig.gate_net_r != null}
+                      <span class="gate-net num">{sig.gate_net_r >= 0 ? "+" : ""}{sig.gate_net_r.toFixed(2)}R net</span>
+                    {/if}
+                  </div>
+                {:else}
+                  <div class="gate-badge gate-unknown" title="signal predates the gate experiment">
+                    <span class="gate-word">UNMEASURED</span>
+                  </div>
+                {/if}
                 <div class="sc-score-meta">
-                  <div class="num"><span class="dim">conf</span> {Math.round(sig.confidence ?? 0)}%</div>
                   <div class="num"><span class="dim">R:R</span> {sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</div>
                   <div class="num"><span class="dim">tf</span> {sig.timeframe ?? "—"}</div>
                   <div class="num"><span class="dim">hold</span> {holdFor(sig)}</div>
+                  <!-- Exact labels (P0/14.4): the composite is an evidence
+                       diagnostic (currently measured inverted), the LLM
+                       number is the model's self-report — neither is a
+                       probability, and neither is called "confidence". -->
+                  <div class="num diag" title="evidence composite — diagnostic only; currently measured inverted vs outcomes">
+                    <span class="dim">evid</span> {Math.round(sig.composite_score ?? 0)}</div>
+                  <div class="num diag" title="LLM stated confidence — the model's self-report; measured to carry no outcome signal">
+                    <span class="dim">llm</span> {Math.round(sig.confidence ?? 0)}%</div>
                 </div>
               </div>
               <div class="sc-levels num">
@@ -1416,4 +1435,17 @@ The original signal will be superseded. Levels are recomputed server-side at sub
       grid-template-columns: repeat(2, 1fr);
     }
   }
+
+  .gate-badge {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-width: 74px; padding: 6px 8px;
+    border-radius: 8px; border: 1px solid transparent; gap: 2px;
+  }
+  .gate-word { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
+  .gate-net { font-size: 10px; opacity: 0.9; }
+  .gate-trade { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.45); color: #4ade80; }
+  .gate-tentative { background: rgba(234,179,8,0.10); border-color: rgba(234,179,8,0.40); color: #facc15; }
+  .gate-no_trade { background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.40); color: #f87171; }
+  .gate-unknown { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.30); color: #94a3b8; }
+  .sc-score-meta .diag { opacity: 0.55; }
 </style>

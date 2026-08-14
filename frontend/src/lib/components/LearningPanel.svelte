@@ -28,11 +28,12 @@
   let backfilling = $state(false);
 
   let calibration = $state<CalibrationSummary | null>(null);
+  let gateExp = $state<any | null>(null);
   let variants = $state<ScoreVariantsReport | null>(null);
   let selBias = $state<SelectionBiasReport | null>(null);
 
   async function loadAll() {
-    const [s, o, a, p, r, l, cal, v, sb] = await Promise.all([
+    const [s, o, a, p, r, l, cal, ge, v, sb] = await Promise.all([
       api.learningSummary(mode).catch(() => null),
       api.learningOutcomes(mode, 300).catch(() => []),
       api.learningAccuracy().catch(() => []),
@@ -40,6 +41,7 @@
       api.learningRegimes().catch(() => []),
       api.learningLessons(30).catch(() => []),
       api.calibration().catch(() => null),
+      fetch("/api/gate-experiment").then(r => r.ok ? r.json() : null).catch(() => null),
       api.scoreVariants().catch(() => null),
       api.selectionBias().catch(() => null),
     ]);
@@ -50,6 +52,7 @@
     regimes = r;
     lessons = l;
     calibration = cal;
+    gateExp = ge;
     variants = v;
     selBias = sb;
   }
@@ -123,7 +126,33 @@
   </div>
 
   <div class="learn-grid">
-    {#if calibration}
+    {#if gateExp && gateExp.overlap && gateExp.overlap.candidates_with_both_verdicts > 0}
+    {@const L = gateExp.legacy}
+    {@const V = gateExp.v8}
+    <div class="grid-row">
+      <Panel title="Gate Experiment — legacy vs v8"
+             meta="{gateExp.overlap.candidates_with_both_verdicts.toLocaleString()} candidates carry both verdicts · judged by the same resolver">
+        <div class="gate-grid num">
+          <div class="gate-col-h"></div><div class="gate-col-h">selected</div><div class="gate-col-h">resolved</div><div class="gate-col-h">win %</div><div class="gate-col-h">avg P&L %</div><div class="gate-col-h">avg MFE R</div>
+          <div class="gate-row-h" title="what the retired composite>=threshold gate WOULD have taken — records only, executes nothing">legacy (records)</div>
+          <div>{L.selected.toLocaleString()}</div><div>{L.resolved.toLocaleString()}</div>
+          <div>{L.win_rate ?? "—"}</div><div>{L.avg_pnl_pct ?? "—"}</div><div>{L.avg_mfe_r ?? "—"}</div>
+          <div class="gate-row-h" title="validity + measured expectancy with robust lower bound — the arm that actually executes">v8 (executes)</div>
+          <div>{V.selected.toLocaleString()}</div><div>{V.resolved.toLocaleString()}</div>
+          <div>{V.win_rate ?? "—"}</div><div>{V.avg_pnl_pct ?? "—"}</div><div>{V.avg_mfe_r ?? "—"}</div>
+        </div>
+        <div class="gate-foot dim">
+          agree on {gateExp.overlap.both_take.toLocaleString()} · legacy-only {gateExp.overlap.legacy_only.toLocaleString()} · v8-only {gateExp.overlap.v8_only.toLocaleString()}
+          {#if gateExp.v8_decision_mix}
+            · v8 mix: {Object.entries(gateExp.v8_decision_mix).map(([k, n]) => `${k} ${n}`).join(", ")}
+          {/if}
+        </div>
+        <div class="gate-foot dim">{gateExp.note}</div>
+      </Panel>
+    </div>
+  {/if}
+
+  {#if calibration}
       <div class="span-7">
         <Panel title="Measured Calibration" meta="{calibration.sample.toLocaleString()} outcomes · rates are measured, not claimed">
           <div class="cal-cols">
@@ -635,4 +664,9 @@
       grid-column: span 12;
     }
   }
+
+  .gate-grid { display: grid; grid-template-columns: 1.4fr repeat(5, 1fr); gap: 6px 10px; padding: 4px 0; }
+  .gate-col-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.55; }
+  .gate-row-h { font-weight: 600; }
+  .gate-foot { font-size: 11px; margin-top: 6px; }
 </style>

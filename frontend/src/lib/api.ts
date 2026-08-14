@@ -27,6 +27,12 @@ export type Signal = {
   paper_direction: string | null;
   rr_ratio: number | null;
   notes?: string | null;
+  // The gate experiment: the stored v8 verdict from the candidate ledger.
+  // The DECISION leads the card; the composite score is a diagnostic.
+  gate_decision?: "TRADE" | "TENTATIVE" | "NO_TRADE" | "UNKNOWN" | null;
+  gate_net_r?: number | null;
+  gate_reason?: string | null;
+  gate_legacy_take?: boolean | null;
 };
 
 export type Threat = {

@@ -708,6 +708,24 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
     dir_key = _normalize_direction(raw_dir)
 
     side, leverage = DIRECTION_LEVERAGE[dir_key]
+
+    # Delivery-risk hard block (Phase 4B): the continuous symbol never
+    # expires, but the contract a real account would hold does. An entry
+    # the real market would refuse (front month inside its notice/expiry
+    # margin) must not exist in the learning ledger either — futures are
+    # paper-only today, and that is exactly why the ledger must be right.
+    try:
+        from lib.futures_contracts import delivery_risk, root_of
+        if root_of(sym) is not None:
+            risk = delivery_risk(sym)
+            if risk["level"] == "blocked":
+                return {"error": f"delivery risk: {risk['reason']}"}
+            if risk["level"] == "roll_window":
+                logger.warning(f"[Paper] {sym} entering inside roll window: "
+                               f"{risk['reason']}")
+    except Exception as e:
+        logger.debug(f"[Paper] delivery-risk check skipped for {sym}: {e}")
+
     entry = float(current_price or signal.get("entry_price") or 0)
     # Try futures price source if still no price
     if (not entry or entry <= 0):

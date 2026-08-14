@@ -210,15 +210,21 @@ EIA_SERIES = (
 )
 
 
-def sync_eia() -> dict:
+def sync_eia(length: int = 4) -> dict:
     """Weekly petroleum + natgas storage. Gated on EIA_API_KEY (free,
     instant, eia.gov/opendata) — absent key reports itself rather than
-    silently narrowing coverage."""
+    silently narrowing coverage.
+
+    `length` is rows-per-series, newest first. The routine sync takes 4;
+    backfill_eia() takes the archive — the v2 API serves full weekly
+    history (decades) in one request per series, and the dedup keys make
+    re-pulling any of it idempotent.
+    """
     key = (os.getenv("EIA_API_KEY") or "").strip()
     if not key:
         return {"source": "eia", "skipped": "EIA_API_KEY not set (free at eia.gov/opendata)"}
     stats, errors = [], []
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=60.0) as client:
         for route, series_id, series, symbol in EIA_SERIES:
             try:
                 data = client.get(
@@ -227,7 +233,8 @@ def sync_eia() -> dict:
                             "data[0]": "value",
                             "facets[series][]": series_id,
                             "sort[0][column]": "period",
-                            "sort[0][direction]": "desc", "length": "4"},
+                            "sort[0][direction]": "desc",
+                            "length": str(min(int(length), 5000))},
                 ).json()
                 for row in (data.get("response") or {}).get("data") or []:
                     stats.append({"symbol": symbol, "series": series,
@@ -243,6 +250,14 @@ def sync_eia() -> dict:
     stored = _store_stats("eia", "eia_v2_weekly_v1", stats, release_ts_fn=_release)
     return {"source": "eia", "fetched": len(stats), "stored": stored,
             "errors": errors or None}
+
+
+def backfill_eia() -> dict:
+    """One-shot archive pull: the full weekly history per series (crude
+    stocks reach back to 1982). Shadow features get decades of context on
+    day one instead of accumulating a year before a seasonal z-score means
+    anything. Idempotent — run it whenever."""
+    return sync_eia(length=5000)
 
 
 # ── Shared persistence ───────────────────────────────────────────────────────

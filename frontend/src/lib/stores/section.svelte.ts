@@ -1,4 +1,5 @@
 export type SectionId =
+  | "brief"
   | "command"
   | "signals"
   | "positions"
@@ -10,6 +11,7 @@ export type SectionId =
   | "ops";
 
 export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
+  { id: "brief", label: "Morning Brief", ready: true },
   { id: "command", label: "Command Center", ready: true },
   { id: "signals", label: "Signals & Scanner", ready: true },
   { id: "positions", label: "Positions & Paper", ready: true },

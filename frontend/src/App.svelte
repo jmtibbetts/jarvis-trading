@@ -3,6 +3,7 @@
   import NavRail from "./lib/components/NavRail.svelte";
   import Toaster from "./lib/components/Toaster.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
+  import Brief from "./lib/sections/Brief.svelte";
   import CommandCenter from "./lib/sections/CommandCenter.svelte";
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
@@ -39,7 +40,9 @@
     <NavRail />
   {/if}
   <main>
-    {#if sectionStore.current === "command"}
+    {#if sectionStore.current === "brief"}
+      <Brief />
+    {:else if sectionStore.current === "command"}
       <CommandCenter />
     {:else if sectionStore.current === "signals"}
       <SignalsScanner />

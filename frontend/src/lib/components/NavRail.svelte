@@ -2,6 +2,8 @@
   import { sectionStore, SECTIONS, openPopout } from "../stores/section.svelte";
 
   const icons: Record<string, string> = {
+    brief:
+      '<path d="M12 3v2M4.9 6.9l1.4 1.4M2 14h2M20 14h2M17.7 8.3l1.4-1.4M7 14a5 5 0 0 1 10 0"/><path d="M3 18h18M6 21h12"/>',
     command:
       '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
     signals: '<path d="M3 12l4-7 5 14 3-9 2 5h4"/>',
@@ -20,7 +22,7 @@
   // The desk's three concerns. Sections not named here (future additions)
   // fall into the last group rather than vanishing from the rail.
   const NAMED_GROUPS: { label: string; ids: string[] }[] = [
-    { label: "Trade", ids: ["command", "signals", "positions"] },
+    { label: "Trade", ids: ["brief", "command", "signals", "positions"] },
     { label: "Intel", ids: ["intelligence", "smartmoney", "macro", "cryptodesk"] },
     { label: "System", ids: ["performance", "ops"] },
   ];

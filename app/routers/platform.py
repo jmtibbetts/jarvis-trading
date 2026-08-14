@@ -56,6 +56,16 @@ def data_platform_parity(symbol: str = "BTC", window_min: int = 60):
     return parity_report(symbol_base=symbol, window_min=window_min)
 
 
+@router.get("/brief")
+def morning_brief(window_hours: int = 24):
+    """One answer to 'what happened while I slept?' — gate movement,
+    corpus maturation, book activity, platform flow, positioning
+    extremes and today's expected releases, assembled from the owning
+    modules' own numbers."""
+    from lib.morning_brief import build_brief
+    return build_brief(max(1, min(window_hours, 168)))
+
+
 @router.get("/data-platform/health")
 def data_platform_health():
     """Phase 3 observability: bounded-queue drop counts (a pipeline that

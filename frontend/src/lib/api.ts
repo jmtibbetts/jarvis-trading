@@ -776,6 +776,40 @@ export type CacheStats = {
   db_size_mb: number;
 };
 
+export type MorningBrief = {
+  generated_at: string;
+  window_hours: number;
+  gate_experiment: {
+    arms: Record<string, { candidates: number; resolved: number }>;
+    resolved_in_window: Record<
+      string,
+      { resolved: number; win_rate: number | null; avg_pnl_pct: number | null }
+    >;
+    new_trade_picks: string[];
+  };
+  corpus: {
+    snapshots_taken: number;
+    labels_moved: { horizon_min: number; status: string; n: number }[];
+    labels_due_today: number;
+    ablation_coverage: { with_context: number; resolved_total: number };
+  };
+  book: {
+    open_positions: number;
+    open_unrealized_pnl: number | null;
+    closed_in_window: number;
+    realized_pnl_window: number | null;
+    new_signals: number;
+  };
+  platform: { events_by_kind: Record<string, number> };
+  positioning_extremes: {
+    sector: string;
+    instrument: string;
+    spec_pctile_3y: number;
+    spec_net: number | null;
+  }[];
+  releases_today: string[];
+};
+
 export type DataPlatformHealth = {
   queues: { name: string; size: number; maxsize: number; pushed: number; dropped_total: number }[];
   store: { path: string; events: number; payload_bytes: number; file_bytes: number };
@@ -1390,6 +1424,8 @@ export const api = {
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),
   dataPlatformHealth: () => get<DataPlatformHealth>(`/data-platform/health`),
+  morningBrief: (windowHours = 24) =>
+    get<MorningBrief>(`/brief?window_hours=${windowHours}`),
   dataParity: (symbol = "BTC", windowMin = 60) =>
     get<ParityReport>(`/data-platform/parity?symbol=${symbol}&window_min=${windowMin}`),
   featureCorpus: () => get<FeatureCorpus>(`/feature-snapshots/summary`),

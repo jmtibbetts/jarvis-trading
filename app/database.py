@@ -1186,6 +1186,16 @@ def _migrate_columns():
             ("first_touch", "TEXT"),
             ("path_source", "TEXT"),
         ],
+        # The gate experiment: both arms' verdicts, recorded at candidate
+        # birth. Nullable — rows from before the experiment simply have no
+        # verdicts, and the scoreboard only compares rows that carry both.
+        "candidate_signals": [
+            ("gate_legacy_take", "INTEGER"),
+            ("gate_v8_decision", "TEXT"),
+            ("gate_v8_take",     "INTEGER"),
+            ("gate_v8_reason",   "TEXT"),
+            ("gate_v8_net_r",    "REAL"),
+        ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),
             ("live_min_score", "REAL DEFAULT 55.0"),
@@ -1596,6 +1606,16 @@ class CandidateSignal(Base):
     rejection_reason = Column(String)    # below_min_persist | below_focus_bar | ...
     signal_id        = Column(String)    # link when verdict == persisted
     paper_mode       = Column(Boolean, default=False)
+    # ── The gate experiment (HARDENING_PLAN: legacy vs v8, side by side) ──
+    # Both verdicts recorded at birth, immutable, judged against the same
+    # counterfactual outcomes. gate_legacy_take is what the retired
+    # composite>=threshold query WOULD have done; gate_v8_* is the arm
+    # that actually executes.
+    gate_legacy_take = Column(Boolean)
+    gate_v8_decision = Column(String)    # TRADE | TENTATIVE | NO_TRADE | UNKNOWN
+    gate_v8_take     = Column(Boolean)
+    gate_v8_reason   = Column(String)
+    gate_v8_net_r    = Column(Float)
     # counterfactual resolution — the only fields ever updated
     resolved         = Column(Boolean, default=False)
     resolved_at      = Column(String)

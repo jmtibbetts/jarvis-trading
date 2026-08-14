@@ -61,7 +61,27 @@ def record_candidate(db, scored: dict, verdict: str,
             return None
 
         breakdown = scored.get("score_breakdown") or {}
+
+        # The gate experiment: BOTH arms' verdicts at birth, immutable.
+        # Never raises past this point — a gate error records as UNKNOWN
+        # rather than costing the candidate row.
+        try:
+            from lib.gate import record_both
+            from lib.trading_preferences import get_user_preference
+            _thresh = float(get_user_preference().get("live_min_score", 55.0))
+            gates = record_both(scored, _thresh)
+        except Exception as ge:
+            logger.debug(f"[Candidates] gate verdicts failed (non-fatal): {ge}")
+            gates = {"gate_legacy_take": None, "gate_v8_decision": "UNKNOWN",
+                     "gate_v8_take": None, "gate_v8_reason": f"gate error: {ge}",
+                     "gate_v8_net_r": None}
+
         row = CandidateSignal(
+            gate_legacy_take=gates["gate_legacy_take"],
+            gate_v8_decision=gates["gate_v8_decision"],
+            gate_v8_take=gates["gate_v8_take"],
+            gate_v8_reason=gates["gate_v8_reason"],
+            gate_v8_net_r=gates["gate_v8_net_r"],
             engine_epoch=CURRENT_EPOCH,
             dedup_hash=h,
             symbol=scored.get("asset_symbol"),

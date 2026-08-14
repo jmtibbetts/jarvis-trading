@@ -223,17 +223,22 @@ def run():
     market_open = is_equity_market_open()
     logger.info(f"[Execute] Market: {'OPEN' if market_open else 'CLOSED'}")
 
-    # Pull Active signals + PendingApproval equities (promote them when market opens)
-    # Gate/order by the composite evidence score (10-factor, includes earnings/staleness/
-    # conflict penalties) rather than raw LLM confidence — falls back to confidence only
-    # when composite_score hasn't been computed for a signal yet.
-    score_expr = func.coalesce(TradingSignal.composite_score, TradingSignal.confidence)
+    # Pull Active signals + PendingApproval equities (promote them when market opens).
+    #
+    # NO SCORE GATE. The composite this query used to filter and sort by is
+    # measured INVERTED against outcomes (80+ band won 30.2% over 222
+    # trades while <60 won 53.3% over 2,249) — so gating live capital on it
+    # preferentially admitted the worst setups and discarded the best.
+    # Eligibility is now hard validity only; the statistical decision
+    # (lib/gate.gate_v8: measured expectancy + robust lower bound) runs
+    # per-signal below and does the actual selection. The legacy gate still
+    # RECORDS its verdict on every candidate for the side-by-side
+    # experiment — it just doesn't execute anything. See HARDENING_PLAN.md.
     with get_db() as db:
         sigs = db.query(TradingSignal).filter(
             TradingSignal.status.in_(["Active", "PendingApproval"]),
             or_(TradingSignal.paper_mode == False, TradingSignal.paper_mode.is_(None)),
-            score_expr >= min_conf
-        ).order_by(score_expr.desc()).limit(100).all()
+        ).order_by(TradingSignal.generated_at.desc()).limit(200).all()
 
         # Promote equity PendingApproval → Active when market opens
         # Crypto is ALWAYS Active — should never be PendingApproval, but guard anyway
@@ -273,30 +278,34 @@ def run():
             if min_rr > 0 and float(s.rr_ratio or 0) < min_rr:
                 gated_rr += 1
                 continue
-            # Net expectancy, re-evaluated HERE rather than trusted from
-            # generation time. Spread, funding and the measured win/loss
-            # distribution all move between a signal being written and it
-            # reaching the broker, and the number that matters is the one
-            # true at the moment money is committed.
+            # The v8 gate: validity + measured expectancy WITH its robust
+            # lower bound, evaluated at the moment money would be committed
+            # (spread, funding and the win/loss distribution all move
+            # between generation and execution).
             #
-            # Refuses only on measured negative expectancy. UNKNOWN passes:
-            # a gate that blocks what it cannot evaluate stops the system
-            # trading entirely, which has happened here before.
-            try:
-                from lib.expectancy import evaluate as _ev
-                verdict = _ev({
-                    "asset_symbol": s.asset_symbol, "asset_class": s.asset_class,
-                    "direction": s.direction, "timeframe": s.timeframe,
-                    "entry_price": s.entry_price, "stop_loss": s.stop_loss,
-                    "strategy": getattr(s, "strategy", None),
-                })
-                if verdict.get("verdict") == "NO_TRADE":
-                    gated_ev += 1
-                    logger.info("[Execute] NO_TRADE %s — %s",
-                                s.asset_symbol, verdict.get("reason"))
-                    continue
-            except Exception as e:
-                logger.debug(f"[Execute] expectancy gate unavailable for {s.asset_symbol}: {e}")
+            # This replaces the old policy of letting UNKNOWN pass. The
+            # "if we never trade it we never learn" argument died when the
+            # candidate/counterfactual pipeline shipped — rejected setups
+            # are resolved and learned from WITHOUT spending capital, so
+            # UNKNOWN generates its evidence in paper, not here
+            # (ALLOW_EXPERIMENTAL_LIVE=1 is the explicit operator override).
+            # TENTATIVE — point estimate clears, lower bound doesn't — is
+            # paper too: computing uncertainty and ignoring it at the
+            # capital boundary was P0.11's exact complaint.
+            from lib.gate import gate_v8
+            g = gate_v8({
+                "asset_symbol": s.asset_symbol, "asset_class": s.asset_class,
+                "direction": s.direction, "timeframe": s.timeframe,
+                "entry_price": s.entry_price, "stop_loss": s.stop_loss,
+                "target_price": s.target_price,
+                "strategy": getattr(s, "strategy", None),
+            })
+            if not g["take"]:
+                gated_ev += 1
+                logger.info("[Execute] %s %s — %s",
+                            g["decision"], s.asset_symbol, g.get("reason"))
+                continue
+            s._gate_net_r = g.get("net_r")   # for net-R ordering below
 
             # Strategy lifecycle, judged OUT OF SAMPLE. A strategy that was
             # profitable on the trades used to rank it and is not on later
@@ -375,15 +384,22 @@ def run():
                 "expires_at": getattr(s, "expires_at", None),
                 "data_quality_score": getattr(s, "data_quality_score", None),
                 "freshness_score": getattr(s, "freshness_score", None),
+                "strategy": getattr(s, "strategy", None),
+                "net_r": getattr(s, "_gate_net_r", None),
             })
 
     logger.info(
-        f"[Execute] {len(sig_dicts)} active signals qualify "
-        f"(score>={min_conf:g}, rr>={min_rr:g}, conf>={min_ai_conf:g}; "
+        f"[Execute] {len(sig_dicts)} signals pass the v8 gate "
+        f"(no score gate — ranked by measured net R; rr>={min_rr:g}, conf>={min_ai_conf:g}; "
         f"gated: {gated_rr} by R:R, {gated_conf} by confidence, "
-        f"{gated_ev} by negative net expectancy, "
+        f"{gated_ev} by gate_v8 (NO_TRADE/TENTATIVE/UNKNOWN), "
         f"{gated_life} by strategy lifecycle)"
     )
+
+    # Ranked by MEASURED net expectancy, best edge first — the old sort was
+    # the composite score, i.e. the inverted number decided who got budget
+    # when slots ran short. None sorts last.
+    sig_dicts.sort(key=lambda d: (d.get("net_r") is None, -(d.get("net_r") or 0.0)))
 
     candidates = sig_dicts
     try:

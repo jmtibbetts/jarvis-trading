@@ -1395,6 +1395,59 @@ def score_variants(gate: float = 55.0, timeframe: str | None = None):
     return evaluate_variants(gate=gate, timeframe=timeframe)
 
 
+@router.get("/gate-experiment")
+def gate_experiment():
+    """The legacy-vs-v8 scoreboard: both gates' picks over the SAME
+    candidates, judged by the SAME counterfactual resolver. This is the
+    evidence that decides keep-vs-revert at the end of the judgment
+    window (HARDENING_PLAN: >=2 weeks or >=300 resolved per arm)."""
+    from sqlalchemy import text as _t
+    from app.database import engine
+
+    def arm(col: str) -> dict:
+        with engine.connect() as c:
+            row = c.execute(_t(f"""
+                SELECT COUNT(*),
+                       SUM(CASE WHEN resolved=1 THEN 1 ELSE 0 END),
+                       AVG(CASE WHEN resolved=1 AND pnl_pct > 0 THEN 100.0
+                                WHEN resolved=1 THEN 0.0 END),
+                       AVG(CASE WHEN resolved=1 THEN pnl_pct END),
+                       AVG(CASE WHEN resolved=1 THEN mfe_r END)
+                FROM candidate_signals
+                WHERE {col} = 1""")).fetchone()
+        n, res, wr, pnl, mfe = row
+        return {"selected": int(n or 0), "resolved": int(res or 0),
+                "win_rate": round(wr, 1) if wr is not None else None,
+                "avg_pnl_pct": round(pnl, 3) if pnl is not None else None,
+                "avg_mfe_r": round(mfe, 3) if mfe is not None else None}
+
+    with engine.connect() as c:
+        overlap = c.execute(_t("""
+            SELECT SUM(CASE WHEN gate_legacy_take=1 AND gate_v8_take=1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN gate_legacy_take=1 AND gate_v8_take=0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN gate_legacy_take=0 AND gate_v8_take=1 THEN 1 ELSE 0 END),
+                   COUNT(*)
+            FROM candidate_signals
+            WHERE gate_legacy_take IS NOT NULL AND gate_v8_take IS NOT NULL
+        """)).fetchone()
+        decisions = c.execute(_t("""
+            SELECT gate_v8_decision, COUNT(*) FROM candidate_signals
+            WHERE gate_v8_decision IS NOT NULL GROUP BY gate_v8_decision
+        """)).fetchall()
+    return {
+        "note": ("both arms judged by the same counterfactual resolver; "
+                 "non-executed picks resolve with perfect fills — the bias "
+                 "applies to both arms equally"),
+        "legacy": arm("gate_legacy_take"),
+        "v8": arm("gate_v8_take"),
+        "overlap": {"both_take": int(overlap[0] or 0),
+                    "legacy_only": int(overlap[1] or 0),
+                    "v8_only": int(overlap[2] or 0),
+                    "candidates_with_both_verdicts": int(overlap[3] or 0)},
+        "v8_decision_mix": {d: int(n) for d, n in decisions},
+    }
+
+
 @router.get("/candidates/selection-bias")
 def candidates_selection_bias():
     """Rejected vs accepted candidates on resolved counterfactuals — the

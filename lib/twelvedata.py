@@ -42,15 +42,28 @@ TD_INTERVALS = {
 
 MAX_BARS_PER_CALL = 5000
 
-# 8/min on the basic plan. 7.6s spacing keeps a long backfill just under it
-# instead of tripping 429s and retry loops that spend credits on nothing.
-_MIN_CALL_SPACING_S = 7.6
+# Per-minute pacing follows the PLAN, which only the operator knows:
+# TWELVEDATA_RPM in .env (8 = free Basic, 55 = Grow, 610 = Pro). The
+# margin keeps a long backfill just under the limit instead of tripping
+# 429s and retry loops that spend credits on nothing. Setting an RPM the
+# plan doesn't actually allow earns exactly those 429s back.
+def _plan_rpm() -> int:
+    try:
+        return max(1, int(os.getenv("TWELVEDATA_RPM", "8")))
+    except ValueError:
+        return 8
+
+
+def _min_call_spacing_s() -> float:
+    return 60.0 / _plan_rpm() + 0.1
 
 # The backfill must never starve the rest of the system: signals, focus
 # scans and anything else that later leans on this client share the same
-# 800/day pool. The client refuses below this floor rather than draining
-# the account to zero.
+# daily pool ON THE FREE PLAN. Paid plans have no daily cap, and
+# credits_remaining() reports UNLIMITED there, which keeps this floor
+# logic inert without a second code path.
 DAILY_CREDIT_FLOOR = 50
+UNLIMITED_CREDITS = 10**9
 
 _lock = threading.Lock()
 _last_call_ts = 0.0
@@ -76,7 +89,7 @@ def _throttled_get(path: str, params: dict) -> dict:
     per-minute limit is account-wide, not per-caller."""
     global _last_call_ts
     with _lock:
-        wait = _MIN_CALL_SPACING_S - (time.time() - _last_call_ts)
+        wait = _min_call_spacing_s() - (time.time() - _last_call_ts)
         if wait > 0:
             time.sleep(wait)
         _last_call_ts = time.time()
@@ -95,8 +108,17 @@ def api_usage() -> dict:
 
 
 def credits_remaining() -> int:
+    """Daily credits left, or UNLIMITED_CREDITS on plans with no daily cap.
+
+    Paid plans report no meaningful plan_daily_limit; treating that as
+    the old 800 default would make the floor trip on day one of a paid
+    account — the exact opposite of what the upgrade bought.
+    """
     u = api_usage()
-    return int(u.get("plan_daily_limit", 800)) - int(u.get("daily_usage", 0))
+    limit = int(u.get("plan_daily_limit") or 0)
+    if limit <= 0:
+        return UNLIMITED_CREDITS
+    return limit - int(u.get("daily_usage", 0))
 
 
 def earliest_timestamp(symbol: str, timeframe: str) -> datetime | None:

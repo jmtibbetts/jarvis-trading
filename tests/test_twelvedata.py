@@ -134,5 +134,47 @@ class PagingTests(unittest.TestCase):
         self.assertLess(pd.Timestamp(calls[2]), pd.Timestamp(calls[1]))
 
 
+class PlanAwarenessTests(unittest.TestCase):
+    """The client follows the PLAN the operator configured — pacing from
+    TWELVEDATA_RPM, and a credit floor that goes inert on paid plans."""
+
+    def test_default_pacing_is_free_tier(self):
+        import os
+        from lib.twelvedata import _min_call_spacing_s
+        os.environ.pop("TWELVEDATA_RPM", None)
+        self.assertAlmostEqual(_min_call_spacing_s(), 60 / 8 + 0.1, places=3)
+
+    def test_rpm_env_reshapes_pacing(self):
+        import os
+        from lib.twelvedata import _min_call_spacing_s
+        os.environ["TWELVEDATA_RPM"] = "55"
+        try:
+            self.assertAlmostEqual(_min_call_spacing_s(), 60 / 55 + 0.1, places=3)
+        finally:
+            os.environ.pop("TWELVEDATA_RPM", None)
+
+    def test_garbage_rpm_falls_back_to_free_tier(self):
+        import os
+        from lib.twelvedata import _min_call_spacing_s
+        os.environ["TWELVEDATA_RPM"] = "fast"
+        try:
+            self.assertAlmostEqual(_min_call_spacing_s(), 60 / 8 + 0.1, places=3)
+        finally:
+            os.environ.pop("TWELVEDATA_RPM", None)
+
+    def test_paid_plan_reports_unlimited_not_negative(self):
+        """A paid account reports no daily limit; the old default-800
+        arithmetic would go NEGATIVE and trip the floor on the first day
+        of the upgrade — the exact opposite of what was bought."""
+        from unittest.mock import patch
+        from lib.twelvedata import UNLIMITED_CREDITS, credits_remaining
+        with patch("lib.twelvedata.api_usage",
+                   return_value={"daily_usage": 5000}):
+            self.assertEqual(credits_remaining(), UNLIMITED_CREDITS)
+        with patch("lib.twelvedata.api_usage",
+                   return_value={"plan_daily_limit": 800, "daily_usage": 100}):
+            self.assertEqual(credits_remaining(), 700)
+
+
 if __name__ == "__main__":
     unittest.main()

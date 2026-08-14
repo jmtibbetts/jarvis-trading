@@ -76,6 +76,7 @@
   let kraken = $state<Awaited<ReturnType<typeof api.krakenVenue>> | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
   let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
+  let sectors = $state<any[] | null>(null);
   let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
   let webNews = $state<Awaited<ReturnType<typeof api.webNews>> | null>(null);
   let expandedOfficial = $state<string | null>(null);
@@ -166,14 +167,19 @@
       MA ? api.psychology().catch(() => null) : none(null),
       SM ? api.ipoPipeline(30).catch(() => null) : none(null),
     ]);
-    const [fxR, cgR, wnR] = await Promise.all([
+    const [fxR, cgR, wnR, secR] = await Promise.all([
       MA ? api.fxRates().catch(() => null) : none(null),
       CD ? api.cryptoMarkets().catch(() => null) : none(null),
       W || MA ? api.webNews().catch(() => null) : none(null),
+      MA
+        ? Promise.all(["energy", "metals", "index"].map((s) =>
+            fetch(`/api/sector/${s}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+        : none(null),
     ]);
     fxRates = fxR ?? fxRates;
     cryptoMarkets = cgR ?? cryptoMarkets;
     webNews = wnR ?? webNews;
+    sectors = secR ? secR.filter(Boolean) : sectors;
     regime = r;
     threats = t;
     news = n;
@@ -309,6 +315,72 @@
           <p class="insider-note">Unverified live web search (tavily/exa) — exactly the FRESH WEB NEWS block injected into every signal-generation LLM prompt. Refreshes every 30 minutes.</p>
         {:else}
           <div class="empty">No web pulse yet — populates on the next signal-generation run</div>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "macro"}
+  <div class="span-12">
+    <Panel title="Sector Desk — Positioning & Term Structure"
+           meta={sectors && sectors.length ? "COT · EIA · futures curves — point-in-time, shadow-only" : "—"}>
+      {#snippet children()}
+        {#if sectors && sectors.length}
+          {#each sectors as sec (sec.sector)}
+            <div class="sec-group">
+              <div class="sec-name">{sec.sector}</div>
+              <div class="sec-cards">
+                {#each Object.entries(sec.instruments) as [key, b] (key)}
+                  {@const p = (b as any).positioning}
+                  {@const c = (b as any).curve}
+                  {@const f = (b as any).fundamentals}
+                  <div class="sec-card">
+                    <div class="sec-head">
+                      <span class="sec-inst">{key}</span>
+                      {#if c && !c.abstain}
+                        <span class="sec-badge" class:warm={c.structure === "backwardation"}>
+                          {c.structure} · roll {c.annualized_roll_pct > 0 ? "+" : ""}{c.annualized_roll_pct}%/yr
+                        </span>
+                      {:else}
+                        <span class="sec-badge dim" title={c?.abstain}>curve —</span>
+                      {/if}
+                    </div>
+                    {#if p && !p.abstain}
+                      <div class="sec-row num">
+                        <span>spec net {p.spec_net >= 0 ? "+" : ""}{p.spec_net?.toLocaleString()}</span>
+                        {#if p.spec_pctile_3y != null}
+                          <span class="dim">{p.spec_pctile_3y}th pctl · 3y</span>
+                        {/if}
+                      </div>
+                      {#if p.spec_pctile_3y != null}
+                        <div class="sec-bar" title="speculator net position vs its 3-year range">
+                          <div class="sec-bar-fill"
+                               class:hot={p.spec_pctile_3y >= 90 || p.spec_pctile_3y <= 10}
+                               style="width:{p.spec_pctile_3y}%"></div>
+                        </div>
+                      {/if}
+                    {:else}
+                      <div class="sec-row dim" title={p?.abstain}>positioning —</div>
+                    {/if}
+                    {#if f}
+                      {#if !f.abstain}
+                        <div class="sec-row num sec-fund">
+                          <span>{f.level?.toLocaleString()} {f.unit}</span>
+                          <span class="dim">seas z {f.seasonal_z_5y ?? "—"} · Δz {f.change_z_3y ?? "—"}</span>
+                        </div>
+                      {:else}
+                        <div class="sec-row dim" title={f.abstain}>fundamentals —</div>
+                      {/if}
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
+          <p class="insider-note">Speculator (noncommercial) net positioning as a 3-year percentile — the filled bar is WHERE in its own range the position sits; ≥90th or ≤10th highlights crowding. Curve roll is what holding the front and rolling costs (−) or pays (+) a long per year. Energy fundamentals: EIA level with seasonal z (vs same week, 5y) and change z (is this build big, 3y). All point-in-time from release timestamps; influences nothing until the ablation says so.</p>
+        {:else}
+          <div class="empty">Sector engines warming — COT/EIA/curve data accumulates within the first sync cycle</div>
         {/if}
       {/snippet}
     </Panel>
@@ -1863,6 +1935,20 @@
     font-size: 9px;
     margin-top: 2px;
   }
+  .sec-group { margin-bottom: 14px; }
+  .sec-group:last-of-type { margin-bottom: 6px; }
+  .sec-name { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.55; margin-bottom: 6px; }
+  .sec-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .sec-card { border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 6px; padding: 9px 11px; display: flex; flex-direction: column; gap: 5px; }
+  .sec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .sec-inst { font-weight: 700; text-transform: capitalize; }
+  .sec-badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; background: var(--bg-3, rgba(255,255,255,0.06)); white-space: nowrap; }
+  .sec-badge.warm { background: rgba(250, 204, 21, 0.12); color: #facc15; }
+  .sec-row { display: flex; justify-content: space-between; font-size: 12px; gap: 8px; }
+  .sec-fund { border-top: 1px dashed var(--border, rgba(255,255,255,0.08)); padding-top: 5px; }
+  .sec-bar { height: 5px; border-radius: 3px; background: var(--bg-3, rgba(255,255,255,0.07)); overflow: hidden; }
+  .sec-bar-fill { height: 100%; border-radius: 3px; background: var(--accent, #4b8dfa); opacity: 0.75; }
+  .sec-bar-fill.hot { background: #f97316; opacity: 0.95; }
   .fx-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));

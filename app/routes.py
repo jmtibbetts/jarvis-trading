@@ -1496,6 +1496,16 @@ def promotion_champions():
     return {"champions": champion_history()}
 
 
+@router.get("/context-ablation")
+def context_ablation():
+    """Does the macro context a candidate was born under predict how it
+    resolved? Per-feature/bucket/direction stats over resolved
+    candidates with stored context. Fills itself as the corpus matures;
+    thin buckets are flagged, not hidden."""
+    from lib.context_ablation import ablation_summary
+    return ablation_summary()
+
+
 @router.get("/feature-snapshots/summary")
 def feature_snapshots_summary():
     """P4 corpus state: clock-driven snapshots by quality, labels by

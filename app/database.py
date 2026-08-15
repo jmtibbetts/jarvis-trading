@@ -1209,6 +1209,9 @@ def _migrate_columns():
             # (funding, COT percentile, curve, short ratio) — the join
             # the 4C ablation needs. NULL = nothing was known, honestly.
             ("market_context",   "TEXT"),
+            # Only generate_signals.py ever wrote candidates, so every
+            # pre-existing row is truthfully 'generator'.
+            ("source", "TEXT DEFAULT 'generator'"),
         ],
         "user_preferences": [
             ("paper_auto_trade_enabled", "INTEGER DEFAULT 1"),
@@ -1628,6 +1631,14 @@ class CandidateSignal(Base):
     verdict          = Column(String)    # persisted | rejected
     rejection_reason = Column(String)    # below_min_persist | below_focus_bar | ...
     signal_id        = Column(String)    # link when verdict == persisted
+    # WHICH writer considered this setup. Added 2026-08-16 when an audit
+    # found the scanner — more than half the desk's signal output — never
+    # recorded candidates at all, so its setups carried no gate verdict and
+    # every card read UNMEASURED. Existing rows backfill to 'generator'
+    # because only generate_signals.py ever wrote here. The gate
+    # experiment's running window is evaluated generator-only so widening
+    # the population cannot move its goalposts mid-flight.
+    source           = Column(String, default="generator", index=True)
     paper_mode       = Column(Boolean, default=False)
     # ── The gate experiment (HARDENING_PLAN: legacy vs v8, side by side) ──
     # Both verdicts recorded at birth, immutable, judged against the same

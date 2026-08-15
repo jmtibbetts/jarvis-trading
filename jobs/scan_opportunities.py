@@ -664,6 +664,15 @@ def _save_signals(signals: list, scan_mode: str):
                 )
                 db.add(new_record)
                 existing[rec_key] = new_record
+                # The scanner produces more than half the desk's signals and
+                # recorded NO candidates until 2026-08-16 — so its setups
+                # carried no gate verdict and every card read UNMEASURED.
+                # Tagged by source so the gate experiment's running window
+                # can still be evaluated on its original population.
+                from lib.candidates import record_candidate
+                record_candidate(db, sig, "persisted",
+                                 signal_id=new_record.id, is_paper=is_paper,
+                                 source="scanner")
                 saved += 1
             except Exception as e:
                 logger.error(f"[Scanner] Save failed {sig.get('asset_symbol')}: {e}")

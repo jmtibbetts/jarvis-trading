@@ -77,7 +77,17 @@ def gate_experiment():
     from sqlalchemy import text as _t
     from app.database import engine
 
-    def arm(col: str) -> dict:
+    # The window opened 2026-08-14 on a GENERATOR-ONLY candidate
+    # population; the scanner began recording candidates 2026-08-16. Both
+    # arms are reported on the original population by default so widening
+    # coverage cannot move the goalposts mid-experiment — the wider view
+    # is available beside it, and becomes the next window's baseline.
+    WINDOW_SOURCE = "generator"
+
+    def arm(col: str, source: str | None = WINDOW_SOURCE) -> dict:
+        src_sql = ("AND COALESCE(source, 'generator') = :src"
+                   if source else "")
+        params = {"src": source} if source else {}
         # Stratified by timeframe because the arms COMPOSE differently:
         # measured 2026-08-15, v8's TRADE picks were 87% 1D futures while
         # its NO_TRADEs were mostly intraday — pooled arm stats would
@@ -94,7 +104,7 @@ def gate_experiment():
                        AVG(CASE WHEN resolved=1 THEN pnl_pct END),
                        AVG(CASE WHEN resolved=1 THEN mfe_r END)
                 FROM candidate_signals
-                WHERE {col} = 1""")).fetchone()
+                WHERE {col} = 1 {src_sql}"""), params).fetchone()
             tf_rows = c.execute(_t(f"""
                 SELECT timeframe, COUNT(*),
                        COUNT(DISTINCT symbol || '|' || date(created_at)),
@@ -103,8 +113,9 @@ def gate_experiment():
                                 WHEN resolved=1 THEN 0.0 END),
                        AVG(CASE WHEN resolved=1 THEN pnl_pct END)
                 FROM candidate_signals
-                WHERE {col} = 1
-                GROUP BY timeframe ORDER BY COUNT(*) DESC""")).fetchall()
+                WHERE {col} = 1 {src_sql}
+                GROUP BY timeframe ORDER BY COUNT(*) DESC"""),
+                params).fetchall()
         n, eff, res, wr, pnl, mfe = row
         return {"selected": int(n or 0), "effective_n": int(eff or 0),
                 "resolved": int(res or 0),
@@ -132,6 +143,15 @@ def gate_experiment():
             SELECT gate_v8_decision, COUNT(*) FROM candidate_signals
             WHERE gate_v8_decision IS NOT NULL GROUP BY gate_v8_decision
         """)).fetchall()
+        by_source = [
+            {"source": s or "generator", "candidates": n,
+             "with_gate_verdict": g or 0, "resolved": r or 0}
+            for s, n, g, r in c.execute(_t("""
+                SELECT COALESCE(source, 'generator'), COUNT(*),
+                       SUM(CASE WHEN gate_v8_decision IS NOT NULL THEN 1 ELSE 0 END),
+                       SUM(resolved)
+                FROM candidate_signals
+                GROUP BY COALESCE(source, 'generator')"""))]
     return {
         "note": ("both arms judged by the same counterfactual resolver; "
                  "non-executed picks resolve with perfect fills — the bias "
@@ -139,6 +159,15 @@ def gate_experiment():
                  "timeframe row, never across the pooled headline: the "
                  "arms compose differently by timeframe, and effective_n "
                  "(distinct symbol-days) is the honest sample size."),
+        "window_population": WINDOW_SOURCE,
+        "window_note": ("arms below cover the population the window OPENED "
+                        "on (generator-only, 2026-08-14). The scanner began "
+                        "recording candidates 2026-08-16; its rows appear in "
+                        "by_source and become the next window's baseline "
+                        "rather than moving this one's goalposts."),
+        "by_source": by_source,
+        "legacy_all_sources": arm("gate_legacy_take", source=None),
+        "v8_all_sources": arm("gate_v8_take", source=None),
         "legacy": arm("gate_legacy_take"),
         "v8": arm("gate_v8_take"),
         "overlap": {"both_take": int(overlap[0] or 0),

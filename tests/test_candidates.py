@@ -79,12 +79,24 @@ class RecordingTests(unittest.TestCase):
 
     def test_regenerated_setups_collapse_to_one_row(self):
         """Generators re-emit the same setup every cycle — 12,845 of 39,235
-        signals were duplicate regenerations. One decision, one row."""
+        signals were duplicate regenerations. One decision, one row.
+
+        A repeat sighting now returns the EXISTING row rather than None:
+        returning None discarded the news, and when the news was 'this
+        setup finally became signal X' the link was lost — 3,347 active
+        signals with 9 joinable gate verdicts, every card UNMEASURED
+        (2026-08-16 audit). One row is still the invariant; silence is
+        not."""
         s = _scored()
         first = self._record(s)
         second = self._record(s)
         self.assertIsNotNone(first)
-        self.assertIsNone(second)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.id, second.id)
+        with get_db() as db:
+            self.assertEqual(
+                db.query(CandidateSignal).filter(
+                    CandidateSignal.dedup_hash == first.dedup_hash).count(), 1)
 
     def test_a_different_level_is_a_different_candidate(self):
         s = _scored()

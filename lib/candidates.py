@@ -32,9 +32,24 @@ def dedup_hash(symbol, timeframe, direction, entry, stop, target) -> str:
 def record_candidate(db, scored: dict, verdict: str,
                      rejection_reason: str | None = None,
                      signal_id: str | None = None,
-                     is_paper: bool = False):
+                     is_paper: bool = False,
+                     source: str = "generator"):
     """Persist one considered setup. Never raises — candidate bookkeeping
-    must not be able to break signal generation."""
+    must not be able to break signal generation.
+
+    A repeat sighting of the same setup does NOT create a second row, but
+    it does complete the first one: if the original row was written before
+    a signal existed (the usual case — a setup is judged, then persists a
+    cycle later) the signal_id is attached now. Returning early instead,
+    as this did until 2026-08-16, orphaned the link and left the signal
+    card reading UNMEASURED forever.
+
+    What is never rewritten: the judgment itself. Score, breakdown,
+    verdict, rejection reason and BOTH gate verdicts stay exactly as first
+    recorded — hindsight editing its own paper trail is how a learning
+    system lies to itself, and the gate experiment depends on those five
+    fields being immutable.
+    """
     try:
         from app.database import CandidateSignal
         from lib.calibration import CURRENT_EPOCH
@@ -56,9 +71,22 @@ def record_candidate(db, scored: dict, verdict: str,
 
         h = dedup_hash(scored.get("asset_symbol"), scored.get("timeframe"),
                        scored.get("direction"), entry, stop, target)
-        if db.query(CandidateSignal.id).filter(
-                CandidateSignal.dedup_hash == h).first():
-            return None
+        existing = db.query(CandidateSignal).filter(
+            CandidateSignal.dedup_hash == h).first()
+        if existing is not None:
+            # Complete the row rather than dropping the news. Only fields
+            # that are still EMPTY get filled; nothing already judged is
+            # touched.
+            if signal_id and not existing.signal_id:
+                existing.signal_id = signal_id
+                if existing.verdict != "persisted":
+                    # It reached the book after all. The original
+                    # rejection_reason stays on the row as the record of
+                    # what the first look concluded.
+                    existing.verdict = "persisted"
+            if not existing.source:
+                existing.source = source
+            return existing
 
         breakdown = scored.get("score_breakdown") or {}
 
@@ -110,6 +138,7 @@ def record_candidate(db, scored: dict, verdict: str,
             verdict=verdict,
             rejection_reason=rejection_reason,
             signal_id=signal_id,
+            source=source,
             paper_mode=bool(is_paper),
         )
         db.add(row)

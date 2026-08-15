@@ -1307,7 +1307,8 @@ def concentration_status():
 
 
 @router.post("/reset/all")
-def reset_all_virtual_books(starting_cash: float = 100000.0):
+def reset_all_virtual_books(starting_cash: float = 100000.0,
+                            pause_autotrading: bool = True):
     """One reset, one clean slate — every virtual book at once.
 
     Reset was the only Danger Zone action without an EVERYTHING scope:
@@ -1320,6 +1321,13 @@ def reset_all_virtual_books(starting_cash: float = 100000.0):
     Soft by design, like the per-book resets it calls: positions close into
     history at their last mark, every trade row survives. The live broker
     account is NOT touched — Alpaca has no reset API (see /trading/flatten).
+
+    PAUSES automatic opening by default (§140.1). Reported six times as
+    "reset never works": the cash did reset, and the books refilled inside
+    one scan cycle, which from the operator's chair is the same thing as
+    nothing happening. Auto Sim takes EVERY approved signal by design, so a
+    reset it can immediately undo is not a clean slate — it is a flicker.
+    Resuming is deliberately a separate action.
     """
     out: dict = {"ok": True, "books": {}, "errors": []}
     for name, fn in (("paper", "lib.paper_engine:soft_reset_paper_portfolio"),
@@ -1338,8 +1346,67 @@ def reset_all_virtual_books(starting_cash: float = 100000.0):
     out["positions_closed"] = sum(
         int((r or {}).get("positions_closed") or 0)
         for r in out["books"].values())
+
+    if pause_autotrading:
+        try:
+            from app.database import DEFAULT_USER_ID, UserPreference, now_iso
+            with get_db() as db:
+                pref = db.query(UserPreference).first()
+                if pref is None:
+                    pref = UserPreference(user_id=DEFAULT_USER_ID)
+                    db.add(pref)
+                pref.auto_sim_enabled = False
+                pref.paper_auto_trade_enabled = False
+                pref.updated_at = now_iso()
+            out["autotrading_paused"] = True
+            out["resume_with"] = "POST /api/trading/autotrading {\"enabled\": true}"
+        except Exception as e:
+            # A reset that silently failed to pause would refill and look
+            # exactly like the bug this is fixing, so it is reported.
+            out["ok"] = False
+            out["autotrading_paused"] = False
+            out["errors"].append(f"pause: {str(e)[:120]}")
+            logger.error(f"[ResetAll] pause failed: {e}")
+    else:
+        out["autotrading_paused"] = False
+
     logger.warning(f"[ResetAll] {out}")
     return out
+
+
+@router.get("/trading/autotrading")
+def get_autotrading_state():
+    """Whether the two SIMULATED books open positions on their own.
+
+    Separate from the kill switch, which governs the live broker account
+    only. These are what a reset pauses.
+    """
+    from app.database import UserPreference
+    with get_db() as db:
+        pref = db.query(UserPreference).first()
+        auto_sim = bool(pref.auto_sim_enabled) if pref else True
+        paper = bool(pref.paper_auto_trade_enabled) if pref else True
+    return {"auto_sim_enabled": auto_sim, "paper_auto_trade_enabled": paper,
+            "any_enabled": auto_sim or paper}
+
+
+@router.post("/trading/autotrading")
+def set_autotrading_state(enabled: bool = Body(..., embed=True)):
+    """Resume (or pause) automatic opening on BOTH simulated books."""
+    from app.database import DEFAULT_USER_ID, UserPreference, now_iso
+    with get_db() as db:
+        pref = db.query(UserPreference).first()
+        if pref is None:
+            pref = UserPreference(user_id=DEFAULT_USER_ID)
+            db.add(pref)
+        pref.auto_sim_enabled = bool(enabled)
+        pref.paper_auto_trade_enabled = bool(enabled)
+        pref.updated_at = now_iso()
+    logger.warning(f"[AutoTrading] simulated books "
+                   f"{'ENABLED' if enabled else 'PAUSED'}")
+    return {"auto_sim_enabled": bool(enabled),
+            "paper_auto_trade_enabled": bool(enabled),
+            "any_enabled": bool(enabled)}
 
 
 @router.post("/paper/run-mtm")

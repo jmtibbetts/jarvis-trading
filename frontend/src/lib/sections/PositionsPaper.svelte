@@ -175,6 +175,7 @@
   }
 
   $effect(() => {
+    loadAutotrading();
     loadAll();
     // loadOrders was only ever called from openManualPosition's success
     // path — a stray indent — so the Open Orders panel showed 0 forever
@@ -277,13 +278,44 @@ Type FLATTEN to confirm:`,
     }
   }
 
-  async function resetAllBooks() {
-    if (!confirm("Reset BOTH virtual books (Paper and Auto Sim) to $100,000? Open positions close into history; every past trade is kept for learning. The live account is untouched.")) return;
+  // Whether the SIMULATED books open positions on their own. Distinct from
+  // the kill switch, which governs the live broker account only.
+  let autoTrading = $state<{ any_enabled: boolean } | null>(null);
+  let autoBusy = $state(false);
+
+  async function loadAutotrading() {
+    autoTrading = await feeds.load("autotrading", () => api.autotradingState());
+  }
+
+  async function setAutotrading(enabled: boolean) {
+    autoBusy = true;
     try {
-      const r = await api.resetAll();
+      autoTrading = await api.setAutotrading(enabled);
+      toastStore.ok(enabled
+        ? "Auto-trading resumed — Paper and Auto Sim will open on the next scan"
+        : "Auto-trading paused — the books will stay as they are");
+    } catch (e) {
+      toastStore.err(`Could not change auto-trading: ${e}`);
+    } finally {
+      autoBusy = false;
+    }
+  }
+
+  async function resetAllBooks() {
+    if (!confirm(
+      "Reset BOTH virtual books (Paper and Auto Sim) to $100,000?\n\n" +
+      "• Open positions close into history at their last mark\n" +
+      "• Every past trade is KEPT — outcomes, calibration and postmortems all read them\n" +
+      "• Automatic opening is PAUSED so the books stay reset; resume when ready\n" +
+      "• The live account is untouched"
+    )) return;
+    try {
+      const r = await api.resetAll(true);
       if (r.errors?.length) toastStore.err(`Partial reset: ${r.errors.join("; ")}`);
-      else toastStore.ok(`Both books reset to $100k — ${r.positions_closed ?? 0} position(s) closed into history`);
-      await loadAll();
+      else toastStore.ok(
+        `Both books reset to $100k — ${r.positions_closed ?? 0} position(s) closed into history` +
+        (r.autotrading_paused ? "; auto-trading paused" : ""));
+      await Promise.all([loadAll(), loadAutotrading()]);
     } catch (e) {
       toastStore.err(`Reset failed: ${e}`);
     }
@@ -865,6 +897,32 @@ Type FLATTEN to confirm:`,
           <span class="dz-desc">Both of the above in one action — one reset, one clean slate. Resetting a single book leaves the other's positions in the combined equity above. Live account untouched.</span>
         </div>
       </div>
+      <!-- The state a reset leaves behind, and the way back out of it.
+           Without this the pause would be invisible and "why has nothing
+           opened since I reset" becomes the next bug report. -->
+      <div class="dz-auto">
+        <span class="dz-auto-label">Simulated auto-trading</span>
+        {#if autoTrading}
+          <Pill
+            label={autoTrading.any_enabled ? "running" : "paused"}
+            tone={autoTrading.any_enabled ? "good" : "warm"}
+          />
+          <button
+            class="btn small outline"
+            disabled={autoBusy}
+            onclick={() => setAutotrading(!autoTrading!.any_enabled)}
+          >
+            {autoBusy ? "…" : autoTrading.any_enabled ? "Pause auto-trading" : "Resume auto-trading"}
+          </button>
+          <span class="dz-auto-note">
+            {autoTrading.any_enabled
+              ? "Paper and Auto Sim open positions on every scan."
+              : "Paper and Auto Sim will not open anything until resumed — a reset stays reset."}
+          </span>
+        {:else}
+          <StateNote status={feeds.status("autotrading")} noun="auto-trading state" />
+        {/if}
+      </div>
       <p class="dz-note">
         Live account balance: Alpaca has no API to reset paper-account equity to a fixed $100,000 — flattening returns it to
         all-cash at current value. For an exact $100k, use the Alpaca dashboard: Account → <b>Reset paper account</b> (one click),
@@ -1397,5 +1455,25 @@ Type FLATTEN to confirm:`,
     padding-top: 10px;
     margin: 4px 0 0;
     line-height: 1.5;
+  }
+  .dz-auto {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    margin-top: 6px;
+  }
+  .dz-auto-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .dz-auto-note {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    flex: 1;
+    min-width: 220px;
   }
 </style>

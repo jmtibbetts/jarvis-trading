@@ -14,6 +14,7 @@ v2.0 Fixes:
 """
 import logging
 from datetime import datetime, timezone
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db, PaperPosition, PaperTrade, PaperPortfolio
 from lib.learning_engine import record_trade_outcome as _record_outcome
@@ -1531,8 +1532,16 @@ def soft_reset_paper_portfolio(starting_cash: float = None) -> dict:
     cash = float(starting_cash or PAPER_STARTING_CAPITAL)
     closed = []
     with get_db() as db:
+        # OPEN rows only. This walked every PaperPosition ever written — 516
+        # rows to close 14 — and `close_paper_position` refuses non-Open
+        # positions, so the other 502 were round-trips to the database to be
+        # told no. Harmless, and it made a reset look hung.
+        # Lowercased on both sides: every writer stores "Open" and SQLite's
+        # `=` is case-sensitive, which is the exact bug that left this
+        # guard's sibling inert for a week.
         open_ids = [(p.id, p.current_price or p.entry_price)
-                    for p in db.query(PaperPosition).all()]
+                    for p in db.query(PaperPosition).filter(
+                        func.lower(PaperPosition.status) == "open").all()]
     for pos_id, price in open_ids:
         try:
             r = close_paper_position(pos_id, float(price or 0), reason="reset")

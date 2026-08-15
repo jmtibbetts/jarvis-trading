@@ -1817,8 +1817,25 @@ export const api = {
   // Both virtual books in one action — the reset counterpart to
   // "Flatten EVERYTHING". Resetting one book alone leaves the other's
   // positions in the combined equity the Positions tab shows.
-  resetAll: () =>
-    post<{ ok: boolean; positions_closed?: number; errors?: string[] }>(`/reset/all`),
+  // Pauses automatic opening by default (§140.1) — without that, Auto Sim
+  // refills the book inside one scan cycle and the reset looks like it never
+  // ran. `resumeAutotrading` is the deliberate way back.
+  resetAll: (pauseAutotrading = true) =>
+    post<{
+      ok: boolean;
+      positions_closed?: number;
+      errors?: string[];
+      autotrading_paused?: boolean;
+    }>(`/reset/all?pause_autotrading=${pauseAutotrading}`),
+  autotradingState: () =>
+    get<{ auto_sim_enabled: boolean; paper_auto_trade_enabled: boolean; any_enabled: boolean }>(
+      `/trading/autotrading`,
+    ),
+  setAutotrading: (enabled: boolean) =>
+    post<{ auto_sim_enabled: boolean; paper_auto_trade_enabled: boolean; any_enabled: boolean }>(
+      `/trading/autotrading`,
+      { enabled },
+    ),
   // What the OPEN-time guard sees, per book. The Portfolio Risk panel
   // above shows combined live+paper equity, which is the right lens for
   // "how exposed am I" and the wrong one for "will the next trade be

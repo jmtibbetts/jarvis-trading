@@ -743,7 +743,16 @@ The original signal will be superseded. Levels are recomputed server-side at sub
                     {/if}
                   </div>
                 {:else}
-                  <div class="gate-badge gate-unknown" title="signal predates the gate experiment">
+                  <!-- The old tooltip asserted "signal predates the gate
+                       experiment". Measured 2026-08-15: 43 of 138 active
+                       signals read UNMEASURED and they carry the SAME
+                       generated_at as measured ones in the same batch —
+                       13:08:17 for both. They are not old; they have no
+                       linked candidate row, so no gate verdict joins to
+                       them. Saying the true thing costs nothing and stops
+                       this being diagnosed as an age problem again. -->
+                  <div class="gate-badge gate-unknown"
+                       title="No gate verdict is joined to this signal — its candidate row was never linked, so the experiment never judged it. Not a verdict of 'no edge'.">
                     <span class="gate-word">UNMEASURED</span>
                   </div>
                 {/if}

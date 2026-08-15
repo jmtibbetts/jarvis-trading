@@ -138,7 +138,7 @@
     {@const L = gateExp.legacy}
     {@const V = gateExp.v8}
     <div class="grid-row">
-      <Panel title="Gate Experiment — legacy vs v8"
+      <Panel title="Gate Experiment — legacy vs v8" status={feeds.status("gateExp")}
              meta="{gateExp.overlap.candidates_with_both_verdicts.toLocaleString()} candidates carry both verdicts · judged by the same resolver">
         <div class="gate-grid num">
           <div class="gate-col-h"></div><div class="gate-col-h" title="raw picks (distinct symbol-days) — five same-day corn candidates are one market opinion, not five samples">selected (eff)</div><div class="gate-col-h">resolved</div><div class="gate-col-h">win %</div><div class="gate-col-h">avg P&L %</div><div class="gate-col-h">avg MFE R</div>
@@ -180,7 +180,7 @@
 
   {#if calibration}
       <div class="span-7">
-        <Panel title="Measured Calibration" meta="{calibration.sample.toLocaleString()} outcomes · rates are measured, not claimed">
+        <Panel title="Measured Calibration" meta="{calibration.sample.toLocaleString()} outcomes · rates are measured, not claimed" status={feeds.status("calibration")}>
           <div class="cal-cols">
             <div>
               <div class="cal-h">By timeframe</div>
@@ -236,7 +236,7 @@
 
     {#if variants}
       <div class="span-5">
-        <Panel title="Shadow Score Variants" meta="gate {variants.gate} · {variants.schema}">
+        <Panel title="Shadow Score Variants" meta="gate {variants.gate} · {variants.schema}" status={feeds.status("variants")}>
           <table class="tbl">
             <thead><tr><th>Variant</th><th>Selected</th><th>Win%</th><th>Avg P&amp;L</th><th>MFE</th><th>Stop-1st</th></tr></thead>
             <tbody>
@@ -259,7 +259,7 @@
 
     {#if selBias && selBias.by_verdict.length > 0}
       <div class="span-5">
-        <Panel title="Selection Bias — Rejected vs Accepted" meta="counterfactually resolved candidates">
+        <Panel title="Selection Bias — Rejected vs Accepted" meta="counterfactually resolved candidates" status={feeds.status("selBias")}>
           <table class="tbl">
             <thead><tr><th>Verdict</th><th>n</th><th>Win%</th><th>Avg P&amp;L</th><th>MFE</th></tr></thead>
             <tbody>
@@ -281,7 +281,7 @@
 
     {#if promo && promo.challengers}
       <div class="span-7">
-        <Panel title="Promotion Framework — §4.3"
+        <Panel title="Promotion Framework — §4.3" status={feeds.status("promo")}
                meta="champion: {promo.champion?.variant} · {promo.resolved_universe?.toLocaleString?.() ?? promo.resolved_universe} resolved candidates · gate {promo.gate}">
           <table class="tbl">
             <thead><tr><th>Challenger</th><th>Verdict</th><th>OOS n</th><th>Sel freq</th><th>Net R (ch / champ)</th><th>Folds won</th><th>Blocking</th></tr></thead>
@@ -312,7 +312,7 @@
     {/if}
 
     <div class="span-5">
-      <Panel title="Signal Accuracy by Symbol" meta="{accuracy.length} symbols">
+      <Panel title="Signal Accuracy by Symbol" meta="{accuracy.length} symbols" status={feeds.status("accuracy")}>
         <div class="tbl-wrap">
           <table class="tbl">
             <thead><tr><th>Sym</th><th>Trades</th><th>Win%</th><th>Avg P&amp;L</th><th>Best</th><th>Worst</th></tr></thead>
@@ -336,7 +336,7 @@
     </div>
 
     <div class="span-7">
-      <Panel title="Trade Outcome Log" meta="{filteredOutcomes.length} shown">
+      <Panel title="Trade Outcome Log" meta="{filteredOutcomes.length} shown" status={feeds.status("outcomes")}>
         {#snippet children()}
           <div class="log-filters">
             <select bind:value={symbolFilter}>
@@ -382,7 +382,7 @@
 
   <div class="learn-grid">
     <div class="span-4">
-      <Panel title="Pattern Memory" meta="Tier 3">
+      <Panel title="Pattern Memory" meta="Tier 3" status={feeds.status("patterns")}>
         <div class="tbl-wrap">
           <table class="tbl">
             <thead><tr><th>Pattern</th><th>Count</th><th>Win%</th><th>Avg P&amp;L</th></tr></thead>
@@ -404,7 +404,7 @@
     </div>
 
     <div class="span-4">
-      <Panel title="Regime Performance" meta="Tier 4">
+      <Panel title="Regime Performance" meta="Tier 4" status={feeds.status("regimes")}>
         <div class="tbl-wrap">
           <table class="tbl">
             <thead><tr><th>Regime</th><th>Trades</th><th>Win%</th><th>Avg P&amp;L</th></tr></thead>
@@ -426,7 +426,7 @@
     </div>
 
     <div class="span-4">
-      <Panel title="AI Lessons" meta="Tier 5">
+      <Panel title="AI Lessons" meta="Tier 5" status={feeds.status("lessons")}>
         <div class="lessons-list">
           {#each lessons as l (l.id)}
             <div class="lesson-row">

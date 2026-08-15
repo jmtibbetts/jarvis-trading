@@ -358,7 +358,7 @@ Type FLATTEN to confirm:`,
 
 <div class="stack" style="margin-bottom:14px">
   <div class="two-col">
-    <Panel title="Portfolio Risk" meta="{fmtUsd(exposure.totalEquity)} combined equity">
+    <Panel title="Portfolio Risk" meta="{fmtUsd(exposure.totalEquity)} combined equity" status={feeds.status("live")}>
       {#snippet children()}
         {#if exposure.totalEquity}
           <div class="risk-split">
@@ -752,7 +752,7 @@ Type FLATTEN to confirm:`,
   {/if}
   <div class="stack">
   <div class="two-col">
-  <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}">
+  <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}" status={feeds.status("paper")}>
     {#if paper && paper.trades.length}
       <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
       <table class="tbl">

@@ -72,7 +72,7 @@
     <p class="muted">assembling…</p>
   {:else if brief}
     <div class="grid">
-      <Panel title="Market Pulse" meta="last close vs prior — the desk's core instruments">
+      <Panel title="Market Pulse" meta="last close vs prior — the desk's core instruments" status={feeds.status("brief")}>
         <div class="pulse">
           {#each brief.market_pulse as p}
             <div class="pt">
@@ -87,7 +87,7 @@
         </div>
       </Panel>
 
-      <Panel title="Analogs" meta="what followed the most similar past moments — history, not prediction">
+      <Panel title="Analogs" meta="what followed the most similar past moments — history, not prediction" status={feeds.status("brief")}>
         {#each brief.analog_reads as a}
           <div class="analog-row">
             <b>{a.symbol}</b>
@@ -100,7 +100,7 @@
         {/each}
       </Panel>
 
-      <Panel title="Perp State" meta="OKX funding / OI / account skew — the crowd's current lean">
+      <Panel title="Perp State" meta="OKX funding / OI / account skew — the crowd's current lean" status={feeds.status("brief")}>
         <table>
           <thead><tr><th>coin</th><th>funding 8h</th><th>OI</th><th>L/S accts</th></tr></thead>
           <tbody>
@@ -116,7 +116,7 @@
         </table>
       </Panel>
 
-      <Panel title="Positioning" meta="COT spec percentile (3y) + curve, every tracked market">
+      <Panel title="Positioning" meta="COT spec percentile (3y) + curve, every tracked market" status={feeds.status("brief")}>
         <table>
           <thead><tr><th>market</th><th>pctile</th><th>net</th><th>curve</th><th>roll/yr</th></tr></thead>
           <tbody>
@@ -135,7 +135,7 @@
         </table>
       </Panel>
 
-      <Panel title="Threat → Price Pressure" meta="rule-mapped hypotheses from active threats — the map stays in Intelligence">
+      <Panel title="Threat → Price Pressure" meta="rule-mapped hypotheses from active threats — the map stays in Intelligence" status={feeds.status("brief")}>
         {#if brief.threat_transmission.length}
           <ul class="tw">
             {#each brief.threat_transmission as t}
@@ -151,7 +151,7 @@
         {/if}
       </Panel>
 
-      <Panel title="Incubator" meta="{brief.incubator.counts?.incubating ?? 0} coins building history toward the {brief.incubator.graduation_bars_1h}-bar graduation">
+      <Panel title="Incubator" meta="{brief.incubator.counts?.incubating ?? 0} coins building history toward the {brief.incubator.graduation_bars_1h}-bar graduation" status={feeds.status("brief")}>
         {#if brief.incubator.incubating?.length}
           <ul class="inc">
             {#each brief.incubator.incubating as c}
@@ -171,7 +171,7 @@
         {/if}
       </Panel>
 
-      <Panel title="Gate Experiment" meta="arms judged by the same resolver — compare within timeframe, mind effective n">
+      <Panel title="Gate Experiment" meta="arms judged by the same resolver — compare within timeframe, mind effective n" status={feeds.status("brief")}>
         <table>
           <thead>
             <tr><th>arm</th><th>candidates</th><th>resolved</th><th>resolved in window</th><th>win</th><th>avg P&L</th></tr>
@@ -197,7 +197,7 @@
         {/if}
       </Panel>
 
-      <Panel title="Book" meta="paper — the account the desk actually runs">
+      <Panel title="Book" meta="paper — the account the desk actually runs" status={feeds.status("brief")}>
         <div class="tiles">
           <KpiTile label="open positions" value={String(brief.book.open_positions)} />
           <KpiTile label="unrealized" value={fmt(brief.book.open_unrealized_pnl)} />
@@ -206,7 +206,7 @@
         </div>
       </Panel>
 
-      <Panel title="Learning Corpus" meta="clock snapshots + independent-horizon labels">
+      <Panel title="Learning Corpus" meta="clock snapshots + independent-horizon labels" status={feeds.status("brief")}>
         <div class="tiles">
           <KpiTile label="snapshots taken" value={String(brief.corpus.snapshots_taken)} />
           <KpiTile label="labels due today" value={String(brief.corpus.labels_due_today)} />
@@ -225,7 +225,7 @@
         {/if}
       </Panel>
 
-      <Panel title="Positioning Extremes" meta="3-year percentile tails, from released COT only">
+      <Panel title="Positioning Extremes" meta="3-year percentile tails, from released COT only" status={feeds.status("brief")}>
         {#if brief.positioning_extremes.length}
           <ul class="extremes">
             {#each brief.positioning_extremes as e}
@@ -244,7 +244,7 @@
         {/if}
       </Panel>
 
-      <Panel title="Alerts" meta="raised in window, by severity">
+      <Panel title="Alerts" meta="raised in window, by severity" status={feeds.status("brief")}>
         <div class="kinds">
           {#each Object.entries(brief.alerts) as [sev, n]}
             <span class="kind" class:crit={sev === "CRITICAL"}>{sev} <b>{n}</b></span>
@@ -254,7 +254,7 @@
         </div>
       </Panel>
 
-      <Panel title="Data Platform" meta="events ingested in window, by kind">
+      <Panel title="Data Platform" meta="events ingested in window, by kind" status={feeds.status("brief")}>
         <div class="kinds">
           {#each Object.entries(brief.platform.events_by_kind) as [kind, n]}
             <span class="kind">{kind} <b>{n.toLocaleString()}</b></span>

@@ -177,11 +177,16 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   const verdictTone = (v: string) => (v === "CONFIRMED" ? "good" : v === "INVALIDATED" ? "bad" : v === "STALE_ENTRY" ? "warm" : "neutral");
 
   async function loadSignals() {
-    try {
-      signals = await api.signals(statusFilter || undefined, 200);
+    // The toast stays — it is the right thing for a click-triggered reload —
+    // but a toast is transient. Miss it and the empty grid reads as "no
+    // setups right now", which is the opposite of "we could not ask". The
+    // tracker keeps that visible on the panel until it is true again.
+    const before = feeds.status("signals").failures;
+    signals = (await feeds.load("signals", () => api.signals(statusFilter || undefined, 200))) ?? [];
+    if (feeds.status("signals").failures > before) {
+      toastStore.err(`Failed to load signals: ${feeds.status("signals").detail}`);
+    } else {
       loadSizings(signals);
-    } catch (e) {
-      toastStore.err(`Failed to load signals: ${e}`);
     }
   }
 
@@ -579,7 +584,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   </div>
 
   <div class="span-8">
-    <Panel title="Opportunity Scanner" meta="4 lanes — crypto runs 24/7">
+    <Panel title="Opportunity Scanner" meta="4 lanes — crypto runs 24/7" status={feeds.status("scannerStatus")}>
       <div class="scanner-row">
         {#each SCANNER_MODES as mode (mode.key)}
           <div class="scanner-card">
@@ -602,7 +607,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   </div>
 
   <div class="span-12">
-    <Panel title="Signals" meta="{filteredSignals.length} shown">
+    <Panel title="Signals" meta="{filteredSignals.length} shown" status={feeds.status("signals")}>
       {#snippet children()}
         <div class="filters">
           <select bind:value={statusFilter}>

@@ -343,7 +343,7 @@
   {#if view === "macro"}
   <div class="span-12">
     <Panel title="Sector Desk — Positioning & Term Structure"
-           meta={sectors && sectors.length ? "COT · EIA · futures curves — point-in-time, shadow-only" : ""}>
+           meta={sectors && sectors.length ? "COT · EIA · futures curves — point-in-time, shadow-only" : ""} status={feeds.status("sectors")}>
       {#snippet children()}
         {#if sectors && sectors.length}
           {#each sectors as sec (sec.sector)}
@@ -583,7 +583,7 @@
 
   {#if view === "world"}
   <div class="span-6">
-    <Panel title="Threat Escalation Trend" meta="last {threatTrend.length} days">
+    <Panel title="Threat Escalation Trend" meta="last {threatTrend.length} days" status={feeds.status("threats")}>
       {#snippet children()}
         {#if threatTrend.length}
           <div class="trend-chart">
@@ -795,8 +795,7 @@
       title="Market Psychology Index"
       meta={psychology?.score != null
         ? `${psychology.components_available}/${psychology.components_possible} components`
-        : ""}
-    >
+        : ""} status={feeds.status("psychology")}>
       {#snippet children()}
         {#if psychology && psychology.score != null}
           <div class="psy-head">
@@ -869,8 +868,7 @@
   <div class="span-12">
     <Panel
       title="Congressional Trade Disclosures"
-      meta={congress ? `${congress.filings_processed} filings processed · House` : ""}
-    >
+      meta={congress ? `${congress.filings_processed} filings processed · House` : ""} status={feeds.status("congress")}>
       {#snippet children()}
         {#if congress && congress.trades.length}
           <div class="dp-banner">
@@ -942,8 +940,7 @@
       title="IPO Pipeline"
       meta={ipo
         ? `${ipo.stage_counts.filed} filed · ${ipo.stage_counts.amended} amended · ${ipo.stage_counts.priced} priced`
-        : ""}
-    >
+        : ""} status={feeds.status("ipo")}>
       {#snippet children()}
         {#if ipo && ipo.pipeline.length}
           <table class="tbl">
@@ -1035,8 +1032,7 @@
   <div class="span-12">
     <Panel
       title="Institutional Ownership (13F)"
-      meta={institutional ? `Q ending ${institutional.current_period} · ${institutional.tickers.length} tickers` : ""}
-    >
+      meta={institutional ? `Q ending ${institutional.current_period} · ${institutional.tickers.length} tickers` : ""} status={feeds.status("institutional")}>
       {#snippet children()}
         {#if institutional && institutional.tickers.length}
           <div class="dp-banner">
@@ -1090,8 +1086,7 @@
   <div class="span-12">
     <Panel
       title="Short Interest / Squeeze Fuel"
-      meta={squeeze ? `settled ${squeeze.settlement_date} · ${squeeze.qualified_count.toLocaleString()} qualified` : ""}
-    >
+      meta={squeeze ? `settled ${squeeze.settlement_date} · ${squeeze.qualified_count.toLocaleString()} qualified` : ""} status={feeds.status("squeeze")}>
       {#snippet children()}
         {#if squeeze && squeeze.candidates.length}
           <div class="dp-banner">
@@ -1167,8 +1162,7 @@
   <div class="span-12">
     <Panel
       title="Execution Cost by Venue"
-      meta={fees ? `${fees.region} pricing · cheapest: ${fees.cheapest}` : ""}
-    >
+      meta={fees ? `${fees.region} pricing · cheapest: ${fees.cheapest}` : ""} status={feeds.status("fees")}>
       <div class="fee-size">
         <span class="dim">Round-trip cost on a</span>
         {#each [500, 2000, 10000, 50000, 100000] as n (n)}
@@ -1206,8 +1200,7 @@
     <Panel
       title="Kraken Venue"
       dotColor={kraken?.stream.connected ? "var(--good)" : "var(--warm)"}
-      meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : ""}
-    >
+      meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : ""} status={feeds.status("kraken")}>
       {#if kraken}
         <div class="kv-head">
           <span class="kv-stat">

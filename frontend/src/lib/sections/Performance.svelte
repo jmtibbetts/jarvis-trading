@@ -261,7 +261,7 @@
 
 
   <div class="span-6">
-    <Panel title="Backtester" meta="deterministic TA-fallback pipeline, no LLM">
+    <Panel title="Backtester" meta="deterministic TA-fallback pipeline, no LLM" status={feeds.status("backtests")}>
       {#snippet children()}
         <div class="bt-form">
           <div class="field">

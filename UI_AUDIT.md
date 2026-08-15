@@ -115,6 +115,54 @@ Two known gaps, deliberately not claimed as done:
   replaced; the genuinely-empty ones were left alone, and every panel in
   the file now carries a header badge.
 
+### 5. The sweep was half-finished and reported as done — FIXED
+
+Asked directly whether everything was fixed, the answer was no. The
+catches were genuinely all gone — that part held up — but §29's actual
+requirement is *the operator knows which state occurred*, and that was
+only true where panels had been hand-edited. Measured: **46 of 90 panels
+had a tracked feed behind them and no way to show it.**
+
+Worst case was `LearningPanel`: 11 feeds wired into the tracker, 10
+panels, **zero** surfaced, and `StateNote` imported but never used. The
+loader half was done and the visible half was skipped, which is the
+failure mode this whole audit is about.
+
+Now 9 of 90 unwired, and all 9 are legitimately stateless — `Ask JARVIS`
+and `Manual Analysis` are input forms, `Position Sizing Calculator` is
+client-side arithmetic, `Auto Sim` is a description, `Danger Zone` is
+buttons, and the four crypto panels delegate to child components that own
+their own load state.
+
+Two further gaps found in the same pass:
+
+- The sweep was scoped to `.catch()`, but §4 also names bare `catch {}`.
+  `OnChainPanel` had one: every failure and the empty case both rendered
+  "On-chain context unavailable". Now tracked. `OrderBookPanel`'s bare
+  catch is deliberate and documented (REST is only a warm start; the WS
+  push fills it in) and was left alone.
+- `SignalsScanner.loadSignals` reported failure through a **toast only**.
+  A toast is transient — miss it and an empty grid reads as "no setups
+  right now", the exact inversion this audit exists to prevent. It now
+  records to the tracker as well as toasting.
+
+**The two new routes had no tests.** 1,853 tests in the repo and the API
+surface added in this session had zero, verified only by hand against the
+live API. `tests/test_wallet_intel_routes.py` covers the cases a live
+smoke test cannot reach: missing key, empty watchlist, transfers failing,
+pricing failing, wallet-count truncation being declared rather than
+silent, the §116 stamp surviving the route (asserted by making
+`assert_not_majors_population` actually fire), and §117 — two addresses
+sharing a non-infrastructure funder collapsing to **one** independent
+cluster.
+
+One of those tests failed first time and the *code* was right: with no
+USD price and too short a history for a baseline, `whale_score` correctly
+declines to call anything a whale. That behaviour is now pinned by its
+own test rather than quietly corrected in the assertion.
+
+Suite 1,853 → **1,864**.
+
 ### 4. The typecheck baseline was hiding real bugs — FIXED
 
 The 30 typecheck errors were recorded as "pre-existing" and used as a

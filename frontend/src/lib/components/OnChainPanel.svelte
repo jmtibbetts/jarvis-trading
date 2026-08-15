@@ -1,20 +1,21 @@
 <script lang="ts">
   import { api, type OnChainContext } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
+  import StateNote from "./StateNote.svelte";
+
+  const feeds = new FeedTracker();
 
   let ctx = $state<OnChainContext | null>(null);
   let loading = $state(true);
-  let failed = $state(false);
 
+  // The bare `catch { failed = true }` this replaces collapsed every failure
+  // into one sentence, "On-chain context unavailable", which also covered
+  // the genuinely-empty case. Coin Metrics being down, the key being absent
+  // and the dataset being empty are three different situations.
   async function load() {
     loading = true;
-    try {
-      ctx = await api.onChainContext();
-      failed = false;
-    } catch {
-      failed = true;
-    } finally {
-      loading = false;
-    }
+    ctx = await feeds.load("onchain", () => api.onChainContext());
+    loading = false;
   }
 
   $effect(() => {
@@ -40,8 +41,8 @@
 
 {#if loading && !ctx}
   <div class="empty">Loading on-chain context…</div>
-{:else if failed || !ctx}
-  <div class="empty">On-chain context unavailable</div>
+{:else if !ctx}
+  <StateNote status={feeds.status("onchain")} noun="on-chain context" />
 {:else}
   <div class="oc-grid">
     {#each ctx.assets as a (a.symbol)}

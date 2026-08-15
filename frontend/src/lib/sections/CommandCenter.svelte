@@ -579,8 +579,7 @@
     <Panel
       title="Coins to Watch"
       dotColor="var(--warm)"
-      meta={focus ? `${focus.focus.length} under focus · signals only at score ${focus.min_score}+` : "—"}
-    >
+      meta={focus ? `${focus.focus.length} under focus · signals only at score ${focus.min_score}+` : "—"} status={feeds.status("focus")}>
       <form class="wl-add" onsubmit={(e) => { e.preventDefault(); addFocus(); }}>
         <input placeholder="Symbol (BEAT/USD)" bind:value={focusSym} disabled={focusBusy} />
         <input placeholder="Why watch it? (optional)" bind:value={focusNote} disabled={focusBusy} />

@@ -29,6 +29,79 @@ def dedup_hash(symbol, timeframe, direction, entry, stop, target) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:20]
 
 
+def _is_stale_link(db, signal_id: str) -> bool:
+    """True when the signal a candidate points at is no longer live.
+
+    Only a stale link is re-pointed. If the linked signal is still Active or
+    PendingApproval, two live signals share one setup and moving the verdict
+    would leave the other reading UNMEASURED — trading one orphan for
+    another. Missing signals count as stale: nothing is worse off.
+    """
+    try:
+        from sqlalchemy import func
+
+        from app.database import TradingSignal
+        row = db.query(TradingSignal).filter(TradingSignal.id == signal_id).first()
+        if row is None:
+            return True
+        return str(row.status or "").lower() not in ("active", "pendingapproval")
+    except Exception as e:
+        logger.debug(f"[Candidates] stale-link check failed (non-fatal): {e}")
+        # Fail toward NOT moving an existing link — a wrong re-point would
+        # rewrite history, a missed one only leaves the badge as it was.
+        return False
+
+
+def relink_orphan_signals(db=None, limit: int = 2000) -> dict:
+    """Attach live signals to the candidate row that already judged them.
+
+    The re-pointing fix above stops NEW orphans; it cannot heal the ones
+    already on the board, because a setup only re-enters `record_candidate`
+    if the scanner sees those exact levels again and prices move.
+
+    Matching is by EXACT dedup hash — symbol, timeframe, direction, entry,
+    stop and target all identical. Nothing looser: a verdict computed for a
+    different entry is a measurement of a different trade, and attaching it
+    to make a badge go away would be inventing evidence. A signal whose
+    numbers match no candidate stays UNMEASURED, which is then true.
+    """
+    from app.database import CandidateSignal, TradingSignal, get_db
+
+    def _run(session):
+        out = {"scanned": 0, "relinked": 0, "no_candidate": 0, "held": 0}
+        live = session.query(TradingSignal).filter(
+            TradingSignal.status.in_(["Active", "PendingApproval"])
+        ).limit(limit).all()
+        linked_ids = {
+            c.signal_id for c in session.query(CandidateSignal).filter(
+                CandidateSignal.signal_id.isnot(None)).all()
+        }
+        for sig in live:
+            if sig.id in linked_ids:
+                continue
+            out["scanned"] += 1
+            h = dedup_hash(sig.asset_symbol, sig.timeframe, sig.direction,
+                           sig.entry_price, sig.stop_loss, sig.target_price)
+            cand = session.query(CandidateSignal).filter(
+                CandidateSignal.dedup_hash == h).first()
+            if cand is None:
+                out["no_candidate"] += 1
+                continue
+            if cand.signal_id and not _is_stale_link(session, cand.signal_id):
+                # Its verdict belongs to another LIVE signal; moving it would
+                # just relocate the orphan.
+                out["held"] += 1
+                continue
+            cand.signal_id = sig.id
+            out["relinked"] += 1
+        return out
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
 def record_candidate(db, scored: dict, verdict: str,
                      rejection_reason: str | None = None,
                      signal_id: str | None = None,
@@ -77,13 +150,30 @@ def record_candidate(db, scored: dict, verdict: str,
             # Complete the row rather than dropping the news. Only fields
             # that are still EMPTY get filled; nothing already judged is
             # touched.
-            if signal_id and not existing.signal_id:
-                existing.signal_id = signal_id
-                if existing.verdict != "persisted":
-                    # It reached the book after all. The original
-                    # rejection_reason stays on the row as the record of
-                    # what the first look concluded.
-                    existing.verdict = "persisted"
+            #
+            # The link also RE-POINTS when the signal it holds is no longer
+            # live. The scanner supersedes an unchanged setup's old signal
+            # and writes a new row with a new id every cycle; this branch
+            # used to attach only when `signal_id` was empty, so the
+            # candidate stayed bolted to the superseded signal and the new
+            # ACTIVE one joined to nothing — which is what put 43 of 138
+            # live signals on UNMEASURED while 85 unlinked candidate rows
+            # sat there for the same symbols. The dedup hash is
+            # symbol+timeframe+direction+entry+stop+target, so the setup
+            # being re-pointed to is the same setup the gate already judged;
+            # the verdict travels with it legitimately.
+            #
+            # The judgment itself still never moves: score, breakdown,
+            # verdict, rejection_reason and both gate fields are untouched
+            # here, exactly as the docstring promises.
+            if signal_id and signal_id != existing.signal_id:
+                if not existing.signal_id or _is_stale_link(db, existing.signal_id):
+                    existing.signal_id = signal_id
+                    if existing.verdict != "persisted":
+                        # It reached the book after all. The original
+                        # rejection_reason stays on the row as the record of
+                        # what the first look concluded.
+                        existing.verdict = "persisted"
             if not existing.source:
                 existing.source = source
             return existing

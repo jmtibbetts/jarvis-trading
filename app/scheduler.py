@@ -618,8 +618,17 @@ def create_scheduler() -> BackgroundScheduler:
     # network. 30 min because a candidate needs forward bars to judge anyway;
     # resolving more eagerly would only find "too young".
     def candidates_run():
-        from lib.candidates import resolve_pending
-        return resolve_pending(limit=500)
+        from lib.candidates import relink_orphan_signals, resolve_pending
+        # Relink first. A live signal whose candidate row points at a
+        # superseded predecessor reads UNMEASURED on its card even though the
+        # gate judged that exact setup — 48 of 138 active signals were in
+        # that state on 2026-08-15. record_candidate now re-points as it
+        # writes, so this is the sweeper for anything that slipped through
+        # (a setup only re-enters that path if the scanner sees the very
+        # same levels again, and prices move).
+        relinked = relink_orphan_signals(limit=2000)
+        resolved = resolve_pending(limit=500)
+        return {"relinked": relinked, "resolved": resolved}
     sched.add_job(make_job_runner('candidates', candidates_run),
                   'interval', minutes=30, id='candidates',
                   next_run_time=now + timedelta(minutes=6),

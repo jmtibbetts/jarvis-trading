@@ -45,11 +45,33 @@ class UpsertTests(unittest.TestCase):
         self._clean()
 
     def _clean(self):
+        from app.database import TradingSignal
         with get_db() as db:
             db.query(CandidateSignal).filter(
                 CandidateSignal.symbol == "TEST-COV/USD").delete(
                 synchronize_session=False)
+            db.query(TradingSignal).filter(
+                TradingSignal.asset_symbol == "TEST-COV/USD").delete(
+                synchronize_session=False)
             db.commit()
+
+    def _make_signal(self, status: str) -> str:
+        """A REAL trading_signals row. The link rules depend on whether the
+        signal a candidate points at still exists and is still live, so a
+        fabricated id cannot exercise them."""
+        import uuid
+
+        from app.database import TradingSignal, now_iso
+        sid = str(uuid.uuid4())
+        with get_db() as db:
+            db.add(TradingSignal(
+                id=sid, asset_symbol="TEST-COV/USD", asset_name="TEST-COV/USD",
+                asset_class="Crypto", direction="Long", confidence=65,
+                timeframe="4H", entry_price=100.0, stop_loss=95.0,
+                target_price=115.0, status=status, generated_at=now_iso(),
+            ))
+            db.commit()
+        return sid
 
     def _rows(self, db):
         return db.query(CandidateSignal).filter(
@@ -86,14 +108,41 @@ class UpsertTests(unittest.TestCase):
             self.assertEqual(row.gate_v8_decision, born_gate)
             self.assertEqual(row.created_at, born_created)
 
-    def test_existing_signal_id_is_not_stolen_by_a_later_signal(self):
+    def test_existing_signal_id_is_not_stolen_by_a_LIVE_signal(self):
+        """The original invariant, now tested with a signal that exists.
+
+        This used the ids "SIG-FIRST"/"SIG-SECOND", which were never
+        inserted into `trading_signals`. That reads as a link to a DELETED
+        signal, not a live one — and `/api/signals/clear-expired` really
+        does hard-delete rows, so the two cases are genuinely different and
+        want opposite answers. Held apart here rather than conflated:
+        a live link stands (below), a dangling one is replaced (next test).
+        """
+        live_id = self._make_signal("Active")
         with get_db() as db:
-            record_candidate(db, SETUP, "persisted", signal_id="SIG-FIRST")
+            record_candidate(db, SETUP, "persisted", signal_id=live_id)
             db.commit()
             record_candidate(db, SETUP, "persisted", signal_id="SIG-SECOND")
             db.commit()
-            self.assertEqual(self._rows(db)[0].signal_id, "SIG-FIRST",
-                             "the first link stands; a setup is one row")
+            self.assertEqual(self._rows(db)[0].signal_id, live_id,
+                             "the live link stands; a setup is one row")
+
+    def test_a_link_to_a_deleted_signal_is_replaced(self):
+        """Otherwise clearing expired signals would strand every candidate
+        they were linked to, and the next signal for that same setup would
+        read UNMEASURED forever — with its verdict sitting right there."""
+        gone_id = self._make_signal("Expired")
+        with get_db() as db:
+            record_candidate(db, SETUP, "persisted", signal_id=gone_id)
+            db.commit()
+        with get_db() as db:
+            from app.database import TradingSignal
+            db.query(TradingSignal).filter(TradingSignal.id == gone_id).delete()
+        live_id = self._make_signal("Active")
+        with get_db() as db:
+            record_candidate(db, SETUP, "persisted", signal_id=live_id)
+            db.commit()
+            self.assertEqual(self._rows(db)[0].signal_id, live_id)
 
     def test_new_rows_carry_their_source(self):
         with get_db() as db:

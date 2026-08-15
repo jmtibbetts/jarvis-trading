@@ -206,6 +206,117 @@ class ExposureIsMeasuredNotAssumedTests(unittest.TestCase):
         self.assertAlmostEqual(v["symbol_exposure_pct"], 26.0, places=1)
 
 
+class StatusViewAgreesWithTheGuardTests(unittest.TestCase):
+    """The panel must measure exposure the way the guard measures it.
+
+    A status view with its own arithmetic could agree with the operator's
+    eyes while disagreeing with the thing that blocks trades — which is
+    the exact failure it was added to make impossible.
+    """
+
+    def setUp(self):
+        self.models = _position_models()
+        for model in self.models.values():
+            with get_db() as db:
+                db.query(model).delete()
+                db.commit()
+
+    tearDown = setUp
+
+    _seq = 0
+
+    def _open(self, table, symbol, notional):
+        """Open one row. Returns False if the book's schema refuses a
+        second open row for the same instrument."""
+        from sqlalchemy.exc import IntegrityError
+
+        model = self.models[table]
+        cols = {c.key for c in model.__mapper__.columns}
+        entry = 100.0
+        type(self)._seq += 1
+        row = {"symbol": symbol, "qty": notional / entry, "entry_price": entry,
+               "current_price": entry, "asset_class": "Crypto",
+               "direction": "Long", "side": "long", "leverage": 1.0,
+               "notional": notional, "margin_used": notional,
+               "signal_id": f"sig-{self._seq}"}
+        try:
+            with get_db() as db:
+                db.add(model(**{k: v for k, v in row.items() if k in cols}))
+                db.commit()
+            return True
+        except IntegrityError:
+            return False
+
+    def test_status_reports_the_same_exposure_the_guard_enforces(self):
+        for book, table in POSITION_BOOKS.items():
+            with self.subTest(book=book):
+                self.setUp()
+                self._open(table, "DOGE/USD", EQUITY * 0.20)
+                st = concentration.book_status(book, EQUITY)
+                self.assertEqual(st["positions"], 1)
+                self.assertAlmostEqual(st["gross_pct_of_equity"], 20.0, places=1)
+                # The guard's own view of adding 10% more must line up.
+                v = concentration.check_against_book(
+                    "DOGE/USD", EQUITY * 0.10, EQUITY * 0.005, EQUITY,
+                    book=book)
+                self.assertAlmostEqual(
+                    v["symbol_exposure_pct"],
+                    st["symbols"][0]["pct_of_equity"] + 10.0, places=1,
+                    msg="status and guard disagree about current exposure")
+
+    def test_same_symbol_across_rows_is_one_bucket(self):
+        """Two 15% positions in one instrument is a 30% bet, not two legal
+        ones — the accumulation case the broken guard could not see.
+
+        Not every book can reach this state: `paper_positions` carries a
+        partial unique index on (user_id, symbol) WHERE status='Open', so
+        one instrument is at most one open row there and the stacking risk
+        lives in Auto Sim, which is unique on signal_id instead. Where the
+        schema already forbids it, that is the stronger guarantee and the
+        test asserts it rather than pretending otherwise.
+        """
+        for book, table in POSITION_BOOKS.items():
+            with self.subTest(book=book):
+                self.setUp()
+                self.assertTrue(self._open(table, "DOGE/USD", EQUITY * 0.15))
+                if not self._open(table, "DOGE/USD", EQUITY * 0.15):
+                    st = concentration.book_status(book, EQUITY)
+                    self.assertEqual(
+                        st["positions"], 1,
+                        f"{table} refused a second open row for one symbol — "
+                        f"stacking is impossible here by schema")
+                    continue
+                st = concentration.book_status(book, EQUITY)
+                doge = [s for s in st["symbols"] if s["symbol"] == "DOGE/USD"]
+                self.assertEqual(len(doge), 1, "one symbol, one bucket")
+                self.assertEqual(doge[0]["rows"], 2)
+                self.assertAlmostEqual(doge[0]["pct_of_equity"], 30.0, places=1)
+                self.assertTrue(doge[0]["over_limit"])
+                self.assertIn("DOGE/USD", st["symbols_over_limit"])
+
+    def test_zero_equity_does_not_divide_by_zero(self):
+        for book in POSITION_BOOKS:
+            with self.subTest(book=book):
+                st = concentration.book_status(book, 0.0)
+                self.assertIsNone(st["gross_pct_of_equity"])
+                self.assertFalse(st["gross_over_limit"])
+
+    def test_an_unreadable_book_reports_rather_than_raises(self):
+        st = concentration.book_status("nonexistent", EQUITY)
+        self.assertIn("error", st)
+        self.assertEqual(st["positions"], 0)
+
+    def test_the_endpoint_covers_every_registered_book(self):
+        from app.routers.trading import concentration_status
+        out = concentration_status()
+        self.assertEqual({b["book"] for b in out["books"]},
+                         set(POSITION_BOOKS),
+                         "a registered book is missing from the panel")
+        for b in out["books"]:
+            self.assertNotIn("no equity source wired", str(b.get("error") or ""),
+                             f"{b['book']} has no equity source")
+
+
 class StatusIsComparedCaseInsensitivelyTests(unittest.TestCase):
     """No query may compare a position status to a lowercase literal.
 

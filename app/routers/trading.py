@@ -1262,6 +1262,50 @@ def paper_reset(hard: bool = False, starting_cash: float = 100000.0):
         raise HTTPException(500, str(e))
 
 
+@router.get("/concentration/status")
+def concentration_status():
+    """Live exposure against the limits that actually block an open.
+
+    Exists because the guard was inert for a week and nothing on screen
+    could have told anyone: the operator was reading combined live+paper
+    equity off the Positions tab while the limit was per-book and matching
+    an empty set. This surfaces what the guard itself sees, book by book.
+
+    Equity per book is computed the way that book's own summary computes
+    it, so this panel and the P&L header cannot disagree.
+    """
+    from lib.concentration import POSITION_BOOKS, book_status
+
+    def _paper_equity() -> float:
+        from lib.paper_engine import get_paper_summary
+        return float((get_paper_summary().get("portfolio") or {}).get("equity") or 0)
+
+    def _auto_sim_equity() -> float:
+        from lib.auto_simulator import get_auto_sim_summary
+        return float((get_auto_sim_summary().get("summary") or {}).get("equity") or 0)
+
+    equity_for = {"paper": _paper_equity, "auto_sim": _auto_sim_equity}
+    books = []
+    for name in POSITION_BOOKS:
+        try:
+            equity = equity_for[name]()
+        except KeyError:
+            # A registered book with no equity source is a wiring gap, not
+            # a reason to drop it silently off the panel.
+            books.append({"book": name, "error": "no equity source wired",
+                          "symbols": [], "positions": 0})
+            continue
+        except Exception as e:
+            books.append({"book": name, "symbols": [], "positions": 0,
+                          "error": f"{type(e).__name__}: {str(e)[:120]}"})
+            continue
+        books.append(book_status(name, equity))
+
+    return {"books": books,
+            "any_over_limit": any(b.get("symbols_over_limit") or
+                                  b.get("gross_over_limit") for b in books)}
+
+
 @router.post("/reset/all")
 def reset_all_virtual_books(starting_cash: float = 100000.0):
     """One reset, one clean slate — every virtual book at once.

@@ -292,6 +292,26 @@ export type SlippageSummary = {
   trades: { symbol: string; asset_class: string; entry_price: number; actual_fill_price: number; slippage_pct: number; fill_recorded_at: string }[];
 };
 
+// Mirrors lib/concentration.book_status — the guard's own arithmetic, not
+// a second measurement of the same thing.
+export type ConcentrationBook = {
+  book: string;
+  table?: string | null;
+  equity?: number;
+  positions: number;
+  gross_notional?: number;
+  gross_pct_of_equity?: number | null;
+  gross_over_limit?: boolean;
+  symbols: { symbol: string; notional: number; rows: number; pct_of_equity: number | null; over_limit: boolean }[];
+  symbols_over_limit?: string[];
+  top?: { symbol: string; pct_of_equity: number | null } | null;
+  limits?: { max_symbol_pct: number; max_gross_pct: number; min_risk_pct: number };
+  note?: string | null;
+  error?: string;
+};
+
+export type ConcentrationStatus = { books: ConcentrationBook[]; any_over_limit: boolean };
+
 export type PositionWithSignal = Position & {
   signal: {
     asset_symbol: string;
@@ -1491,6 +1511,11 @@ export const api = {
   // positions in the combined equity the Positions tab shows.
   resetAll: () =>
     post<{ ok: boolean; positions_closed?: number; errors?: string[] }>(`/reset/all`),
+  // What the OPEN-time guard sees, per book. The Portfolio Risk panel
+  // above shows combined live+paper equity, which is the right lens for
+  // "how exposed am I" and the wrong one for "will the next trade be
+  // refused" — the limit is per book.
+  concentrationStatus: () => get<ConcentrationStatus>(`/concentration/status`),
   paperRunMtm: () => post<Record<string, unknown>>(`/paper/run-mtm`),
 
   autoSimSummary: () => get<AutoSimSummary>(`/auto-paper/summary`),

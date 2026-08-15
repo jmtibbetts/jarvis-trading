@@ -46,6 +46,39 @@ MAX_GROSS_EXPOSURE_PCT = 400.0
 MIN_RISK_PCT_OF_EQUITY = 0.02
 
 
+# Row accessors live at module level so the OPEN-time check and the
+# reporting view below cannot drift apart — a status panel that measured
+# exposure differently from the guard would be worse than no panel.
+def _sym(p):
+    return str(getattr(p, "symbol", None) or
+               (p.get("symbol") if isinstance(p, dict) else "") or "").upper()
+
+
+def _get(p, attr):
+    v = getattr(p, attr, None)
+    if v is None and isinstance(p, dict):
+        v = p.get(attr)
+    return v
+
+
+def _num(v):
+    try:
+        return abs(float(v or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _not(p):
+    v = _num(_get(p, "notional"))
+    if v:
+        return v
+    # Books that do not persist notional fall back to qty x entry.
+    # Exact for spot and margin; for a futures multiplier it is a
+    # FLOOR, which errs toward refusing rather than permitting — the
+    # correct direction for a guard to be wrong in.
+    return _num(_get(p, "qty")) * _num(_get(p, "entry_price"))
+
+
 def check(symbol: str, notional: float, loss_at_stop: float,
           equity: float, open_positions: list) -> dict:
     """May this position open? Returns the verdict with its arithmetic.
@@ -56,32 +89,6 @@ def check(symbol: str, notional: float, loss_at_stop: float,
     """
     if equity <= 0:
         return {"ok": False, "reason": "no equity to size against"}
-
-    def _sym(p):
-        return str(getattr(p, "symbol", None) or
-                   (p.get("symbol") if isinstance(p, dict) else "") or "").upper()
-
-    def _get(p, attr):
-        v = getattr(p, attr, None)
-        if v is None and isinstance(p, dict):
-            v = p.get(attr)
-        return v
-
-    def _num(v):
-        try:
-            return abs(float(v or 0))
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _not(p):
-        v = _num(_get(p, "notional"))
-        if v:
-            return v
-        # Books that do not persist notional fall back to qty x entry.
-        # Exact for spot and margin; for a futures multiplier it is a
-        # FLOOR, which errs toward refusing rather than permitting — the
-        # correct direction for a guard to be wrong in.
-        return _num(_get(p, "qty")) * _num(_get(p, "entry_price"))
 
     sym = str(symbol or "").upper()
     notional = abs(float(notional or 0))
@@ -163,6 +170,83 @@ def open_rows(book: str, db):
     from sqlalchemy import func
     model = _book_model(book)
     return db.query(model).filter(func.lower(model.status) == "open").all()
+
+
+def book_status(book: str, equity: float, db=None) -> dict:
+    """What the limits say about a book AS IT STANDS — the reporting view.
+
+    Deliberately built from the same `_not`/`_sym` accessors and the same
+    constants as check(), because the whole reason this exists is that the
+    guard was silently inert for a week. A panel that measured exposure
+    its own way could agree with the operator's eyes while disagreeing
+    with the thing that actually blocks trades, which is the failure it is
+    meant to make impossible.
+
+    `over_limit` is not hypothetical: positions opened before the guard
+    worked can sit above the cap right now. The cap governs OPENING, so an
+    existing breach is reported, never auto-liquidated.
+    """
+    def _aggregate(rows) -> tuple[dict, int]:
+        # MUST run inside the session: these are ORM instances, and reading
+        # an attribute after the session closes raises DetachedInstanceError
+        # rather than returning a number.
+        acc: dict[str, dict] = {}
+        for p in rows:
+            s = _sym(p)
+            if not s:
+                continue
+            e = acc.setdefault(s, {"symbol": s, "notional": 0.0, "rows": 0})
+            e["notional"] += _not(p)
+            e["rows"] += 1
+        return acc, len(rows)
+
+    try:
+        from app.database import get_db
+        if db is not None:
+            by_symbol, n_rows = _aggregate(open_rows(book, db))
+        else:
+            with get_db() as _db:
+                by_symbol, n_rows = _aggregate(open_rows(book, _db))
+    except Exception as e:
+        logger.warning(f"[Concentration] status failed for {book}: {e}")
+        return {"book": book, "error": f"{type(e).__name__}: {str(e)[:120]}",
+                "symbols": [], "positions": 0}
+
+    equity = float(equity or 0)
+    for e in by_symbol.values():
+        e["pct_of_equity"] = round(100.0 * e["notional"] / equity, 2) if equity > 0 else None
+        e["over_limit"] = bool(equity > 0 and
+                               e["pct_of_equity"] > MAX_SYMBOL_EXPOSURE_PCT)
+        e["notional"] = round(e["notional"], 2)
+
+    symbols = sorted(by_symbol.values(),
+                     key=lambda e: e["notional"], reverse=True)
+    gross = round(sum(e["notional"] for e in symbols), 2)
+    gross_pct = round(100.0 * gross / equity, 2) if equity > 0 else None
+    breaches = [e["symbol"] for e in symbols if e["over_limit"]]
+
+    return {
+        "book": book,
+        "table": POSITION_BOOKS.get(book),
+        "equity": round(equity, 2),
+        "positions": n_rows,
+        "gross_notional": gross,
+        "gross_pct_of_equity": gross_pct,
+        "gross_over_limit": bool(gross_pct is not None and
+                                 gross_pct > MAX_GROSS_EXPOSURE_PCT),
+        "symbols": symbols,
+        "symbols_over_limit": breaches,
+        "top": symbols[0] if symbols else None,
+        "limits": {
+            "max_symbol_pct": MAX_SYMBOL_EXPOSURE_PCT,
+            "max_gross_pct": MAX_GROSS_EXPOSURE_PCT,
+            "min_risk_pct": MIN_RISK_PCT_OF_EQUITY,
+        },
+        # Breaches predating the working guard are legal-but-unwanted, not
+        # a bug to be alarmed about twice.
+        "note": ("limits govern OPENING; an existing position above the cap "
+                 "is reported, never force-closed") if breaches else None,
+    }
 
 
 def check_against_book(symbol: str, notional: float, loss_at_stop: float,

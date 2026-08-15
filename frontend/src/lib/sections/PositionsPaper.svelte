@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
-  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist } from "../api";
+  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist, type ConcentrationStatus } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
 
@@ -14,6 +14,7 @@
   let autosim = $state<AutoSimSummary | null>(null);
   let slippage = $state<SlippageSummary | null>(null);
   let earnings = $state<EarningsWatchlist | null>(null);
+  let concentration = $state<ConcentrationStatus | null>(null);
   let busy = $state<Set<string>>(new Set());
   let orders = $state<{ id: string; symbol: string; qty: number; side: string; status: string; type: string }[]>([]);
   let orderBusy = $state<Set<string>>(new Set());
@@ -127,7 +128,7 @@
   let liveLoadFailed = $state(false);
 
   async function loadAll() {
-    const [l, p, a, s, e] = await Promise.all([
+    const [l, p, a, s, e, c] = await Promise.all([
       api.positionsWithSignals().catch(() => {
         liveLoadFailed = true;
         return null;
@@ -136,7 +137,9 @@
       api.autoSimSummary().catch(() => null),
       api.slippageSummary(50).catch(() => null),
       api.earningsWatchlist().catch(() => null),
+      api.concentrationStatus().catch(() => null),
     ]);
+    concentration = c;
     if (l) liveLoadFailed = false;
     // A failed fetch keeps the LAST GOOD data on screen instead of flashing
     // an empty "0 positions" state that reads as if everything was closed.
@@ -386,6 +389,72 @@ Type FLATTEN to confirm:`,
       {/snippet}
     </Panel>
 
+    <Panel
+      title="Concentration Limits"
+      meta={concentration ? (concentration.any_over_limit ? "over limit" : "within limits") : "—"}
+    >
+      {#snippet children()}
+        {#if !concentration}
+          <div class="empty">Concentration status unavailable</div>
+        {:else}
+          <!-- Per BOOK, deliberately. The Portfolio Risk panel beside this
+               one shows combined live+paper equity, which answers "how
+               exposed am I" — but the cap that refuses the next trade is
+               measured against one book's own equity, and reading the
+               combined number is what made a working guard look broken. -->
+          {#each concentration.books as b (b.book)}
+            <div class="conc-book">
+              <div class="conc-head">
+                <b>{b.book === "auto_sim" ? "Auto Sim" : "Paper"}</b>
+                {#if b.error}
+                  <span class="dim">{b.error}</span>
+                {:else}
+                  <span class="dim">
+                    {b.positions} open · gross {b.gross_pct_of_equity?.toFixed(1) ?? "—"}%
+                    <span class="dim">of {b.limits?.max_gross_pct}%</span>
+                  </span>
+                {/if}
+              </div>
+              {#if !b.error}
+                {#if b.symbols.length}
+                  <div class="exposure-list">
+                    {#each b.symbols.slice(0, 6) as s (s.symbol)}
+                      <div class="exposure-row">
+                        <span class:conc-over={s.over_limit}>
+                          {s.symbol}{#if s.rows > 1}<span class="dim"> ×{s.rows}</span>{/if}
+                        </span>
+                        <div class="exposure-track">
+                          <div
+                            class="exposure-fill"
+                            class:conc-fill-over={s.over_limit}
+                            style="width:{Math.min(100, ((s.pct_of_equity ?? 0) / (b.limits?.max_symbol_pct || 25)) * 100)}%"
+                          ></div>
+                        </div>
+                        <b class="num" class:conc-over={s.over_limit}>{s.pct_of_equity?.toFixed(1) ?? "—"}%</b>
+                      </div>
+                    {/each}
+                  </div>
+                  {#if b.symbols_over_limit?.length}
+                    <p class="risk-warning">
+                      ⚠ {b.symbols_over_limit.join(", ")} above the {b.limits?.max_symbol_pct}% cap. {b.note}
+                    </p>
+                  {/if}
+                {:else}
+                  <div class="empty">No open exposure</div>
+                {/if}
+              {/if}
+            </div>
+          {/each}
+          <p class="conc-foot dim">
+            Bars are % of that book's own equity against the {concentration.books[0]?.limits?.max_symbol_pct ?? 25}% per-symbol cap — the same
+            arithmetic that blocks an open, not a second measurement of it.
+          </p>
+        {/if}
+      {/snippet}
+    </Panel>
+  </div>
+
+  <div class="two-col">
     <Panel title="Position Sizing Calculator" meta="risk-based share count">
       {#snippet children()}
         <div class="sizer-form">
@@ -1160,6 +1229,37 @@ Type FLATTEN to confirm:`,
     margin: 12px 0 0;
     font-size: 11.5px;
     color: var(--warm);
+  }
+
+  /* A panel left alone on the last grid row spans it rather than leaving
+     a dead half-column beside itself. */
+  .two-col > :only-child {
+    grid-column: 1 / -1;
+  }
+
+  .conc-book + .conc-book {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .conc-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .conc-over {
+    color: var(--bad);
+  }
+  .conc-fill-over {
+    background: var(--bad);
+  }
+  .conc-foot {
+    margin: 12px 0 0;
+    font-size: 11px;
+    line-height: 1.45;
   }
 
   .sizer-form {

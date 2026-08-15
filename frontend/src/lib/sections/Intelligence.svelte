@@ -584,6 +584,27 @@
                 {#if reading}
                   <span class="macro-val">{fmtMacroValue(reading.value, reading.unit)}</span>
                   <span class="macro-unit">{reading.unit} · {reading.date}</span>
+                  <!-- Every observation behind this number was already
+                       fetched to compute it and then dropped. A single
+                       reading cannot say whether inflation is falling. -->
+                  {#if reading.history && reading.history.length > 2}
+                    {@const h = reading.history}
+                    {@const rising = (h[h.length - 1]?.value ?? 0) >= (h[0]?.value ?? 0)}
+                    <LineChart
+                      series={[{
+                        label: MACRO_LABELS[key] ?? key,
+                        values: h.map((p) => p.value),
+                        color: rising ? "var(--warm)" : "var(--good)",
+                        area: true,
+                      }]}
+                      xLabels={h.map((p) => String(p.date).slice(2, 7))}
+                      height={54}
+                      includeY={reading.unit.includes("%") ? [0] : []}
+                      zeroLine
+                      yFormat={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : v.toFixed(1))}
+                    />
+                    <span class="macro-span">{h.length} pts · {String(h[0].date).slice(0, 7)} → {String(h[h.length - 1].date).slice(0, 7)}</span>
+                  {/if}
                 {:else}
                   <span class="macro-val dim">—</span>
                 {/if}
@@ -2425,5 +2446,11 @@
     font-size: 10.5px;
     color: var(--ink-dim);
     margin-bottom: 4px;
+  }
+  .macro-span {
+    font-family: var(--mono);
+    font-size: 8.5px;
+    color: var(--ink-faint);
+    margin-top: 2px;
   }
 </style>

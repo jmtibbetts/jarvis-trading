@@ -133,6 +133,35 @@ def _level(rows: list[dict]) -> dict | None:
     return {"date": rows[0]["date"], "value": rows[0]["value"], "compared_to": None}
 
 
+def _series_history(rows: list[dict], treatment: str) -> list[dict]:
+    """The whole series under the SAME transform as the headline reading.
+
+    `rows` is newest-first, as FRED returns it; the result is oldest-first
+    because that is the direction a chart reads. Points that cannot be
+    transformed — a YoY value whose comparison month is missing — are
+    dropped rather than carried as zero, and the chart breaks its line
+    there instead of drawing through a hole.
+    """
+    out: list[dict] = []
+    if treatment == "yoy_pct":
+        # Recompute at every point against its own 12-months-prior value.
+        for i in range(len(rows)):
+            window = rows[i:]
+            point = _yoy_pct(window, periods_back=12)
+            if point:
+                out.append({"date": point["date"], "value": point["value"]})
+    elif treatment == "mom_change":
+        for i in range(len(rows) - 1):
+            point = _mom_change(rows[i:])
+            if point:
+                out.append({"date": point["date"], "value": point["value"]})
+    else:
+        out = [{"date": r["date"], "value": r["value"]} for r in rows
+               if r.get("value") is not None]
+    out.reverse()
+    return out
+
+
 def get_macro_snapshot(force_refresh: bool = False) -> dict | None:
     """Latest reading for every series in SERIES_CONFIG, each transformed
     the conventional way for that series type. Returns None if no API key
@@ -148,7 +177,10 @@ def get_macro_snapshot(force_refresh: bool = False) -> dict | None:
     readings = {}
     any_success = False
     for key, (series_id, unit, treatment) in SERIES_CONFIG.items():
-        rows = fetch_series(series_id, limit=30 if treatment.startswith("yoy") else 6)
+        # 6 was enough when only the latest reading survived; the history is
+        # charted now, and six points is not a trend. Same single request
+        # either way — FRED bills per call, not per observation.
+        rows = fetch_series(series_id, limit=30 if treatment.startswith("yoy") else 24)
         if not rows:
             readings[key] = None
             continue
@@ -161,6 +193,15 @@ def get_macro_snapshot(force_refresh: bool = False) -> dict | None:
         if result:
             result["unit"] = unit
             result["series_id"] = series_id
+            # The transformed HISTORY, oldest-first, so the panel can draw
+            # the path instead of one number. Every observation needed for
+            # this was already fetched above and then discarded — a level
+            # series keeps its levels, and a YoY series is recomputed at
+            # each point against ITS OWN 12-months-prior value, by calendar
+            # date, exactly as `_yoy_pct` does for the latest reading. A
+            # percentage change series plotted as raw levels would be a
+            # different statistic wearing the same label.
+            result["history"] = _series_history(rows, treatment)
             any_success = True
         readings[key] = result
 

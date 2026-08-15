@@ -591,7 +591,14 @@ export type YieldCurveSnapshot = {
   fetched_at: string;
 };
 
-export type MacroReading = { date: string; value: number; compared_to: string | null; unit: string; series_id: string } | null;
+// `history` carries the SAME transform as `value` — a YoY series is YoY at
+// every point, not raw levels — so the chart and the headline number are
+// the same statistic. Oldest-first, which is the direction a chart reads.
+export type MacroReading = {
+  date: string; value: number; compared_to: string | null;
+  unit: string; series_id: string;
+  history?: { date: string; value: number }[];
+} | null;
 
 export type OptionsSummary = {
   underlying: string;

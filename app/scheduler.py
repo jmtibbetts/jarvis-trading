@@ -67,6 +67,7 @@ job_status = {
     'official_data': {'status': 'idle', 'last': None, 'error': None},
     'futures_curve': {'status': 'idle', 'last': None, 'error': None},
     'brief_push': {'status': 'idle', 'last': None, 'error': None},
+    'onchain': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -673,6 +674,16 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('brief_push', brief_push_run),
                   'cron', hour=13, minute=0, id='brief_push',
                   timezone='UTC', replace_existing=True, max_instances=1)
+
+    # On-chain fundamentals are DAILY by definition (Coin Metrics
+    # publishes at 1d frequency), so polling faster would manufacture
+    # copies of one observation rather than information.
+    def onchain_run():
+        from lib.onchain import sync as onchain_sync
+        return onchain_sync()
+    sched.add_job(make_job_runner('onchain', onchain_run),
+                  'cron', hour=2, minute=30, id='onchain', timezone='UTC',
+                  replace_existing=True, max_instances=1)
 
     sched.add_job(make_job_runner('official_data', official_data_run),
                   'interval', hours=6, id='official_data',

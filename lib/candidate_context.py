@@ -142,6 +142,14 @@ def build_context(symbol: str, asof: datetime | None = None) -> dict | None:
 
     if cls == "Crypto":
         ctx.update(_derivatives_block(sym, asof))
+        # Slow network state (daily): MVRV and activity percentiles. Only
+        # BTC/ETH have community coverage, so most coins get nothing —
+        # which is an absent key, never a fabricated neutral.
+        try:
+            from lib.onchain import latest_context
+            ctx.update(latest_context(sym, asof))
+        except Exception as e:
+            logger.debug(f"[CandidateContext] onchain skipped: {e}")
         # CME positioning exists for BTC/ETH only; other bases just skip.
         ctx.update(_cot_block(sym, asof))
     elif cls == "Futures":

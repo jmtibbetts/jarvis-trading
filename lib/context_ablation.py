@@ -58,6 +58,12 @@ FEATURES = [
      "either caps rallies or fuels squeezes",
      "CASE WHEN v < 0.4 THEN 'light(<40%)' "
      "WHEN v > 0.6 THEN 'heavy(>60%)' ELSE 'normal(40-60%)' END"),
+    ("mvrv_pctile_2y",
+     "cycle valuation: setups born when market value sits far below "
+     "realized value (holders underwater) resolve differently than those "
+     "born at euphoric premiums",
+     "CASE WHEN v < 20 THEN 'cheap(<20)' "
+     "WHEN v > 80 THEN 'rich(>80)' ELSE 'mid(20-80)' END"),
     ("eia_change_z",
      "inventory surprise: multi-sigma builds/draws reprice energy — "
      "setups born right after them live in a different regime",

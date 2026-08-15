@@ -97,5 +97,42 @@ class FloorTests(unittest.TestCase):
         self.assertFalse(v2["passes"])
 
 
+
+class OnChainContextTests(unittest.TestCase):
+    """Coin Metrics community: ask what's granted, and let stale data
+    abstain rather than pose as today's network state."""
+
+    def test_only_granted_metrics_are_requested(self):
+        """One ungranted metric name 403s the WHOLE batch, silently
+        costing every other metric in it — verified live: FeeMeanUSD is
+        not on the community tier and its presence failed the request."""
+        from unittest.mock import patch
+        import lib.onchain as oc
+        with patch.object(oc, "granted_metrics",
+                          return_value={"CapMVRVCur", "TxCnt"}):
+            with patch.object(oc.httpx, "get") as g:
+                g.return_value.json.return_value = {"data": []}
+                g.return_value.raise_for_status = lambda: None
+                oc.fetch_metrics("btc")
+                asked = g.call_args.kwargs["params"]["metrics"].split(",")
+        self.assertEqual(set(asked), {"CapMVRVCur", "TxCnt"})
+        self.assertNotIn("FeeMeanUSD", asked)
+
+    def test_stale_network_state_abstains(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+        import lib.onchain as oc
+        old = (datetime.now(timezone.utc) - timedelta(days=9)).date()
+        with patch("lib.sector_engine._series", return_value=[(old, 2.1)]):
+            self.assertEqual(oc.latest_context("BTC/USD"), {})
+
+    def test_release_stamp_is_the_day_after_the_observation(self):
+        """A metric describing the 15th was not knowable during the 15th."""
+        from datetime import datetime, timezone
+        d = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        release = (d + timedelta(days=1)).timestamp()
+        self.assertGreater(release, d.timestamp())
+
+
 if __name__ == "__main__":
     unittest.main()

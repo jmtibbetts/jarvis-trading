@@ -2,9 +2,13 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist, type ConcentrationStatus } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
+
+  const feeds = new FeedTracker();
 
   type Account = "live" | "paper" | "autosim";
   let account = $state<Account>("live");
@@ -20,7 +24,7 @@
   let orderBusy = $state<Set<string>>(new Set());
 
   async function loadOrders() {
-    orders = await api.alpacaOrders().catch(() => []);
+    orders = (await feeds.load("orders", () => api.alpacaOrders())) ?? [];
   }
 
   async function cancelOrder(id: string, symbol: string) {
@@ -125,29 +129,25 @@
     expandedLive = next;
   }
 
-  let liveLoadFailed = $state(false);
-
   async function loadAll() {
+    // Every feed keeps its LAST GOOD data on screen when a refresh fails,
+    // rather than flashing an empty state that reads as if everything was
+    // closed — the tracker records that what is showing is now stale, and
+    // how old it is, so the operator is never guessing which it is.
     const [l, p, a, s, e, c] = await Promise.all([
-      api.positionsWithSignals().catch(() => {
-        liveLoadFailed = true;
-        return null;
-      }),
-      api.paperSummary().catch(() => null),
-      api.autoSimSummary().catch(() => null),
-      api.slippageSummary(50).catch(() => null),
-      api.earningsWatchlist().catch(() => null),
-      api.concentrationStatus().catch(() => null),
+      feeds.load("live", () => api.positionsWithSignals()),
+      feeds.load("paper", () => api.paperSummary()),
+      feeds.load("autosim", () => api.autoSimSummary()),
+      feeds.load("slippage", () => api.slippageSummary(50)),
+      feeds.load("earnings", () => api.earningsWatchlist()),
+      feeds.load("concentration", () => api.concentrationStatus()),
     ]);
-    concentration = c;
-    if (l) liveLoadFailed = false;
-    // A failed fetch keeps the LAST GOOD data on screen instead of flashing
-    // an empty "0 positions" state that reads as if everything was closed.
-    live = l ?? live;
+    live = l;
     paper = p;
     autosim = a;
     slippage = s;
     earnings = e;
+    concentration = c;
   }
 
   async function openManualPosition() {
@@ -391,11 +391,12 @@ Type FLATTEN to confirm:`,
 
     <Panel
       title="Concentration Limits"
-      meta={concentration ? (concentration.any_over_limit ? "over limit" : "within limits") : "—"}
+      meta={concentration ? (concentration.any_over_limit ? "over limit" : "within limits") : ""}
+      status={feeds.status("concentration")}
     >
       {#snippet children()}
         {#if !concentration}
-          <div class="empty">Concentration status unavailable</div>
+          <StateNote status={feeds.status("concentration")} noun="concentration status" />
         {:else}
           <!-- Per BOOK, deliberately. The Portfolio Risk panel beside this
                one shows combined live+paper equity, which answers "how
@@ -490,7 +491,7 @@ Type FLATTEN to confirm:`,
     <KpiTile label="Open Positions" value={String(live?.positions.length ?? "—")} />
   </div>
   <div class="stack">
-  <Panel title="Live Positions" meta="Alpaca — click a row for signal context">
+  <Panel title="Live Positions" meta="Alpaca — click a row for signal context" status={feeds.status("live")}>
     {#if live && live.positions.length}
       <table class="tbl">
         <thead>
@@ -535,17 +536,17 @@ Type FLATTEN to confirm:`,
         </tbody>
       </table>
     {:else}
-      {#if liveLoadFailed}
-        <div class="empty err-note">Couldn't load live positions (server/Alpaca unreachable) — retrying automatically. This is a data-fetch failure, not zero positions.</div>
-      {:else}
-        <div class="empty">No open live positions</div>
-      {/if}
+      <StateNote
+        status={feeds.status("live")}
+        noun="live positions"
+        emptyText="No open live positions"
+      />
     {/if}
   </Panel>
 
 
   <div class="two-col">
-  <Panel title="Open Orders" meta="{orders.length} working at Alpaca">
+  <Panel title="Open Orders" meta="{orders.length} working at Alpaca" status={feeds.status("orders")}>
     {#snippet children()}
       {#if orders.length}
         <button class="btn tiny outline" style="margin-bottom:8px" onclick={cancelAllOrders}>Cancel All</button>
@@ -569,7 +570,7 @@ Type FLATTEN to confirm:`,
       {/if}
     {/snippet}
   </Panel>
-  <Panel title="Execution Slippage" meta={slippage?.count ? `${slippage.count} fills` : "no data"}>
+  <Panel title="Execution Slippage" meta={slippage?.count ? `${slippage.count} fills` : ""} status={feeds.status("slippage")}>
     {#if slippage && slippage.count}
       <div class="slip-stats">
         <div class="slip-stat"><span>Avg</span><b class="num">{slippage.avg_slippage_pct?.toFixed(3)}%</b></div>
@@ -627,7 +628,7 @@ Type FLATTEN to confirm:`,
     </div>
   {/if}
   <div class="stack">
-  <Panel title="Paper Positions" meta="{paper?.positions.length ?? 0} open">
+  <Panel title="Paper Positions" meta="{paper?.positions.length ?? 0} open" status={feeds.status("paper")}>
     {#snippet children()}
       <div class="panel-actions">
         <button class="btn small outline" onclick={() => (showManualOpen = !showManualOpen)}>
@@ -783,7 +784,7 @@ Type FLATTEN to confirm:`,
   </Panel>
   </div>
   <div class="span-12">
-    <Panel title="Auto Sim Positions" meta="{autosim?.positions.length ?? 0} open">
+    <Panel title="Auto Sim Positions" meta="{autosim?.positions.length ?? 0} open" status={feeds.status("autosim")}>
       {#if autosim && autosim.positions.length}
         <table class="tbl">
           <thead>
@@ -1335,9 +1336,6 @@ Type FLATTEN to confirm:`,
     .two-col {
       grid-template-columns: 1fr;
     }
-  }
-  .err-note {
-    color: var(--bad);
   }
   .dz-row {
     display: flex;

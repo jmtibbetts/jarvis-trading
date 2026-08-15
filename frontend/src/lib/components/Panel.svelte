@@ -1,18 +1,28 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { sectionStore, isPopout, popPanel, openPanelPopout } from "../stores/section.svelte";
+  import StateBadge from "./StateBadge.svelte";
+  import type { FeedStatus } from "../dataState.svelte";
 
   let {
     title,
     meta = "",
     dotColor = "var(--accent)",
     noPad = false,
+    status = null,
     children,
   }: {
     title: string;
     meta?: string;
     dotColor?: string;
     noPad?: boolean;
+    /**
+     * The load state of whatever this panel is showing. Passing it puts a
+     * badge in the header for every state except READY, so §29's requirement
+     * — the operator knows which state occurred without opening DevTools —
+     * is satisfied by one prop rather than bespoke markup per panel.
+     */
+    status?: FeedStatus | null;
     children: Snippet;
   } = $props();
 
@@ -33,6 +43,7 @@
         {title}
       </div>
       <div class="right">
+        <StateBadge {status} />
         {#if meta}<div class="meta">{meta}</div>{/if}
         {#if !isPopout}
           <button

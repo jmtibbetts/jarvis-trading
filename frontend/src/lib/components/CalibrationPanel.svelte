@@ -11,31 +11,30 @@
   // well-evidenced ones at the same visual weight. A win rate without a
   // denominator is a rumour.
   import Panel from "./Panel.svelte";
+  import StateNote from "./StateNote.svelte";
   import { api, type Calibration, type Expectancy, type LlmRouting } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
+
+  const feeds = new FeedTracker();
 
   let cal = $state<Calibration | null>(null);
   let expectancy = $state<Expectancy | null>(null);
   let routing = $state<LlmRouting | null>(null);
   let loading = $state(true);
-  let failed = $state<string | null>(null);
 
   async function load() {
     loading = true;
-    failed = null;
-    try {
-      const [c, e, r] = await Promise.all([
-        api.calibration().catch((err) => { throw err; }),
-        api.expectancy().catch(() => null),
-        api.llmRouting(30).catch(() => null),
-      ]);
-      cal = c;
-      expectancy = e;
-      routing = r;
-    } catch (e) {
-      failed = String(e);
-    } finally {
-      loading = false;
-    }
+    // Calibration is the load-bearing one — expectancy and routing are
+    // supporting detail, and their absence should not blank the panel.
+    const [c, e, r] = await Promise.all([
+      feeds.load("calibration", () => api.calibration()),
+      feeds.load("expectancy", () => api.expectancy()),
+      feeds.load("routing", () => api.llmRouting(30)),
+    ]);
+    cal = c;
+    expectancy = e;
+    routing = r;
+    loading = false;
   }
   $effect(() => { load(); });
 
@@ -77,11 +76,11 @@
   );
 </script>
 
-<Panel title="Calibration" meta={cal ? `${n0(cal.sample)} outcomes` : ""}>
-  {#if loading}
+<Panel title="Calibration" meta={cal ? `${n0(cal.sample)} outcomes` : ""} status={feeds.status("calibration")}>
+  {#if loading && !cal}
     <p class="muted">Reading measured outcomes…</p>
-  {:else if failed}
-    <p class="err">Could not load calibration: {failed}</p>
+  {:else if !cal}
+    <StateNote status={feeds.status("calibration")} noun="calibration" />
   {:else if cal}
     <div class="headline">
       <div class="big">
@@ -178,9 +177,10 @@
 <Panel
   title="Expectancy"
   meta={expectancy ? `${expectancy.total_buckets} buckets` : ""}
+  status={feeds.status("expectancy")}
 >
   {#if !expectancy}
-    <p class="muted">Expectancy unavailable.</p>
+    <StateNote status={feeds.status("expectancy")} noun="expectancy" />
   {:else if expectancy.error}
     <p class="err">{expectancy.error}</p>
   {:else if !expectancy.buckets.length}
@@ -232,9 +232,10 @@
 <Panel
   title="Model routing"
   meta={routing?.coverage ? `${n0(routing.coverage.routed_calls)} calls / ${routing.coverage.days}d` : ""}
+  status={feeds.status("routing")}
 >
   {#if !routing}
-    <p class="muted">Routing telemetry unavailable.</p>
+    <StateNote status={feeds.status("routing")} noun="routing telemetry" />
   {:else if routing.error}
     <p class="err">{routing.error}</p>
   {:else}

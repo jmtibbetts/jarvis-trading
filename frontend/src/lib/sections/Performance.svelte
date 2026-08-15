@@ -4,9 +4,13 @@
   import Pill from "../components/Pill.svelte";
   import LearningPanel from "../components/LearningPanel.svelte";
   import CalibrationPanel from "../components/CalibrationPanel.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type PerformanceAnalytics, type Decision, type BacktestRun, type RMultipleSummary } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
+
+  const feeds = new FeedTracker();
 
   let perf = $state<PerformanceAnalytics | null>(null);
   let decisions = $state<Decision[]>([]);
@@ -16,12 +20,12 @@
 
   async function loadAll() {
     const [p, d, r] = await Promise.all([
-      api.performanceAnalytics(30).catch(() => null),
-      api.decisions(300).catch(() => []),
-      api.rMultiples(200).catch(() => null),
+      feeds.load("perf", () => api.performanceAnalytics(30)),
+      feeds.load("decisions", () => api.decisions(300)),
+      feeds.load("rmult", () => api.rMultiples(200)),
     ]);
     perf = p;
-    decisions = d;
+    decisions = d ?? [];
     rmult = r;
   }
 
@@ -95,8 +99,8 @@
   let btPolling: number | undefined;
 
   async function loadRuns() {
-    const res = await api.backtestList().catch(() => ({ runs: [] }));
-    btRuns = res.runs;
+    const res = await feeds.load("backtests", () => api.backtestList());
+    btRuns = res?.runs ?? btRuns;
   }
 
   async function startBacktest() {
@@ -129,7 +133,7 @@
   function pollRun(runId: string) {
     clearInterval(btPolling);
     btPolling = window.setInterval(async () => {
-      const run = await api.backtestGet(runId).catch(() => null);
+      const run = await feeds.load("backtestRun", () => api.backtestGet(runId));
       if (!run) return;
       if (run.status !== "running") {
         clearInterval(btPolling);
@@ -140,7 +144,7 @@
   }
 
   async function viewRun(runId: string) {
-    btSelected = await api.backtestGet(runId).catch(() => null);
+    btSelected = await feeds.load("backtestRun", () => api.backtestGet(runId));
   }
 
   $effect(() => {
@@ -158,7 +162,7 @@
 
 <div class="grid">
   <div class="span-8">
-    <Panel title="AI Decision Log" meta="{filteredDecisions.length} of {decisions.length}">
+    <Panel title="AI Decision Log" meta="{filteredDecisions.length} of {decisions.length}" status={feeds.status("decisions")}>
       {#snippet children()}
         <div class="decision-toolbar">
           <div class="decision-stats">
@@ -197,7 +201,7 @@
               <div class="drow-time num">{d.created_at?.slice(5, 16).replace("T", " ")}</div>
             </div>
           {:else}
-            <div class="empty">No decisions logged yet</div>
+            <StateNote status={feeds.status("decisions")} noun="decisions" emptyText="No decisions logged yet" />
           {/each}
         </div>
       {/snippet}
@@ -205,7 +209,7 @@
   </div>
 
   <div class="span-4">
-    <Panel title="Performance Analytics" meta="{perf?.period_days ?? 30}d">
+    <Panel title="Performance Analytics" meta="{perf?.period_days ?? 30}d" status={feeds.status("perf")}>
       <div class="stat-list">
         <div class="stat"><span>Sharpe Ratio</span><b class="num">{perf?.sharpe_ratio?.toFixed(2) ?? "—"}</b></div>
         <div class="stat"><span>Max Drawdown</span><b class="num">{perf ? fmtPct(perf.max_drawdown_pct) : "—"}</b></div>
@@ -224,7 +228,7 @@
   </div>
 
   <div class="span-6">
-    <Panel title="R-Multiple Distribution" meta="{rmult?.count ?? 0} closed trades with a stop on record">
+    <Panel title="R-Multiple Distribution" meta="{rmult?.count ?? 0} closed trades with a stop on record" status={feeds.status("rmult")}>
       {#snippet children()}
         {#if rmult && rmult.count}
           <button class="btn tiny outline r-export" onclick={exportRMultiplesCsv}>Export CSV</button>
@@ -249,7 +253,7 @@
             <p class="r-skipped">{rmult.skipped} closed trade{rmult.skipped > 1 ? "s" : ""} skipped — no stop recorded at open.</p>
           {/if}
         {:else}
-          <div class="empty">No closed trades with a recorded stop yet</div>
+          <StateNote status={feeds.status("rmult")} noun="R-multiples" emptyText="No closed trades with a recorded stop yet" />
         {/if}
       {/snippet}
     </Panel>
@@ -297,7 +301,7 @@
                 />
               </button>
             {:else}
-              <div class="empty">No backtests run yet</div>
+              <StateNote status={feeds.status("backtests")} noun="backtests" emptyText="No backtests run yet" />
             {/each}
           </div>
           <div class="bt-result">

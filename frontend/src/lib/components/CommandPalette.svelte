@@ -9,6 +9,8 @@
   let input = $state<HTMLInputElement | undefined>();
   let symbolResults = $state<{ symbol: string; where: string; section: (typeof SECTIONS)[number]["id"] }[]>([]);
   let loadingSymbols = $state(false);
+  /** Sources that failed during the current search, named for the footer. */
+  let searchDegraded = $state<string[]>([]);
 
   type Action = { label: string; hint: string; run: () => void };
 
@@ -46,11 +48,17 @@
     loadingSymbols = true;
     try {
       const upper = q.trim().toUpperCase();
+      // A palette search that silently drops a source returns fewer hits and
+      // says nothing about it — the operator concludes the symbol is not in
+      // the system. `searchDegraded` names which source was missing so a
+      // short result list is never mistaken for a complete one.
+      const missing: string[] = [];
       const [signals, live, paper] = await Promise.all([
-        api.signals("Active", 300).catch(() => []),
-        api.positionsWithSignals().catch(() => null),
-        api.paperSummary().catch(() => null),
+        api.signals("Active", 300).catch(() => { missing.push("active signals"); return []; }),
+        api.positionsWithSignals().catch(() => { missing.push("live positions"); return null; }),
+        api.paperSummary().catch(() => { missing.push("paper book"); return null; }),
       ]);
+      searchDegraded = missing;
       const results: { symbol: string; where: string; section: (typeof SECTIONS)[number]["id"] }[] = [];
       const seen = new Set<string>();
       for (const s of signals) {
@@ -136,6 +144,11 @@
         {:else if loadingSymbols}
           <div class="group-label">Searching…</div>
         {/if}
+        {#if searchDegraded.length}
+          <div class="degraded">
+            Symbol search could not read {searchDegraded.join(", ")} — results may be incomplete.
+          </div>
+        {/if}
 
         <div class="group-label">Actions</div>
         {#each filteredActions as a (a.label)}
@@ -195,6 +208,12 @@
     letter-spacing: 0.06em;
     color: var(--ink-faint);
     padding: 8px 10px 4px;
+  }
+  .degraded {
+    font-size: 10.5px;
+    color: var(--warm);
+    padding: 4px 10px 8px;
+    line-height: 1.4;
   }
   .result {
     width: 100%;

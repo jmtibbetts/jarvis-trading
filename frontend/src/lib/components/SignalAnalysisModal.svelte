@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type SignalAnalysis, type TfAnalysis, type OptionsSummary } from "../api";
+  import { classify } from "../dataState.svelte";
   import Pill from "./Pill.svelte";
   import CandleChart from "./CandleChart.svelte";
   import { toastStore } from "../stores/toast.svelte";
@@ -15,13 +16,16 @@
   let notesDirty = $state(false);
   let options = $state<OptionsSummary | null>(null);
   let optionsLoading = $state(false);
-  let optionsUnavailable = $state(false);
+  // The backend already says WHY (503 "no chain data returned", 403 for an
+  // account without options entitlement). Keeping only a boolean threw that
+  // away and left one guess covering both.
+  let optionsUnavailable = $state<string | null>(null);
 
   async function load() {
     loading = true;
     error = null;
     options = null;
-    optionsUnavailable = false;
+    optionsUnavailable = null;
     try {
       data = await api.signalAnalysis(signalId);
       notesInput = data.signal.notes ?? "";
@@ -41,7 +45,7 @@
         api
           .optionsSummary(data.signal.asset_symbol)
           .then((res) => (options = res))
-          .catch(() => (optionsUnavailable = true))
+          .catch((err) => (optionsUnavailable = classify(err).detail))
           .finally(() => (optionsLoading = false));
       }
     } catch (e) {
@@ -302,7 +306,7 @@
             {/if}
             <p class="options-note">{options.contracts_analyzed} contracts across {options.expirations_covered.length} expirations (next 45 days, ±15% of spot). No open-interest data available from this feed, so unusual-volume/OI signals aren't computed — only what's genuinely in the data.</p>
           {:else if optionsUnavailable}
-            <p class="options-empty">Options data unavailable for {s.asset_symbol} (no chain, or account lacks options market data access).</p>
+            <p class="options-empty">{optionsUnavailable}</p>
           {/if}
         </div>
       {/if}

@@ -2,7 +2,11 @@
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type MorningBrief } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
+
+  const feeds = new FeedTracker();
 
   let brief = $state<MorningBrief | null>(null);
   let windowHours = $state(24);
@@ -10,7 +14,7 @@
 
   async function load() {
     loading = true;
-    brief = await api.morningBrief(windowHours).catch(() => null);
+    brief = await feeds.load("brief", () => api.morningBrief(windowHours));
     loading = false;
   }
 
@@ -260,7 +264,10 @@
       </Panel>
     </div>
   {:else}
-    <p class="muted">brief unavailable — is the API up?</p>
+    <!-- Was a guess dressed as a diagnosis ("is the API up?"). The status
+         knows whether the server answered, what it said, and how many times
+         in a row it has failed. -->
+    <StateNote status={feeds.status("brief")} noun="morning brief" />
   {/if}
 </div>
 

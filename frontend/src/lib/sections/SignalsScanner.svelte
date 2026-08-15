@@ -3,10 +3,14 @@
   import Pill from "../components/Pill.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type Signal, type AnalyzeResult, type ScannerStatus, type TradingPreference, type VerifyResult } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
   import { linkStore } from "../stores/link.svelte";
+
+  const feeds = new FeedTracker();
 
   // ── trade horizon preference ────────────────────────────────────────
   const HORIZON_MODES: ["scalp" | "longer" | "all", string][] = [
@@ -16,7 +20,7 @@
   ];
   let preference = $state<TradingPreference | null>(null);
   async function loadPreference() {
-    preference = await api.tradingPreference().catch(() => null);
+    preference = await feeds.load("preference", () => api.tradingPreference());
   }
   async function setTradeMode(mode: "scalp" | "longer" | "all") {
     try {
@@ -411,7 +415,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   let scannerRunning = $state<Set<string>>(new Set());
 
   async function loadScannerStatus() {
-    scannerStatus = await api.scannerStatus().catch(() => null);
+    scannerStatus = await feeds.load("scannerStatus", () => api.scannerStatus());
   }
 
   async function runScanner(mode: (typeof SCANNER_MODES)[number]["key"]) {

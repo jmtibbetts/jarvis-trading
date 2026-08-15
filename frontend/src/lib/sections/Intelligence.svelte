@@ -7,7 +7,11 @@
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
   import OnChainPanel from "../components/OnChainPanel.svelte";
   import DexDiscoveryPanel from "../components/DexDiscoveryPanel.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse, type InsiderTransaction } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
+
+  const feeds = new FeedTracker();
 
   let {
     view = "world",
@@ -73,7 +77,7 @@
   let feeNotional = $state(10000);
 
   async function loadFees() {
-    fees = await api.feeComparison(feeNotional).catch(() => fees);
+    fees = await feeds.load("fees", () => api.feeComparison(feeNotional));
   }
   let kraken = $state<Awaited<ReturnType<typeof api.krakenVenue>> | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
@@ -129,18 +133,18 @@
   });
 
   async function loadThreats() {
-    threats = await api.threats(60, {
+    threats = (await feeds.load("threats", () => api.threats(60, {
       confirmation: threatConfirm || undefined,
       minReliability: threatMinReliability || undefined,
-    });
+    }))) ?? [];
   }
 
   async function loadNews() {
-    news = await api.news(40, {
+    news = (await feeds.load("news", () => api.news(40, {
       confirmation: newsConfirm || undefined,
       minReliability: newsMinReliability || undefined,
       stale: newsStale === "" ? undefined : newsStale === "stale",
-    });
+    }))) ?? [];
   }
 
   async function loadAll() {
@@ -149,50 +153,61 @@
     // the world/macro/crypto views not paying for it matters, and a popout
     // window polling every 30s only polls its own tab's endpoints.
     const W = view === "world", SM = view === "smartmoney", MA = view === "macro", CD = view === "cryptodesk";
-    const none = <T,>(v: T) => Promise.resolve(v);
+    // A feed this view does not need is left ALONE rather than recorded as
+    // empty — stamping a state on an endpoint we never called would put a
+    // confident "no data" badge on a panel that was simply not asked for.
+    // Skipping returns the tracker's own last-good value rather than reading
+    // the component's $state — reading it here would make this effect depend
+    // on the very variables loadAll writes, and re-fire it on every load.
+    const when = <T,>(need: boolean, key: string, fn: () => Promise<T>) =>
+      need ? feeds.load(key, fn) : Promise.resolve(feeds.lastGood<T>(key));
     const [r, t, n, m, s, st, ex, ic, yc, fr, dp, sq, inst, cg, cga, psy, ipoRes] = await Promise.all([
-      W ? api.regime().catch(() => null) : none(null),
-      W ? api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined }) : none([]),
-      W ? api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" }) : none([]),
-      W ? api.marketFull().catch(() => ({ equities: [], crypto: [], count: 0 })) : none({ equities: [], crypto: [], count: 0 }),
-      W ? api.intelligenceSources().catch(() => []) : none([]),
-      W ? api.intelligenceStatus().catch(() => null) : none(null),
-      W ? api.threatExposure().catch(() => null) : none(null),
-      SM ? api.insiderClusters(14).catch(() => null) : none(null),
-      MA ? api.yieldCurve().catch(() => null) : none(null),
-      MA ? api.macroFred().catch(() => null) : none(null),
-      SM ? api.darkPoolTop("T1", 20).catch(() => null) : none(null),
-      SM ? api.squeezeTop(20, 3).catch(() => null) : none(null),
-      SM ? api.institutionalAccumulation(20).catch(() => null) : none(null),
-      SM ? api.congressTrades(25).catch(() => null) : none(null),
-      SM ? api.congressActivity(12).catch(() => null) : none(null),
-      MA ? api.psychology().catch(() => null) : none(null),
-      SM ? api.ipoPipeline(30).catch(() => null) : none(null),
+      when(W, "regime", () => api.regime()),
+      when(W, "threats", () => api.threats(60, { confirmation: threatConfirm || undefined, minReliability: threatMinReliability || undefined })),
+      when(W, "news", () => api.news(40, { confirmation: newsConfirm || undefined, minReliability: newsMinReliability || undefined, stale: newsStale === "" ? undefined : newsStale === "stale" })),
+      when(W, "market", () => api.marketFull()),
+      when(W, "sources", () => api.intelligenceSources()),
+      when(W, "intelStatus", () => api.intelligenceStatus()),
+      when(W, "exposure", () => api.threatExposure()),
+      when(SM, "insiderClusters", () => api.insiderClusters(14)),
+      when(MA, "yieldCurve", () => api.yieldCurve()),
+      when(MA, "macro", () => api.macroFred()),
+      when(SM, "darkPool", () => api.darkPoolTop("T1", 20)),
+      when(SM, "squeeze", () => api.squeezeTop(20, 3)),
+      when(SM, "institutional", () => api.institutionalAccumulation(20)),
+      when(SM, "congress", () => api.congressTrades(25)),
+      when(SM, "congressActivity", () => api.congressActivity(12)),
+      when(MA, "psychology", () => api.psychology()),
+      when(SM, "ipo", () => api.ipoPipeline(30)),
     ]);
     const [fxR, cgR, wnR, secR] = await Promise.all([
-      MA ? api.fxRates().catch(() => null) : none(null),
-      CD ? api.cryptoMarkets().catch(() => null) : none(null),
-      W || MA ? api.webNews().catch(() => null) : none(null),
-      MA
-        ? Promise.all(["energy", "metals", "index"].map((s) =>
-            fetch(`/api/sector/${s}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
-        : none(null),
+      when(MA, "fx", () => api.fxRates()),
+      when(CD, "cryptoMarkets", () => api.cryptoMarkets()),
+      when(W || MA, "webNews", () => api.webNews()),
+      when(MA, "sectors", () => Promise.all(
+        ["energy", "metals", "index"].map((s) => api.raw<unknown>(`/sector/${s}`)),
+      )),
     ]);
-    fxRates = fxR ?? fxRates;
-    cryptoMarkets = cgR ?? cryptoMarkets;
-    webNews = wnR ?? webNews;
+    fxRates = fxR;
+    cryptoMarkets = cgR;
+    webNews = wnR;
     sectors = secR ? secR.filter(Boolean) : sectors;
     regime = r;
-    threats = t;
-    news = n;
-    equities = m.equities.slice(0, 12);
-    crypto = m.crypto.slice(0, 12);
-    sources = s;
+    threats = t ?? [];
+    news = n ?? [];
+    // marketFull is one payload feeding two tabs; a failure keeps whichever
+    // rows are already on screen rather than emptying both.
+    if (m) {
+      equities = m.equities.slice(0, 12);
+      crypto = m.crypto.slice(0, 12);
+    }
+    sources = s ?? [];
     intelStatus = st;
     exposure = ex;
     insiderClusters = ic;
     if (SM) {
-      api.insiderActivity(undefined, 14, 40).then((rows) => (insiderTxs = rows)).catch(() => {});
+      feeds.load("insiderTxs", () => api.insiderActivity(undefined, 14, 40))
+        .then((rows) => (insiderTxs = rows ?? []));
     }
     yieldCurve = yc;
     macro = fr;
@@ -202,11 +217,12 @@
     congress = cg;
     congressActivity = cga;
     if (CD) {
-      api.krakenVenue().then((r) => (kraken = r)).catch(() => {});
+      feeds.load("kraken", () => api.krakenVenue()).then((r) => (kraken = r));
       loadFees();
     }
     if (SM) {
-      api.congressByOfficial(365, 40).then((r) => (congressOfficials = r)).catch(() => {});
+      feeds.load("congressOfficials", () => api.congressByOfficial(365, 40))
+        .then((r) => (congressOfficials = r));
     }
     psychology = psy;
     ipo = ipoRes;
@@ -271,7 +287,7 @@
 <div class="grid">
   {#if view === "world"}
   <div class="span-4">
-    <Panel title="Market Regime" meta={regime?.spy_trend ?? ""}>
+    <Panel title="Market Regime" meta={regime?.spy_trend ?? ""} status={feeds.status("regime")}>
       {#if regime}
         <div class="regime-label">{regime.label}</div>
         <div class="regime-risk">risk: {regime.risk}</div>
@@ -285,7 +301,7 @@
           </div>
         {/if}
       {:else}
-        <div class="empty">Regime unavailable</div>
+        <StateNote status={feeds.status("regime")} noun="regime" />
       {/if}
     </Panel>
   </div>
@@ -293,7 +309,7 @@
 
   {#if view === "world"}
   <div class="span-8">
-    <Panel title="Threat Map" dotColor="var(--critical)" meta="{threats.length} active" noPad>
+    <Panel title="Threat Map" dotColor="var(--critical)" meta="{threats.length} active" noPad status={feeds.status("threats")}>
       <ThreatMap {threats} />
     </Panel>
   </div>
@@ -301,7 +317,7 @@
 
   {#if view === "world" || view === "macro"}
   <div class="span-12">
-    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : "—"}>
+    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : ""} status={feeds.status("webNews")}>
       {#snippet children()}
         {#if webNews && webNews.items.length}
           <div class="list">
@@ -326,7 +342,7 @@
   {#if view === "macro"}
   <div class="span-12">
     <Panel title="Sector Desk — Positioning & Term Structure"
-           meta={sectors && sectors.length ? "COT · EIA · futures curves — point-in-time, shadow-only" : "—"}>
+           meta={sectors && sectors.length ? "COT · EIA · futures curves — point-in-time, shadow-only" : ""}>
       {#snippet children()}
         {#if sectors && sectors.length}
           {#each sectors as sec (sec.sector)}
@@ -391,7 +407,7 @@
 
   {#if view === "macro"}
   <div class="span-12">
-    <Panel title="FX Rates — Live Interbank" meta={fxRates ? `${fxRates.pairs.length} pairs · AllRatesToday` : "—"}>
+    <Panel title="FX Rates — Live Interbank" meta={fxRates ? `${fxRates.pairs.length} pairs · AllRatesToday` : ""} status={feeds.status("fx")}>
       {#snippet children()}
         {#if fxRates && fxRates.pairs.length}
           <div class="fx-grid">
@@ -400,7 +416,7 @@
                 <div class="fx-head">
                   <span class="fx-pair">{p.pair}</span>
                   <span class="fx-chg num {p.change_pct != null && p.change_pct >= 0 ? 'pl-up' : 'pl-down'}">
-                    {p.change_pct != null ? `${p.change_pct >= 0 ? "+" : ""}${p.change_pct.toFixed(2)}% 30d` : "—"}
+                    {p.change_pct != null ? `${p.change_pct >= 0 ? "+" : ""}${p.change_pct.toFixed(2)}% 30d` : ""}
                   </span>
                 </div>
                 <div class="fx-rate num">{p.rate ?? "—"}</div>
@@ -413,7 +429,7 @@
           </div>
           <p class="insider-note">Live interbank mid rates with 30 days of daily closes — the same feed injected into forex signal generation. Refreshes every 15 minutes.</p>
         {:else}
-          <div class="empty">FX rates unavailable — needs ALLRATES_API_KEY</div>
+          <StateNote status={feeds.status("fx")} noun="FX rates" />
         {/if}
       {/snippet}
     </Panel>
@@ -422,7 +438,7 @@
 
   {#if view === "macro"}
   <div class="span-12">
-    <Panel title="Treasury Yield Curve" meta={yieldCurve ? `as of ${yieldCurve.latest.date}` : "—"}>
+    <Panel title="Treasury Yield Curve" meta={yieldCurve ? `as of ${yieldCurve.latest.date}` : ""} status={feeds.status("yieldCurve")}>
       {#snippet children()}
         {#if yieldCurve}
           <div class="ih-strip">
@@ -441,13 +457,13 @@
             <div class="ih-stat">
               <span class="ih-label">2s10s spread</span>
               <span class="ih-val {yieldCurve.latest["2s10s_inverted"] ? 'bad' : 'good'}">
-                {yieldCurve.latest.spread_2s10s != null ? `${yieldCurve.latest.spread_2s10s >= 0 ? "+" : ""}${yieldCurve.latest.spread_2s10s.toFixed(2)}` : "—"}
+                {yieldCurve.latest.spread_2s10s != null ? `${yieldCurve.latest.spread_2s10s >= 0 ? "+" : ""}${yieldCurve.latest.spread_2s10s.toFixed(2)}` : ""}
               </span>
             </div>
             <div class="ih-stat">
               <span class="ih-label">3m10y spread</span>
               <span class="ih-val {yieldCurve.latest["3m10y_inverted"] ? 'bad' : 'good'}">
-                {yieldCurve.latest.spread_3m10y != null ? `${yieldCurve.latest.spread_3m10y >= 0 ? "+" : ""}${yieldCurve.latest.spread_3m10y.toFixed(2)}` : "—"}
+                {yieldCurve.latest.spread_3m10y != null ? `${yieldCurve.latest.spread_3m10y >= 0 ? "+" : ""}${yieldCurve.latest.spread_3m10y.toFixed(2)}` : ""}
               </span>
             </div>
             <div class="ih-stat">
@@ -459,7 +475,7 @@
           </div>
           <p class="insider-note">US Treasury daily yield curve (free, official Treasury.gov data). An inverted curve — short-term yields above long-term — has historically preceded recessions, though timing and lead time vary widely.</p>
         {:else}
-          <div class="empty">Yield curve data unavailable</div>
+          <StateNote status={feeds.status("yieldCurve")} noun="yield curve" />
         {/if}
       {/snippet}
     </Panel>
@@ -468,7 +484,7 @@
 
   {#if view === "macro"}
   <div class="span-12">
-    <Panel title="Macro Indicators" meta={macro?.configured ? "FRED · St. Louis Fed" : "not configured"}>
+    <Panel title="Macro Indicators" meta={macro?.configured ? "FRED · St. Louis Fed" : "not configured"} status={feeds.status("macro")}>
       {#snippet children()}
         {#if macro?.configured && macro.readings}
           <div class="macro-grid">
@@ -489,7 +505,7 @@
             Not configured — add a free FRED API key (FRED_API_KEY in .env, instant signup at fred.stlouisfed.org) to enable CPI, unemployment, nonfarm payrolls, GDP, and Fed funds rate tracking.
           </div>
         {:else}
-          <div class="empty">Macro data unavailable</div>
+          <StateNote status={feeds.status("macro")} noun="macro data" />
         {/if}
       {/snippet}
     </Panel>
@@ -498,7 +514,7 @@
 
   {#if view === "world"}
   <div class="span-12">
-    <Panel title="Intelligence Ingestion Health" meta={intelStatus ? intelStatus.status : "—"}>
+    <Panel title="Intelligence Ingestion Health" meta={intelStatus ? intelStatus.status : ""} status={feeds.status("intelStatus")}>
       {#snippet children()}
         {#if intelStatus}
           <div class="ih-strip">
@@ -557,7 +573,7 @@
             </table>
           {/if}
         {:else}
-          <div class="empty">Ingestion status unavailable</div>
+          <StateNote status={feeds.status("intelStatus")} noun="ingestion status" />
         {/if}
       {/snippet}
     </Panel>
@@ -598,7 +614,7 @@
 
   {#if view === "world"}
   <div class="span-6">
-    <Panel title="Position Exposure to Active Threats" meta={exposure ? `${exposure.symbols_exposed}/${exposure.symbols_checked} symbols` : "—"}>
+    <Panel title="Position Exposure to Active Threats" meta={exposure ? `${exposure.symbols_exposed}/${exposure.symbols_checked} symbols` : ""} status={feeds.status("exposure")}>
       {#snippet children()}
         {#if exposure && exposure.symbols_exposed}
           <div class="list">
@@ -615,7 +631,7 @@
         {:else if exposure}
           <div class="empty">No open position is directly named in an active threat</div>
         {:else}
-          <div class="empty">Exposure check unavailable</div>
+          <StateNote status={feeds.status("exposure")} noun="exposure check" />
         {/if}
       {/snippet}
     </Panel>
@@ -624,7 +640,7 @@
 
   {#if view === "smartmoney"}
   <div class="span-12">
-    <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d · ${insiderTxs.length} recent filings` : "—"}>
+    <Panel title="Insider Activity" meta={insiderClusters ? `${insiderClusters.transactions_analyzed} open-market buys/sells, last ${insiderClusters.window_days}d · ${insiderTxs.length} recent filings` : ""} status={feeds.status("insiderClusters")}>
       {#snippet children()}
         <div class="insider-cols">
           <div class="insider-col">
@@ -654,7 +670,7 @@
             {:else if insiderClusters}
               <div class="empty">No notable clusters in the last {insiderClusters.window_days} days</div>
             {:else}
-              <div class="empty">Insider activity unavailable</div>
+              <StateNote status={feeds.status("insiderClusters")} noun="insider activity" />
             {/if}
           </div>
 
@@ -689,7 +705,7 @@
                             <td class="dim" title={t.owner_title ?? ""} colspan="2">{(t.owner_name ?? "").slice(0, 24)}{t.is_officer ? " • officer" : t.is_director ? " • director" : ""}</td>
                             <td class={t.transaction_code === "P" ? "pl-up" : t.transaction_code === "S" ? "pl-down" : "dim"} colspan="1">{t.transaction_label}</td>
                             <td class="num">{fmtUsdShort(t.total_value)}</td>
-                            <td class="num dim">{t.price_per_share != null ? `$${t.price_per_share.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
+                            <td class="num dim">{t.price_per_share != null ? `$${t.price_per_share.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : ""}</td>
                             <td class="num dim">
                               {t.transaction_date ?? "—"}
                               {#if reportDelayDays(t.transaction_date, t.filed_at) != null}
@@ -714,7 +730,7 @@
 
   {#if view === "smartmoney"}
   <div class="span-12">
-    <Panel title="Dark Pool / Off-Exchange (ATS) Activity" meta={darkPoolTop ? `week of ${darkPoolTop.week_start} · ${darkPoolTop.tier}` : "—"}>
+    <Panel title="Dark Pool / Off-Exchange (ATS) Activity" meta={darkPoolTop ? `week of ${darkPoolTop.week_start} · ${darkPoolTop.tier}` : ""} status={feeds.status("darkPool")}>
       {#snippet children()}
         {#if darkPoolTop && darkPoolTop.symbols.length}
           <div class="dp-banner">⚠ Delayed, weekly-aggregated FINRA data — published ~2-4 weeks after the trading week, not real-time order flow. Click a row for the per-venue breakdown.</div>
@@ -734,9 +750,9 @@
                   <td class="sym">{expandedDarkPoolSymbol === s.symbol ? "▾" : "▸"} {s.symbol}</td>
                   <td class="num">{s.shares?.toLocaleString() ?? "—"}</td>
                   <td class="num">{s.trade_count?.toLocaleString() ?? "—"}</td>
-                  <td class="num">{s.notional != null ? `$${Math.round(s.notional / 1_000_000).toLocaleString()}M` : "—"}</td>
+                  <td class="num">{s.notional != null ? `$${Math.round(s.notional / 1_000_000).toLocaleString()}M` : ""}</td>
                   <td class="num {s.wow_pct == null ? '' : s.wow_pct >= 0 ? 'pl-up' : 'pl-down'}">
-                    {s.wow_pct != null ? `${s.wow_pct >= 0 ? "+" : ""}${s.wow_pct}%` : "—"}
+                    {s.wow_pct != null ? `${s.wow_pct >= 0 ? "+" : ""}${s.wow_pct}%` : ""}
                   </td>
                   <td class="num small">{s.published_at ?? "—"} ({s.reporting_delay_days ?? "?"}d delay)</td>
                 </tr>
@@ -765,7 +781,7 @@
             </tbody>
           </table>
         {:else}
-          <div class="empty">Dark pool / ATS data unavailable</div>
+          <StateNote status={feeds.status("darkPool")} noun="dark pool / ATS data" />
         {/if}
       {/snippet}
     </Panel>
@@ -778,7 +794,7 @@
       title="Market Psychology Index"
       meta={psychology?.score != null
         ? `${psychology.components_available}/${psychology.components_possible} components`
-        : "—"}
+        : ""}
     >
       {#snippet children()}
         {#if psychology && psychology.score != null}
@@ -810,7 +826,7 @@
               {#each Object.values(psychology.markets) as m (m.market)}
                 <div class="psy-mkt">
                   <div class="psy-mkt-name">{m.market}</div>
-                  <div class="psy-mkt-score num">{m.score != null ? m.score.toFixed(0) : "—"}</div>
+                  <div class="psy-mkt-score num">{m.score != null ? m.score.toFixed(0) : ""}</div>
                   <div class="psy-mkt-label {m.score == null ? '' : m.score >= 60 ? 'pl-up' : m.score < 40 ? 'pl-down' : ''}">
                     {(m.label ?? "no data").replaceAll("_", " ").toLowerCase()}
                   </div>
@@ -852,7 +868,7 @@
   <div class="span-12">
     <Panel
       title="Congressional Trade Disclosures"
-      meta={congress ? `${congress.filings_processed} filings processed · House` : "—"}
+      meta={congress ? `${congress.filings_processed} filings processed · House` : ""}
     >
       {#snippet children()}
         {#if congress && congress.trades.length}
@@ -925,7 +941,7 @@
       title="IPO Pipeline"
       meta={ipo
         ? `${ipo.stage_counts.filed} filed · ${ipo.stage_counts.amended} amended · ${ipo.stage_counts.priced} priced`
-        : "—"}
+        : ""}
     >
       {#snippet children()}
         {#if ipo && ipo.pipeline.length}
@@ -948,9 +964,9 @@
                     />
                   </td>
                   <td class="sym">{r.ticker ?? "—"}</td>
-                  <td class="num">{r.offer_price != null ? `$${r.offer_price}` : "—"}</td>
-                  <td class="num">{r.shares_offered != null ? r.shares_offered.toLocaleString() : "—"}</td>
-                  <td class="num">{r.total_offering_usd != null ? `$${Math.round(r.total_offering_usd / 1_000_000)}M` : "—"}</td>
+                  <td class="num">{r.offer_price != null ? `$${r.offer_price}` : ""}</td>
+                  <td class="num">{r.shares_offered != null ? r.shares_offered.toLocaleString() : ""}</td>
+                  <td class="num">{r.total_offering_usd != null ? `$${Math.round(r.total_offering_usd / 1_000_000)}M` : ""}</td>
                   <td class="num">{r.latest_filed_at?.slice(0, 10) ?? "—"}</td>
                 </tr>
               {/each}
@@ -969,7 +985,7 @@
 
   {#if view === "smartmoney"}
   <div class="span-12">
-    <Panel title="Trades by Official" meta={congressOfficials ? `${congressOfficials.officials.length} officials · 365d` : "—"}>
+    <Panel title="Trades by Official" meta={congressOfficials ? `${congressOfficials.officials.length} officials · 365d` : ""} status={feeds.status("congressOfficials")}>
       {#snippet children()}
         {#if congressOfficials && congressOfficials.officials.length}
           <div class="cap-h">
@@ -1018,7 +1034,7 @@
   <div class="span-12">
     <Panel
       title="Institutional Ownership (13F)"
-      meta={institutional ? `Q ending ${institutional.current_period} · ${institutional.tickers.length} tickers` : "—"}
+      meta={institutional ? `Q ending ${institutional.current_period} · ${institutional.tickers.length} tickers` : ""}
     >
       {#snippet children()}
         {#if institutional && institutional.tickers.length}
@@ -1049,7 +1065,7 @@
                     {#if t.insufficient_history}
                       <span class="dim">no prior quarter</span>
                     {:else if t.share_change_pct == null}
-                      {t.status === "newly_reported" ? "newly reported" : "—"}
+                      {t.status === "newly_reported" ? "newly reported" : ""}
                     {:else}
                       {t.share_change_pct >= 0 ? "+" : ""}{t.share_change_pct.toFixed(1)}%
                     {/if}
@@ -1073,7 +1089,7 @@
   <div class="span-12">
     <Panel
       title="Short Interest / Squeeze Fuel"
-      meta={squeeze ? `settled ${squeeze.settlement_date} · ${squeeze.qualified_count.toLocaleString()} qualified` : "—"}
+      meta={squeeze ? `settled ${squeeze.settlement_date} · ${squeeze.qualified_count.toLocaleString()} qualified` : ""}
     >
       {#snippet children()}
         {#if squeeze && squeeze.candidates.length}
@@ -1102,7 +1118,7 @@
                   <td class="num">{c.days_to_cover?.toFixed(2) ?? "—"}</td>
                   <td class="num">{c.current_short_shares?.toLocaleString() ?? "—"}</td>
                   <td class="num {c.change_percent == null ? '' : c.change_percent >= 0 ? 'pl-up' : 'pl-down'}">
-                    {c.change_percent != null ? `${c.change_percent >= 0 ? "+" : ""}${c.change_percent.toFixed(1)}%` : "—"}
+                    {c.change_percent != null ? `${c.change_percent >= 0 ? "+" : ""}${c.change_percent.toFixed(1)}%` : ""}
                   </td>
                   <td class="num"><b>{c.squeeze.squeeze_score?.toFixed(1) ?? "—"}</b></td>
                 </tr>
@@ -1150,7 +1166,7 @@
   <div class="span-12">
     <Panel
       title="Execution Cost by Venue"
-      meta={fees ? `${fees.region} pricing · cheapest: ${fees.cheapest}` : "—"}
+      meta={fees ? `${fees.region} pricing · cheapest: ${fees.cheapest}` : ""}
     >
       <div class="fee-size">
         <span class="dim">Round-trip cost on a</span>
@@ -1181,7 +1197,7 @@
         </table>
         <div class="fee-foot dim">{fees.note}</div>
       {:else}
-        <div class="empty">Loading fee comparison…</div>
+        <StateNote status={feeds.status("fees")} noun="fee comparison" />
       {/if}
     </Panel>
   </div>
@@ -1189,7 +1205,7 @@
     <Panel
       title="Kraken Venue"
       dotColor={kraken?.stream.connected ? "var(--good)" : "var(--warm)"}
-      meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : "—"}
+      meta={kraken ? `${kraken.stream.connected ? "streaming" : "offline"} · practice priced at ${kraken.paper_venue}` : ""}
     >
       {#if kraken}
         <div class="kv-head">
@@ -1219,9 +1235,9 @@
               {#each kraken.stream.symbols as r (r.symbol)}
                 <tr>
                   <td class="sym">{r.symbol}</td>
-                  <td class="num">{r.spread_pct != null ? `${r.spread_pct}%` : "—"}</td>
+                  <td class="num">{r.spread_pct != null ? `${r.spread_pct}%` : ""}</td>
                   <td class="num {(r.flow_imbalance ?? 0) > 0.15 ? 'pl-up' : (r.flow_imbalance ?? 0) < -0.15 ? 'pl-down' : 'dim'}">
-                    {r.flow_imbalance != null ? (r.flow_imbalance >= 0 ? "+" : "") + r.flow_imbalance.toFixed(2) : "—"}
+                    {r.flow_imbalance != null ? (r.flow_imbalance >= 0 ? "+" : "") + r.flow_imbalance.toFixed(2) : ""}
                   </td>
                   <td class="num dim">{r.prints}</td>
                   <td class="num dim">{r.buy_count}B / {r.sell_count}S</td>
@@ -1241,13 +1257,13 @@
           </div>
         {/if}
       {:else}
-        <div class="empty">Loading venue data…</div>
+        <StateNote status={feeds.status("kraken")} noun="venue data" />
       {/if}
     </Panel>
   </div>
 
   <div class="span-12">
-    <Panel title="Market Structure" meta={cryptoMarkets ? `${cryptoMarkets.coins.length} coins · CoinGecko live` : "—"}>
+    <Panel title="Market Structure" meta={cryptoMarkets ? `${cryptoMarkets.coins.length} coins · CoinGecko live` : ""} status={feeds.status("cryptoMarkets")}>
       {#snippet children()}
         {#if cryptoMarkets && cryptoMarkets.coins.length}
           <div class="wl-scroll cap-h">
@@ -1260,9 +1276,9 @@
                   <tr>
                     <td class="sym">{c0.symbol.toUpperCase()}</td>
                     <td class="num">${c0.price < 1 ? c0.price.toPrecision(4) : c0.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                    <td class="num {`${(c0.chg_1h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_1h != null ? `${c0.chg_1h >= 0 ? "+" : ""}${c0.chg_1h.toFixed(1)}%` : "—"}</td>
-                    <td class="num {`${(c0.chg_24h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_24h != null ? `${c0.chg_24h >= 0 ? "+" : ""}${c0.chg_24h.toFixed(1)}%` : "—"}</td>
-                    <td class="num {`${(c0.chg_7d ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_7d != null ? `${c0.chg_7d >= 0 ? "+" : ""}${c0.chg_7d.toFixed(1)}%` : "—"}</td>
+                    <td class="num {`${(c0.chg_1h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_1h != null ? `${c0.chg_1h >= 0 ? "+" : ""}${c0.chg_1h.toFixed(1)}%` : ""}</td>
+                    <td class="num {`${(c0.chg_24h ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_24h != null ? `${c0.chg_24h >= 0 ? "+" : ""}${c0.chg_24h.toFixed(1)}%` : ""}</td>
+                    <td class="num {`${(c0.chg_7d ?? 0) >= 0 ? 'pl-up' : 'pl-down'}`}">{c0.chg_7d != null ? `${c0.chg_7d >= 0 ? "+" : ""}${c0.chg_7d.toFixed(1)}%` : ""}</td>
                     <td class="num dim">${(c0.volume_24h / 1e9).toFixed(2)}B</td>
                     <td class="num dim">${(c0.market_cap / 1e9).toFixed(1)}B</td>
                     <td class="num">
@@ -1278,7 +1294,7 @@
           </div>
           <p class="insider-note">Live CoinGecko market data (same source Deep Verify feeds the LLM). "From ATH" shows how far below the all-time high each coin trades. Refreshes every 5 minutes.</p>
         {:else}
-          <div class="empty">CoinGecko market data unavailable</div>
+          <StateNote status={feeds.status("cryptoMarkets")} noun="CoinGecko market data" />
         {/if}
       {/snippet}
     </Panel>
@@ -1319,7 +1335,7 @@
 
   {#if view === "world"}
   <div class="span-6">
-    <Panel title="Active Threats" meta="{threats.length} active">
+    <Panel title="Active Threats" meta="{threats.length} active" status={feeds.status("threats")}>
       {#snippet children()}
         <div class="filters">
           <select bind:value={threatConfirm} onchange={loadThreats}>
@@ -1365,7 +1381,7 @@
               </div>
             </div>
           {:else}
-            <div class="empty">No active threats</div>
+            <StateNote status={feeds.status("threats")} noun="threats" emptyText="No active threats" />
           {/each}
         </div>
       {/snippet}
@@ -1375,7 +1391,7 @@
 
   {#if view === "world"}
   <div class="span-6">
-    <Panel title="News" meta="{news.length} items">
+    <Panel title="News" meta="{news.length} items" status={feeds.status("news")}>
       {#snippet children()}
         <div class="filters">
           <select bind:value={newsConfirm} onchange={loadNews}>
@@ -1417,7 +1433,7 @@
               </div>
             </div>
           {:else}
-            <div class="empty">No recent news</div>
+            <StateNote status={feeds.status("news")} noun="news" emptyText="No recent news" />
           {/each}
         </div>
       {/snippet}
@@ -1427,7 +1443,7 @@
 
   {#if view === "world"}
   <div class="span-12">
-    <Panel title="Market Watchlist" meta="{marketTab === 'equities' ? equities.length : crypto.length} shown">
+    <Panel title="Market Watchlist" meta="{marketTab === 'equities' ? equities.length : crypto.length} shown" status={feeds.status("market")}>
       {#snippet children()}
         <div class="mtabs">
           <button class="mtab" class:on={marketTab === "equities"} onclick={() => (marketTab = "equities")}>Equities</button>

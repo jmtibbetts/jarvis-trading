@@ -5,7 +5,9 @@
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer, type PsychologyIndex } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import { wsStore } from "../stores/ws.svelte";
   import { linkStore } from "../stores/link.svelte";
   import { sectionStore } from "../stores/section.svelte";
@@ -25,8 +27,10 @@
   let focusBusy = $state(false);
   let expandedFocus = $state<string | null>(null);
 
+  const feeds = new FeedTracker();
+
   async function loadFocus() {
-    focus = await api.focusList().catch(() => focus);
+    focus = await feeds.load("focus", () => api.focusList());
   }
 
   // ── On-demand focus scan, per coin ──────────────────────────────────
@@ -169,7 +173,7 @@
 
   async function setEquityRange(hours: number) {
     equityHours = hours;
-    equity = await api.equity(hours).catch(() => equity);
+    equity = (await feeds.load("equity", () => api.equity(hours))) ?? [];
   }
   let jobs = $state<JobStatusMap>({});
   let regime = $state<Regime | null>(null);
@@ -183,57 +187,67 @@
   let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
   let webNews = $state<Awaited<ReturnType<typeof api.webNews>> | null>(null);
   let postmortems = $state<{ window_days: number; total_failures: number; by_reason: Record<string, number> } | null>(null);
-  let loadError = $state<string | null>(null);
+  // Human names for the feed keys, so the degraded-feeds banner reads like a
+  // sentence rather than like variable names.
+  const FEED_LABELS: Record<string, string> = {
+    signals: "Active signals", threats: "Threat intelligence", positions: "Open positions",
+    equity: "Equity curve", jobs: "Job status", regime: "Regime", performance: "Performance",
+    signalPerf: "Signal performance", news: "News", opportunities: "Opportunities",
+    catalysts: "Catalyst calendar", watchlist: "Watchlist", psychology: "Psychology index",
+    fx: "FX rates", cryptoMarkets: "Crypto markets", webNews: "Web pulse",
+    postmortems: "Learning loop", focus: "Focus list",
+  };
+  const troubled = $derived(feeds.troubled);
 
+  // Every feed is tracked and independent. The old shape wrapped the whole
+  // Promise.all in one try/catch with four uncaught calls inside it, so a
+  // single failing endpoint threw away twelve good responses and blanked the
+  // command centre behind one error string — while the nine `.catch(() =>
+  // null)` calls beside them failed silently and rendered as "nothing here".
   async function loadAll() {
-    try {
-      const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes, psyRes] = await Promise.all([
-        api.signals("Active", 8),
-        api.threats(8),
-        api.positions().catch(() => null), // Alpaca may be unreachable/unconfigured — degrade gracefully
-        api.equity(equityHours),
-        api.jobStatus(),
-        api.regime().catch(() => null),
-        api.performanceAnalytics(30).catch(() => null),
-        fetch("/api/signals/performance").then((r) => r.json()).catch(() => null),
-        api.news(12).catch(() => []),
-        api.opportunitiesRanked(8).catch(() => []),
-        api.catalystCalendar().catch(() => null),
-        api.enrichedWatchlist(25).catch(() => null),
-        api.psychology().catch(() => null),
-      ]);
-      Promise.all([
-        api.fxRates().catch(() => null),
-        api.cryptoMarkets().catch(() => null),
-        api.webNews().catch(() => null),
-        fetch("/api/learning/postmortems?days=30").then((r) => r.json()).catch(() => null),
-        api.focusList().catch(() => null),
-      ]).then(([fx, cg, wn, pm, fc]) => {
-        fxRates = fx ?? fxRates;
-        cryptoMarkets = cg ?? cryptoMarkets;
-        webNews = wn ?? webNews;
-        postmortems = pm ?? postmortems;
-        focus = fc ?? focus;
-      });
-      signals = sigRes.sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
-      opportunities = oppRes;
-      catalysts = catRes;
-      watchlist = wlRes;
-      threats = threatRes;
-      positionsResp = posRes;
-      equity = eqRes;
-      jobs = jobRes;
-      regime = regimeRes;
-      sharpe = perfRes?.sharpe_ratio ?? null;
-      maxDrawdown = perfRes?.max_drawdown_pct ?? null;
-      winRate = sigPerfRes?.summary?.hit_rate ?? null;
-      profitFactor = sigPerfRes?.summary?.profit_factor ?? null;
-      news = newsRes;
-      psychology = psyRes;
-      loadError = null;
-    } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
-    }
+    const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes, psyRes] = await Promise.all([
+      feeds.load("signals", () => api.signals("Active", 8)),
+      feeds.load("threats", () => api.threats(8)),
+      feeds.load("positions", () => api.positions()),
+      feeds.load("equity", () => api.equity(equityHours)),
+      feeds.load("jobs", () => api.jobStatus()),
+      feeds.load("regime", () => api.regime()),
+      feeds.load("performance", () => api.performanceAnalytics(30)),
+      feeds.load("signalPerf", () => api.raw<{ summary?: { hit_rate?: number; profit_factor?: number } }>("/signals/performance")),
+      feeds.load("news", () => api.news(12)),
+      feeds.load("opportunities", () => api.opportunitiesRanked(8)),
+      feeds.load("catalysts", () => api.catalystCalendar()),
+      feeds.load("watchlist", () => api.enrichedWatchlist(25)),
+      feeds.load("psychology", () => api.psychology()),
+    ]);
+    Promise.all([
+      feeds.load("fx", () => api.fxRates()),
+      feeds.load("cryptoMarkets", () => api.cryptoMarkets()),
+      feeds.load("webNews", () => api.webNews()),
+      feeds.load("postmortems", () => api.raw<{ window_days: number; total_failures: number; by_reason: Record<string, number> }>("/learning/postmortems?days=30")),
+      feeds.load("focus", () => api.focusList()),
+    ]).then(([fx, cg, wn, pm, fc]) => {
+      fxRates = fx;
+      cryptoMarkets = cg;
+      webNews = wn;
+      postmortems = pm;
+      focus = fc;
+    });
+    signals = (sigRes ?? []).slice().sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
+    opportunities = oppRes ?? [];
+    catalysts = catRes;
+    watchlist = wlRes;
+    threats = threatRes ?? [];
+    positionsResp = posRes;
+    equity = eqRes ?? [];
+    jobs = jobRes ?? {};
+    regime = regimeRes;
+    sharpe = perfRes?.sharpe_ratio ?? null;
+    maxDrawdown = perfRes?.max_drawdown_pct ?? null;
+    winRate = sigPerfRes?.summary?.hit_rate ?? null;
+    profitFactor = sigPerfRes?.summary?.profit_factor ?? null;
+    news = newsRes ?? [];
+    psychology = psyRes;
   }
 
   async function askAnalyst() {
@@ -300,8 +314,13 @@
   </div>
 </div>
 
-{#if loadError}
-  <div class="err">Some data failed to load: {loadError}</div>
+{#if troubled.length}
+  <div class="err">
+    <b>{troubled.length} feed{troubled.length === 1 ? "" : "s"} not current:</b>
+    {#each troubled as k (k)}
+      <span class="feed-err">{FEED_LABELS[k] ?? k} — {feeds.status(k).detail}</span>
+    {/each}
+  </div>
 {/if}
 
 <div class="grid">
@@ -336,12 +355,12 @@
   </div>
 
   <div class="span-8">
-    <Panel title="Equity Curve" meta="{equity.length} snapshots">
+    <Panel title="Equity Curve" meta="{equity.length} snapshots" status={feeds.status("equity")}>
       <EquityChart points={equity} rangeHours={equityHours} onRange={setEquityRange} />
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open">
+    <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open" status={feeds.status("positions")}>
       {#if positionsResp && positionsResp.positions.length}
         <div class="pos-scroll">
           <table class="pos">
@@ -360,12 +379,12 @@
           </table>
         </div>
       {:else}
-        <div class="empty">No open positions</div>
+        <StateNote status={feeds.status("positions")} noun="positions" emptyText="No open positions" />
       {/if}
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : "—"}>
+    <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : ""} status={feeds.status("cryptoMarkets")}>
       <div class="movers">
         <div class="mv-col">
           <div class="mv-head">CRYPTO — BIGGEST 24H MOVES</div>
@@ -399,7 +418,7 @@
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : "—"}>
+    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : ""} status={feeds.status("webNews")}>
       {#if webNews && webNews.items.length}
         <div class="pulse">
           {#each webNews.items.slice(0, 5) as it, i (i)}
@@ -416,7 +435,7 @@
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Learning Loop" meta={postmortems ? `${postmortems.total_failures} failures analyzed · ${postmortems.window_days}d` : "—"}>
+    <Panel title="Learning Loop" meta={postmortems ? `${postmortems.total_failures} failures analyzed · ${postmortems.window_days}d` : ""} status={feeds.status("postmortems")}>
       {#if failureReasons.length}
         {#each failureReasons as [reason, count] (reason)}
           <div class="fail-row">
@@ -427,12 +446,12 @@
         {/each}
         <div class="pulse-note dim">Why signals died, classified deterministically — feeds the scoring penalty so repeated failure patterns get downranked.</div>
       {:else}
-        <div class="empty">No failures recorded in this window</div>
+        <StateNote status={feeds.status("postmortems")} noun="postmortems" emptyText="No failures recorded in this window" />
       {/if}
     </Panel>
   </div>
   <div class="span-7">
-    <Panel title="Active Signals" meta="top {signals.length} by score">
+    <Panel title="Active Signals" meta="top {signals.length} by score" status={feeds.status("signals")}>
       <div class="sig-list">
         {#each signals as sig (sig.id)}
           <div
@@ -456,13 +475,13 @@
             </div>
           </div>
         {:else}
-          <div class="empty">No active signals right now</div>
+          <StateNote status={feeds.status("signals")} noun="active signals" emptyText="No active signals right now" />
         {/each}
       </div>
     </Panel>
   </div>
   <div class="span-5">
-    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active · map on Intelligence tab">
+    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active · map on Intelligence tab" status={feeds.status("threats")}>
       {#if threats.length}
         <div class="threat-list">
           {#each threats.slice(0, 6) as t (t.id)}
@@ -476,12 +495,12 @@
           {/each}
         </div>
       {:else}
-        <div class="empty">No active threats</div>
+        <StateNote status={feeds.status("threats")} noun="threats" emptyText="No active threats" />
       {/if}
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked">
+    <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked" status={feeds.status("opportunities")}>
       <div class="sig-list cap-h">
         {#each opportunities as opp (opp.signal_id)}
           <div
@@ -551,7 +570,7 @@
             </div>
           </div>
         {:else}
-          <div class="empty">No ranked opportunities right now</div>
+          <StateNote status={feeds.status("opportunities")} noun="opportunities" emptyText="No ranked opportunities right now" />
         {/each}
       </div>
     </Panel>
@@ -650,7 +669,7 @@
     </Panel>
   </div>
   <div class="span-8">
-    <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : "—"}>
+    <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : ""} status={feeds.status("watchlist")}>
       <form
         class="wl-add"
         onsubmit={(e) => {
@@ -709,7 +728,7 @@
         </div>
         <div class="wl-note">{watchlist.note}</div>
       {:else}
-        <div class="empty">Watchlist unavailable</div>
+        <StateNote status={feeds.status("watchlist")} noun="watchlist" emptyText="No symbols on the watchlist" />
       {/if}
     </Panel>
   </div>
@@ -749,7 +768,7 @@
     </Panel>
   </div>
   <div class="span-4">
-    <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : "—"}>
+    <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : ""} status={feeds.status("catalysts")}>
       {#if catalysts && catalysts.events.length}
         <div class="cat-list">
           {#each catalysts.events.slice(0, 9) as e (e.type + e.date + (e.title ?? ""))}
@@ -767,7 +786,7 @@
           {/each}
         </div>
       {:else}
-        <div class="empty">No upcoming catalysts assembled</div>
+        <StateNote status={feeds.status("catalysts")} noun="catalysts" emptyText="No upcoming catalysts assembled" />
       {/if}
     </Panel>
   </div>
@@ -820,6 +839,14 @@
     border-radius: 8px;
     font-size: 12px;
     margin-bottom: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    align-items: baseline;
+  }
+  .feed-err {
+    color: var(--ink-dim);
+    font-size: 11.5px;
   }
   .grid {
     display: grid;

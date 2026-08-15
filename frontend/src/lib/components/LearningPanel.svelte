@@ -13,7 +13,11 @@
     type RegimeStat,
     type Lesson,
   } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
+  import StateNote from "./StateNote.svelte";
   import { toastStore } from "../stores/toast.svelte";
+
+  const feeds = new FeedTracker();
 
   let mode = $state<"all" | "live" | "paper">("all");
   let summary = $state<LearningFullSummary | null>(null);
@@ -35,24 +39,24 @@
 
   async function loadAll() {
     const [s, o, a, p, r, l, cal, ge, v, sb, pr] = await Promise.all([
-      api.learningSummary(mode).catch(() => null),
-      api.learningOutcomes(mode, 300).catch(() => []),
-      api.learningAccuracy().catch(() => []),
-      api.learningPatterns().catch(() => []),
-      api.learningRegimes().catch(() => []),
-      api.learningLessons(30).catch(() => []),
-      api.calibration().catch(() => null),
-      fetch("/api/gate-experiment").then(r => r.ok ? r.json() : null).catch(() => null),
-      api.scoreVariants().catch(() => null),
-      api.selectionBias().catch(() => null),
-      fetch("/api/promotion/status").then(r => r.ok ? r.json() : null).catch(() => null),
+      feeds.load("summary", () => api.learningSummary(mode)),
+      feeds.load("outcomes", () => api.learningOutcomes(mode, 300)),
+      feeds.load("accuracy", () => api.learningAccuracy()),
+      feeds.load("patterns", () => api.learningPatterns()),
+      feeds.load("regimes", () => api.learningRegimes()),
+      feeds.load("lessons", () => api.learningLessons(30)),
+      feeds.load("calibration", () => api.calibration()),
+      feeds.load("gateExp", () => api.raw<any>("/gate-experiment")),
+      feeds.load("variants", () => api.scoreVariants()),
+      feeds.load("selBias", () => api.selectionBias()),
+      feeds.load("promo", () => api.raw<any>("/promotion/status")),
     ]);
     summary = s;
-    outcomes = o;
-    accuracy = a;
-    patterns = p;
-    regimes = r;
-    lessons = l;
+    outcomes = o ?? [];
+    accuracy = a ?? [];
+    patterns = p ?? [];
+    regimes = r ?? [];
+    lessons = l ?? [];
     calibration = cal;
     gateExp = ge;
     variants = v;

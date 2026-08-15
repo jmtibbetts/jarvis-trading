@@ -1261,32 +1261,87 @@ export type AnalyzeResult = {
   signal: (Record<string, any> & { error?: string }) | null;
 };
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`/api${path}`);
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+/**
+ * A failed request, carrying the one fact the UI needs to say something
+ * useful about it: the status.
+ *
+ * `.catch(() => null)` throughout the section loaders used to collapse every
+ * failure into the same `null` the backend returns for "genuinely nothing
+ * here" — §4 calls that out as particularly dangerous on a trading desk,
+ * because "no positions" and "we could not ask about positions" look
+ * identical and only one of them means you are flat. Classification needs
+ * the status, and `new Error("GET /x -> 503")` only carried it as prose.
+ *
+ * `status === 0` means the request never reached the server at all (offline,
+ * DNS, connection refused) — distinct from any answer the server gave.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly path: string;
+  readonly method: string;
+  readonly detail: string | null;
+
+  constructor(method: string, path: string, status: number, detail?: string | null) {
+    super(detail ?? `${method} ${path} -> ${status || "unreachable"}`);
+    // `name` is deliberately left as "Error": several call sites interpolate
+    // the error straight into a toast, and renaming it would prefix every one
+    // of them with "ApiError:" for no gain. Code discriminates on instanceof.
+    this.status = status;
+    this.path = path;
+    this.method = method;
+    this.detail = detail ?? null;
+  }
+}
+
+/** Body text of an error response, when the backend bothered to send one. */
+async function errDetail(res: Response): Promise<string | null> {
+  try {
+    const body = await res.json();
+    return body?.detail ?? body?.error ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    // fetch only rejects when the request never completed. That is a
+    // materially different failure from any status the server returned, and
+    // the UI says so ("API unreachable" vs "provider unavailable").
+    throw new ApiError(method, path, 0, e instanceof Error ? e.message : String(e));
+  }
+  if (!res.ok) throw new ApiError(method, path, res.status, await errDetail(res));
   return res.json();
+}
+
+async function get<T>(path: string): Promise<T> {
+  return request<T>("GET", path);
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    method: "POST",
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => null);
-    throw new Error(detail?.detail ?? detail?.error ?? `POST ${path} -> ${res.status}`);
-  }
-  return res.json();
+  return request<T>("POST", path, body);
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`/api${path}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(`DELETE ${path} -> ${res.status}`);
-  return res.json();
+  return request<T>("DELETE", path);
 }
 
 export const api = {
+  /**
+   * Escape hatch for endpoints that never got a typed wrapper. Several call
+   * sites used bare `fetch("/api/...").then(r => r.json())`, which does not
+   * check `res.ok` — a 503 with a JSON error body parsed cleanly and the UI
+   * rendered the error object as if it were data. Routing them through here
+   * gets them the same ApiError classification as everything else.
+   */
+  raw: <T>(path: string) => get<T>(path),
   signals: (status?: string, limit = 150) =>
     get<Signal[]>(`/signals${status ? `?status=${status}&limit=${limit}` : `?limit=${limit}`}`),
   threats: (limit = 60, filters?: { confirmation?: string; minReliability?: number }) => {

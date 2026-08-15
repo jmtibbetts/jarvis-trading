@@ -1,10 +1,14 @@
 <script lang="ts">
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
+  import StateNote from "../components/StateNote.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
   import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus, type WalletActivityStatus } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
+
+  const feeds = new FeedTracker();
 
   let jobs = $state<JobStatusMap>({});
   let configs = $state<PlatformConfig[]>([]);
@@ -24,7 +28,7 @@
   let wallet = $state<WalletActivityStatus | null>(null);
 
   async function loadExecPrefs() {
-    execPrefs = await api.tradingPreference().catch(() => null);
+    execPrefs = await feeds.load("execPrefs", () => api.tradingPreference());
   }
 
   async function saveExecPrefs() {
@@ -50,18 +54,38 @@
     busy = next;
   }
 
+  // Ops is the page an operator opens BECAUSE something looks wrong, so it is
+  // the worst possible place for a failed request to render as a healthy
+  // empty panel — "no errors in the last 15 minutes" and "could not reach the
+  // error-rate endpoint" were the same screen. Each feed now reports itself.
+  //
+  // These also stopped being sequential: eleven awaits in a row meant the
+  // page filled in over eleven round trips, and one slow provider held up
+  // every panel behind it.
   async function loadAll() {
-    jobs = await api.jobStatus().catch(() => ({}));
-    configs = await api.settingsList().catch(() => []);
-    llmHealth = await api.llmHealth().catch(() => null);
     loadExecPrefs();
-    cacheStats = await api.cacheStats().catch(() => null);
-    orders = await api.alpacaOrders().catch(() => []);
-    errorRate = await api.errorRate(15).catch(() => null);
-    platform = await api.dataPlatformHealth().catch(() => null);
-    parity = await api.dataParity().catch(() => null);
-    corpus = await api.featureCorpus().catch(() => null);
-    wallet = await api.walletActivityStatus().catch(() => null);
+    const [j, c, lh, cs, o, er, p, pa, co, w] = await Promise.all([
+      feeds.load("jobs", () => api.jobStatus()),
+      feeds.load("configs", () => api.settingsList()),
+      feeds.load("llmHealth", () => api.llmHealth()),
+      feeds.load("cache", () => api.cacheStats()),
+      feeds.load("orders", () => api.alpacaOrders()),
+      feeds.load("errorRate", () => api.errorRate(15)),
+      feeds.load("platform", () => api.dataPlatformHealth()),
+      feeds.load("parity", () => api.dataParity()),
+      feeds.load("corpus", () => api.featureCorpus()),
+      feeds.load("wallet", () => api.walletActivityStatus()),
+    ]);
+    jobs = j ?? {};
+    configs = c ?? [];
+    llmHealth = lh;
+    cacheStats = cs;
+    orders = o ?? [];
+    errorRate = er;
+    platform = p;
+    parity = pa;
+    corpus = co;
+    wallet = w;
   }
 
   // Bytes/day per event kind — the §46 measurement, summed across symbols.
@@ -262,7 +286,7 @@ Save anyway?`)) return;
 
 <div class="grid">
   <div class="span-4">
-    <Panel title="LM Studio" dotColor={llmHealth?.ok ? "var(--good)" : "var(--bad)"} meta={llmHealth?.ok ? "reachable" : "unreachable"}>
+    <Panel title="LM Studio" dotColor={llmHealth?.ok ? "var(--good)" : "var(--bad)"} meta={llmHealth ? (llmHealth.ok ? "reachable" : "unreachable") : ""} status={feeds.status("llmHealth")}>
       {#if llmHealth}
         <div class="stat-list">
           <div class="stat"><span>Platform</span><b>{llmHealth.platform ?? "—"}</b></div>
@@ -270,13 +294,13 @@ Save anyway?`)) return;
           {#if llmHealth.error}<div class="stat"><span>Error</span><b class="pl-down">{llmHealth.error}</b></div>{/if}
         </div>
       {:else}
-        <div class="empty">Checking…</div>
+        <StateNote status={feeds.status("llmHealth")} noun="LM Studio health" />
       {/if}
     </Panel>
   </div>
 
   <div class="span-4">
-    <Panel title="API Error Rate" dotColor={errorRate && errorRate.error_rate_pct > 5 ? "var(--bad)" : "var(--good)"} meta={errorRate ? `${errorRate.window_minutes}m window` : ""}>
+    <Panel title="API Error Rate" dotColor={errorRate && errorRate.error_rate_pct > 5 ? "var(--bad)" : "var(--good)"} meta={errorRate ? `${errorRate.window_minutes}m window` : ""} status={feeds.status("errorRate")}>
       {#if errorRate}
         <div class="stat-list">
           <div class="stat"><span>Requests</span><b class="num">{errorRate.total_requests}</b></div>
@@ -291,13 +315,13 @@ Save anyway?`)) return;
           </div>
         {/if}
       {:else}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("errorRate")} noun="error-rate data" />
       {/if}
     </Panel>
   </div>
 
   <div class="span-4">
-    <Panel title="OHLCV Cache" meta={cacheStats ? `${cacheStats.db_size_mb} MB` : ""}>
+    <Panel title="OHLCV Cache" meta={cacheStats ? `${cacheStats.db_size_mb} MB` : ""} status={feeds.status("cache")}>
       {#snippet children()}
         {#if cacheStats}
           <div class="stat-list">
@@ -306,7 +330,7 @@ Save anyway?`)) return;
             <div class="stat"><span>Latest Bar</span><b class="num">{cacheStats.latest_bar_ts?.slice(0, 16).replace("T", " ") || "—"}</b></div>
           </div>
         {:else}
-          <div class="empty">Loading…</div>
+          <StateNote status={feeds.status("cache")} noun="cache statistics" />
         {/if}
         <button class="btn tiny outline backfill-btn" disabled={backfilling} onclick={runBackfill}>
           {backfilling ? "Starting…" : "Backfill Now"}
@@ -316,7 +340,7 @@ Save anyway?`)) return;
   </div>
 
   <div class="span-4">
-    <Panel title="Event Platform" dotColor={platform && platform.queues.every((q) => q.dropped_total === 0) ? "var(--good)" : "var(--warn)"} meta={platform ? `${platform.store.events.toLocaleString()} events · ${mb(platform.store.file_bytes)} MB` : ""}>
+    <Panel title="Event Platform" dotColor={platform && platform.queues.every((q) => q.dropped_total === 0) ? "var(--good)" : "var(--warn)"} meta={platform ? `${platform.store.events.toLocaleString()} events · ${mb(platform.store.file_bytes)} MB` : ""} status={feeds.status("platform")}>
       {#if platform}
         <div class="stat-list">
           {#each platform.books as b (b.stream)}
@@ -333,13 +357,13 @@ Save anyway?`)) return;
           {/each}
         </div>
       {:else}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("platform")} noun="event platform health" />
       {/if}
     </Panel>
   </div>
 
   <div class="span-4">
-    <Panel title="Feed Parity" dotColor={parity && parity.pairs.every((p) => p.verdict === "parity") ? "var(--good)" : "var(--warn)"} meta={parity ? `${parity.symbol} · ${parity.window_min}m window` : ""}>
+    <Panel title="Feed Parity" dotColor={parity && parity.pairs.every((p) => p.verdict === "parity") ? "var(--good)" : "var(--warn)"} meta={parity ? `${parity.symbol} · ${parity.window_min}m window` : ""} status={feeds.status("parity")}>
       {#if parity}
         {#if parity.pairs.length}
           <div class="stat-list">
@@ -355,13 +379,13 @@ Save anyway?`)) return;
           <div class="empty">No overlapping venue data in window</div>
         {/if}
       {:else}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("parity")} noun="feed parity" />
       {/if}
     </Panel>
   </div>
 
   <div class="span-4">
-    <Panel title="Feature Corpus" meta={corpus ? `${Object.values(corpus.snapshots).reduce((a, b) => a + b, 0)} snapshots` : ""}>
+    <Panel title="Feature Corpus" meta={corpus ? `${Object.values(corpus.snapshots).reduce((a, b) => a + b, 0)} snapshots` : ""} status={feeds.status("corpus")}>
       {#if corpus}
         <div class="stat-list">
           {#each Object.entries(corpus.snapshots) as [k, n] (k)}
@@ -377,7 +401,7 @@ Save anyway?`)) return;
           {/each}
         </div>
       {:else}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("corpus")} noun="feature corpus" />
       {/if}
     </Panel>
   </div>
@@ -387,9 +411,10 @@ Save anyway?`)) return;
       title="Wallet Flow (Helius)"
       dotColor={!wallet ? "var(--dim)" : !wallet.configured ? "var(--dim)" : wallet.events_stored ? "var(--good)" : "var(--warn)"}
       meta={wallet ? (wallet.configured ? `${wallet.wallets_watched} watched` : "not configured") : ""}
+      status={feeds.status("wallet")}
     >
       {#if !wallet}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("wallet")} noun="wallet collector status" />
       {:else}
         <div class="stat-list">
           <!-- Deliberately three states, not two. A collector that polls
@@ -427,7 +452,7 @@ Save anyway?`)) return;
   </div>
 
   <div class="span-7">
-    <Panel title="Jobs" meta="{jobEntries.filter(([, j]) => j.status === 'ok').length}/{jobEntries.length} ok">
+    <Panel title="Jobs" meta="{jobEntries.filter(([, j]) => j.status === 'ok').length}/{jobEntries.length} ok" status={feeds.status("jobs")}>
       <div class="job-grid">
         {#each jobEntries as [name, job] (name)}
           <div class="job-card">
@@ -453,7 +478,7 @@ Save anyway?`)) return;
   </div>
 
   <div class="span-5">
-    <Panel title="Provider Settings" meta="{configs.length} configured">
+    <Panel title="Provider Settings" meta="{configs.length} configured" status={feeds.status("configs")}>
       {#snippet children()}
         <button class="btn small primary" onclick={() => (showAddForm = !showAddForm)}>
           {showAddForm ? "Cancel" : "+ Add Config"}
@@ -503,7 +528,7 @@ Save anyway?`)) return;
               </div>
             {/if}
           {:else}
-            <div class="empty">No provider configs yet</div>
+            <StateNote status={feeds.status("configs")} noun="provider configs" emptyText="No provider configs yet" />
           {/each}
         </div>
       {/snippet}
@@ -511,7 +536,7 @@ Save anyway?`)) return;
   </div>
 
   <div class="span-12">
-    <Panel title="Execution Criteria" meta="governs the broker account AND the paper book">
+    <Panel title="Execution Criteria" meta="governs the broker account AND the paper book" status={feeds.status("execPrefs")}>
       {#if execPrefs}
         <div class="exec-grid">
           <label class="exec-field">
@@ -537,7 +562,7 @@ Save anyway?`)) return;
           whether the criteria are earning their keep.
         </p>
       {:else}
-        <div class="empty">Loading…</div>
+        <StateNote status={feeds.status("execPrefs")} noun="execution criteria" />
       {/if}
     </Panel>
   </div>

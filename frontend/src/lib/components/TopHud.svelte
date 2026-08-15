@@ -6,8 +6,17 @@
   import NotificationCenter from "./NotificationCenter.svelte";
 
   let providers = $state<{ name: string; ok: boolean; detail: string }[]>([]);
+  // The provider strip is the desk's at-a-glance health indicator, so the old
+  // `.catch(() => {})` inverted its meaning in the worst possible direction:
+  // when the status endpoint itself failed, the strip kept rendering the last
+  // good reading with "0 down" and the HUD looked healthiest exactly when the
+  // server was least reachable. Now the strip says it cannot see.
+  let providerCheckFailed = $state(false);
   $effect(() => {
-    const load = () => api.providerStatus().then((r) => (providers = r.providers)).catch(() => {});
+    const load = () =>
+      api.providerStatus()
+        .then((r) => { providers = r.providers; providerCheckFailed = false; })
+        .catch(() => { providerCheckFailed = true; });
     load();
     const id = setInterval(load, 120_000);
     return () => clearInterval(id);
@@ -93,7 +102,10 @@
     {#if providers.length}
       <button
         class="providers"
-        title={providers.map((p) => `${p.ok ? "●" : "○"} ${p.name}: ${p.detail}`).join(" | ")}
+        class:unverified={providerCheckFailed}
+        title={providerCheckFailed
+          ? "Provider status could not be refreshed — these readings are stale"
+          : providers.map((p) => `${p.ok ? "●" : "○"} ${p.name}: ${p.detail}`).join(" | ")}
         onclick={() => sectionStore.go("ops")}
       >
         {#each providers as p (p.name)}
@@ -101,7 +113,15 @@
             <i></i><em>{p.name}</em>
           </span>
         {/each}
-        {#if downCount > 0}<span class="prov-warn num">{downCount} down</span>{/if}
+        {#if providerCheckFailed}
+          <span class="prov-warn num">stale</span>
+        {:else if downCount > 0}
+          <span class="prov-warn num">{downCount} down</span>
+        {/if}
+      </button>
+    {:else if providerCheckFailed}
+      <button class="providers unverified" title="Provider status endpoint unreachable" onclick={() => sectionStore.go("ops")}>
+        <span class="prov-warn num">providers unknown</span>
       </button>
     {/if}
     <div class="ws-pill" class:live={wsStore.connected} title={wsStore.connected ? "Live feed connected" : "Reconnecting…"}>
@@ -220,6 +240,11 @@
     padding: 4px 6px;
     cursor: pointer;
     border-radius: 7px;
+  }
+  /* Dimmed and outlined: the dots are still there but no longer vouched for. */
+  .providers.unverified {
+    opacity: 0.55;
+    border: 1px dashed var(--warm);
   }
   .providers:hover {
     background: rgba(124, 154, 255, 0.07);

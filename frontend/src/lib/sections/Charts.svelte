@@ -11,7 +11,11 @@
     type Time,
   } from "lightweight-charts";
   import { api, type AnalogSummary, type ChartPayload } from "../api";
+  import { FeedTracker } from "../dataState.svelte";
   import Pill from "../components/Pill.svelte";
+  import StateNote from "../components/StateNote.svelte";
+
+  const feeds = new FeedTracker();
 
   let container: HTMLDivElement;
   let chart: IChartApi | null = null;
@@ -127,12 +131,15 @@
 
   async function load() {
     loading = true;
-    payload = await api.marketChart(symbol, timeframe).catch(() => null);
+    // Deliberately NOT keeping the previous payload here: unlike a position
+    // list, a chart still labelled BTC while showing the last symbol's candles
+    // is worse than a blank chart. The status says which it is.
+    payload = await feeds.load("chart", () => api.marketChart(symbol, timeframe), { keepLast: false });
     loading = false;
     localStorage.setItem("jarvis.chart.symbol", symbol);
     localStorage.setItem("jarvis.chart.tf", timeframe);
     render();
-    analogs = await api.marketAnalogs(symbol, timeframe).catch(() => null);
+    analogs = await feeds.load("analogs", () => api.marketAnalogs(symbol, timeframe), { keepLast: false });
   }
 
   function jumpTo(time: string) {
@@ -154,7 +161,7 @@
 
   $effect(() => {
     buildChart();
-    api.chartSymbols().then((r) => (available = r.symbols)).catch(() => {});
+    feeds.load("symbols", () => api.chartSymbols()).then((r) => { if (r) available = r.symbols; });
     load();
     return () => chart?.remove();
   });
@@ -204,6 +211,11 @@
   <div class="surface" bind:this={container}></div>
   {#if payload && !payload.bar_count}
     <p class="empty">no cached bars for {payload.symbol} @ {payload.timeframe} — the picker lists what the cache can draw</p>
+  {:else if !payload && !loading}
+    <!-- An empty chart surface used to be the entire report on a failed
+         request: no bars, no message, indistinguishable from a symbol the
+         cache has never held. -->
+    <StateNote status={feeds.status("chart")} noun="chart data" />
   {/if}
   {#if analogs}
     <div class="analogs">

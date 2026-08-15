@@ -191,6 +191,20 @@ def market_analogs(symbol: str, timeframe: str = "15m", top_k: int = 12):
     return out
 
 
+@router.get("/dex/discovery")
+def dex_discovery(confirm: bool = True):
+    """New DEX listings that cleared the quality floors — the second
+    desk's discovery layer. Keyless (GeckoTerminal + DEX Screener).
+
+    Surviving here means 'start collecting history', NOT 'trade this':
+    no signal, no sizing, and nothing enters the majors book's gate. The
+    rejection tally is reported because the feed is overwhelmingly noise
+    and hiding that would make the survivors look more special than they
+    are."""
+    from lib.dex_discovery import discover
+    return discover(confirm=confirm)
+
+
 @router.get("/market/chart-symbols")
 def market_chart_symbols():
     """Distinct (symbol, timeframe) coverage of the bar cache — the chart

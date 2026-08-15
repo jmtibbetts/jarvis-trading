@@ -945,6 +945,106 @@ class WalletRelationship(Base):
     last_seen_at  = Column(String, default=now_iso)
 
 
+class DexPosition(Base):
+    """A simulated on-chain spot position. Deliberately NOT PaperPosition.
+
+    An AMM swap and a broker fill are different events, and the fields that
+    matter barely overlap. There is no leverage here and no short side: you
+    cannot borrow from a constant-product pool, so a book that offers 5x on
+    a memecoin is describing a venue that does not exist. Size is bounded
+    by POOL DEPTH rather than by account equity — the binding constraint
+    on-chain is how much the pool can absorb, which is why entry impact is
+    stored on the row instead of being recomputed later from a mid price
+    that has since moved.
+    """
+    __tablename__ = "dex_positions"
+
+    id          = Column(String, primary_key=True, default=new_id)
+    user_id     = Column(String, default=DEFAULT_USER_ID, index=True)
+    mint        = Column(String, index=True, nullable=False)
+    symbol      = Column(String)
+    pool_address = Column(String, index=True)
+    dex         = Column(String)
+    network     = Column(String, default="solana")
+
+    status      = Column(String, default="Open", index=True)
+    qty_tokens  = Column(Float)          # tokens actually received
+    entry_price_usd = Column(Float)      # AVERAGE achieved, not the quote
+    quoted_price_usd = Column(Float)     # spot at decision time
+    notional_usd = Column(Float)         # USD committed
+
+    # Entry costs, kept separate — one is the pool's price, one is your own
+    # size, and they call for different remedies.
+    entry_pool_fee_usd  = Column(Float, default=0.0)
+    entry_impact_usd    = Column(Float, default=0.0)
+    entry_impact_pct    = Column(Float, default=0.0)
+    entry_network_fee_usd = Column(Float, default=0.0)
+    pool_reserve_usd_at_entry = Column(Float)
+
+    stop_price_usd   = Column(Float)
+    target_price_usd = Column(Float)
+    current_price_usd = Column(Float)
+    unrealized_pnl_usd = Column(Float, default=0.0)
+
+    signal_id  = Column(String, index=True)
+    opened_at  = Column(String, default=now_iso, index=True)
+    updated_at = Column(String, default=now_iso)
+    notes      = Column(Text)
+
+
+class DexTrade(Base):
+    """A closed simulated swap round trip, with every cost itemised."""
+    __tablename__ = "dex_trades"
+
+    id          = Column(String, primary_key=True, default=new_id)
+    user_id     = Column(String, default=DEFAULT_USER_ID, index=True)
+    position_id = Column(String, index=True)
+    mint        = Column(String, index=True)
+    symbol      = Column(String)
+    pool_address = Column(String)
+    dex         = Column(String)
+
+    qty_tokens  = Column(Float)
+    notional_usd = Column(Float)
+    entry_price_usd = Column(Float)
+    exit_price_usd  = Column(Float)
+
+    # Gross is the price move; net is what the book actually keeps. On a
+    # thin pool the gap between them can exceed the move itself.
+    gross_pnl_usd = Column(Float)
+    total_costs_usd = Column(Float)
+    net_pnl_usd  = Column(Float)
+    net_pnl_pct  = Column(Float)
+
+    entry_impact_pct = Column(Float)
+    exit_impact_pct  = Column(Float)
+    pool_fees_usd    = Column(Float)
+    network_fees_usd = Column(Float)
+
+    reason     = Column(String)
+    opened_at  = Column(String, index=True)
+    closed_at  = Column(String, default=now_iso, index=True)
+    hold_minutes = Column(Float)
+
+
+class DexPortfolio(Base):
+    """The virtual on-chain wallet. `reset_at` is the epoch watermark —
+    equity derives from trades AFTER it, so a reset cannot be undone by a
+    stale row and history is never deleted to move a number."""
+    __tablename__ = "dex_portfolio"
+
+    id            = Column(String, primary_key=True, default=new_id)
+    user_id       = Column(String, default=DEFAULT_USER_ID, unique=True)
+    starting_usd  = Column(Float, default=10_000.0)
+    cash_usd      = Column(Float, default=10_000.0)
+    realized_pnl_usd = Column(Float, default=0.0)
+    total_trades  = Column(Integer, default=0)
+    wins          = Column(Integer, default=0)
+    losses        = Column(Integer, default=0)
+    reset_at      = Column(String)
+    updated_at    = Column(String, default=now_iso)
+
+
 class TelegramLinkToken(Base):
     __tablename__ = "telegram_link_tokens"
     id           = Column(String, primary_key=True, default=new_id)

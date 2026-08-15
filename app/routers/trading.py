@@ -1391,22 +1391,52 @@ def get_autotrading_state():
 
 
 @router.post("/trading/autotrading")
-def set_autotrading_state(enabled: bool = Body(..., embed=True)):
-    """Resume (or pause) automatic opening on BOTH simulated books."""
+def set_autotrading_state(enabled: bool | None = Body(None, embed=True),
+                          paper: bool | None = Body(None, embed=True),
+                          auto_sim: bool | None = Body(None, embed=True)):
+    """Pause or resume automatic opening, PER BOOK.
+
+    They are governed separately because they are in different states:
+    paper mirrors the broker's criteria and is ready to run, while Auto Sim
+    is being rebuilt from "take every approved signal" into a full virtual
+    exchange. Running the two together would keep pouring untrustworthy
+    outcomes into a book the operator eventually wants to train on.
+
+    `enabled` still sets both, for existing callers; an explicit `paper` or
+    `auto_sim` overrides it.
+
+    SIMULATED books only. The live broker account is behind the kill switch
+    and is deliberately unreachable from here — one endpoint that can arm
+    real orders alongside simulated ones is a mistake waiting for a typo.
+    """
     from app.database import DEFAULT_USER_ID, UserPreference, now_iso
+    if enabled is None and paper is None and auto_sim is None:
+        raise HTTPException(400, "pass `enabled`, or `paper` / `auto_sim`")
+
+    want_paper = paper if paper is not None else enabled
+    want_sim = auto_sim if auto_sim is not None else enabled
+
     with get_db() as db:
-        pref = db.query(UserPreference).first()
+        # Filtered by user_id, matching how both jobs READ it. `.first()`
+        # would drift onto a different row the moment a second user exists,
+        # and the flag would silently stop governing anything.
+        pref = db.query(UserPreference).filter(
+            UserPreference.user_id == DEFAULT_USER_ID).first()
         if pref is None:
             pref = UserPreference(user_id=DEFAULT_USER_ID)
             db.add(pref)
-        pref.auto_sim_enabled = bool(enabled)
-        pref.paper_auto_trade_enabled = bool(enabled)
+        if want_paper is not None:
+            pref.paper_auto_trade_enabled = bool(want_paper)
+        if want_sim is not None:
+            pref.auto_sim_enabled = bool(want_sim)
         pref.updated_at = now_iso()
-    logger.warning(f"[AutoTrading] simulated books "
-                   f"{'ENABLED' if enabled else 'PAUSED'}")
-    return {"auto_sim_enabled": bool(enabled),
-            "paper_auto_trade_enabled": bool(enabled),
-            "any_enabled": bool(enabled)}
+        out = {"auto_sim_enabled": bool(pref.auto_sim_enabled),
+               "paper_auto_trade_enabled": bool(pref.paper_auto_trade_enabled)}
+    out["any_enabled"] = out["auto_sim_enabled"] or out["paper_auto_trade_enabled"]
+    logger.warning(f"[AutoTrading] paper="
+                   f"{'ON' if out['paper_auto_trade_enabled'] else 'PAUSED'} "
+                   f"auto_sim={'ON' if out['auto_sim_enabled'] else 'PAUSED'}")
+    return out
 
 
 @router.post("/paper/run-mtm")

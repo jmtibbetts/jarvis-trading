@@ -12,6 +12,7 @@
     type PatternMemory,
     type RegimeStat,
     type Lesson,
+    type PromotionStatus,
   } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import StateNote from "./StateNote.svelte";
@@ -35,7 +36,7 @@
   let gateExp = $state<any | null>(null);
   let variants = $state<ScoreVariantsReport | null>(null);
   let selBias = $state<SelectionBiasReport | null>(null);
-  let promo = $state<any | null>(null);
+  let promo = $state<PromotionStatus | null>(null);
 
   async function loadAll() {
     const [s, o, a, p, r, l, cal, ge, v, sb, pr] = await Promise.all([
@@ -49,7 +50,7 @@
       feeds.load("gateExp", () => api.raw<any>("/gate-experiment")),
       feeds.load("variants", () => api.scoreVariants()),
       feeds.load("selBias", () => api.selectionBias()),
-      feeds.load("promo", () => api.raw<any>("/promotion/status")),
+      feeds.load("promo", () => api.raw<PromotionStatus>("/promotion/status")),
     ]);
     summary = s;
     outcomes = o ?? [];

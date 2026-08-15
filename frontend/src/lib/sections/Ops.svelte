@@ -109,6 +109,19 @@
     return Object.entries(acc).sort((a, b) => b[1].bytes - a[1].bytes);
   });
 
+  // `status` is a free-form string from the API, so the accumulator needs an
+  // index signature — but spreading one into an object literal drops it, so
+  // the mapped rows lost `resolved`/`pending`/`abstained` and the template's
+  // reads of them were the four "pre-existing" Ops errors. Naming the row
+  // type keeps both: the known columns are checked, unknown statuses still
+  // accumulate.
+  type LabelRow = {
+    horizon: number;
+    avg?: number | null;
+    resolved?: number;
+    pending?: number;
+    abstained?: number;
+  };
   const labelRows = $derived.by(() => {
     const acc: Record<number, Record<string, number> & { avg?: number | null }> = {};
     for (const l of corpus?.labels ?? []) {
@@ -116,7 +129,7 @@
       h[l.status] = l.n;
       if (l.status === "resolved") h.avg = l.avg_forward_ret_pct;
     }
-    return Object.entries(acc).map(([h, v]) => ({ horizon: Number(h), ...v }));
+    return Object.entries(acc).map(([h, v]): LabelRow => ({ horizon: Number(h), ...v }));
   });
 
   const mb = (b: number) => (b / 1048576).toFixed(1);

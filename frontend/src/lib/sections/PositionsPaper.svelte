@@ -794,7 +794,10 @@ Type FLATTEN to confirm:`,
             {#each autosim.positions as p (p.id)}
               <tr>
                 <td class="sym">{p.symbol}</td>
-                <td><Pill label={p.direction} tone={(p.direction ?? "").toLowerCase().includes("short") ? "bad" : "good"} /></td>
+                <!-- direction is nullable; the tone already guarded for it,
+                     the label did not, so a null direction rendered a blank
+                     pill rather than saying it was unknown. -->
+                <td><Pill label={p.direction ?? "unknown"} tone={(p.direction ?? "").toLowerCase().includes("short") ? "bad" : "good"} /></td>
                 <td class="num">{p.leverage}x</td>
                 <td class="num qty">{fmtQty(p.qty)}</td>
                 <td class="num margin">{fmtUsd(p.margin_used ?? 0)}</td>

@@ -22,6 +22,9 @@ Re-measured after the silent-catch sweep: Python **1,853 passed, 17
 skipped**; `npm run check` **30 errors, 6 files** — the same 30, zero
 added; `npm run build` clean.
 
+**Final: `npm run check` is at 0 errors, 0 warnings, 0 files.** See
+"P0 finding 4" — treating the 30 as a baseline was itself the mistake.
+
 The 30 typecheck errors predate this work and live in `api.ts` (3),
 `LearningPanel.svelte` (18), `Ops.svelte` (4), `Brief.svelte` (2),
 `Charts.svelte` (2), `PositionsPaper.svelte` (1). None were introduced by
@@ -111,6 +114,44 @@ Two known gaps, deliberately not claimed as done:
   ones ("X unavailable", which claimed a cause they could not know) were
   replaced; the genuinely-empty ones were left alone, and every panel in
   the file now carries a header badge.
+
+### 4. The typecheck baseline was hiding real bugs — FIXED
+
+The 30 typecheck errors were recorded as "pre-existing" and used as a
+regression guard: *did this session add any?* That is a useful question
+and the wrong one to stop at. A permanently-red check is a check nobody
+reads, and §3 explicitly lists **"components rendering but containing
+wrong data"** as a thing to hunt. Four of the 30 errors *were* that bug,
+sitting in the report the whole time.
+
+`Pill` takes a `label` prop and had no `children` snippet, but four call
+sites passed content as children:
+
+```svelte
+<Pill tone="neutral">{payload.symbol}</Pill>
+```
+
+The content was silently discarded and the pill rendered as an empty
+coloured box. **Confirmed in the running app** — the Charts header pill
+measured 12px wide with `textContent === ""` where `BTC/USD` belonged.
+Brief's "releases today" pills were empty for the same reason, as was its
+"no scheduled releases today" fallback. `tone="info"` also matched no CSS
+rule, so those pills were unstyled on top of being blank. After the fix
+the same pill measures 53px and reads `BTC/USD`.
+
+The rest, and why each mattered:
+
+| Count | Error | What it actually was |
+|---|---|---|
+| 4 | `'children' does not exist` / `"info"` not assignable | The blank-pill bug above. |
+| 9 | `Duplicate identifier 'CalibrationRow'`, dup object key | **Two** type declarations and **two** `api.calibration()` entries for one endpoint. In an object literal the last key wins, so one was dead code; and the duplicate name made TS resolve `CalibrationRow` to the narrow shape, so `LearningPanel`'s reads of `.timeframe` / `.strategy` / `.band` had *no* checking. Verified against the live payload and consolidated onto the shape the server actually returns. |
+| 12 | `'ev' is of type 'unknown'` | `promo` was `$state<any>`. Typing it from the live payload immediately caught a **real mismatch**: the panel renders `champion.variant`, but `champion` is a promotion artifact object, not a string. |
+| 4 | `Property 'resolved' does not exist` | Spreading an index-signature type into an object literal drops it, so `resolved`/`pending`/`abstained` were unchecked in the Feature Corpus panel. |
+| 1 | `string \| null` not assignable | A nullable `direction` rendered a blank pill instead of saying "unknown". |
+
+No runtime behaviour changed for the `CalibrationRow` duplicate — both
+`api.calibration()` definitions hit the same URL and type parameters are
+erased. The cost was the *checking* that stopped happening around it.
 
 ---
 

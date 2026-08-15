@@ -1145,15 +1145,75 @@ export type ConfigCreate = {
   notes?: string;
 };
 
-export type CalibrationRow = { timeframe?: string; strategy?: string; band?: string; win_rate: number; sample: number };
-export type CalibrationSummary = {
-  overall_win_rate: number;
-  sample: number;
-  min_sample: number;
-  full_trust_sample: number;
-  by_timeframe: CalibrationRow[];
-  by_strategy: CalibrationRow[];
-  by_score: CalibrationRow[];
+/**
+ * `/calibration` had TWO type declarations and TWO `api.calibration()`
+ * entries describing the same endpoint. Duplicate `CalibrationRow` made
+ * TypeScript resolve the name to whichever came first, so `LearningPanel`'s
+ * reads of `.timeframe` / `.strategy` / `.band` all errored — and because the
+ * errors were being counted as a known baseline rather than read, that panel
+ * had effectively no type checking against the API at all.
+ *
+ * `Calibration` above is the shape `lib/calibration.summary()` actually
+ * returns (verified against the live payload — it carries
+ * `by_strategy_timeframe`, which this one omitted). This name is kept as an
+ * alias so existing imports keep working.
+ */
+export type CalibrationSummary = Calibration;
+
+/**
+ * `/promotion/status`, typed from the live payload rather than left as `any`.
+ *
+ * `promo` was `$state<any | null>`, which made `Object.entries()` hand back
+ * `unknown` and produced twelve of the "pre-existing" typecheck errors. The
+ * panel reads `ev.criteria.walk_forward` and friends with no checking at
+ * all, so a renamed field would have surfaced as a blank cell rather than a
+ * build failure — the same class of silent gap as the catch sweep.
+ */
+export type PromotionStats = {
+  n: number;
+  win_rate?: number;
+  mean_net_r?: number;
+  p5_net_r?: number;
+  max_drawdown_r?: number;
+};
+export type PromotionCriterion = { pass: boolean } & Record<string, unknown>;
+export type PromotionEvaluation = {
+  challenger: string;
+  champion: string;
+  challenger_stats: PromotionStats;
+  champion_stats: PromotionStats;
+  verdict: string;
+  defined_at?: string;
+  failed?: string[] | null;
+  gate?: number;
+  oos_universe?: number;
+  blocking?: string | null;
+  criteria?: {
+    selection_frequency?: { challenger: number; champion: number; pass: boolean };
+    walk_forward?: {
+      pass: boolean;
+      folds: { fold: number; n: number; challenger_n: number; champion_n: number; valid: boolean; challenger_won: boolean }[];
+      valid_folds?: number;
+      folds_won?: number;
+    };
+  } & Record<string, PromotionCriterion | unknown>;
+};
+export type PromotionStatus = {
+  challengers: Record<string, PromotionEvaluation>;
+  // The champion is the promotion ARTIFACT, not a variant name — the panel
+  // renders `champion.variant`, and typing it as a string was the first
+  // thing the new type caught.
+  champion?: {
+    id: number;
+    variant: string;
+    schema_version?: string;
+    promoted_at?: string;
+    note?: string;
+  } | null;
+  gate?: number;
+  note?: string;
+  resolved_universe?: number;
+  schema?: string;
 };
 export type VariantStats = { n: number; win_rate?: number; avg_pnl_pct?: number; avg_mfe_r?: number; stop_first_pct?: number };
 export type ScoreVariantsReport = {
@@ -1789,7 +1849,8 @@ export const api = {
   jobReset: (name: string) => post<{ ok: boolean }>(`/jobs/${name}/reset`),
   jobTrigger: (name: string) => post<{ ok: boolean; already_running?: boolean; detail?: string }>(`/jobs/${name}/trigger`),
 
-  calibration: () => get<Calibration>(`/calibration`),
+  // (the duplicate `calibration:` key that used to sit here is gone — in an
+  // object literal the last one silently wins, so one of the two was dead)
   expectancy: () => get<Expectancy>(`/expectancy`),
   llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),
   llmHealth: () => get<LlmHealth>(`/llm/health`),

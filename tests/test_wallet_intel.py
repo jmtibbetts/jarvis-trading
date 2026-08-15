@@ -15,11 +15,14 @@ import unittest
 from lib.wallet_intel import (
     MIN_HISTORY_FOR_BASELINE,
     accumulation_score,
+    assert_not_majors_population,
     classify_counterparty,
     cluster_by_funder,
     coordination_score,
     copy_trade_candidate,
     exchange_flows,
+    independent_clusters,
+    is_wallet_alpha,
     smart_money_score,
     wallet_baseline,
     whale_score,
@@ -203,6 +206,100 @@ class CoordinationTests(unittest.TestCase):
         evs = [self._ev("a", 1000), self._ev("b", 1030), self._ev("c", 1060)]
         joined = " ".join(coordination_score(evs)["reasons"]).lower()
         self.assertIn("not evidence the wallets are related", joined)
+
+
+class IndependentClusterTests(unittest.TestCase):
+    """§117: raw wallet count and independent cluster count are different
+    numbers and the operator needs both. Seven wallets behind one funder
+    are one opinion held seven times."""
+
+    def test_unrelated_wallets_are_each_their_own_cluster(self):
+        i = independent_clusters(["a", "b", "c"])
+        self.assertEqual(i["raw_wallets"], 3)
+        self.assertEqual(i["independent_clusters"], 3)
+        self.assertEqual(i["collapsed"], 0)
+
+    def test_a_shared_cluster_collapses_to_one_opinion(self):
+        i = independent_clusters(["a", "b", "c"], {"a": "k", "b": "k", "c": "k"})
+        self.assertEqual(i["raw_wallets"], 3)
+        self.assertEqual(i["independent_clusters"], 1)
+        self.assertEqual(i["collapsed"], 2)
+
+    def test_an_unmapped_wallet_is_independent_not_lumped_in(self):
+        """Unknown relatedness is not evidence of relatedness."""
+        i = independent_clusters(["a", "b"], {"a": "k"})
+        self.assertEqual(i["independent_clusters"], 2)
+
+    def test_duplicates_do_not_inflate_the_raw_count(self):
+        self.assertEqual(independent_clusters(["a", "a", "b"])["raw_wallets"], 2)
+
+
+class ClusterAwareConsensusTests(unittest.TestCase):
+    def _ev(self, wallet, ts):
+        return {"wallet": wallet, "symbol": "BONK", "direction": "in",
+                "timestamp": ts}
+
+    EVENTS = property(lambda self: [self._ev("a", 1000), self._ev("b", 1020),
+                                    self._ev("c", 1040)])
+
+    def test_three_independent_wallets_still_score(self):
+        c = coordination_score(self.EVENTS)
+        self.assertGreater(c["score"], 0)
+        self.assertEqual(c["independent_clusters"], 3)
+
+    def test_one_actor_split_across_three_addresses_scores_nothing(self):
+        """The manufactured-consensus case. Without the cluster collapse,
+        anyone can fabricate a coordination signal with a wallet
+        generator — and a detector that rewards that is worse than none."""
+        same = {"a": "owner1", "b": "owner1", "c": "owner1"}
+        self.assertEqual(coordination_score(self.EVENTS, cluster_map=same)["score"], 0.0)
+
+    def test_the_score_falls_when_wallets_collapse(self):
+        partial = {"a": "owner1", "b": "owner1"}          # a+b are one
+        four = self.EVENTS + [self._ev("d", 1050)]
+        full = coordination_score(four)
+        collapsed = coordination_score(four, cluster_map=partial)
+        self.assertLess(collapsed["score"], full["score"])
+        self.assertEqual(collapsed["independent_clusters"], 3)
+        self.assertEqual(collapsed["raw_wallets"], 4)
+
+    def test_both_numbers_are_reported(self):
+        partial = {"a": "o", "b": "o"}
+        four = self.EVENTS + [self._ev("d", 1050)]
+        c = coordination_score(four, cluster_map=partial)
+        self.assertIn("raw_wallets", c)
+        self.assertIn("independent_clusters", c)
+        self.assertTrue(any("collapsed as related" in r for r in c["reasons"]))
+
+
+class ResearchBoundaryTests(unittest.TestCase):
+    """§116: UI connection is not model contamination."""
+
+    def test_a_copy_candidate_is_stamped_wallet_alpha(self):
+        r = copy_trade_candidate({"wallet": "w", "symbol": "X"},
+                                 {"score": 90, "confidence": "high", "reasons": []})
+        self.assertEqual(r["research_population"], "WALLET_ALPHA")
+        self.assertTrue(is_wallet_alpha(r))
+
+    def test_the_majors_boundary_refuses_wallet_alpha_records(self):
+        r = copy_trade_candidate({"wallet": "w"},
+                                 {"score": 90, "confidence": "high", "reasons": []})
+        with self.assertRaises(ValueError) as ctx:
+            assert_not_majors_population([r], where="expectancy")
+        self.assertIn("separate by design", str(ctx.exception))
+
+    def test_ordinary_majors_records_pass_the_boundary(self):
+        assert_not_majors_population([{"symbol": "BTC/USD", "r": 1.2}])
+
+    def test_it_raises_rather_than_silently_filtering(self):
+        """Dropping contaminated records quietly would hide the wiring
+        mistake that produced them."""
+        mixed = [{"ok": True},
+                 copy_trade_candidate({"wallet": "w"},
+                                      {"score": 90, "confidence": "high",
+                                       "reasons": []})]
+        with self.assertRaises(ValueError):
+            assert_not_majors_population(mixed)
 
 
 class SmartMoneyTests(unittest.TestCase):

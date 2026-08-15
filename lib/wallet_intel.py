@@ -51,6 +51,50 @@ WHALE_RELATIVE_MULTIPLE = 5.0
 MIN_HISTORY_FOR_BASELINE = 8
 
 
+# ── The research boundary (§116) ─────────────────────────────────────────
+# Wallet Alpha is a SEPARATE research population from CRYPTO_MAJORS. Its
+# observations may never enter the majors' expectancy, calibration, Gate
+# populations, model training, performance statistics or risk budget until
+# a deliberate promotion process proves the integration valid.
+#
+# UI CONNECTION IS NOT MODEL CONTAMINATION. The surfaces should cross-link
+# freely — an operator investigating a whale should reach the token, the
+# liquidity and the copyability without friction — while the evidence
+# populations stay isolated. Every record this module emits is stamped so
+# that a downstream consumer cannot plead ignorance about which population
+# it came from, and so a test can prove the stamp survives.
+RESEARCH_POPULATION = "WALLET_ALPHA"
+
+
+def stamp_population(record: dict) -> dict:
+    """Mark a record as Wallet Alpha evidence. Cheap, and the cheapness is
+    the point: an unstamped record entering a majors population is then a
+    detectable bug rather than an invisible one."""
+    return {**(record or {}), "research_population": RESEARCH_POPULATION}
+
+
+def is_wallet_alpha(record: dict) -> bool:
+    return (record or {}).get("research_population") == RESEARCH_POPULATION
+
+
+def assert_not_majors_population(records, where: str = "") -> None:
+    """Refuse Wallet Alpha records at a CRYPTO_MAJORS boundary.
+
+    Called by whatever feeds majors expectancy or calibration. Raises
+    rather than filtering, because silently dropping contaminated records
+    would hide the wiring mistake that produced them.
+    """
+    bad = [r for r in (records or []) if is_wallet_alpha(r)]
+    if bad:
+        raise ValueError(
+            f"{len(bad)} WALLET_ALPHA record(s) reached a CRYPTO_MAJORS "
+            f"population{' at ' + where if where else ''}. These populations "
+            f"are separate by design (§116): wallet-alpha evidence has not "
+            f"been shown valid for majors expectancy, calibration, gating, "
+            f"training or risk, and mixing them silently would contaminate "
+            f"every statistic downstream.")
+
+
 def _num(v) -> float:
     try:
         return abs(float(v or 0))
@@ -294,7 +338,37 @@ def cluster_by_funder(funding: dict[str, dict],
     return sorted(out, key=lambda c: (-c["confidence"], -c["size"]))
 
 
-def coordination_score(events: list[dict], window_s: int = 300) -> dict:
+def independent_clusters(wallets, cluster_map: dict[str, str] | None = None
+                         ) -> dict:
+    """Collapse a wallet set into INDEPENDENT groups.
+
+    The invariant behind every consensus number this desk shows: seven
+    wallets that share one funder are one opinion held seven times, not
+    seven opinions. Counting them as seven is the on-chain form of the
+    double-counting already removed from historical scoring — one piece
+    of evidence entering a decision repeatedly as though it were several.
+
+    cluster_map: wallet -> cluster id. A wallet absent from the map is
+    its own cluster, which is the correct default: unknown relatedness
+    is not evidence of relatedness.
+    """
+    cluster_map = cluster_map or {}
+    groups: dict[str, list[str]] = defaultdict(list)
+    for w in dict.fromkeys(x for x in (wallets or []) if x):
+        groups[cluster_map.get(w) or f"solo:{w}"].append(w)
+    grouped = {k: sorted(v) for k, v in groups.items()}
+    return {
+        "raw_wallets": sum(len(v) for v in grouped.values()),
+        "independent_clusters": len(grouped),
+        "clusters": grouped,
+        # The number that shrank, and by how much — an operator seeing
+        # "7 wallets" deserves to know it is 3 opinions.
+        "collapsed": sum(len(v) for v in grouped.values()) - len(grouped),
+    }
+
+
+def coordination_score(events: list[dict], window_s: int = 300,
+                       cluster_map: dict[str, str] | None = None) -> dict:
     """Did distinct wallets act on the same token inside a tight window?
 
     events: {wallet, symbol, direction, timestamp}. Returns a score with
@@ -319,12 +393,19 @@ def coordination_score(events: list[dict], window_s: int = 300) -> dict:
             window = [e for e in evs[i:]
                       if e["timestamp"] - anchor["timestamp"] <= window_s]
             wallets = {e.get("wallet") for e in window if e.get("wallet")}
-            if len(wallets) < 3:
+            ind = independent_clusters(wallets, cluster_map)
+            # THREE INDEPENDENT clusters, not three wallets. Without this
+            # a single actor splitting funds across three addresses
+            # manufactures its own consensus — and manufactured consensus
+            # is exactly what a coordination detector must not reward.
+            if ind["independent_clusters"] < 3:
                 continue
             spread = window[-1]["timestamp"] - anchor["timestamp"]
             groups.append({
                 "symbol": sym, "direction": direction,
                 "wallets": sorted(wallets), "wallet_count": len(wallets),
+                "independent_clusters": ind["independent_clusters"],
+                "collapsed_wallets": ind["collapsed"],
                 "window_seconds": spread,
                 "started_at": anchor["timestamp"],
             })
@@ -332,21 +413,30 @@ def coordination_score(events: list[dict], window_s: int = 300) -> dict:
 
     if not groups:
         return best
-    groups.sort(key=lambda g: (-g["wallet_count"], g["window_seconds"]))
+    groups.sort(key=lambda g: (-g["independent_clusters"], g["window_seconds"]))
     top = groups[0]
-    # More wallets and a tighter window both raise it; neither alone is
-    # enough to call anything.
+    # Scored on INDEPENDENT CLUSTERS, never on raw wallet count. A tighter
+    # window raises it; neither alone is enough to call anything.
     tightness = 1.0 - (top["window_seconds"] / window_s if window_s else 0)
-    score = min(100.0, 20.0 * top["wallet_count"] * max(0.3, tightness))
+    score = min(100.0, 20.0 * top["independent_clusters"] * max(0.3, tightness))
+    reasons = [
+        f"{top['independent_clusters']} independent clusters "
+        f"({top['wallet_count']} wallets) moved {top['symbol']} "
+        f"{top['direction']} within {top['window_seconds']}s",
+        "timing proximity only — this is not evidence the wallets are "
+        "related, and unrelated wallets react to the same news",
+    ]
+    if top["collapsed_wallets"]:
+        reasons.append(
+            f"{top['collapsed_wallets']} wallet(s) collapsed as related — "
+            f"scored as {top['independent_clusters']} opinions, not "
+            f"{top['wallet_count']}")
     return {
         "score": round(score, 1),
+        "raw_wallets": top["wallet_count"],
+        "independent_clusters": top["independent_clusters"],
         "groups": groups,
-        "reasons": [
-            f"{top['wallet_count']} distinct wallets moved {top['symbol']} "
-            f"{top['direction']} within {top['window_seconds']}s",
-            "timing proximity only — this is not evidence the wallets are "
-            "related, and unrelated wallets react to the same news",
-        ],
+        "reasons": reasons,
     }
 
 
@@ -450,7 +540,7 @@ def copy_trade_candidate(trade: dict, wallet_score: dict,
             ok = False
             reasons.append(f"top holders control {conc:.0f}% of supply")
 
-    return {
+    return stamp_population({
         "stage": "COPY_CANDIDATE" if ok else "REJECTED",
         "wallet": trade.get("wallet"),
         "symbol": trade.get("symbol") or trade.get("mint"),
@@ -463,4 +553,4 @@ def copy_trade_candidate(trade: dict, wallet_score: dict,
         # an approval, and it carries no size for anything to act on.
         "note": ("a candidate for the risk engine to judge; not an approved "
                  "or sized trade"),
-    }
+    })

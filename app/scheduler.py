@@ -57,6 +57,7 @@ job_status = {
     'insider':   {'status': 'idle', 'last': None, 'error': None},
     'inst13f':   {'status': 'idle', 'last': None, 'error': None},
     'congress':  {'status': 'idle', 'last': None, 'error': None},
+    'senate':    {'status': 'idle', 'last': None, 'error': None},
     'ipo':       {'status': 'idle', 'last': None, 'error': None},
     'postmortem':{'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
@@ -588,6 +589,16 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('congress', congress_run),
                   'interval', hours=2, id='congress',
                   next_run_time=now + timedelta(minutes=8),
+                  replace_existing=True, max_instances=1)
+
+    # The Senate half, same cadence and the same table with chamber="Senate".
+    # Offset from the House run so two disclosure scrapers are not competing
+    # for the same window. Cheaper per filing — eFD publishes an HTML table
+    # rather than the House's scanned PDFs — so the per-run bound is higher.
+    from jobs.fetch_senate_trades import run as senate_run
+    sched.add_job(make_job_runner('senate', senate_run),
+                  'interval', hours=2, id='senate',
+                  next_run_time=now + timedelta(minutes=11),
                   replace_existing=True, max_instances=1)
 
     # IPO registration pipeline every 4 hours — free EDGAR feeds, no LLM.

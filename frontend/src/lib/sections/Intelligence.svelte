@@ -9,6 +9,7 @@
   import DexDiscoveryPanel from "../components/DexDiscoveryPanel.svelte";
   import WalletAlphaPanel from "../components/WalletAlphaPanel.svelte";
   import StateNote from "../components/StateNote.svelte";
+  import LineChart from "../components/LineChart.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse, type InsiderTransaction } from "../api";
   import { FeedTracker } from "../dataState.svelte";
 
@@ -76,6 +77,40 @@
   let congressActivity = $state<CongressActivityResponse | null>(null);
   let fees = $state<Awaited<ReturnType<typeof api.feeComparison>> | null>(null);
   let feeNotional = $state(10000);
+
+  // ── Yield curve, shaped for plotting ────────────────────────────────
+  // Maturities in real order. The payload is a flat dict keyed by tenor, so
+  // Object.keys would sort "10yr" before "2yr" and draw a curve that zigzags
+  // — a made-up shape on the one chart whose shape IS the message.
+  const CURVE_TENORS: [string, string][] = [
+    ["1mo", "1m"], ["2mo", "2m"], ["3mo", "3m"], ["4mo", "4m"], ["6mo", "6m"],
+    ["1yr", "1y"], ["2yr", "2y"], ["3yr", "3y"], ["5yr", "5y"], ["7yr", "7y"],
+    ["10yr", "10y"], ["20yr", "20y"], ["30yr", "30y"],
+  ];
+
+  const curvePoints = $derived.by(() => {
+    const l = yieldCurve?.latest as Record<string, number | null> | undefined;
+    if (!l) return { labels: [] as string[], values: [] as (number | null)[] };
+    const labels: string[] = [];
+    const values: (number | null)[] = [];
+    for (const [key, short] of CURVE_TENORS) {
+      if (l[key] == null) continue;   // absent tenor is skipped, not zeroed
+      labels.push(short);
+      values.push(Number(l[key]));
+    }
+    return { labels, values };
+  });
+
+  const curveTrend = $derived.by(() => {
+    const rows = (yieldCurve?.trend ?? []) as Record<string, any>[];
+    // Oldest first so the x-axis reads left to right like every other chart.
+    const asc = [...rows].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    return {
+      labels: asc.map((r) => String(r.date ?? "").slice(5)),
+      s2s10s: asc.map((r) => (r.spread_2s10s == null ? null : Number(r.spread_2s10s))),
+      s3m10y: asc.map((r) => (r.spread_3m10y == null ? null : Number(r.spread_3m10y))),
+    };
+  });
 
   async function loadFees() {
     fees = await feeds.load("fees", () => api.feeComparison(feeNotional));
@@ -491,6 +526,43 @@
               </span>
             </div>
           </div>
+          <!-- The SHAPE is the signal, and it was being fetched and thrown
+               away: the payload carries the whole term structure and 20 days
+               of spread history, and the panel rendered six numbers. -->
+          {#if curvePoints.labels.length > 1}
+            <div class="chart-block">
+              <div class="chart-cap">Term structure — today vs the whole curve</div>
+              <LineChart
+                series={[{ label: "Yield", values: curvePoints.values, color: "var(--accent)", area: true }]}
+                xLabels={curvePoints.labels}
+                height={140}
+                showDots
+                yUnit="%"
+                yFormat={(v) => v.toFixed(2)}
+              />
+            </div>
+          {/if}
+          {#if curveTrend.labels.length > 1}
+            <div class="chart-block">
+              <div class="chart-cap">
+                2s10s and 3m10y spread — {curveTrend.labels.length} sessions.
+                Below zero is inversion.
+              </div>
+              <LineChart
+                series={[
+                  { label: "2s10s", values: curveTrend.s2s10s, color: "var(--accent)" },
+                  { label: "3m10y", values: curveTrend.s3m10y, color: "var(--warm)", dashed: true },
+                ]}
+                xLabels={curveTrend.labels}
+                height={150}
+                zeroLine
+                includeY={[0]}
+                shadeBelow={0}
+                shadeLabel="inverted"
+                yFormat={(v) => v.toFixed(2)}
+              />
+            </div>
+          {/if}
           <p class="insider-note">US Treasury daily yield curve (free, official Treasury.gov data). An inverted curve — short-term yields above long-term — has historically preceded recessions, though timing and lead time vary widely.</p>
         {:else}
           <StateNote status={feeds.status("yieldCurve")} noun="yield curve" />
@@ -2345,5 +2417,13 @@
     .span-8 {
       grid-column: span 12;
     }
+  }
+  .chart-block {
+    margin: 12px 0 4px;
+  }
+  .chart-cap {
+    font-size: 10.5px;
+    color: var(--ink-dim);
+    margin-bottom: 4px;
   }
 </style>

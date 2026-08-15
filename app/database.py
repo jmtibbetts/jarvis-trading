@@ -1050,10 +1050,22 @@ class AutoSimPortfolio(Base):
     __tablename__ = "auto_sim_portfolios"
     user_id      = Column(String, primary_key=True, default=DEFAULT_USER_ID)
     starting_cash= Column(Float, default=100000.0)
+    # These four are a CACHE of what the trades table already records. They
+    # are incremented on every close, which makes them vulnerable to any
+    # concurrent session holding a stale copy — a soft reset zeroed them and
+    # a background job's in-flight portfolio object wrote the old totals
+    # straight back, so the book read insolvent again minutes later with
+    # zero trades in between. `reset_at` is the durable fix: realized P&L is
+    # DERIVED from trades closed after the watermark, so no stale object can
+    # resurrect a cleared book.
     realized_pnl = Column(Float, default=0.0)
     total_trades = Column(Integer, default=0)
     wins         = Column(Integer, default=0)
     losses       = Column(Integer, default=0)
+    # Trades closed at or before this instant belong to a previous book.
+    # They stay in the table — they are learning data — but they no longer
+    # count toward this book's equity.
+    reset_at     = Column(String)
     updated_at   = Column(String, default=now_iso)
 
 class BacktestRun(Base):
@@ -1436,6 +1448,12 @@ def _migrate_columns():
         "wallet_registry": [
             ("label", "TEXT"),
         ],
+        "auto_sim_portfolios": [
+            ("reset_at", "TEXT"),
+        ],
+        "paper_portfolio": [
+            ("reset_at", "TEXT"),
+        ],
         "auto_sim_positions": [
             ("fees",       "REAL DEFAULT 0.0"),   # round trip, reserved at open
             ("fee_basis",  "TEXT"),
@@ -1723,6 +1741,8 @@ class PaperPortfolio(Base):
     total_trades   = Column(Float, default=0)
     winning_trades = Column(Float, default=0)
     realized_pnl   = Column(Float, default=0.0)
+    # Same watermark, same reason — see AutoSimPortfolio.reset_at.
+    reset_at       = Column(String)
     updated_at     = Column(String, default=now_iso)
 
 class ExecutionSample(Base):

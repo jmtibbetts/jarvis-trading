@@ -169,6 +169,28 @@ def _unseen_candidates(signals, seen_signal_ids: set[str]):
     ]
 
 
+def book_trades(db, portfolio, user_id: str) -> list:
+    """Trades belonging to the CURRENT book — closed after the last reset.
+
+    Rows before the watermark stay in the table because they are the
+    simulator's evidentiary record, but they are not this book's P&L. Their
+    absence from equity is the entire difference between a reset that holds
+    and one that reverts half an hour later.
+    """
+    rows = db.query(AutoSimTrade).filter(AutoSimTrade.user_id == user_id).all()
+    watermark = getattr(portfolio, "reset_at", None)
+    if watermark:
+        rows = [t for t in rows if str(t.closed_at or "") > watermark]
+    return rows
+
+
+def book_realized(db, portfolio, user_id: str) -> float:
+    """Realized P&L for the current book, SUMMED from rows rather than read
+    from the running counter. A sum cannot be resurrected by a stale
+    session; the counter demonstrably was."""
+    return sum(float(t.realized_pnl or 0) for t in book_trades(db, portfolio, user_id))
+
+
 def _ensure_portfolio(db, user_id: str) -> AutoSimPortfolio:
     row = db.query(AutoSimPortfolio).filter(AutoSimPortfolio.user_id == user_id).first()
     if not row:
@@ -354,7 +376,11 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
         # single pass could otherwise open five DOGE positions that are each
         # individually under the cap and collectively far over it.
         conc_book = list(live_rows)
-        conc_equity = (capital + float(portfolio.realized_pnl or 0)
+        # Derived from THIS book's closed trades, same as the summary. The
+        # stored counter can be clobbered by a stale concurrent session, and
+        # sizing the next trade against a resurrected loss history is how a
+        # freshly reset book refuses every open as insolvent.
+        conc_equity = (capital + book_realized(db, portfolio, user_id)
                        + sum(float(p.unrealized_pnl or 0) for p in live_rows))
         if slots_left <= 0 or deployed >= deploy_cap:
             logger.info(
@@ -445,11 +471,24 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
         trades = db.query(AutoSimTrade).filter(
             AutoSimTrade.user_id == user_id
         ).order_by(AutoSimTrade.closed_at.desc()).all()
+        # Trades belonging to THIS book — everything closed after the last
+        # reset. The rows before the watermark are kept for learning and
+        # deliberately excluded from equity; counting them is what made a
+        # reset book insolvent again the moment anything recomputed.
+        watermark = getattr(portfolio, "reset_at", None)
+        if watermark:
+            trades = [t for t in trades if str(t.closed_at or "") > watermark]
+
         unrealized = sum(float(row.unrealized_pnl or 0) for row in positions)
-        wins = int(portfolio.wins or 0)
-        losses = int(portfolio.losses or 0)
+        # DERIVED from this book's trades, not read from a mutable counter.
+        # The counter is incremented on every close and any concurrent
+        # session holding a stale copy can write an old total back over a
+        # reset — which is exactly what happened. A sum over rows cannot be
+        # resurrected by a stale object.
+        realized = sum(float(row.realized_pnl or 0) for row in trades)
+        wins = sum(1 for row in trades if float(row.realized_pnl or 0) > 0)
+        losses = sum(1 for row in trades if float(row.realized_pnl or 0) < 0)
         decided = wins + losses
-        realized = float(portfolio.realized_pnl or 0)
         starting = float(portfolio.starting_cash or 100000)
         gross_profit = sum(max(0, float(row.realized_pnl or 0)) for row in trades)
         gross_loss = sum(min(0, float(row.realized_pnl or 0)) for row in trades)
@@ -463,7 +502,7 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
             "summary": {
                 "starting_cash": starting, "equity": starting + realized + unrealized,
                 "realized_pnl": realized, "unrealized_pnl": unrealized,
-                "total_pnl": realized + unrealized, "total_trades": int(portfolio.total_trades or 0),
+                "total_pnl": realized + unrealized, "total_trades": len(trades),
                 "wins": wins, "losses": losses,
                 "win_rate": round(wins / decided * 100, 2) if decided else 0.0,
                 "gross_profit": gross_profit, "gross_loss": gross_loss,
@@ -558,6 +597,18 @@ def soft_reset_auto_simulator(user_id: str = DEFAULT_USER_ID,
             db.delete(pos)
             closed += 1
         portfolio.starting_cash = float(starting_cash)
+        # The WATERMARK is what actually makes this stick. Zeroing the
+        # counters alone did not: they are a running cache of the trades
+        # table, and any concurrent job holding a stale portfolio object
+        # wrote the old totals straight back. Measured on 2026-08-15 — the
+        # book read $100,000 immediately after a reset and -$7,066 half an
+        # hour later with ZERO trades closed in between, the restored value
+        # matching the all-time sum to the cent.
+        #
+        # Everything closed at or before this instant belongs to the
+        # previous book. The rows stay — they are learning data — they just
+        # stop counting toward this book's equity.
+        portfolio.reset_at = now_iso()
         portfolio.realized_pnl = 0.0
         portfolio.total_trades = 0
         portfolio.wins = 0

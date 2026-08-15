@@ -312,6 +312,54 @@ export type ConcentrationBook = {
 
 export type ConcentrationStatus = { books: ConcentrationBook[]; any_over_limit: boolean };
 
+// Mirrors app/routers/intel.onchain_context. `state` distinguishes data we
+// never had from data we refuse to use — the two need different fixes.
+export type OnChainAsset = {
+  symbol: string;
+  state: "fresh" | "stale" | "never_synced" | "error";
+  detail?: string;
+  mvrv?: number;
+  mvrv_pctile_2y?: number | null;
+  mvrv_age_days?: number;
+  as_of?: string;
+  observations?: number;
+  active_addresses?: number;
+  active_addr_pctile_2y?: number | null;
+  joined?: boolean;
+};
+
+export type OnChainContext = { assets: OnChainAsset[]; note?: string };
+
+// Mirrors lib/dex_discovery.discover. `rejected` and `rejection_reasons`
+// are first-class: the feed is overwhelmingly noise, and hiding that would
+// make the survivors look more special than they are.
+export type DexSurvivor = {
+  network: string;
+  name: string;
+  pool_address: string;
+  liquidity_usd: number;
+  volume_24h_usd: number;
+  txns_24h: number;
+  buyers_24h: number;
+  sell_ratio: number | null;
+  age_hours: number | null;
+  fdv_usd: number | null;
+  ds_url?: string;
+  ds_dex?: string;
+  source_disagreement?: string;
+};
+
+export type DexDiscovery = {
+  scanned: number;
+  survivors: DexSurvivor[];
+  rejected: number;
+  rejection_reasons: Record<string, number>;
+  fetch_errors: string[];
+  degraded: boolean;
+  floors: Record<string, number | number[]>;
+  note?: string;
+};
+
 export type PositionWithSignal = Position & {
   signal: {
     asset_symbol: string;
@@ -1283,6 +1331,11 @@ export const api = {
   orderbook: (symbol: string) => get<OrderBookResponse>(`/orderbook/${symbol}`),
   cryptoDerivatives: (symbol: string, liquidationHours = 24) =>
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
+  onChainContext: () => get<OnChainContext>(`/onchain/context`),
+  // Hits GeckoTerminal + DEX Screener live, so this is on-demand rather
+  // than part of any page load.
+  dexDiscovery: (confirm = true) =>
+    get<DexDiscovery>(`/dex/discovery?confirm=${confirm}`),
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
   psychology: () => get<PsychologyIndex>("/psychology"),
   ipoPipeline: (limit = 40) => get<IpoPipelineResponse>(`/ipo/pipeline?limit=${limit}`),

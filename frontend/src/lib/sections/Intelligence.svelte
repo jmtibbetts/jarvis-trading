@@ -5,6 +5,8 @@
   import ThreatMap from "../components/ThreatMap.svelte";
   import OrderBookPanel from "../components/OrderBookPanel.svelte";
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
+  import OnChainPanel from "../components/OnChainPanel.svelte";
+  import DexDiscoveryPanel from "../components/DexDiscoveryPanel.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse, type InsiderTransaction } from "../api";
 
   let {
@@ -1295,6 +1297,22 @@
   <div class="span-12">
     <Panel title="Crypto Derivatives" meta="OKX perpetuals · funding, OI, liquidations">
       <CryptoDerivativesPanel />
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "cryptodesk"}
+  <div class="span-12">
+    <Panel title="On-Chain Fundamentals" meta="Coin Metrics · daily · MVRV cycle gauge">
+      <OnChainPanel />
+    </Panel>
+  </div>
+  {/if}
+
+  {#if view === "cryptodesk"}
+  <div class="span-12">
+    <Panel title="DEX Discovery" meta="new listings that cleared the floors — not endorsements">
+      <DexDiscoveryPanel />
     </Panel>
   </div>
   {/if}

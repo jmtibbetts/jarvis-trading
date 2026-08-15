@@ -211,6 +211,64 @@ def dex_discovery(confirm: bool = True):
     return discover(confirm=confirm)
 
 
+@router.get("/onchain/context")
+def onchain_context():
+    """Network-level on-chain state — the SLOW context layer.
+
+    MVRV is the classic cycle gauge, and the level alone means nothing:
+    2.4 is euphoric for one asset and ordinary for another, so what is
+    reported is the percentile against the asset's own trailing 2 years.
+    This describes conditions, never entries — it is the weather the
+    signals happen in.
+
+    Reports staleness EXPLICITLY. lib.onchain.latest_context returns an
+    empty dict both when the series is stale past its 4-day tolerance and
+    when it was never synced at all, which is the right call for a join
+    key (a week-old reading must not masquerade as today's network state)
+    but the wrong call for an ops panel — "no data" and "data we refuse to
+    use" need different fixes, so they get different labels here.
+    """
+    from datetime import datetime, timezone
+
+    from lib.onchain import ASSETS, latest_context
+    from lib.sector_engine import _pctile, _series as released
+
+    asof = datetime.now(timezone.utc)
+    out = []
+    for symbol in ASSETS:
+        row: dict = {"symbol": symbol}
+        try:
+            mvrv = released(symbol, "cm_CapMVRVCur", asof)
+            active = released(symbol, "cm_AdrActCnt", asof)
+            if not mvrv:
+                row["state"] = "never_synced"
+                row["detail"] = "no released MVRV rows in the event store"
+            else:
+                age = (asof.date() - mvrv[-1][0]).days
+                row["mvrv"] = round(mvrv[-1][1], 3)
+                row["mvrv_pctile_2y"] = _pctile(mvrv, years=2)
+                row["mvrv_age_days"] = age
+                row["as_of"] = mvrv[-1][0].isoformat()
+                row["observations"] = len(mvrv)
+                # Same 4-day tolerance the join applies, named here.
+                row["state"] = "stale" if age > 4 else "fresh"
+                if row["state"] == "stale":
+                    row["detail"] = (f"{age}d old — past the 4-day tolerance, "
+                                     f"so signals are NOT joined against it")
+            if active:
+                row["active_addresses"] = active[-1][1]
+                row["active_addr_pctile_2y"] = _pctile(active, years=2)
+            # What the candidate join would actually receive right now.
+            row["joined"] = bool(latest_context(symbol, asof))
+        except Exception as e:
+            row["state"] = "error"
+            row["detail"] = f"{type(e).__name__}: {str(e)[:120]}"
+        out.append(row)
+    return {"assets": out,
+            "note": ("daily-frequency data on a daily clock; MVRV percentile "
+                     "is the cycle gauge, not a trade trigger")}
+
+
 @router.get("/market/chart-symbols")
 def market_chart_symbols():
     """Distinct (symbol, timeframe) coverage of the bar cache — the chart

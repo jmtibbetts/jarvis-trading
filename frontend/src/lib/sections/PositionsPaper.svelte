@@ -274,6 +274,18 @@ Type FLATTEN to confirm:`,
     }
   }
 
+  async function resetAllBooks() {
+    if (!confirm("Reset BOTH virtual books (Paper and Auto Sim) to $100,000? Open positions close into history; every past trade is kept for learning. The live account is untouched.")) return;
+    try {
+      const r = await api.resetAll();
+      if (r.errors?.length) toastStore.err(`Partial reset: ${r.errors.join("; ")}`);
+      else toastStore.ok(`Both books reset to $100k — ${r.positions_closed ?? 0} position(s) closed into history`);
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Reset failed: ${e}`);
+    }
+  }
+
   const fmtUsd = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const fmtPct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 
@@ -757,6 +769,10 @@ Type FLATTEN to confirm:`,
         <div class="dz-item">
           <button class="btn small outline" onclick={resetAutoSim}>Reset Auto Sim → $100k</button>
           <span class="dz-desc">Same, for the follow-everything simulator. History preserved.</span>
+        </div>
+        <div class="dz-item">
+          <button class="btn small outline" onclick={resetAllBooks}>Reset EVERYTHING → $100k</button>
+          <span class="dz-desc">Both of the above in one action — one reset, one clean slate. Resetting a single book leaves the other's positions in the combined equity above. Live account untouched.</span>
         </div>
       </div>
       <p class="dz-note">

@@ -159,10 +159,16 @@ def market_chart(symbol: str, timeframe: str = "1H", limit: int = 3000):
             "generated_at": s.generated_at, "timeframe": s.timeframe,
             "llm_model": s.llm_model,
         } for s in sigs]
+        from sqlalchemy import func
+
         from app.database import PaperPosition
+        # LOWER() is load-bearing: writers store "Open" and SQLite's `=` is
+        # case-sensitive, so this filter matched nothing and the chart's
+        # position overlay was permanently empty. Same defect as the
+        # concentration guard (lib/concentration.open_rows).
         poss = (db.query(PaperPosition)
                   .filter(PaperPosition.symbol.in_(forms))
-                  .filter(PaperPosition.status == "open").all())
+                  .filter(func.lower(PaperPosition.status) == "open").all())
         positions = [{
             "id": p.id, "direction": p.direction, "qty": p.qty,
             "entry_price": p.entry_price, "stop_loss": p.stop_loss,

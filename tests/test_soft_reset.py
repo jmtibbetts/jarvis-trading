@@ -99,6 +99,71 @@ class AutoSimSoftResetTests(unittest.TestCase):
             self.assertEqual(p.total_trades, 0)
 
 
+class ResetAllCoversEveryBookTests(unittest.TestCase):
+    """One reset, one clean slate.
+
+    Reset was the only Danger Zone action without an EVERYTHING scope —
+    flatten had one, reset had a button per book. Resetting the paper book
+    alone left Auto Sim's positions standing in the combined equity the
+    Positions tab displays, which reads exactly like "the reset refilled
+    cash and left the orders open". These tests are non-mutating: the reset
+    functions themselves are patched, because what is under test is that
+    the endpoint calls BOTH of them.
+    """
+
+    def _call(self, paper, autosim):
+        from unittest.mock import patch
+        from app.routers.trading import reset_all_virtual_books
+        with patch("lib.paper_engine.soft_reset_paper_portfolio", paper), \
+             patch("lib.auto_simulator.soft_reset_auto_simulator", autosim):
+            return reset_all_virtual_books(starting_cash=100_000.0)
+
+    def test_both_books_are_reset(self):
+        from unittest.mock import MagicMock
+        paper = MagicMock(return_value={"ok": True, "positions_closed": 3})
+        autosim = MagicMock(return_value={"ok": True, "positions_closed": 4})
+        out = self._call(paper, autosim)
+        self.assertTrue(out["ok"], out)
+        paper.assert_called_once()
+        autosim.assert_called_once()
+        self.assertEqual(set(out["books"]), {"paper", "auto_sim"},
+                         "a virtual book was left out of the combined reset")
+        self.assertEqual(out["positions_closed"], 7,
+                         "the count must span both books")
+
+    def test_every_registered_position_book_is_covered(self):
+        """The combined reset must not drift behind the book registry."""
+        from unittest.mock import MagicMock
+        from lib.concentration import POSITION_BOOKS
+        out = self._call(MagicMock(return_value={}), MagicMock(return_value={}))
+        self.assertEqual(
+            set(out["books"]), set(POSITION_BOOKS),
+            "a book exists that /reset/all does not reset — one reset must "
+            "mean one clean slate across every book")
+
+    def test_one_book_failing_still_resets_the_other_and_says_so(self):
+        from unittest.mock import MagicMock
+        paper = MagicMock(side_effect=RuntimeError("paper db locked"))
+        autosim = MagicMock(return_value={"ok": True, "positions_closed": 2})
+        out = self._call(paper, autosim)
+        autosim.assert_called_once()
+        self.assertFalse(out["ok"])
+        self.assertTrue(any("paper" in e for e in out["errors"]), out)
+        self.assertIn("auto_sim", out["books"],
+                      "one book's failure must not abort the other")
+
+    def test_the_starting_cash_reaches_both_books(self):
+        from unittest.mock import MagicMock
+        from unittest.mock import patch
+        from app.routers.trading import reset_all_virtual_books
+        paper, autosim = MagicMock(return_value={}), MagicMock(return_value={})
+        with patch("lib.paper_engine.soft_reset_paper_portfolio", paper), \
+             patch("lib.auto_simulator.soft_reset_auto_simulator", autosim):
+            reset_all_virtual_books(starting_cash=25_000.0)
+        self.assertEqual(paper.call_args.kwargs["starting_cash"], 25_000.0)
+        self.assertEqual(autosim.call_args.kwargs["starting_cash"], 25_000.0)
+
+
 class HardResetStaysExplicitTests(unittest.TestCase):
     def test_the_destructive_paths_still_exist_but_are_labelled(self):
         """Hard resets remain for corrupt data, and their docstrings must

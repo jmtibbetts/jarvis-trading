@@ -1262,6 +1262,42 @@ def paper_reset(hard: bool = False, starting_cash: float = 100000.0):
         raise HTTPException(500, str(e))
 
 
+@router.post("/reset/all")
+def reset_all_virtual_books(starting_cash: float = 100000.0):
+    """One reset, one clean slate — every virtual book at once.
+
+    Reset was the only Danger Zone action without an EVERYTHING scope:
+    flatten has one, reset had a button per book. So "reset the sim" meant
+    the paper book only, Auto Sim kept its open positions, and the combined
+    equity the Positions tab displays still showed the old concentration —
+    which reads exactly like a reset that refilled cash and left the orders
+    open. It isn't; it is two books and one button.
+
+    Soft by design, like the per-book resets it calls: positions close into
+    history at their last mark, every trade row survives. The live broker
+    account is NOT touched — Alpaca has no reset API (see /trading/flatten).
+    """
+    out: dict = {"ok": True, "books": {}, "errors": []}
+    for name, fn in (("paper", "lib.paper_engine:soft_reset_paper_portfolio"),
+                     ("auto_sim", "lib.auto_simulator:soft_reset_auto_simulator")):
+        mod, _, attr = fn.partition(":")
+        try:
+            import importlib
+            out["books"][name] = getattr(importlib.import_module(mod), attr)(
+                starting_cash=starting_cash)
+        except Exception as e:
+            # One book failing must not leave the other unreset and the
+            # operator unaware — report per book rather than 500-ing.
+            out["ok"] = False
+            out["errors"].append(f"{name}: {str(e)[:120]}")
+            logger.error(f"[ResetAll] {name} failed: {e}")
+    out["positions_closed"] = sum(
+        int((r or {}).get("positions_closed") or 0)
+        for r in out["books"].values())
+    logger.warning(f"[ResetAll] {out}")
+    return out
+
+
 @router.post("/paper/run-mtm")
 def paper_run_mtm():
     """Manually trigger mark-to-market cycle."""

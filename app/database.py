@@ -810,6 +810,12 @@ class AutoSimPosition(Base):
     target_price      = Column(Float)
     stop_loss         = Column(Float)
     margin_used       = Column(Float, default=1000.0)
+    # Exposure as solved at open (qty x unit value), the quantity the
+    # concentration guard bounds. Auto Sim stored only margin, so its book
+    # reported zero exposure to anything that asked — and margin says
+    # nothing about exposure once leverage is involved. Derived rows
+    # (pre-migration) fall back to qty x entry in lib/concentration.
+    notional          = Column(Float)
     fees              = Column(Float, default=0.0)   # round-trip venue cost, charged at open
     fee_basis         = Column(String)
     entry_slippage_pct = Column(Float, default=0.0)
@@ -1232,6 +1238,10 @@ def _migrate_columns():
             ("fees",       "REAL DEFAULT 0.0"),   # round trip, reserved at open
             ("fee_basis",  "TEXT"),
             ("entry_slippage_pct", "REAL DEFAULT 0.0"),
+            # Exposure at open. Without it the concentration guard reads
+            # every Auto Sim row as zero exposure; existing rows stay NULL
+            # and fall back to qty x entry.
+            ("notional",   "REAL"),
         ],
         "auto_sim_trades": [
             ("gross_pnl",  "REAL DEFAULT 0.0"),   # before costs

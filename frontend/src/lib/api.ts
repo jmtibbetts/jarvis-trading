@@ -1486,6 +1486,11 @@ export const api = {
   paperSummary: () => get<PaperSummary>(`/paper/summary`),
   paperClose: (id: string) => post<Record<string, unknown>>(`/paper/close/${id}`),
   paperReset: () => post<{ ok: boolean; positions_closed?: number }>(`/paper/reset`),
+  // Both virtual books in one action — the reset counterpart to
+  // "Flatten EVERYTHING". Resetting one book alone leaves the other's
+  // positions in the combined equity the Positions tab shows.
+  resetAll: () =>
+    post<{ ok: boolean; positions_closed?: number; errors?: string[] }>(`/reset/all`),
   paperRunMtm: () => post<Record<string, unknown>>(`/paper/run-mtm`),
 
   autoSimSummary: () => get<AutoSimSummary>(`/auto-paper/summary`),

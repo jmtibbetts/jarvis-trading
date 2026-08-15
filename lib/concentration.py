@@ -61,14 +61,27 @@ def check(symbol: str, notional: float, loss_at_stop: float,
         return str(getattr(p, "symbol", None) or
                    (p.get("symbol") if isinstance(p, dict) else "") or "").upper()
 
-    def _not(p):
-        v = getattr(p, "notional", None)
+    def _get(p, attr):
+        v = getattr(p, attr, None)
         if v is None and isinstance(p, dict):
-            v = p.get("notional")
+            v = p.get(attr)
+        return v
+
+    def _num(v):
         try:
             return abs(float(v or 0))
         except (TypeError, ValueError):
             return 0.0
+
+    def _not(p):
+        v = _num(_get(p, "notional"))
+        if v:
+            return v
+        # Books that do not persist notional fall back to qty x entry.
+        # Exact for spot and margin; for a futures multiplier it is a
+        # FLOOR, which errs toward refusing rather than permitting — the
+        # correct direction for a guard to be wrong in.
+        return _num(_get(p, "qty")) * _num(_get(p, "entry_price"))
 
     sym = str(symbol or "").upper()
     notional = abs(float(notional or 0))
@@ -109,19 +122,60 @@ def check(symbol: str, notional: float, loss_at_stop: float,
     return {**detail, "ok": True, "limit": None, "reason": "within limits"}
 
 
+# ── The books ────────────────────────────────────────────────────────────
+# EVERY table a position writer opens into. This registry is the whole
+# reason a third book cannot quietly appear unguarded:
+# tests/test_concentration_parity.py discovers position models by shape and
+# fails if one is missing from here.
+#
+# Each book is judged against ITSELF. Paper and Auto Sim are independent
+# simulations with their own capital, so measuring one against the other's
+# open rows would refuse trades on the strength of an unrelated experiment.
+# "% of COMBINED equity" is a display concern (PositionsPaper.svelte); the
+# limit that blocks an open is per-book.
+POSITION_BOOKS: dict[str, str] = {
+    "paper": "paper_positions",
+    "auto_sim": "auto_sim_positions",
+}
+
+
+def _book_model(book: str):
+    from app.database import AutoSimPosition, PaperPosition
+    try:
+        return {"paper": PaperPosition, "auto_sim": AutoSimPosition}[book]
+    except KeyError:
+        raise ValueError(
+            f"unknown book {book!r}; register it in POSITION_BOOKS") from None
+
+
+def open_rows(book: str, db):
+    """Open rows of one book.
+
+    The status filter is CASE-INSENSITIVE and that is load-bearing. This
+    function previously compared against the literal "open" while every
+    writer stores "Open", and SQLite's `=` is case-sensitive — so the guard
+    matched nothing and judged every position against an empty book from
+    the day it landed. It could still refuse a single position that alone
+    breached the cap, which is why it looked alive, but accumulation (the
+    actual failure: DOGE reaching 35% across several opens) sailed through.
+    Comparing case-insensitively means neither casing can resurrect it.
+    """
+    from sqlalchemy import func
+    model = _book_model(book)
+    return db.query(model).filter(func.lower(model.status) == "open").all()
+
+
 def check_against_book(symbol: str, notional: float, loss_at_stop: float,
-                       equity: float, db=None) -> dict:
+                       equity: float, db=None, book: str = "paper") -> dict:
     """check() with the open book loaded for you. Never raises — a
     concentration check that errors must not become an unbounded open."""
     try:
-        from app.database import PaperPosition, get_db
+        from app.database import get_db
         if db is not None:
-            rows = db.query(PaperPosition).filter(
-                PaperPosition.status == "open").all()
+            rows = open_rows(book, db)
             return check(symbol, notional, loss_at_stop, equity, rows)
         with get_db() as _db:
-            rows = _db.query(PaperPosition).filter(
-                PaperPosition.status == "open").all()
+            rows = open_rows(book, _db)
             return check(symbol, notional, loss_at_stop, equity, rows)
     except Exception as e:
         logger.warning(f"[Concentration] check failed for {symbol}: {e}")

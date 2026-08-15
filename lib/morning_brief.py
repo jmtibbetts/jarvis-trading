@@ -82,9 +82,13 @@ def _book_movement(cutoff: str) -> dict:
     from app.database import engine
 
     with engine.connect() as c:
+        # LOWER() is load-bearing: rows are written with status "Open" and
+        # SQLite's `=` is case-sensitive, so this counted zero every
+        # morning and the brief reported an empty book regardless of what
+        # was actually held. Same defect as the concentration guard.
         open_row = c.execute(text("""
             SELECT COUNT(*), ROUND(SUM(unrealized_pnl), 2)
-            FROM paper_positions WHERE status = 'open'""")).fetchone()
+            FROM paper_positions WHERE LOWER(status) = 'open'""")).fetchone()
         closed = c.execute(text("""
             SELECT COUNT(*), ROUND(SUM(realized_pnl), 2)
             FROM paper_trades WHERE closed_at > :c"""),

@@ -342,6 +342,20 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
         slots_left = MAX_OPEN_POSITIONS - len(live_rows)
         capital = float(portfolio.starting_cash or 100_000.0)
         deploy_cap = capital * (MAX_DEPLOYED_PCT / 100.0)
+        # Auto Sim is a SECOND position book with its own capital, and it
+        # opened without any concentration limit at all — the paper engine's
+        # guard sits in open_paper_position, which this path never calls.
+        # That is why the desk still showed one instrument at a third of
+        # equity after the limit "landed".
+        #
+        # The book is carried in a local list rather than re-queried per
+        # candidate because this loop opens SEVERAL positions per pass: rows
+        # added below are not visible to a fresh query until commit, so a
+        # single pass could otherwise open five DOGE positions that are each
+        # individually under the cap and collectively far over it.
+        conc_book = list(live_rows)
+        conc_equity = (capital + float(portfolio.realized_pnl or 0)
+                       + sum(float(p.unrealized_pnl or 0) for p in live_rows))
         if slots_left <= 0 or deployed >= deploy_cap:
             logger.info(
                 f"[AutoSim] At capacity ({len(live_rows)}/{MAX_OPEN_POSITIONS} positions, "
@@ -386,16 +400,31 @@ def _run_auto_simulator(user_id: str = DEFAULT_USER_ID) -> dict:
             if sized.rejected:
                 skipped += 1
                 continue
+            # Concentration belongs to the book, not the sizing formula
+            # (see lib/concentration.py for why a notional ceiling inside
+            # solve_position collides with risk parity).
+            from lib import concentration
+            conc = concentration.check(
+                signal.asset_symbol, sized.notional,
+                abs(sized.qty * (entry - stop)), conc_equity, conc_book)
+            if not conc.get("ok"):
+                logger.info(f"[AutoSim] {signal.asset_symbol} not opened — "
+                            f"concentration: {conc['reason']}")
+                skipped += 1
+                continue
             qty = sized.qty
             fees, fee_basis = _round_trip_fee(signal.asset_symbol, sized.notional,
                                               sized.leverage, entry)
+            conc_book.append({"symbol": signal.asset_symbol,
+                              "notional": sized.notional})
             db.add(AutoSimPosition(
                 id=new_id(), user_id=user_id, signal_id=signal.id,
                 symbol=signal.asset_symbol, asset_class=signal.asset_class,
                 direction=signal.direction, side=side, leverage=sized.leverage,
                 qty=qty, entry_price=entry, current_price=entry,
                 target_price=signal.target_price, stop_loss=stop,
-                margin_used=round(sized.margin, 2), fees=round(fees, 6),
+                margin_used=round(sized.margin, 2), notional=sized.notional,
+                fees=round(fees, 6),
                 fee_basis=fee_basis, entry_slippage_pct=round(half_spread, 8),
                 unrealized_pnl=round(-fees, 6),
                 signal_updated_at=signal.updated_date, opened_at=now.isoformat(),
@@ -461,7 +490,10 @@ def get_auto_sim_summary(user_id: str = DEFAULT_USER_ID) -> dict:
                 # tell you whether you hold 0.16 BTC or 70,000 ARB.
                 "qty": row.qty,
                 "margin_used": row.margin_used,
-                "notional": round(float(row.qty or 0) * float(row.entry_price or 0), 2),
+                # Prefer the exposure solved at open; rows written before
+                # the column existed still derive it.
+                "notional": round(float(row.notional or 0)
+                                  or float(row.qty or 0) * float(row.entry_price or 0), 2),
                 "market_value": round(float(row.qty or 0) * float(row.current_price or row.entry_price or 0), 2),
                 "current_price": row.current_price, "target_price": row.target_price,
                 "stop_loss": row.stop_loss, "unrealized_pnl": row.unrealized_pnl,

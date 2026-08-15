@@ -165,11 +165,19 @@ def _fetch_equity_via_yfinance(symbols: list) -> dict:
                 price = getattr(info, 'last_price', None) or getattr(info, 'regularMarketPrice', None)
                 vol   = getattr(info, 'three_month_average_volume', 0) or 0
                 if price:
+                    # Same omission as the Alpaca path above. fast_info
+                    # carries the previous close, so the day's move is free.
+                    prev = getattr(info, 'previous_close', None) or getattr(info, 'previousClose', None)
+                    try:
+                        prev = float(prev) if prev else 0.0
+                    except (TypeError, ValueError):
+                        prev = 0.0
                     results[sym] = {
                         'price': float(price),
                         'volume': float(vol),
                         'asset_class': 'Equity',
                         'name': sym,
+                        'change_percent': ((float(price) - prev) / prev * 100.0) if prev > 0 else None,
                     }
             except Exception as ie:
                 logger.debug(f"[Market] yfinance equity {sym}: {ie}")
@@ -177,6 +185,46 @@ def _fetch_equity_via_yfinance(symbols: list) -> dict:
     except Exception as e:
         logger.warning(f"[Market] yfinance equity fallback failed entirely: {e}")
     return results
+
+
+def _apply_equity_session_change(results: dict) -> int:
+    """Set change_percent on equities from the PRIOR DAILY CLOSE.
+
+    Reads the daily bars already in the OHLCV cache, so it costs no provider
+    call. Returns how many rows it could price.
+
+    Leaves `change_percent` as it found it when there is no usable daily
+    history — a symbol whose move cannot be established keeps whatever the
+    bar-level fallback gave it, and if that is None the UI shows an em-dash
+    rather than inventing a flat 0%.
+    """
+    from datetime import timedelta
+
+    priced = 0
+    try:
+        from lib.ohlcv_cache import get_cached_range
+    except Exception as e:
+        logger.warning(f"[Market] session-change unavailable (no cache): {e}")
+        return 0
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=10)
+    for sym, data in results.items():
+        if data.get("asset_class") != "Equity":
+            continue
+        try:
+            df = get_cached_range(sym, "1D", start, end)
+            if df is None or len(df) < 2:
+                continue
+            prior_close = float(df["close"].iloc[-2])
+            price = float(data.get("price") or 0)
+            if prior_close > 0 and price > 0:
+                data["change_percent"] = (price - prior_close) / prior_close * 100.0
+                priced += 1
+        except Exception as e:
+            logger.debug(f"[Market] session change {sym}: {e}")
+    logger.info(f"[Market] session change set for {priced} equities")
+    return priced
 
 
 def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
@@ -293,11 +341,25 @@ def run():
         try:
             bars = future.result(timeout=ALPACA_READ_TIMEOUT)
             for sym, bar in bars.items():
+                # change_percent was never set on the equity path at all, so
+                # every equity row in the Market Watchlist rendered its CHANGE
+                # column as a bare "+%" — 0 of 44 equities carried a value
+                # while 301 of 301 crypto rows did, because only the crypto
+                # branch copied it off the discovery metadata.
+                #
+                # The bar already carries open and close, so this costs no
+                # extra call: it is that bar's own move, which is what the
+                # column means. None when open is missing or zero — an
+                # unknown change stays unknown rather than becoming 0%, which
+                # would read as "flat" and is a different claim.
+                o = float(getattr(bar, "open", 0) or 0)
+                c = float(bar.close)
                 results[sym] = {
-                    'price': float(bar.close),
+                    'price': c,
                     'volume': float(bar.volume or 0),
                     'asset_class': 'Equity',
                     'name': sym,
+                    'change_percent': ((c - o) / o * 100.0) if o > 0 else None,
                 }
             logger.info(f"[Market] Got {len(bars)} equity prices (Alpaca)")
         except FuturesTimeout:
@@ -355,6 +417,19 @@ def run():
             results[sym]["name"] = meta.get("name") or results[sym].get("name") or sym
             results[sym]["change_percent"] = meta.get("change_pct", results[sym].get("change_percent"))
             results[sym]["market_cap"] = meta.get("market_cap", results[sym].get("market_cap"))
+
+    # Equity change over the SESSION, not over the last bar.
+    #
+    # The latest-bar move is a real number but it is the wrong one: a column
+    # headed CHANGE next to a crypto column carrying a 24h move has to mean
+    # the same thing, and `get_stock_latest_bar` returns a one-minute bar —
+    # measured 0.23%, 0.15%, 0.12% across the watchlist, which reads as a
+    # dead-flat tape rather than as "this is one minute of it".
+    #
+    # The daily bars this same job warms into the OHLCV cache are the honest
+    # source. Prior daily CLOSE to current price is the session move as
+    # every other desk quotes it. No cached daily bar means no claim.
+    _apply_equity_session_change(results)
 
     # -- 2. Save prices to MarketAsset DB ----------------------------------------
     with get_db() as db:

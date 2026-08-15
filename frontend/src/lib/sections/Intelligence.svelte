@@ -1460,9 +1460,26 @@
             {#each marketTab === "equities" ? equities : crypto as a (a.symbol)}
               <tr>
                 <td class="sym">{a.symbol}</td>
-                <td class="name">{a.name}</td>
+                <!-- The equity fetch has no name source, so it stores the
+                     symbol as the name and this column rendered "NBIS NBIS"
+                     down the page — a column's worth of screen claiming to
+                     add something and adding nothing. Shown only when it is
+                     actually a name. -->
+                <td class="name">
+                  {#if a.name && a.name !== a.symbol}{a.name}{:else}<span class="dim">—</span>{/if}
+                </td>
                 <td class="num">{a.price}</td>
-                <td class="num {a.change_percent >= 0 ? 'pl-up' : 'pl-down'}">{a.change_percent >= 0 ? "+" : ""}{a.change_percent?.toFixed(2)}%</td>
+                <!-- `null >= 0` is TRUE in JS, so a missing change rendered
+                     as a green "+%" — a plus sign, a colour and a percent
+                     symbol around no number at all. Every equity row looked
+                     like a tiny gain. Unknown is now said, not decorated. -->
+                <td class="num {a.change_percent == null ? '' : a.change_percent >= 0 ? 'pl-up' : 'pl-down'}">
+                  {#if a.change_percent == null}
+                    <span class="dim" title="no change data for this asset yet">—</span>
+                  {:else}
+                    {a.change_percent >= 0 ? "+" : ""}{a.change_percent.toFixed(2)}%
+                  {/if}
+                </td>
               </tr>
             {:else}
               <tr><td colspan="4" class="empty">No market data cached yet</td></tr>

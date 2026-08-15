@@ -62,16 +62,79 @@ def b58decode(s: str) -> bytes:
     return b"\0" * pad + body
 
 
+def b58encode(raw: bytes) -> str:
+    """Canonical base58. Needed to round-trip an address and reject a
+    non-canonical encoding of the same bytes."""
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    # Leading zero BYTES map to leading '1' characters, and when the value
+    # is entirely zero those '1's ARE the whole encoding. An `or "1"`
+    # fallback here made the all-zero System Program encode to 33
+    # characters and get rejected as malformed.
+    return "1" * (len(raw) - len(raw.lstrip(b"\0"))) + out
+
+
 def is_valid_address(addr: str) -> bool:
-    """A Solana public key is 32 bytes, base58 encoded. Rejecting malformed
-    input here keeps junk out of the registry, where it would otherwise
-    burn Helius calls returning 404 forever."""
+    """LAYER 1 — STRUCTURAL validation only.
+
+    Valid base58, decodes to exactly 32 bytes, and round-trips canonically.
+    The round-trip rejects a non-canonical encoding of the same bytes (a
+    stray leading '1', say) which the length check alone lets through.
+
+    What this deliberately does NOT do is check the key lies on the ed25519
+    curve. Program Derived Addresses are off-curve BY DESIGN and are
+    completely valid Solana addresses; rejecting them would throw away
+    every PDA, program-owned account and protocol address. `off_curve` is
+    an entity-classification signal, never a validity verdict.
+
+    Known and documented limit: a truncated or altered address often still
+    decodes to 32 bytes and round-trips cleanly, because dropping a base58
+    character just divides the value by ~58. No structural test can infer
+    "this was probably meant to be a different address". That question is
+    answered by LAYER 2 — on-chain evidence — not by the encoding.
+    """
     if not addr or not (32 <= len(addr) <= 44):
         return False
     try:
-        return len(b58decode(addr)) == 32
+        raw = b58decode(addr)
     except ValueError:
         return False
+    return len(raw) == 32 and b58encode(raw) == addr
+
+
+def structural_check(addr: str) -> dict:
+    """`is_valid_address` with its reasoning exposed, for the UI.
+
+    The UI must never say "INVALID ADDRESS" for an address that is merely
+    off-curve or merely inactive, so it needs to know WHICH test failed.
+    """
+    if not addr:
+        return {"valid": False, "reason": "empty"}
+    if not (32 <= len(addr) <= 44):
+        return {"valid": False,
+                "reason": f"length {len(addr)} outside the 32–44 range a "
+                          f"32-byte base58 value can occupy"}
+    try:
+        raw = b58decode(addr)
+    except ValueError as e:
+        return {"valid": False, "reason": f"not valid base58: {e}"}
+    if len(raw) != 32:
+        return {"valid": False,
+                "reason": f"decodes to {len(raw)} bytes, not 32"}
+    if b58encode(raw) != addr:
+        return {"valid": False,
+                "reason": "non-canonical base58 encoding of these bytes"}
+    return {
+        "valid": True,
+        "reason": "structurally valid 32-byte base58 address",
+        # Informational ONLY. Off-curve is not invalid — see above.
+        "note": ("Structural validity cannot prove this is the address that "
+                 "was intended, nor that it is a trader. On-chain evidence "
+                 "and entity classification decide that."),
+    }
 
 
 def load_seed_wallets() -> list[str]:

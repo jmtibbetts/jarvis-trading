@@ -66,24 +66,50 @@ def _f(v, default=0.0) -> float:
 _GT_SPACING_S = 2.5
 _last_gt_call = 0.0
 
+# A 429 used to end that call permanently: return [], record the error,
+# move on. With six calls per pass sharing one spacing clock, a single
+# throttling episode therefore wiped the WHOLE discovery pass — observed
+# live as `scanned: 0` with all six paths reporting "rate limited (429)"
+# while the API answered every request normally seconds later.
+#
+# 429 is the one status that explicitly means "ask again shortly", so it is
+# the one worth retrying. Bounded at three attempts: this runs behind an
+# explicit button, and a few seconds is a fair price for the panel having
+# anything in it at all. Every other status still fails on the first try.
+_GT_RETRIES = 3
+_GT_BACKOFF_S = (4.0, 9.0)
+
 
 def _gt_get(path: str, errors: list) -> list[dict]:
     global _last_gt_call
     import time
-    wait = _GT_SPACING_S - (time.time() - _last_gt_call)
-    if wait > 0:
-        time.sleep(wait)
-    _last_gt_call = time.time()
-    try:
-        r = httpx.get(f"{GT_BASE}/{path}", timeout=30.0)
-        if r.status_code == 429:
-            errors.append(f"{path}: rate limited (429)")
+
+    for attempt in range(_GT_RETRIES):
+        wait = _GT_SPACING_S - (time.time() - _last_gt_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_gt_call = time.time()
+        try:
+            r = httpx.get(f"{GT_BASE}/{path}", timeout=30.0)
+            if r.status_code == 429:
+                if attempt < _GT_RETRIES - 1:
+                    # Honour Retry-After when the server sends one; it knows
+                    # its own window better than a guessed constant.
+                    try:
+                        hinted = float(r.headers.get("Retry-After", "") or 0)
+                    except ValueError:
+                        hinted = 0.0
+                    time.sleep(max(hinted, _GT_BACKOFF_S[attempt]))
+                    continue
+                errors.append(f"{path}: rate limited (429) after "
+                              f"{_GT_RETRIES} attempts")
+                return []
+            r.raise_for_status()
+            return r.json().get("data") or []
+        except Exception as e:
+            errors.append(f"{path}: {type(e).__name__}")
             return []
-        r.raise_for_status()
-        return r.json().get("data") or []
-    except Exception as e:
-        errors.append(f"{path}: {type(e).__name__}")
-        return []
+    return []
 
 
 def fetch_new_pools(network: str, limit: int = 20,

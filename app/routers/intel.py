@@ -358,16 +358,47 @@ def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
     from lib import helius_client, token_pricing, wallet_intel
     from lib.wallet_activity import _config, parse_transfers
 
+    from lib import wallet_registry
+
     _, key, wallets, page_limit = _config()
-    if not key or not wallets:
-        # A configuration state, not a failure. The UI renders this as
-        # NOT_CONFIGURED rather than as an empty result.
-        return {"configured": False,
-                "has_key": bool(key),
-                "wallets_watched": len(wallets),
-                "detail": ("HELIUS_API_KEY not set" if not key else
-                           "HELIUS_WATCH_WALLETS is empty"),
-                "research_population": wallet_intel.RESEARCH_POPULATION}
+
+    # §21: `configured` reflects whether the SUBSYSTEM can work — a Helius
+    # connection and the feature switch — not whether somebody hand-typed a
+    # wallet list. Reporting configured:false for a blank env var made an
+    # environment variable the database and hid a working client behind an
+    # empty string.
+    enabled = wallet_registry.intelligence_enabled()
+    registry_counts = wallet_registry.counts()
+    base = {
+        "configured": enabled,
+        "enabled": enabled,
+        "helius": {"connected": bool(key)},
+        "discovery": {"enabled": wallet_registry.discovery_enabled()},
+        "wallets": registry_counts,
+        "research_population": wallet_intel.RESEARCH_POPULATION,
+        "features": {
+            "whale_detection": True, "smart_money": True,
+            "alpha_scoring": True, "copy_scoring": True,
+            "coordination": True, "clustering": True,
+            "funding_analysis": True,
+        },
+    }
+
+    if not key:
+        return {**base, "configured": False, "enabled": False,
+                "detail": "HELIUS_API_KEY not set"}
+
+    # The live analysis below reads TRANSFERS for specific addresses, so it
+    # still needs at least one wallet. That is a different statement from
+    # "the subsystem is unconfigured", and the response now says which.
+    if not wallets:
+        return {**base,
+                "detail": ("No wallets to analyse yet. Discovery is "
+                           + ("enabled and will populate the registry."
+                              if base["discovery"]["enabled"]
+                              else "disabled; set HELIUS_WALLET_DISCOVERY_ENABLED=true "
+                                   "or add seeds to HELIUS_WATCH_WALLETS.")),
+                "analysis": None}
 
     watched = wallets[:_WALLET_INTEL_MAX_WALLETS]
     lim = max(1, min(int(limit or page_limit), _WALLET_INTEL_MAX_TRANSFERS))

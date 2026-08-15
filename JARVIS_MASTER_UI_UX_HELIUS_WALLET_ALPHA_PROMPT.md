@@ -4968,3 +4968,77 @@ misread waiting to happen.
 
 Anything a provider does NOT return on the current plan is stated as
 such, so an empty panel is never mistaken for a quiet market.
+
+---
+
+# 141. SELF-EXPANDING WALLET INTELLIGENCE — OPERATOR SPEC 2026-08-15
+
+Full 31-phase specification supplied by the operator. The governing
+principle: move from "tell JARVIS which wallets to watch" to "JARVIS
+discovers which wallets are worth watching". `HELIUS_WATCH_WALLETS`
+becomes optional seeds / pinned overrides, never the wallet universe.
+
+Lifecycle: DISCOVERED -> CANDIDATE -> ANALYZING -> WATCH -> SMART_MONEY
+-> HIGH_CONVICTION, with decay back through DEGRADED -> ARCHIVED. Pinned
+wallets are exempt from automatic archival.
+
+Four SEPARATE scores, never collapsed into one: whale (capital),
+smart_money (competence), alpha (what happens after they enter), copy
+(whether following them survives latency, slippage and liquidity). A
+wallet can legitimately score smart_money 94 / copy 22.
+
+Verified against the live API 2026-08-15 before any design was committed:
+- getTokenLargestAccounts WORKS (20 accounts) — the earlier "too many
+  accounts" note was stale.
+- getMultipleAccounts(jsonParsed) resolves token account -> owner wallet,
+  5 of 5. Discovery costs 2 RPC calls per token.
+- The largest BONK holder is a Binance hot wallet, which is why §13's
+  entity classification is a correctness requirement and not polish.
+
+Standing safety rules from the spec: large wallet != smart money;
+profitable != copyable; same token != coordinated; shared funding != same
+owner; early buyer != insider; transfer != trade. Each is a signal with a
+confidence, never a claim.
+
+This section supersedes the wallet portions of §129 ordering.
+
+---
+
+# 142. WALLET INTELLIGENCE AS A SYSTEM-WIDE SENSOR — 2026-08-15
+
+Supersedes and expands §141. The critical addition: **wallet intelligence
+must not live only on its own page.** A dedicated Wallet Intelligence page
+is the research lab; the normal trading screen is where the intelligence
+becomes actionable. It must flow into trading screens, token screens,
+charts, watchlists, market scanners, the opportunity scanner, the signal
+engine, the confluence engine, AI/LLM reasoning, trade setups and alerts.
+
+`SMART MONEY / WALLET INTELLIGENCE` becomes a first-class confluence
+category beside Technical Analysis, Order Flow, Volume, Momentum, News,
+Regime — weighted through the EXISTING confluence architecture, never a
+blind average.
+
+Named seeds (labels only, NOT quality claims):
+West, Cented, theo, Tuults, ban.
+
+Four states that must never collapse into one boolean:
+  CONFIGURED  — can the subsystem operate?
+  OPERATIONAL — can it currently do useful work?
+  SEEDED      — were manual wallets supplied?
+  DISCOVERY   — can it find wallets by itself?
+
+Both modes are required for done:
+  MODE A — seeds supplied: import, persist, analyse, score, monitor.
+  MODE B — HELIUS_WATCH_WALLETS empty: still configured, discovery runs,
+           JARVIS finds wallet #1 itself from TOKEN ACTIVITY, not from a
+           known wallet.
+
+Conflicts must be surfaced, never hidden: a technical long while five
+high-alpha wallets exit is a CONFLICT DETECTED, not a quietly lowered
+score. Early entry, entry-during-breakout and late chasing must be
+weighted differently — a wallet buying after +31% is not confirmation.
+
+AI reasoning receives STRUCTURED context, never scraped UI text.
+
+Evidence table required: a score of 91 must be explainable by the
+observations behind it, not presented as a black box.

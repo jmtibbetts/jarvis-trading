@@ -88,12 +88,46 @@ class WalletIntelRouteTests(unittest.TestCase):
         # Even the refusal carries the population stamp.
         self.assertEqual(out["research_population"], "WALLET_ALPHA")
 
-    def test_empty_watchlist_says_so_specifically(self):
+    def test_empty_watchlist_is_configured_but_has_nothing_to_analyse(self):
+        """§141 corrected this contract, and the correction matters.
+
+        This used to assert `configured: false` for an empty watch list,
+        which made an environment variable the database: a working Helius
+        connection and a 24KB scoring engine reported themselves disabled
+        because a string was blank. Configured now means the SUBSYSTEM can
+        operate; having no wallets to analyse is a separate, and separately
+        reported, fact.
+
+        The original intent — say something specific rather than going
+        quiet — is preserved and now has more to say.
+        """
         with mock.patch("lib.wallet_activity._config",
-                        return_value=("https://x", "key", [], 100)):
+                        return_value=("https://x", "key", [], 100)), \
+             mock.patch("lib.helius_client.configured", return_value=True):
+            out = intel_routes.wallet_intel_report()
+
+        self.assertTrue(out["configured"],
+                        "a blank seed list must not disable the subsystem")
+        self.assertTrue(out["helius"]["connected"])
+        self.assertIn("wallets", out)
+        self.assertIn("discovery", out)
+        self.assertIsNone(out["analysis"],
+                          "no wallets means no analysis was run, and the "
+                          "response should say so rather than fake an "
+                          "empty result")
+        self.assertIn("No wallets to analyse", out["detail"])
+        self.assertEqual(out["research_population"], "WALLET_ALPHA")
+
+    def test_missing_key_is_still_unconfigured(self):
+        """The correction above must not swing too far: no Helius key IS
+        genuinely unconfigured, and that has to stay distinguishable from
+        'configured but nothing discovered yet'."""
+        with mock.patch("lib.wallet_activity._config",
+                        return_value=("https://x", "", [], 100)), \
+             mock.patch("lib.helius_client.configured", return_value=False):
             out = intel_routes.wallet_intel_report()
         self.assertFalse(out["configured"])
-        self.assertIn("HELIUS_WATCH_WALLETS", out["detail"])
+        self.assertIn("HELIUS_API_KEY", out["detail"])
 
     def test_transfer_failure_is_reported_not_swallowed(self):
         """A wallet whose transfers 500 must appear in `errors`. Returning

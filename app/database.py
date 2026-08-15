@@ -767,6 +767,184 @@ class UserPreference(Base):
     updated_at          = Column(String, default=now_iso)
 
 
+# ── Wallet intelligence registry (§141) ──────────────────────────────────
+# The wallet universe used to be an environment variable, which made
+# `HELIUS_WATCH_WALLETS` the database and left the whole subsystem reporting
+# configured:false whenever it was blank. Wallets live here now; the env var
+# becomes optional seeds and pinned overrides.
+#
+# Lifecycle, per §141:
+#   DISCOVERED -> CANDIDATE -> ANALYZING -> WATCH -> SMART_MONEY
+#                                                 -> HIGH_CONVICTION
+#   and back down through DEGRADED -> ARCHIVED as edge decays.
+#
+# EXCLUDED_ENTITY is a terminal state, not a demotion. An exchange hot
+# wallet or a router program is not a bad trader — it is not a trader. The
+# largest BONK holder on the first live query was a Binance hot wallet, so
+# without this the system's first "discovery" is a CEX moving customer
+# funds, announced as a whale.
+WALLET_STATES = (
+    "DISCOVERED", "CANDIDATE", "ANALYZING", "WATCH",
+    "SMART_MONEY", "HIGH_CONVICTION", "DEGRADED", "ARCHIVED",
+    "EXCLUDED_ENTITY",
+)
+
+
+class WalletRegistry(Base):
+    __tablename__ = "wallet_registry"
+
+    address     = Column(String, primary_key=True)
+    # Human name where one is known. Truncated base58 is unreadable, and an
+    # operator who supplied a wallet because they know whose it is should
+    # see that name back. A label is not evidence of quality.
+    label       = Column(String)
+    # How it got here: manual_seed | token_holders | counterparty |
+    # funding_graph | co_trading. Kept so a bad discovery source can be
+    # measured and switched off rather than guessed at.
+    source          = Column(String, default="manual_seed")
+    source_wallet   = Column(String)
+    discovery_reason = Column(Text)
+
+    status      = Column(String, default="DISCOVERED", index=True)
+    # Pinned wallets survive automatic archival. A seed the operator chose
+    # is never silently dropped because it went quiet for a week.
+    pinned              = Column(Boolean, default=False)
+    monitoring_enabled  = Column(Boolean, default=False)
+
+    # Entity classification (§13). Decided BEFORE scoring, because scoring
+    # infrastructure produces confident nonsense.
+    entity_type = Column(String)          # exchange | program | pool | bridge…
+    entity_name = Column(String)
+    is_trader   = Column(Boolean)
+    is_protocol = Column(Boolean, default=False)
+
+    first_discovered_at = Column(String, default=now_iso)
+    last_seen_at        = Column(String)
+    last_analyzed_at    = Column(String)
+    last_score_update   = Column(String)
+
+    total_transactions = Column(Integer, default=0)
+    total_swaps        = Column(Integer, default=0)
+    qualified_trades   = Column(Integer, default=0)
+    winning_trades     = Column(Integer, default=0)
+    losing_trades      = Column(Integer, default=0)
+
+    win_rate       = Column(Float)
+    realized_pnl   = Column(Float)
+    average_return = Column(Float)
+    median_return  = Column(Float)
+    profit_factor  = Column(Float)
+    max_drawdown   = Column(Float)
+
+    average_trade_size    = Column(Float)
+    median_trade_size     = Column(Float)
+    largest_trade         = Column(Float)
+    average_holding_period = Column(Float)
+
+    # What happened AFTER this wallet entered — the actual alpha question.
+    entry_alpha_5m  = Column(Float)
+    entry_alpha_15m = Column(Float)
+    entry_alpha_1h  = Column(Float)
+    entry_alpha_4h  = Column(Float)
+    entry_alpha_24h = Column(Float)
+
+    # Four SEPARATE scores. Collapsing them is the mistake §10 exists to
+    # prevent: a wallet can be genuinely skilled and completely uncopyable.
+    whale_score        = Column(Float)
+    smart_money_score  = Column(Float)
+    alpha_score        = Column(Float)
+    coordination_score = Column(Float)
+    copy_score         = Column(Float)
+    # Confidence is separate from score so a 100% win rate over 2 trades
+    # cannot outrank 71% over 167. §29's sample-size discipline.
+    confidence_score   = Column(Float)
+
+    cluster_id         = Column(String, index=True)
+    funded_by          = Column(String)
+    funding_cluster_id = Column(String)
+
+    # §116: WALLET_ALPHA records must never enter CRYPTO_MAJORS training,
+    # calibration, expectancy or Gate. Stamped at birth so the guard can
+    # assert on it rather than infer.
+    population = Column(String, default="WALLET_ALPHA")
+
+    notes      = Column(Text)
+    updated_at = Column(String, default=now_iso, onupdate=now_iso)
+
+
+class WalletTrade(Base):
+    """One reconstructed trade. Raw transfers are NOT trades (§9) — a token
+    account being created, a wrapped-SOL unwrap and a genuine swap all look
+    alike until they are reconstructed, and counting transfers as trades is
+    how a wallet gets a fabricated win rate."""
+    __tablename__ = "wallet_trades"
+    __table_args__ = (
+        # One signature moves several mints between several counterparties,
+        # so the signature alone is NOT unique. Measured on live data.
+        UniqueConstraint("signature", "mint", "counterparty", "direction",
+                         name="uq_wallet_trade_identity"),
+    )
+
+    id        = Column(String, primary_key=True, default=new_id)
+    address   = Column(String, index=True, nullable=False)
+    signature = Column(String, nullable=False)
+    mint      = Column(String, nullable=False)
+    counterparty = Column(String, default="")
+    direction = Column(String, nullable=False)      # buy | sell
+
+    token_symbol = Column(String)
+    quantity     = Column(Float)
+    # `amount` from /v1/transfers, never decimals/amountRaw — those are
+    # unreliable per-token on live data (a USDT row reported decimals 0
+    # when USDT genuinely has 6).
+    value_usd    = Column(Float)
+    price        = Column(Float)
+    price_source = Column(String)
+    dex          = Column(String)
+    fees_usd     = Column(Float)
+
+    opened_at        = Column(String, index=True)
+    closed_at        = Column(String)
+    holding_period_s = Column(Float)
+    realized_pnl     = Column(Float)
+    return_pct       = Column(Float)
+
+    # Post-entry price path — the alpha measurement. Null where no price
+    # history exists for that mint; abstaining beats inventing a return.
+    price_5m_after  = Column(Float)
+    price_15m_after = Column(Float)
+    price_1h_after  = Column(Float)
+    price_4h_after  = Column(Float)
+    price_24h_after = Column(Float)
+    mfe = Column(Float)
+    mae = Column(Float)
+
+    population = Column(String, default="WALLET_ALPHA")
+    created_at = Column(String, default=now_iso)
+
+
+class WalletRelationship(Base):
+    """Edges in the wallet graph. Shared funding is NOT proof of shared
+    ownership and co-trading is NOT proof of collusion (§141 safety rules),
+    so every edge carries a confidence and a kind rather than a verdict."""
+    __tablename__ = "wallet_relationships"
+    __table_args__ = (
+        UniqueConstraint("from_address", "to_address", "kind",
+                         name="uq_wallet_relationship"),
+    )
+
+    id           = Column(String, primary_key=True, default=new_id)
+    from_address = Column(String, index=True, nullable=False)
+    to_address   = Column(String, index=True, nullable=False)
+    # funded_by | transferred_to | traded_same_token | coordinated_with
+    kind       = Column(String, nullable=False)
+    confidence = Column(Float, default=0.0)
+    evidence   = Column(Text)
+    observations = Column(Integer, default=1)
+    first_seen_at = Column(String, default=now_iso)
+    last_seen_at  = Column(String, default=now_iso)
+
+
 class TelegramLinkToken(Base):
     __tablename__ = "telegram_link_tokens"
     id           = Column(String, primary_key=True, default=new_id)
@@ -1253,6 +1431,11 @@ def _migrate_columns():
         # cannot lose money to costs will always look profitable, so its P&L
         # could not be compared against the paper book (which does charge
         # venue fees). These columns carry the cost side of the ledger.
+        # The registry is young and will gain columns as §141 lands; every
+        # one goes here so an existing database picks it up without a drop.
+        "wallet_registry": [
+            ("label", "TEXT"),
+        ],
         "auto_sim_positions": [
             ("fees",       "REAL DEFAULT 0.0"),   # round trip, reserved at open
             ("fee_basis",  "TEXT"),

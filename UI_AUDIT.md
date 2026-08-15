@@ -116,15 +116,41 @@ Two known gaps, deliberately not claimed as done:
 
 ## Backend → UI parity gaps
 
-Confirmed present in the backend with **no UI surface at all**:
+All three P1 gaps are closed:
 
 | Capability | Module | API route | UI |
 |---|---|---|---|
-| Wallet intelligence (whale, smart-money, cluster, coordination, copy-candidate) | `lib/wallet_intel.py` | none | none |
-| Token pricing / USD coverage | `lib/token_pricing.py` | none | none |
-| Helius client health + per-endpoint metrics | `lib/helius_client.py` | none | none |
+| Wallet intelligence (whale, exchange flow, cluster, coordination) | `lib/wallet_intel.py` | `/wallet/intel` | Crypto Desk → Wallet Alpha |
+| Token pricing / USD coverage | `lib/token_pricing.py` | same response | same panel (coverage strip) |
+| Helius client health + per-endpoint metrics | `lib/helius_client.py` | `/helius/health` | Ops → Helius API |
 
-Surfaced during this session:
+`smart_money_score` and `copy_trade_candidate` are still unsurfaced —
+both need a per-wallet trade history the collector does not yet retain
+(`_store` keeps symbol/metric/value and drops counterparty and mint), so
+a panel for them would have nothing honest to show yet.
+
+`/wallet/intel` is on an explicit button, not a poll. It makes live
+Helius calls — transfers per wallet, one batched identity call, one
+funded-by per wallet — bounded at 12 wallets and 100 transfers each. Put
+on a 30s timer it would spend the plan's quota on an unread tab.
+
+Verified against the live API: 96 transfers across 2 wallets, 87.5%
+priced (69 helius + 15 peg, 12 abstained rather than guessed), 21 whale
+candidates, 8 exchange flows, 2 funder clusters, coordination 0.0 with
+the reason given. Every record stamped `WALLET_ALPHA`, and the panel
+prints raw wallet count *and* independent cluster count side by side
+(§117) rather than the flattering one.
+
+**A gap the P0 work missed, found here.** The SPA fallback answers any
+unmatched path with `index.html` and a **200**, so a route the running
+server does not have arrived as a success and `res.json()` threw a bare
+`SyntaxError` about an unexpected `<`. `request()` now checks the
+content-type and raises a proper `unsupported`, which renders as:
+*"/helius/health is not a route on the running server (got text/html) —
+it may need a restart to pick up new endpoints."* Confirmed on screen
+against the operator's own running instance.
+
+Surfaced earlier in this session:
 
 | Capability | Route | UI |
 |---|---|---|
@@ -137,6 +163,18 @@ Surfaced during this session:
 
 ## Still to do
 
-Everything from §129 P1 downward: Helius/wallet-alpha surfaces, the Daily
-Brief command centre (§130), the Crypto Desk IA (§131), the workstation
-interaction model (§49–67), and the visualization primitives (§125).
+§129 P2 downward: the Daily Brief command centre (§130), the Crypto Desk
+IA (§131), the workstation interaction model (§49–67), and the
+visualization primitives (§125).
+
+Carried forward from the sections above, so it is not lost:
+
+- KPI tiles still render `—` on a failed fetch (P0 note 3).
+- `smart_money_score` / `copy_trade_candidate` have no surface, because
+  the collector does not retain the per-wallet history they need.
+- `HELIUS_WATCH_WALLETS` is **empty** on this deployment, so Wallet Alpha
+  correctly reports NOT CONFIGURED. The pipeline was verified by
+  temporarily pointing it at two public Solana addresses; nothing was
+  written to the watchlist.
+- Execution past `simulateTransaction` still needs a funded Solana
+  keypair. Blocked on the operator by design — no signer in the repo.

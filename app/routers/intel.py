@@ -294,6 +294,170 @@ def wallet_activity_status():
     return out
 
 
+@router.get("/helius/health")
+def helius_health():
+    """Reachability and per-endpoint metrics for the single Helius door.
+
+    `lib/helius_client.py` has recorded latency, call counts and error
+    counts per endpoint since it was written, and none of it was readable
+    without a Python prompt. Cheap: health() makes two calls and never
+    raises, metrics() makes none.
+    """
+    from lib import helius_client
+
+    out = {"configured": helius_client.configured(),
+           "metrics": helius_client.metrics()}
+    if not out["configured"]:
+        out["detail"] = "HELIUS_API_KEY not set"
+        return out
+    out["health"] = helius_client.health()
+    return out
+
+
+# How much live API spend one /wallet/intel call is allowed to make. The
+# analysis needs transfers per wallet, one batched identity call, and one
+# funded-by per wallet; without ceilings a large watchlist turns a page
+# refresh into a rate-limit incident.
+_WALLET_INTEL_MAX_WALLETS = 12
+_WALLET_INTEL_MAX_TRANSFERS = 100
+
+
+@router.get("/wallet/intel")
+def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
+    """Wallet Alpha over the watched Solana wallets: whales, exchange flow,
+    clusters, coordination, and USD coverage.
+
+    Everything here already existed in `lib/wallet_intel.py` and
+    `lib/token_pricing.py` with no route and no UI. The analysis is pure;
+    this endpoint is the I/O around it.
+
+    Two invariants the response is shaped by:
+
+    §116 — every record is stamped WALLET_ALPHA. This is a research
+    population and must never reach majors expectancy, calibration, the
+    Gate, training or risk. Surfacing it in the UI is not contamination;
+    feeding it to a model would be.
+
+    §117 — coordination reports BOTH the raw wallet count and the
+    independent cluster count, because one actor splitting a position
+    across three addresses is one opinion, not three.
+
+    This makes live Helius calls (bounded above), so it is deliberately
+    not on any poll loop.
+    """
+    from collections import defaultdict
+
+    from lib import helius_client, token_pricing, wallet_intel
+    from lib.wallet_activity import _config, parse_transfers
+
+    _, key, wallets, page_limit = _config()
+    if not key or not wallets:
+        # A configuration state, not a failure. The UI renders this as
+        # NOT_CONFIGURED rather than as an empty result.
+        return {"configured": False,
+                "has_key": bool(key),
+                "wallets_watched": len(wallets),
+                "detail": ("HELIUS_API_KEY not set" if not key else
+                           "HELIUS_WATCH_WALLETS is empty"),
+                "research_population": wallet_intel.RESEARCH_POPULATION}
+
+    watched = wallets[:_WALLET_INTEL_MAX_WALLETS]
+    lim = max(1, min(int(limit or page_limit), _WALLET_INTEL_MAX_TRANSFERS))
+    errors: list[str] = []
+
+    # ── 1. transfers per wallet ──────────────────────────────────────────
+    rows: list[dict] = []
+    for addr in watched:
+        try:
+            rows.extend(parse_transfers(helius_client.transfers(addr, lim), addr))
+        except Exception as e:
+            errors.append(f"{addr[:8]}… transfers: {type(e).__name__}: {str(e)[:120]}")
+
+    if not rows:
+        return {"configured": True, "wallets_watched": len(wallets),
+                "wallets_queried": len(watched), "transfers": 0,
+                "errors": errors,
+                "detail": ("no transfers returned for the watched wallets — "
+                           "a quiet chain and a broken parser look the same "
+                           "here only if `errors` is empty"),
+                "research_population": wallet_intel.RESEARCH_POPULATION}
+
+    # ── 2. price them (peg -> helius -> market -> abstain) ───────────────
+    mints = [r.get("mint") for r in rows if r.get("mint")]
+    try:
+        prices = token_pricing.resolve_prices(mints, address_for_helius=watched[0])
+    except Exception as e:
+        prices, _ = {}, errors.append(f"pricing: {type(e).__name__}: {str(e)[:120]}")
+    valued = token_pricing.value_transfers(rows, prices)
+    cov = token_pricing.coverage(valued)
+
+    # ── 3. classify counterparties in ONE batched call ───────────────────
+    identities: dict[str, dict] = {}
+    cps = [r.get("counterparty") for r in valued if r.get("counterparty")]
+    if cps:
+        try:
+            identities = helius_client.batch_identity(list(dict.fromkeys(cps)))
+        except Exception as e:
+            errors.append(f"batch-identity: {type(e).__name__}: {str(e)[:120]}")
+
+    flows = wallet_intel.exchange_flows(valued, identities)
+
+    # ── 4. whales, judged both absolutely and per-wallet ─────────────────
+    by_wallet: dict[str, list[dict]] = defaultdict(list)
+    for t in valued:
+        by_wallet[t.get("wallet")].append(t)
+    baselines = {w: wallet_intel.wallet_baseline(ts) for w, ts in by_wallet.items()}
+
+    whales = []
+    for t in valued:
+        s = wallet_intel.whale_score(t, baselines.get(t.get("wallet")))
+        if s["score"] > 0:
+            whales.append({**t, "whale": s})
+    whales.sort(key=lambda w: -w["whale"]["score"])
+
+    # ── 5. clusters. funded-by 404s legitimately and returns {} ──────────
+    funding: dict[str, dict] = {}
+    for addr in watched:
+        try:
+            funding[addr] = helius_client.funded_by(addr)
+        except Exception as e:
+            errors.append(f"{addr[:8]}… funded-by: {type(e).__name__}: {str(e)[:120]}")
+    clusters = wallet_intel.cluster_by_funder(funding, identities)
+    cluster_map = {m: c["funder"] for c in clusters
+                   if not c["is_infrastructure_funder"] and c["size"] > 1
+                   for m in c["members"]}
+    independence = wallet_intel.independent_clusters(
+        [r.get("wallet") for r in valued], cluster_map)
+
+    # ── 6. coordination, scored on clusters not wallets (§117) ───────────
+    coordination = wallet_intel.coordination_score(
+        [{"wallet": t.get("wallet"), "symbol": t.get("symbol"),
+          "direction": t.get("direction"), "timestamp": t.get("timestamp")}
+         for t in valued],
+        cluster_map=cluster_map)
+
+    return wallet_intel.stamp_population({
+        "configured": True,
+        "wallets_watched": len(wallets),
+        "wallets_queried": len(watched),
+        "wallets_truncated": max(0, len(wallets) - len(watched)),
+        "transfer_limit": lim,
+        "transfers": len(valued),
+        "pricing": cov,
+        "exchange_flows": [wallet_intel.stamp_population(f) for f in flows[:40]],
+        "whales": [wallet_intel.stamp_population(w) for w in whales[:25]],
+        "clusters": clusters[:20],
+        # BOTH numbers, always — §117. The UI shows them side by side.
+        "independence": independence,
+        "coordination": coordination,
+        "errors": errors,
+        "boundary_note": (
+            "WALLET_ALPHA is a separate research population (§116). It is "
+            "shown here and cross-links freely, but never enters majors "
+            "expectancy, calibration, the Gate, training or risk."),
+    })
+
+
 @router.get("/market/chart-symbols")
 def market_chart_symbols():
     """Distinct (symbol, timeframe) coverage of the bar cache — the chart

@@ -348,6 +348,109 @@ export type WalletActivityStatus = {
   store_error?: string;
 };
 
+// Mirrors GET /helius/health — the single Helius door's reachability plus
+// the per-endpoint counters lib/helius_client has always recorded.
+export type HeliusHealth = {
+  configured: boolean;
+  detail?: string;
+  metrics: Record<string, { calls: number; errors: number; ms_total?: number; ms_avg?: number; last_status?: number | null }>;
+  health?: {
+    configured: boolean;
+    detail?: string;
+    rpc?: { ok: boolean; ms?: number; error?: string };
+    wallet_api?: { ok: boolean; ms?: number; error?: string };
+  };
+};
+
+// Mirrors GET /wallet/intel. Shaped by two invariants:
+//   §116 — every record carries research_population WALLET_ALPHA and must
+//          never reach a CRYPTO_MAJORS population.
+//   §117 — coordination reports raw_wallets AND independent_clusters. One
+//          actor across three addresses is one opinion, not three, and the
+//          UI shows both numbers rather than picking the flattering one.
+export type WalletWhale = {
+  signature: string;
+  timestamp: number | null;
+  direction: "in" | "out";
+  counterparty: string | null;
+  mint: string | null;
+  symbol: string | null;
+  amount: number;
+  wallet: string;
+  usd_value?: number | null;
+  whale: { score: number; is_whale: boolean; reasons: string[] };
+};
+
+export type WalletExchangeFlow = {
+  flow: "exchange_inflow" | "exchange_outflow";
+  wallet: string;
+  exchange: string;
+  exchange_address: string;
+  symbol: string | null;
+  amount: number;
+  usd_value?: number | null;
+  signature: string;
+  timestamp: number | null;
+  implication: string;
+};
+
+export type WalletCluster = {
+  funder: string;
+  funder_name: string | null;
+  funder_type: string | null;
+  members: string[];
+  size: number;
+  confidence: number;
+  is_infrastructure_funder: boolean;
+  reasons: string[];
+};
+
+export type WalletIntel = {
+  configured: boolean;
+  detail?: string;
+  has_key?: boolean;
+  wallets_watched: number;
+  wallets_queried?: number;
+  wallets_truncated?: number;
+  transfer_limit?: number;
+  transfers?: number;
+  pricing?: {
+    total: number;
+    priced: number;
+    unpriced: number;
+    priced_pct: number;
+    by_source: Record<string, number>;
+  };
+  exchange_flows?: WalletExchangeFlow[];
+  whales?: WalletWhale[];
+  clusters?: WalletCluster[];
+  independence?: {
+    raw_wallets: number;
+    independent_clusters: number;
+    collapsed: number;
+    clusters: Record<string, string[]>;
+  };
+  coordination?: {
+    score: number;
+    raw_wallets?: number;
+    independent_clusters?: number;
+    reasons: string[];
+    groups: {
+      symbol: string;
+      direction: string;
+      wallets: string[];
+      wallet_count: number;
+      independent_clusters: number;
+      collapsed_wallets: number;
+      window_seconds: number;
+      started_at: number;
+    }[];
+  };
+  errors?: string[];
+  boundary_note?: string;
+  research_population?: string;
+};
+
 // Mirrors lib/dex_discovery.discover. `rejected` and `rejection_reasons`
 // are first-class: the feed is overwhelmingly noise, and hiding that would
 // make the survivors look more special than they are.
@@ -1318,6 +1421,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(method, path, 0, e instanceof Error ? e.message : String(e));
   }
   if (!res.ok) throw new ApiError(method, path, res.status, await errDetail(res));
+  // The SPA fallback answers any unmatched path with index.html and a 200.
+  // So a route that does not exist on the running server arrives here
+  // looking successful, and `res.json()` then throws a bare SyntaxError
+  // about unexpected "<" — which classifies as a generic error and reads
+  // like a bug in JARVIS rather than "your server predates this endpoint".
+  const ctype = res.headers.get("content-type") ?? "";
+  if (!ctype.includes("json")) {
+    throw new ApiError(method, path, 404,
+      `${path} is not a route on the running server (got ${ctype || "no content-type"}) — it may need a restart to pick up new endpoints`);
+  }
   return res.json();
 }
 
@@ -1406,6 +1519,10 @@ export const api = {
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
   onChainContext: () => get<OnChainContext>(`/onchain/context`),
   walletActivityStatus: () => get<WalletActivityStatus>(`/wallet/activity/status`),
+  heliusHealth: () => get<HeliusHealth>(`/helius/health`),
+  // Makes live, bounded Helius calls — driven by an explicit button, never
+  // a poll. See the route docstring for the ceilings.
+  walletIntel: (limit = 100) => get<WalletIntel>(`/wallet/intel?limit=${limit}`),
   // Hits GeckoTerminal + DEX Screener live, so this is on-demand rather
   // than part of any page load.
   dexDiscovery: (confirm = true) =>

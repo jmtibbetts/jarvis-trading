@@ -3,7 +3,7 @@
   import Pill from "../components/Pill.svelte";
   import StateNote from "../components/StateNote.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus, type WalletActivityStatus } from "../api";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus, type WalletActivityStatus, type HeliusHealth } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
@@ -26,6 +26,14 @@
   let parity = $state<ParityReport | null>(null);
   let corpus = $state<FeatureCorpus | null>(null);
   let wallet = $state<WalletActivityStatus | null>(null);
+  let helius = $state<HeliusHealth | null>(null);
+
+  const heliusEndpoints = $derived(
+    Object.entries(helius?.metrics ?? {}).sort((a, b) => b[1].calls - a[1].calls),
+  );
+  const heliusOk = $derived(
+    !!helius?.health?.rpc?.ok && !!helius?.health?.wallet_api?.ok,
+  );
 
   async function loadExecPrefs() {
     execPrefs = await feeds.load("execPrefs", () => api.tradingPreference());
@@ -64,7 +72,7 @@
   // every panel behind it.
   async function loadAll() {
     loadExecPrefs();
-    const [j, c, lh, cs, o, er, p, pa, co, w] = await Promise.all([
+    const [j, c, lh, cs, o, er, p, pa, co, w, hx] = await Promise.all([
       feeds.load("jobs", () => api.jobStatus()),
       feeds.load("configs", () => api.settingsList()),
       feeds.load("llmHealth", () => api.llmHealth()),
@@ -75,6 +83,7 @@
       feeds.load("parity", () => api.dataParity()),
       feeds.load("corpus", () => api.featureCorpus()),
       feeds.load("wallet", () => api.walletActivityStatus()),
+      feeds.load("helius", () => api.heliusHealth()),
     ]);
     jobs = j ?? {};
     configs = c ?? [];
@@ -86,6 +95,7 @@
     parity = pa;
     corpus = co;
     wallet = w;
+    helius = hx;
   }
 
   // Bytes/day per event kind — the §46 measurement, summed across symbols.
@@ -446,6 +456,53 @@ Save anyway?`)) return;
               <b class="num">{n}</b>
             </div>
           {/each}
+        </div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <!-- The single Helius door's own telemetry. lib/helius_client has
+         recorded per-endpoint calls, errors and latency since it was
+         written; until now reading it meant opening a Python prompt. -->
+    <Panel
+      title="Helius API"
+      dotColor={!helius?.configured ? "var(--ink-faint)" : heliusOk ? "var(--good)" : "var(--bad)"}
+      meta={helius?.configured ? `${heliusEndpoints.length} endpoints used` : ""}
+      status={feeds.status("helius")}
+    >
+      {#if !helius}
+        <StateNote status={feeds.status("helius")} noun="Helius client health" />
+      {:else if !helius.configured}
+        <div class="stat-list">
+          <div class="stat"><span>Status</span><b>not configured</b></div>
+          <div class="stat"><span>Detail</span><b>{helius.detail ?? "HELIUS_API_KEY not set"}</b></div>
+        </div>
+      {:else}
+        <div class="stat-list">
+          <div class="stat">
+            <span>JSON-RPC</span>
+            <b class={helius.health?.rpc?.ok ? "" : "bad"}>
+              {helius.health?.rpc?.ok ? `ok · ${helius.health.rpc.ms}ms` : (helius.health?.rpc?.error ?? "unknown")}
+            </b>
+          </div>
+          <div class="stat">
+            <span>Wallet API</span>
+            <b class={helius.health?.wallet_api?.ok ? "" : "bad"}>
+              {helius.health?.wallet_api?.ok ? `ok · ${helius.health.wallet_api.ms}ms` : (helius.health?.wallet_api?.error ?? "unknown")}
+            </b>
+          </div>
+          {#each heliusEndpoints as [name, m] (name)}
+            <div class="stat">
+              <span>{name}</span>
+              <b class="num {m.errors ? 'bad' : ''}">
+                {m.calls} calls{m.errors ? ` · ${m.errors} err` : ""}{m.ms_avg != null ? ` · ${Math.round(m.ms_avg)}ms` : ""}
+              </b>
+            </div>
+          {/each}
+          {#if !heliusEndpoints.length}
+            <div class="stat"><span>Endpoints</span><b>none called since restart</b></div>
+          {/if}
         </div>
       {/if}
     </Panel>

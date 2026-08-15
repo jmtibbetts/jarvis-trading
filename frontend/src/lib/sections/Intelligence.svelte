@@ -7,6 +7,7 @@
   import CryptoDerivativesPanel from "../components/CryptoDerivativesPanel.svelte";
   import OnChainPanel from "../components/OnChainPanel.svelte";
   import DexDiscoveryPanel from "../components/DexDiscoveryPanel.svelte";
+  import WalletAlphaPanel from "../components/WalletAlphaPanel.svelte";
   import StateNote from "../components/StateNote.svelte";
   import { api, type Regime, type Threat, type NewsArticle, type MarketAsset, type IntelligenceSource, type IntelligenceStatus, type ThreatExposure, type InsiderClustersResponse, type YieldCurveSnapshot, type MacroSnapshot, type DarkPoolTopActivity, type DarkPoolVenues, type SqueezeTopResponse, type InstitutionalAccumulation, type CongressTradesResponse, type CongressActivityResponse, type PsychologyIndex, type IpoPipelineResponse, type InsiderTransaction } from "../api";
   import { FeedTracker } from "../dataState.svelte";
@@ -1330,6 +1331,15 @@
     <Panel title="DEX Discovery" meta="new listings that cleared the floors — not endorsements">
       <DexDiscoveryPanel />
     </Panel>
+  </div>
+  {/if}
+
+  {#if view === "cryptodesk"}
+  <!-- WalletAlphaPanel brings its own Panel: it owns its run button and its
+       own load state, and the analysis is on-demand rather than part of this
+       section's poll. -->
+  <div class="span-12">
+    <WalletAlphaPanel />
   </div>
   {/if}
 

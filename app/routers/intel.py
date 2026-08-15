@@ -70,6 +70,14 @@ def get_intelligence_sources():
 
 @router.get("/intelligence/status")
 def get_intelligence_status():
+    """Snapshot-served: 18 seconds for a 507-byte answer, measured
+    2026-08-15. Source health changes on the ingestion cycle, not per
+    request (§140.3)."""
+    from lib.snapshot_cache import cached
+    return cached("intel:status", 300, _intelligence_status)
+
+
+def _intelligence_status():
     with get_db() as db:
         sources = db.query(IntelligenceSourceHealth).all()
         latest = db.query(IntelligenceIngestionRun).order_by(

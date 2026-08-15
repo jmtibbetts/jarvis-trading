@@ -533,6 +533,25 @@ class MarketAsset(Base):
     created_date  = Column(String, default=now_iso)
     updated_date  = Column(String, default=now_iso)
 
+class SnapshotCache(Base):
+    """Last good result of an expensive derivation, surviving restarts.
+
+    The Morning Brief takes 172 seconds to derive and returns 7.7 KB. That
+    cost was paid on every request and again from zero after every restart,
+    which is what left the panel on "assembling…" and the desk looking dead
+    after a crash. See lib/snapshot_cache.py for the serving rules; the
+    short version is that a reading labelled four minutes old beats a blank
+    panel, and it beats a three-minute block by more.
+    """
+    __tablename__ = "snapshot_cache"
+    id          = Column(String, primary_key=True, default=new_id)
+    key         = Column(String, unique=True, index=True)
+    payload     = Column(Text)
+    computed_at = Column(Float, default=0.0)
+    compute_ms  = Column(Integer, default=0)
+    last_error  = Column(String)
+
+
 class PlatformConfig(Base):
     __tablename__ = "platform_configs"
     id           = Column(String, primary_key=True, default=new_id)

@@ -487,7 +487,18 @@ def get_r_multiples(limit: int = 200):
 def get_performance_analytics(days: int = 90):
     """Real portfolio analytics computed from history: Sharpe ratio and max
     drawdown from daily equity snapshots, plus win-rate/avg P&L broken down
-    by originating signal source (watchlist LLM vs ta_fallback vs scanner)."""
+    by originating signal source (watchlist LLM vs ta_fallback vs scanner).
+
+    Snapshot-served: measured at 77 seconds for a 530-byte answer on
+    2026-08-15. The work is a full replay over equity snapshots and trade
+    outcomes, and it changes on the timescale of closed trades, not of page
+    refreshes (§140.3).
+    """
+    from lib.snapshot_cache import cached
+    return cached(f"perf:{days}", 900, lambda: _performance_analytics(days))
+
+
+def _performance_analytics(days: int = 90):
     from lib.performance_analytics import (
         daily_equity_curve, compute_max_drawdown, compute_sharpe_ratio, signal_source_breakdown,
     )

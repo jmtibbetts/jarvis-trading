@@ -61,9 +61,22 @@ def morning_brief(window_hours: int = 24):
     """One answer to 'what happened while I slept?' — gate movement,
     corpus maturation, book activity, platform flow, positioning
     extremes and today's expected releases, assembled from the owning
-    modules' own numbers."""
+    modules' own numbers.
+
+    Served from a snapshot. Measured at **172 seconds** to derive on
+    2026-08-15, which is why the panel sat on "assembling…" — and paid
+    again from zero after every restart. The snapshot is refreshed behind
+    the response and carries its own age, so the operator reads a brief
+    from a few minutes ago instead of watching a spinner (§140.3).
+    """
     from lib.morning_brief import build_brief
-    return build_brief(max(1, min(window_hours, 168)))
+    from lib.snapshot_cache import cached
+
+    hours = max(1, min(window_hours, 168))
+    # 20 minutes: the brief's inputs are daily-to-hourly clocks, and §140.4
+    # asks for roughly three refreshes a day of the news half. A shorter TTL
+    # would spend three minutes of CPU to change almost nothing.
+    return cached(f"brief:{hours}", 1200, lambda: build_brief(hours))
 
 
 @router.get("/data-platform/health")

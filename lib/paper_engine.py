@@ -838,6 +838,19 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
         logger.info(f"[Paper] {sym} NOT opened — sizing rejected: {sizing.get('reason')}")
         return {"error": f"paper sizing rejected: {sizing.get('reason')}"}
 
+    # Concentration is a property of the BOOK, not of this trade, so it is
+    # judged here against what is already open — not inside solve_position,
+    # where a notional ceiling collides with risk parity (measured
+    # 2026-08-16: any cap tight enough to bind a 146%-exposure XAUT also
+    # strangles an ordinary 1x/5%-stop trade at 20% notional).
+    from lib.concentration import check_against_book
+    conc = check_against_book(sym, sizing["notional"],
+                              sizing.get("loss_at_stop") or 0.0, _equity)
+    if not conc.get("ok"):
+        logger.info(f"[Paper] {sym} NOT opened — concentration: {conc['reason']}")
+        return {"error": f"concentration limit: {conc['reason']}",
+                "concentration": conc}
+
     qty = round(sizing["qty"], 6)
     margin = round(sizing["margin"], 2)
     notional = sizing["notional"]

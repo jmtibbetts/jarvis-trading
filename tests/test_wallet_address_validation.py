@@ -127,6 +127,28 @@ class EntityClassificationTests(unittest.TestCase):
         self.assertFalse(c["is_trader"])
         self.assertEqual(c["owner_wallet"], owner)
 
+    def test_an_account_owned_by_another_program_is_a_PDA_not_a_trader(self):
+        """Found by spot-checking the first live discovery pass, not by
+        reasoning: among five sampled "trader candidates" were an account
+        owned by Pump.fun's AMM and another owned by Meteora DLMM. Both are
+        liquidity vaults. Neither is executable and neither is an SPL token
+        account, so every other check passed them — and they would have
+        scored as traders with huge volume and constant activity, ranking
+        protocol plumbing above every human on the chain.
+
+        A user wallet is owned by the SYSTEM program. Nothing else is."""
+        for program in ("pAMMBay6oceH9fJKBRHGwLPKnCACo9AJ7YXFPz3mQzY",   # Pump.fun AMM
+                        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"):  # Meteora DLMM
+            c = classify(WALLET, _ev(owner_program=program))
+            self.assertEqual(c["entity_type"], "PDA", program)
+            self.assertFalse(c["is_trader"])
+            self.assertTrue(c["is_protocol"])
+
+    def test_a_system_owned_account_is_still_a_trader_candidate(self):
+        c = classify(WALLET, _ev(owner_program="11111111111111111111111111111111"))
+        self.assertEqual(c["entity_type"], "TRADER_CANDIDATE")
+        self.assertTrue(c["is_trader"])
+
     def test_a_valid_address_with_no_account_is_not_malformed(self):
         c = classify(WALLET, _ev(exists=False))
         self.assertNotEqual(c["entity_type"], "INVALID")

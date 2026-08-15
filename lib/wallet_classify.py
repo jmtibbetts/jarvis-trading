@@ -38,6 +38,9 @@ NON_TRADER_ENTITIES = {
 # wallet.
 _SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 _SPL_TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+# A user wallet is a System Program account. This is the single check
+# that separates a person from protocol plumbing.
+_SYSTEM_PROGRAM = "11111111111111111111111111111111"
 
 
 def on_chain_evidence(address: str) -> dict:
@@ -159,6 +162,25 @@ def classify(address: str, evidence: dict | None = None) -> dict:
                       is_protocol=True, owner_wallet=owner,
                       reason="owned by the SPL Token program — a token "
                              "account. Its OWNER is the trading candidate.")
+        return result
+
+    # A user wallet is owned by the SYSTEM program. Anything owned by some
+    # OTHER program is that program's account — a pool vault, a bonding
+    # curve, an escrow — and cannot have a trading history of its own.
+    #
+    # This check was missing and the first live discovery pass proved why:
+    # among five sampled "trader candidates" were an account owned by
+    # Pump.fun's AMM and another owned by Meteora DLMM. Both are liquidity
+    # vaults. They are not executable and not SPL token accounts, so every
+    # earlier test passed them, and they would have been scored as traders
+    # with enormous volume and constant activity — ranking protocol
+    # plumbing above every human on the chain.
+    if owner_program and owner_program != _SYSTEM_PROGRAM:
+        result.update(entity_type="PDA", is_trader=False, is_protocol=True,
+                      off_curve=True,
+                      reason=f"owned by program {owner_program[:12]}… — a "
+                             f"program-derived account (pool vault, bonding "
+                             f"curve or escrow), not a wallet")
         return result
 
     result.update(entity_type=TRADER_CANDIDATE, is_trader=True,

@@ -14,6 +14,8 @@
   import { FeedTracker } from "../dataState.svelte";
   import Pill from "../components/Pill.svelte";
   import StateNote from "../components/StateNote.svelte";
+  import AnalogDistribution from "../components/AnalogDistribution.svelte";
+  import ReturnHistogram from "../components/ReturnHistogram.svelte";
 
   const feeds = new FeedTracker();
 
@@ -217,34 +219,47 @@
          cache has never held. -->
     <StateNote status={feeds.status("chart")} noun="chart data" />
   {/if}
-  {#if analogs}
-    <div class="analogs">
-      <div class="ahead">
-        <b>analogs</b>
+  <div class="lower">
+    <div class="lower-col">
+      <div class="sub-head">
+        <b>Bar returns</b>
         <span class="muted">
-          {analogs.analogs.length} most similar non-overlapping moments of
-          {analogs.candidates_searched.toLocaleString()} searched — history, not prediction
+          how this instrument actually moves, from the {payload?.bar_count.toLocaleString() ?? 0}
+          bars on screen
         </span>
-        {#each Object.entries(analogs.forward_summary) as [h, s]}
-          <span class="fwd">
-            +{h.replace("fwd_", "").replace("b", "")} bars:
-            <b class:pos={s.median_pct > 0} class:neg={s.median_pct < 0}>{s.median_pct}%</b>
-            <span class="muted">({s.up_rate}% up, n={s.n})</span>
-          </span>
-        {/each}
       </div>
-      <div class="alist">
-        {#each analogs.analogs as a}
-          <button class="chip" onclick={() => jumpTo(a.time)} title="jump chart to this moment">
-            {String(a.time).slice(0, 10)}
-            <span class:pos={Number(a["fwd_96b_pct"]) > 0} class:neg={Number(a["fwd_96b_pct"]) < 0}>
-              {a["fwd_96b_pct"]}%
-            </span>
-          </button>
-        {/each}
-      </div>
+      {#if payload && payload.bars.length > 2}
+        <ReturnHistogram bars={payload.bars} timeframe={payload.timeframe} />
+      {:else}
+        <StateNote status={feeds.status("chart")} noun="bars" emptyText="No bars to measure" />
+      {/if}
     </div>
-  {/if}
+
+    <div class="lower-col">
+      <div class="sub-head">
+        <b>Analog outcomes</b>
+        <span class="muted">
+          {analogs?.analogs.length ?? 0} most similar non-overlapping moments — every
+          one of them, not just the median
+        </span>
+      </div>
+      {#if analogs}
+        <AnalogDistribution {analogs} />
+        <div class="alist">
+          {#each analogs.analogs as a}
+            <button class="chip" onclick={() => jumpTo(a.time)} title="jump chart to this moment">
+              {String(a.time).slice(0, 10)}
+              <span class:pos={Number(a["fwd_96b_pct"]) > 0} class:neg={Number(a["fwd_96b_pct"]) < 0}>
+                {a["fwd_96b_pct"]}%
+              </span>
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <StateNote status={feeds.status("analogs")} noun="analogs" />
+      {/if}
+    </div>
+  </div>
 </div>
 
 <style>
@@ -317,23 +332,35 @@
     font-size: 12.5px;
     margin: 0;
   }
-  .analogs {
+  /* Two panels side by side under the candles: what this instrument's bars
+     do, and what followed the moments that looked like this one. Both are
+     context for the same decision, so they belong on one screen. */
+  .lower {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    gap: 10px;
+    flex: none;
+  }
+  @media (max-width: 1100px) {
+    .lower {
+      grid-template-columns: 1fr;
+    }
+  }
+  .lower-col {
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
   }
-  .ahead {
+  .sub-head {
     display: flex;
-    gap: 14px;
+    gap: 10px;
     align-items: baseline;
     flex-wrap: wrap;
     font-size: 12.5px;
-  }
-  .fwd {
-    font-variant-numeric: tabular-nums;
   }
   .alist {
     display: flex;

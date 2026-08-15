@@ -628,6 +628,22 @@ def create_scheduler() -> BackgroundScheduler:
     # the filters rejected. Local bar walk over the OHLCV cache — no LLM, no
     # network. 30 min because a candidate needs forward bars to judge anyway;
     # resolving more eagerly would only find "too young".
+    # Autonomous wallet discovery. Ranked by volume/transaction
+    # ACCELERATION rather than size, so it looks at tokens that just woke
+    # up — where wallets that were early are still visible — instead of at
+    # whichever pair is permanently largest.
+    #
+    # 20 minutes because that is roughly the useful life of the signal: a
+    # surge worth investigating is hours old at most, and each pass costs
+    # 2 GeckoTerminal calls plus 2 Helius RPC calls per token.
+    def wallet_discovery_run():
+        from lib.wallet_discovery import discover_from_tokens
+        return discover_from_tokens(max_tokens=5)
+    sched.add_job(make_job_runner('wallet_discovery', wallet_discovery_run),
+                  'interval', minutes=20, id='wallet_discovery',
+                  next_run_time=now + timedelta(minutes=3),
+                  replace_existing=True, max_instances=1)
+
     def candidates_run():
         from lib.candidates import relink_orphan_signals, resolve_pending
         # Relink first. A live signal whose candidate row points at a

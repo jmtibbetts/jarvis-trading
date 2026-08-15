@@ -34,12 +34,120 @@ GT_BASE = "https://api.geckoterminal.com/api/v2"
 # the exchanges, which is exactly the band classification clears out.
 HOLDERS_PER_TOKEN = 20
 
+# Activity floor. An acceleration computed on a trickle is noise:
+# 300% more of $200 is still $600, and the wallets in it are not the
+# ones worth the RPC calls.
+MIN_H1_VOLUME_USD = 20_000.0
+
 
 def _cfg_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, "") or default)
     except ValueError:
         return default
+
+
+def _f(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def surge_metrics(attrs: dict) -> dict:
+    """Is this token SUDDENLY busy, or just permanently large?
+
+    Ranking by absolute 24h volume finds big tokens, which is a different
+    question and mostly the wrong one: a pair doing $2M every day outranks
+    one that went from $5k to $500k in the last hour, and the second is
+    where wallets that were early are still visible.
+
+    Acceleration is measured against the token's OWN recent pace, so a
+    small pair waking up scores like a large one waking up:
+
+        vol_accel_1h = h1 volume / (h24 volume / 24)
+        vol_accel_5m = m5 volume / (h1 volume / 12)
+
+    Both are 1.0 at steady state. Two guards keep them honest:
+
+    A pool younger than a day has no meaningful h24 baseline — dividing by
+    a window the pool did not exist for manufactures enormous ratios out of
+    nothing, so young pools are scored on the 5m/1h pair only.
+
+    A token already past its move is penalised rather than ranked highly.
+    h24 +110% with h6 -45% is a completed pump; buying pressure there is
+    exit liquidity, and the wallets worth finding are long gone.
+    """
+    vol = attrs.get("volume_usd") or {}
+    txn = attrs.get("transactions") or {}
+    chg = attrs.get("price_change_percentage") or {}
+
+    v_h24, v_h6, v_h1, v_m5 = (_f(vol.get("h24")), _f(vol.get("h6")),
+                               _f(vol.get("h1")), _f(vol.get("m5")))
+    t_h24, t_h1 = txn.get("h24") or {}, txn.get("h1") or {}
+    tx_h24 = _f(t_h24.get("buys")) + _f(t_h24.get("sells"))
+    tx_h1 = _f(t_h1.get("buys")) + _f(t_h1.get("sells"))
+
+    # Pool age from the h6/h24 relationship: if essentially all of the
+    # day's volume happened in the last 6 hours, the pool is young and the
+    # h24 baseline is not a baseline.
+    young = v_h24 <= 0 or (v_h6 / v_h24) > 0.9
+
+    # A ratio needs a window the pool actually traded through. When m5 IS
+    # essentially all of h1, the pool is minutes old and m5/(h1/12) pins to
+    # its ceiling of 12.0 by construction — every brand-new pool scores
+    # identically and the ranking becomes "newest first", which is a
+    # different question wearing this one's clothes. Measured live: the
+    # entire top 8 sat at exactly 12.0.
+    minutes_old = v_h1 <= 0 or (v_m5 / v_h1) > 0.8
+
+    vol_accel_1h = (v_h1 / (v_h24 / 24.0)) if v_h24 > 0 and not young else None
+    # A young pool still has a usable 6h baseline even when 24h is fiction.
+    if vol_accel_1h is None and v_h6 > 0 and not minutes_old:
+        vol_accel_1h = v_h1 / (v_h6 / 6.0)
+    vol_accel_5m = (v_m5 / (v_h1 / 12.0)) if v_h1 > 0 and not minutes_old else None
+    txn_accel_1h = (tx_h1 / (tx_h24 / 24.0)) if tx_h24 > 0 and not young else None
+
+    buys_h1, sells_h1 = _f(t_h1.get("buys")), _f(t_h1.get("sells"))
+    buy_pressure = buys_h1 / (buys_h1 + sells_h1) if (buys_h1 + sells_h1) else None
+
+    c_h24, c_h6, c_h1 = _f(chg.get("h24")), _f(chg.get("h6")), _f(chg.get("h1"))
+    # Pumped and now falling: the move already happened and current buying
+    # is exit liquidity. On a young pool h24 and h6 are the same number, so
+    # the h24>50 condition never fires — hence the second clause, which
+    # caught GIF/SOL sitting at -77% and still scoring 12.9.
+    post_peak = (c_h24 > 50 and (c_h6 < -15 or c_h1 < -15)) or c_h6 < -25
+
+    # Composite. Deliberately uses the acceleration available rather than
+    # substituting absolute volume when it is missing, so a token cannot
+    # score for merely being large.
+    parts = [x for x in (vol_accel_1h, vol_accel_5m, txn_accel_1h) if x is not None]
+    score = (sum(parts) / len(parts)) if parts else 0.0
+    if buy_pressure is not None:
+        score *= (0.5 + buy_pressure)      # 0.5x all-sells .. 1.5x all-buys
+    if post_peak:
+        score *= 0.25
+    # An acceleration on nothing is nothing. Below a real activity floor the
+    # ratio is noise — 300% more of $200 is still $600.
+    if v_h1 < MIN_H1_VOLUME_USD:
+        score *= 0.1
+    if minutes_old:
+        # Not discarded: a pool minutes old may be exactly the thing worth
+        # watching. But it has no measured baseline, so it must not
+        # outrank a token with an observed one.
+        score *= 0.3
+
+    return {
+        "vol_accel_1h": round(vol_accel_1h, 3) if vol_accel_1h is not None else None,
+        "vol_accel_5m": round(vol_accel_5m, 3) if vol_accel_5m is not None else None,
+        "txn_accel_1h": round(txn_accel_1h, 3) if txn_accel_1h is not None else None,
+        "buy_pressure_1h": round(buy_pressure, 3) if buy_pressure is not None else None,
+        "price_change_h1": c_h1, "price_change_h6": c_h6, "price_change_h24": c_h24,
+        "young_pool": young,
+        "minutes_old": minutes_old,
+        "post_peak": post_peak,
+        "surge_score": round(score, 3),
+    }
 
 
 def interesting_solana_mints(limit: int = 10, errors: list | None = None) -> list[dict]:
@@ -76,14 +184,18 @@ def interesting_solana_mints(limit: int = 10, errors: list | None = None) -> lis
                     "name": a.get("name"),
                     "pool": a.get("address"),
                     "source_list": path,
-                    "volume_24h_usd": float((a.get("volume_usd") or {}).get("h24") or 0),
-                    "liquidity_usd": float(a.get("reserve_in_usd") or 0),
+                    "volume_24h_usd": _f((a.get("volume_usd") or {}).get("h24")),
+                    "liquidity_usd": _f(a.get("reserve_in_usd")),
+                    **surge_metrics(a),
                 })
         except Exception as e:
             if errors is not None:
                 errors.append(f"{path}: {type(e).__name__}")
             logger.debug(f"[WalletDiscovery] {path}: {e}")
-    out.sort(key=lambda t: t["volume_24h_usd"], reverse=True)
+    # Ranked by ACCELERATION, not size. See surge_metrics: absolute volume
+    # answers "which token is big", and the question here is "which token
+    # just woke up", where wallets that were early are still visible.
+    out.sort(key=lambda t: t["surge_score"], reverse=True)
     return out[:limit]
 
 

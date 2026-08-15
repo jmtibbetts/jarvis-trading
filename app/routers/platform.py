@@ -56,6 +56,19 @@ def data_platform_parity(symbol: str = "BTC", window_min: int = 60):
     return parity_report(symbol_base=symbol, window_min=window_min)
 
 
+@router.get("/brief/news")
+def brief_news_surface(hours: int = 24, per_bucket: int = 6):
+    """Market-moving news for the brief, grouped by what it could move.
+
+    Separate from /brief on purpose. The brief is a 172-second snapshot
+    refreshed on a slow clock; news lands every 15 minutes and is cheap to
+    query, so tying it to the snapshot would have made it as stale as the
+    thing it sits next to. This reads the live table each call.
+    """
+    from lib.brief_news import brief_news
+    return brief_news(hours=hours, per_bucket=per_bucket)
+
+
 @router.get("/brief")
 def morning_brief(window_hours: int = 24):
     """One answer to 'what happened while I slept?' — gate movement,

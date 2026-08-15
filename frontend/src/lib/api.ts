@@ -1510,6 +1510,21 @@ async function del<T>(path: string): Promise<T> {
   return request<T>("DELETE", path);
 }
 
+export type BriefNewsItem = {
+  id: string; title: string; url: string | null; source: string | null;
+  category: string | null; sentiment: string | null;
+  published_at: string | null; age: string | null;
+  affected_assets: string[];
+  /** Instruments the desk HOLDS or WATCHES that this article names. */
+  book_hits: string[];
+};
+export type BriefNews = {
+  window_hours: number; considered: number;
+  your_book: BriefNewsItem[]; book_symbols_watched: number;
+  buckets: { key: string; label: string; items: BriefNewsItem[]; newest_age: string | null }[];
+  newest_age: string | null; as_of: string; note: string;
+};
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1897,6 +1912,8 @@ export const api = {
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),
   dataPlatformHealth: () => get<DataPlatformHealth>(`/data-platform/health`),
+  briefNews: (hours = 24, perBucket = 6) =>
+    get<BriefNews>(`/brief/news?hours=${hours}&per_bucket=${perBucket}`),
   morningBrief: (windowHours = 24) =>
     get<MorningBrief>(`/brief?window_hours=${windowHours}`),
   marketChart: (symbol: string, timeframe: string, limit = 3000) =>

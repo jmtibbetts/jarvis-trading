@@ -3,17 +3,23 @@
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
   import StateNote from "../components/StateNote.svelte";
-  import { api, type MorningBrief } from "../api";
+  import { api, type MorningBrief, type BriefNews } from "../api";
   import { FeedTracker } from "../dataState.svelte";
 
   const feeds = new FeedTracker();
 
   let brief = $state<MorningBrief | null>(null);
+  let news = $state<BriefNews | null>(null);
   let windowHours = $state(24);
   let loading = $state(false);
 
   async function load() {
     loading = true;
+    // News is fetched SEPARATELY and not awaited with the brief. The brief
+    // is a slow snapshot; news is a 0.4s query off a table that refills
+    // every 15 minutes. Joining them would have made the fresher half wait
+    // for the staler half on every load.
+    feeds.load("news", () => api.briefNews(windowHours)).then((n) => (news = n));
     brief = await feeds.load("brief", () => api.morningBrief(windowHours));
     loading = false;
   }
@@ -22,6 +28,9 @@
     windowHours;
     load();
   });
+
+  const sentClass = (s: string | null) =>
+    s === "positive" ? "pos" : s === "negative" ? "neg" : "";
 
   const fmt = (v: number | null | undefined, digits = 2) =>
     v == null ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -67,6 +76,71 @@
       </div>
     {/if}
   </div>
+
+  <!-- News sits ABOVE the snapshot grid and renders on its own clock. The
+       brief takes ~172s to derive and is served from a snapshot; news is a
+       live 0.4s query, so making it wait behind the slower half would have
+       thrown away the only genuinely current thing on the page. -->
+  {#if news}
+    <div class="news-wrap">
+      <Panel
+        title="News"
+        meta="{news.considered} items · {news.window_hours}h · newest {news.newest_age ?? 'unknown'}"
+        status={feeds.status("news")}
+      >
+        {#if news.your_book.length}
+          <div class="nb-head">
+            <b>In your book</b>
+            <span class="muted">
+              names a symbol you hold, watch, or have an active signal on
+              — {news.book_symbols_watched} tracked
+            </span>
+          </div>
+          <div class="nb-list">
+            {#each news.your_book as it (it.id)}
+              <a class="nb-item book" href={it.url ?? "#"} target="_blank" rel="noopener noreferrer">
+                <span class="nb-syms">
+                  {#each it.book_hits.slice(0, 3) as s}<em>{s}</em>{/each}
+                </span>
+                <span class="nb-title {sentClass(it.sentiment)}">{it.title}</span>
+                <span class="nb-meta">{it.source} · {it.age}</span>
+              </a>
+            {/each}
+          </div>
+        {:else}
+          <div class="nb-head">
+            <b>In your book</b>
+            <span class="muted">
+              nothing in the last {news.window_hours}h names any of the
+              {news.book_symbols_watched} symbols you hold or watch
+            </span>
+          </div>
+        {/if}
+
+        <div class="nb-buckets">
+          {#each news.buckets as b (b.key)}
+            <div class="nb-bucket">
+              <div class="nb-bh">{b.label}<span class="muted">{b.newest_age}</span></div>
+              {#each b.items as it (it.id)}
+                <a class="nb-item" href={it.url ?? "#"} target="_blank" rel="noopener noreferrer">
+                  <span class="nb-title {sentClass(it.sentiment)}">{it.title}</span>
+                  <span class="nb-meta">
+                    {it.source} · {it.age}
+                    {#if it.affected_assets.length}
+                      <span class="nb-tags">{it.affected_assets.slice(0, 4).join(" ")}</span>
+                    {/if}
+                  </span>
+                </a>
+              {/each}
+            </div>
+          {/each}
+        </div>
+        <p class="nb-note">{news.note}</p>
+      </Panel>
+    </div>
+  {:else}
+    <StateNote status={feeds.status("news")} noun="news" />
+  {/if}
 
   {#if loading && !brief}
     <p class="muted">assembling…</p>
@@ -436,4 +510,34 @@
     background: var(--accent);
   }
   .cap { text-transform: capitalize; }
+
+  .news-wrap { margin-bottom: 14px; }
+  .nb-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 8px; font-size: 12px; }
+  .nb-head b { color: var(--ink); }
+  .nb-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 4px 18px; margin-bottom: 14px; }
+  .nb-item { display: block; text-decoration: none; padding: 5px 8px;
+    border-radius: var(--radius-sm); border: 1px solid transparent; }
+  .nb-item:hover { background: var(--surface-raised); border-color: var(--line); }
+  .nb-item.book { border-left: 2px solid var(--accent); }
+  .nb-syms { display: inline-flex; gap: 4px; margin-right: 6px; }
+  .nb-syms em { font-style: normal; font-family: var(--mono); font-size: 9.5px;
+    color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 3px;
+    padding: 1px 4px; }
+  .nb-title { color: var(--ink); font-size: 12px; line-height: 1.35; }
+  .nb-title.pos { color: var(--good); }
+  .nb-title.neg { color: var(--bad); }
+  .nb-meta { display: block; color: var(--ink-faint); font-size: 10px;
+    font-family: var(--mono); margin-top: 2px; }
+  .nb-tags { color: var(--accent-dim); margin-left: 6px; }
+  .nb-buckets { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px 20px; }
+  .nb-bh { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ink-dim); border-bottom: 1px solid var(--line);
+    padding-bottom: 4px; margin-bottom: 4px; }
+  .nb-bh .muted { font-size: 9.5px; text-transform: none; letter-spacing: 0; }
+  .nb-note { color: var(--ink-faint); font-size: 10.5px; margin: 12px 0 0;
+    line-height: 1.5; }
 </style>

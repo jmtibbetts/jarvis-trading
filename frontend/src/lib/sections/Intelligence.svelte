@@ -82,6 +82,23 @@
   }
   let kraken = $state<Awaited<ReturnType<typeof api.krakenVenue>> | null>(null);
   let congressOfficials = $state<Awaited<ReturnType<typeof api.congressByOfficial>> | null>(null);
+  // Filings are fetched per official when a row is opened, and kept, so
+  // re-opening a row is free. The list itself no longer carries them.
+  let officialDetail = $state<Record<string, Awaited<ReturnType<typeof api.congressOfficialDetail>>>>({});
+  let officialLoading = $state<string | null>(null);
+
+  async function toggleOfficial(name: string) {
+    if (expandedOfficial === name) {
+      expandedOfficial = null;
+      return;
+    }
+    expandedOfficial = name;
+    if (officialDetail[name]) return;
+    officialLoading = name;
+    const d = await feeds.load(`official:${name}`, () => api.congressOfficialDetail(name, 365));
+    if (d) officialDetail = { ...officialDetail, [name]: d };
+    officialLoading = null;
+  }
   let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
   let sectors = $state<any[] | null>(null);
   let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
@@ -222,7 +239,7 @@
       loadFees();
     }
     if (SM) {
-      feeds.load("congressOfficials", () => api.congressByOfficial(365, 40))
+      feeds.load("congressOfficials", () => api.congressByOfficial(365, 500))
         .then((r) => (congressOfficials = r));
     }
     psychology = psy;
@@ -983,7 +1000,13 @@
 
   {#if view === "smartmoney"}
   <div class="span-12">
-    <Panel title="Trades by Official" meta={congressOfficials ? `${congressOfficials.officials.length} officials · 365d` : ""} status={feeds.status("congressOfficials")}>
+    <Panel
+      title="Trades by Official"
+      meta={congressOfficials
+        ? `${congressOfficials.returned ?? congressOfficials.officials.length} of ${congressOfficials.total_officials ?? congressOfficials.officials.length} officials · 365d${congressOfficials.truncated ? " · TRUNCATED" : ""}`
+        : ""}
+      status={feeds.status("congressOfficials")}
+    >
       {#snippet children()}
         {#if congressOfficials && congressOfficials.officials.length}
           <div class="cap-h">
@@ -992,21 +1015,30 @@
                 class="off-row"
                 role="button"
                 tabindex="0"
-                onclick={() => (expandedOfficial = expandedOfficial === o.member_name ? null : o.member_name)}
-                onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (expandedOfficial = expandedOfficial === o.member_name ? null : o.member_name)}
+                onclick={() => toggleOfficial(o.member_name)}
+                onkeydown={(e) => (e.key === "Enter" || e.key === " ") && toggleOfficial(o.member_name)}
               >
                 <span class="off-caret">{expandedOfficial === o.member_name ? "▾" : "▸"}</span>
                 <span class="off-name">{o.member_name} <i class="dim">({o.state_district ?? o.chamber})</i></span>
                 <span class="num">{o.trade_count} trades</span>
                 <span class="num"><span class="pl-up">{o.purchases}P</span>/<span class="pl-down">{o.sales}S</span></span>
                 <span class="num dim">${Math.round(o.range_low_total / 1000).toLocaleString()}k–${Math.round(o.range_high_total / 1000).toLocaleString()}k range</span>
+                {#if o.top_tickers?.length}
+                  <span class="off-tickers dim">{o.top_tickers.join(" ")}</span>
+                {/if}
+                {#if o.last_traded}<span class="num dim">last {o.last_traded}</span>{/if}
               </div>
               {#if expandedOfficial === o.member_name}
                 <div class="off-detail">
+                  {#if officialLoading === o.member_name}
+                    <div class="empty">Loading {o.trade_count} filings…</div>
+                  {:else if !officialDetail[o.member_name]}
+                    <StateNote status={feeds.status(`official:${o.member_name}`)} noun="filings" />
+                  {:else}
                   <table class="tbl">
                     <thead><tr><th>Ticker</th><th>Action</th><th>Amount</th><th>Traded</th><th>Reported</th></tr></thead>
                     <tbody>
-                      {#each o.trades as t (t.id)}
+                      {#each officialDetail[o.member_name].trades as t (t.id)}
                         <tr>
                           <td class="sym">{t.ticker ?? "—"}</td>
                           <td class={t.transaction_code.startsWith("P") ? "pl-up" : t.transaction_code.startsWith("S") ? "pl-down" : "dim"}>{t.transaction_label}</td>
@@ -1017,6 +1049,7 @@
                       {/each}
                     </tbody>
                   </table>
+                  {/if}
                 </div>
               {/if}
             {/each}

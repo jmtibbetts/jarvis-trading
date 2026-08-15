@@ -1286,12 +1286,48 @@ def get_congress_trades(limit: int = 50, ticker: str = None, days: int = 180):
     }
 
 
+@router.get("/congress/official/{member_name:path}")
+def get_congress_official_detail(member_name: str, days: int = 365):
+    """Every disclosed trade for ONE official — the drill-down.
+
+    Split out from the list endpoint because that one inlined every trade
+    for every official: 1.4 MB to render forty NAMES. Paying megabytes to
+    show a summary is why the list was capped so low in the first place,
+    which is what made the panel look like the desk only knew about forty
+    people when it holds ninety-six.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(days, 1))).date().isoformat()
+    with get_db() as db:
+        rows = (db.query(CongressTrade)
+                .filter(CongressTrade.member_name == member_name)
+                .filter(CongressTrade.transaction_date >= cutoff)
+                .order_by(CongressTrade.transaction_date.desc()).all())
+        trades = [_congress_trade_dict(t) for t in rows]
+        chamber = rows[0].chamber if rows else None
+        district = rows[0].state_district if rows else None
+    return {
+        "member_name": member_name, "chamber": chamber or "House",
+        "state_district": district, "window_days": days,
+        "trade_count": len(trades), "trades": trades,
+        "disclaimer": _CONGRESS_DISCLAIMER,
+    }
+
+
 @router.get("/congress/by-official")
-def get_congress_by_official(days: int = 365, limit: int = 50):
+def get_congress_by_official(days: int = 365, limit: int = 500,
+                             include_trades: bool = False):
     """Disclosed trades grouped per official — name, chamber, district, trade
-    count, buy/sell split, summed disclosed range bounds, and the full trade
-    list for expandable UI. Counts are of disclosures; exact amounts are
-    never disclosed (range bounds only)."""
+    count, buy/sell split and summed disclosed range bounds.
+
+    Trades are NOT inlined by default any more (`include_trades=true` restores
+    the old shape). One summary row is a few hundred bytes; the full trade
+    list for forty officials was 1.4 MB, and the resulting cap made a
+    ninety-six-member dataset look like a forty-member one.
+
+    The default limit is high enough to cover everyone currently ingested,
+    and `total_officials` / `truncated` say plainly when it is not — a
+    silently truncated list is the failure this panel already had.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(days, 1))).date().isoformat()
     with get_db() as db:
         rows = (db.query(CongressTrade)
@@ -1311,11 +1347,26 @@ def get_congress_by_official(days: int = 365, limit: int = 50):
             o["range_low_total"] += t.amount_low or 0.0
             o["range_high_total"] += t.amount_high or 0.0
             o["trades"].append(_congress_trade_dict(t))
-    ranked = sorted(officials.values(), key=lambda o: -len(o["trades"]))[:min(max(limit, 1), 200)]
+            o["last_traded"] = max(o.get("last_traded") or "", t.transaction_date or "")
+            if t.ticker:
+                o.setdefault("_tickers", {})
+                o["_tickers"][t.ticker] = o["_tickers"].get(t.ticker, 0) + 1
+    total = len(officials)
+    ranked = sorted(officials.values(), key=lambda o: -len(o["trades"]))[:min(max(limit, 1), 1000)]
     for o in ranked:
         o["trade_count"] = len(o["trades"])
+        # The tickers this person touched most — enough to recognise a
+        # position without pulling their whole filing history.
+        o["top_tickers"] = [t for t, _ in sorted(
+            (o.pop("_tickers", {}) or {}).items(), key=lambda kv: -kv[1])[:5]]
+        if not include_trades:
+            o["trades"] = []
     return {
         "officials": ranked, "window_days": days,
+        "total_officials": total,
+        "returned": len(ranked),
+        "truncated": total > len(ranked),
+        "trades_inlined": include_trades,
         "note": ("House disclosures only — Senate (efdsearch) and executive-branch "
                  "(OGE 278e) filings use separate systems not yet ingested. Amounts "
                  "are disclosed RANGE bounds, never exact values."),

@@ -4906,12 +4906,32 @@ Selections persist across reloads.
 
 ## 140.6 CONGRESSIONAL AND OFFICIAL DISCLOSURES — COVERAGE AND DRILL-DOWN — P1
 
-Both the "Congressional Trade Disclosures" and "Trades by Official"
-panels are truncated far below the real population — Congress, the
-Senate and the executive together are hundreds of filers, not forty.
-Requirements: full ingested coverage with the cap stated when one is
-applied, and every row clickable through to that person's filings — what
-was bought or sold, when, size band, and the price at the time.
+**DISPLAY CAP FIXED 2026-08-15. SENATE AND EXECUTIVE STILL MISSING.**
+
+Measured in the store: **2,876 trades, 96 distinct members, chamber =
+House for every single row.** 90 members traded in the last 365 days.
+
+So the "only forty people" was two separate things:
+
+1. A display cap of 40, now lifted — the panel shows **90 of 90** and
+   states `total_officials` / `truncated` so a future cap can never be
+   silent. This was only possible after splitting the endpoint: it inlined
+   every trade for every official and cost **1.4 MB to render forty NAMES**,
+   which is why the cap existed. Summary rows are now 24 KB for all 90, and
+   `/congress/official/{name}` fetches one person's filings on click —
+   verified at 759 filings for the top filer.
+2. **The Senate and the executive branch are genuinely not ingested at
+   all.** `lib/congress_trading.py` reads the Clerk of the House
+   disclosures (`disclosures-clerk.house.gov`) and nothing else. Senate PTRs
+   live on a different system (`efdsearch.senate.gov`, behind an agreement
+   gate) and executive-branch filings are OGE Form 278e — separate sources,
+   separate parsers. New ingestion work, not a display fix.
+
+Note on "at what price": STOCK Act filings disclose an AMOUNT RANGE and
+dates, never an execution price. The drill-down shows the range, the
+transaction date, the report date and the filing delay. A price would have
+to be reconstructed from market data and labelled an estimate; it must
+never be presented as disclosed.
 
 ## 140.7 INTELLIGENCE TAB — P1
 

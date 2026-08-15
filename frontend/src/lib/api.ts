@@ -1611,12 +1611,23 @@ export const api = {
     if (opts.ticker) p.set("ticker", opts.ticker);
     return get<CongressTradesResponse>(`/congress/trades?${p}`);
   },
-  congressByOfficial: (days = 365, limit = 50) =>
+  // Summary rows only — `trades` is empty unless include_trades=true.
+  // Inlining every trade cost 1.4 MB to render forty NAMES, which is why
+  // the list was capped so low that a 96-member dataset looked like 40.
+  congressByOfficial: (days = 365, limit = 500) =>
     get<{ officials: {
       member_name: string; state_district: string | null; chamber: string;
       purchases: number; sales: number; other: number; trade_count: number;
       range_low_total: number; range_high_total: number; trades: CongressTrade[];
-    }[]; note: string }>(`/congress/by-official?days=${days}&limit=${limit}`),
+      top_tickers?: string[]; last_traded?: string | null;
+    }[]; window_days: number; total_officials?: number; returned?: number;
+      truncated?: boolean; note?: string; disclaimer?: string }>(
+      `/congress/by-official?days=${days}&limit=${limit}`),
+  // One official's filings, fetched when a row is opened.
+  congressOfficialDetail: (memberName: string, days = 365) =>
+    get<{ member_name: string; chamber: string; state_district: string | null;
+      trade_count: number; trades: CongressTrade[]; disclaimer?: string }>(
+      `/congress/official/${encodeURIComponent(memberName)}?days=${days}`),
   feeComparison: (notional = 10000, contracts = 1) =>
     get<{
       notional: number; contracts: number; region: string; cheapest: string | null;

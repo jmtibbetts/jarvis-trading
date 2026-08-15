@@ -370,7 +370,7 @@ def venue_max_leverage(symbol: str, notional: float) -> tuple[float, str]:
 
 def size_position(equity: float, entry: float, stop: float, leverage: float,
                   free_cash: float, margin_override: float = 0.0,
-                  symbol: str = "") -> dict:
+                  symbol: str = "", notional_cap_usd: float | None = None) -> dict:
     """Margin-first sizing.
 
         margin   = equity * TRADE_MARGIN_PCT   (or an explicit override)
@@ -416,15 +416,27 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         # inflated: a manual 1x stays 1x.
         leverage = max(1.0, min(float(leverage or 1.0), safe["cap"]))
         notional = margin * max(1.0, leverage)
+        # The concentration cap binds the manual path too. An explicit
+        # "commit $435 at 9.6x" is an instruction about SIZE, not a waiver on
+        # book exposure, and letting it through would leave one unguarded
+        # door into the same book the automatic path is careful about.
+        if notional_cap_usd and notional > notional_cap_usd > 0:
+            notional = notional_cap_usd
+            margin = notional / max(1.0, leverage)
         qty = notional / unit_value if unit_value > 0 else 0.0
     else:
         # The shared engine solves everything else — futures included.
+        # `notional_cap_usd` is the concentration headroom: solve_position has
+        # always accepted it and nothing ever passed one, so risk-parity sizing
+        # ran unbounded. A tight stop then produced a position that breached
+        # the book cap by construction — proposed, then refused, every time.
         from lib.risk_engine import solve_position
         decision = solve_position(
             entry=entry, stop=stop, risk_budget_usd=margin,
             free_cash=free_cash, symbol=symbol,
             requested_leverage=leverage if leverage > 1.0 else None,
             max_margin_frac_of_cash=MAX_MARGIN_PCT_OF_CASH / 100.0,
+            notional_cap_usd=notional_cap_usd,
         )
         if decision.rejected:
             return {"ok": False, "reason": decision.rejection_reason}
@@ -822,13 +834,37 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 float(r.margin_used or 0)
                 for r in _db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
             )
-            sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
-                                   margin_override=override_margin, symbol=sym)
+            # Ask how much room is left BEFORE sizing, so the sizer fits
+            # inside the cap instead of proposing something that will be
+            # refused. Same module and same constants as the guard below —
+            # the check that follows is a verification, not a second opinion.
+            from lib.concentration import headroom_for_book
+            _room = headroom_for_book(sym, _equity, _db, book="paper")
+            # NOT `or None`: zero room must stay zero. `solve_position`
+            # treats a falsy cap as "no cap", so `0.0 or None` would hand an
+            # exhausted symbol UNLIMITED size — which is how this call sized
+            # DOGE at 70% of equity with no headroom left, in testing.
+            _cap = _room["max_notional"]
+            if _cap <= 0:
+                _sizing_blocked = _room["reason"]
+                sizing = {"ok": False, "reason": _room["reason"]}
+            else:
+                _sizing_blocked = None
+                sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
+                                       margin_override=override_margin, symbol=sym,
+                                       notional_cap_usd=_cap)
     except Exception as e:
         # FAIL CLOSED (P0.3's paper twin): a sizing crash is not a license
         # to open a flat-size position.
         logger.error(f"[Paper] sizing crashed for {sym} — refusing to open: {e}")
         return {"error": f"sizing unavailable for {sym}: {e}"}
+
+    # No room at all is a BOOK state, and saying so in those terms beats
+    # reporting it as a sizing failure — the trade is fine, the book is full.
+    if _sizing_blocked:
+        logger.info(f"[Paper] {sym} NOT opened — {_sizing_blocked}")
+        return {"error": f"concentration limit: {_sizing_blocked}",
+                "concentration": _room}
 
     if not sizing.get("ok"):
         # A deterministic rejection stays a rejection (P0.7). The old code

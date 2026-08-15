@@ -409,6 +409,10 @@ Type FLATTEN to confirm:`,
                 <b>{b.book === "auto_sim" ? "Auto Sim" : "Paper"}</b>
                 {#if b.error}
                   <span class="dim">{b.error}</span>
+                {:else if b.solvent === false}
+                  <span class="conc-insolvent">
+                    {b.positions} open · NO EQUITY
+                  </span>
                 {:else}
                   <span class="dim">
                     {b.positions} open · gross {b.gross_pct_of_equity?.toFixed(1) ?? "—"}%
@@ -417,6 +421,16 @@ Type FLATTEN to confirm:`,
                 {/if}
               </div>
               {#if !b.error}
+                <!-- A book past its capital cannot express exposure as a
+                     percentage, and every "—%" bar below is that, not a
+                     rounding gap. Saying it once, loudly, beats six dashes
+                     that each look like a missing number. -->
+                {#if b.solvent === false}
+                  <p class="risk-warning">
+                    ⚠ Equity {b.equity != null ? `$${b.equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "≤ 0"} —
+                    {b.state_detail ?? "the book has no capital to size against, so every open is refused."}
+                  </p>
+                {/if}
                 {#if b.symbols.length}
                   <div class="exposure-list">
                     {#each b.symbols.slice(0, 6) as s (s.symbol)}
@@ -431,7 +445,10 @@ Type FLATTEN to confirm:`,
                             style="width:{Math.min(100, ((s.pct_of_equity ?? 0) / (b.limits?.max_symbol_pct || 25)) * 100)}%"
                           ></div>
                         </div>
-                        <b class="num" class:conc-over={s.over_limit}>{s.pct_of_equity?.toFixed(1) ?? "—"}%</b>
+                        <b class="num" class:conc-over={s.over_limit}>
+                          {#if s.pct_of_equity != null}{s.pct_of_equity.toFixed(1)}%
+                          {:else}<span class="conc-unknown" title="no equity to measure against">n/a</span>{/if}
+                        </b>
                       </div>
                     {/each}
                   </div>
@@ -1256,6 +1273,17 @@ Type FLATTEN to confirm:`,
   }
   .conc-over {
     color: var(--bad);
+  }
+  .conc-insolvent {
+    color: var(--bad);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+  }
+  .conc-unknown {
+    color: var(--ink-faint);
+    font-style: italic;
+    cursor: help;
   }
   .conc-fill-over {
     background: var(--bad);

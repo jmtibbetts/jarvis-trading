@@ -301,8 +301,12 @@ export type ConcentrationBook = {
   positions: number;
   gross_notional?: number;
   gross_pct_of_equity?: number | null;
-  gross_over_limit?: boolean;
-  symbols: { symbol: string; notional: number; rows: number; pct_of_equity: number | null; over_limit: boolean }[];
+  // null, not false — a book with no equity cannot say it is within limits.
+  gross_over_limit?: boolean | null;
+  solvent?: boolean;
+  state?: "ok" | "insolvent";
+  state_detail?: string | null;
+  symbols: { symbol: string; notional: number; rows: number; pct_of_equity: number | null; over_limit: boolean | null }[];
   symbols_over_limit?: string[];
   top?: { symbol: string; pct_of_equity: number | null } | null;
   limits?: { max_symbol_pct: number; max_gross_pct: number; min_risk_pct: number };

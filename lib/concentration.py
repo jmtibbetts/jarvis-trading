@@ -49,9 +49,41 @@ MIN_RISK_PCT_OF_EQUITY = 0.02
 # Row accessors live at module level so the OPEN-time check and the
 # reporting view below cannot drift apart — a status panel that measured
 # exposure differently from the guard would be worse than no panel.
+
+# Quote currencies that all denominate the same dollar exposure. Most crypto,
+# and nearly everything on a DEX, quotes in USDT or USDC rather than USD.
+_STABLE_QUOTES = ("USDT", "USDC", "USD")
+
+
+def canon_symbol(symbol) -> str:
+    """Collapse a symbol to the bucket its EXPOSURE belongs in.
+
+    `DOGE/USD` and `DOGE/USDT` are one coin and one bet. Before this, the
+    guard compared raw uppercased strings, so a book holding 20% of DOGE/USD
+    would happily accept another 20% of DOGE/USDT: two different strings, one
+    instrument, 40% of equity on a 25% cap. That is the same double-counting
+    §117 removes from coordination scoring — one thing counted as several —
+    and the quote currency is exactly the kind of cosmetic difference that
+    makes it invisible.
+
+    Deliberately requires a SEPARATOR before the quote. Collapsing on a bare
+    suffix would rewrite any equity ticker that happens to end in "USD", and
+    a guard that quietly renames instruments is worse than one that misses a
+    pairing.
+    """
+    s = str(symbol or "").upper().strip()
+    for sep in ("/", "-", "_", ":"):
+        if sep in s:
+            base, _, quote = s.partition(sep)
+            if quote in _STABLE_QUOTES and base:
+                return f"{base}/USD"
+            break
+    return s
+
+
 def _sym(p):
-    return str(getattr(p, "symbol", None) or
-               (p.get("symbol") if isinstance(p, dict) else "") or "").upper()
+    return canon_symbol(getattr(p, "symbol", None) or
+                        (p.get("symbol") if isinstance(p, dict) else "") or "")
 
 
 def _get(p, attr):
@@ -90,7 +122,9 @@ def check(symbol: str, notional: float, loss_at_stop: float,
     if equity <= 0:
         return {"ok": False, "reason": "no equity to size against"}
 
-    sym = str(symbol or "").upper()
+    # Canonicalized, so the incoming symbol lands in the same bucket the
+    # book rows were aggregated into — DOGE/USDT must meet DOGE/USD.
+    sym = canon_symbol(symbol)
     notional = abs(float(notional or 0))
 
     # Same instrument already open counts toward the same bucket — two
@@ -127,6 +161,77 @@ def check(symbol: str, notional: float, loss_at_stop: float,
                            f"too tight to size meaningfully; fees would "
                            f"dominate the outcome")}
     return {**detail, "ok": True, "limit": None, "reason": "within limits"}
+
+
+def headroom(symbol: str, equity: float, open_positions: list) -> dict:
+    """The largest notional this symbol may still open. Pure.
+
+    This exists because the guard alone was the wrong shape. `size_position`
+    solves quantity from RISK — budget / stop_distance — and never looked at
+    notional, so a tight stop produced an enormous position by construction:
+    a $10 stop on a $620 entry with a $1,003 risk budget is 100 shares, which
+    is $62k, which is 62% of a $100k book. Every such trade was proposed and
+    then refused, and the operator saw a stream of "concentration limit"
+    errors instead of trades. The two halves were never reconciled.
+
+    The sizer now asks how much room is left and fits inside it, so the
+    normal outcome is a SMALLER position rather than a rejected one.
+    Rejection is reserved for the case where the remaining room cannot carry
+    a meaningful bet at all, and then it says so in those terms.
+
+    Note this returns room for a NEW position; it never asks anything to be
+    closed. An existing holding above the cap keeps its size (limits govern
+    opening) and simply leaves zero headroom.
+    """
+    if equity <= 0:
+        return {"max_notional": 0.0, "symbol_headroom": 0.0,
+                "gross_headroom": 0.0, "binding": "equity",
+                "reason": "no equity to size against"}
+
+    # Canonicalized, so the incoming symbol lands in the same bucket the
+    # book rows were aggregated into — DOGE/USDT must meet DOGE/USD.
+    sym = canon_symbol(symbol)
+    existing_sym = sum(_not(p) for p in open_positions if _sym(p) == sym)
+    gross = sum(_not(p) for p in open_positions)
+
+    sym_room = max(0.0, equity * (MAX_SYMBOL_EXPOSURE_PCT / 100.0) - existing_sym)
+    gross_room = max(0.0, equity * (MAX_GROSS_EXPOSURE_PCT / 100.0) - gross)
+    room = min(sym_room, gross_room)
+
+    return {
+        "max_notional": room,
+        "symbol_headroom": sym_room,
+        "gross_headroom": gross_room,
+        "existing_symbol_notional": existing_sym,
+        "gross_notional": gross,
+        "binding": ("symbol" if sym_room <= gross_room else "gross"),
+        "reason": (
+            f"{sym} may add ${room:,.0f} "
+            f"({'symbol' if sym_room <= gross_room else 'gross'} cap binds)"
+            if room > 0 else
+            f"no room for {sym}: "
+            + (f"already at {100.0 * existing_sym / equity:.0f}% of equity "
+               f"(cap {MAX_SYMBOL_EXPOSURE_PCT:.0f}%)" if sym_room <= 0 else
+               f"book gross is {100.0 * gross / equity:.0f}% "
+               f"(cap {MAX_GROSS_EXPOSURE_PCT:.0f}%)")),
+    }
+
+
+def headroom_for_book(symbol: str, equity: float, db=None,
+                      book: str = "paper") -> dict:
+    """`headroom()` with the open book loaded. Never raises — and on failure
+    returns ZERO room, because an unknown book is not permission to size."""
+    try:
+        from app.database import get_db
+        if db is not None:
+            return headroom(symbol, equity, open_rows(book, db))
+        with get_db() as _db:
+            return headroom(symbol, equity, open_rows(book, _db))
+    except Exception as e:
+        logger.warning(f"[Concentration] headroom failed for {symbol}: {e}")
+        return {"max_notional": 0.0, "symbol_headroom": 0.0,
+                "gross_headroom": 0.0, "binding": "error",
+                "reason": f"headroom unavailable: {e}"}
 
 
 # ── The books ────────────────────────────────────────────────────────────
@@ -213,10 +318,19 @@ def book_status(book: str, equity: float, db=None) -> dict:
                 "symbols": [], "positions": 0}
 
     equity = float(equity or 0)
+    # A book with no positive equity is not a book within its limits — it is
+    # a book that cannot answer the question. Auto Sim reached realized_pnl
+    # -106,901 on 100,000 of starting cash, so equity went NEGATIVE, and
+    # every percentage here silently became None while `over_limit` became
+    # False. The panel then displayed $101k of XLF notional as "—%" with no
+    # breach flagged, which reads as healthy. `check()` refuses every open in
+    # this state; the report has to say the same thing.
+    solvent = equity > 0
     for e in by_symbol.values():
-        e["pct_of_equity"] = round(100.0 * e["notional"] / equity, 2) if equity > 0 else None
-        e["over_limit"] = bool(equity > 0 and
-                               e["pct_of_equity"] > MAX_SYMBOL_EXPOSURE_PCT)
+        e["pct_of_equity"] = round(100.0 * e["notional"] / equity, 2) if solvent else None
+        # None, not False: unknown is not "within limits".
+        e["over_limit"] = (e["pct_of_equity"] > MAX_SYMBOL_EXPOSURE_PCT
+                           if solvent else None)
         e["notional"] = round(e["notional"], 2)
 
     symbols = sorted(by_symbol.values(),
@@ -232,8 +346,18 @@ def book_status(book: str, equity: float, db=None) -> dict:
         "positions": n_rows,
         "gross_notional": gross,
         "gross_pct_of_equity": gross_pct,
-        "gross_over_limit": bool(gross_pct is not None and
-                                 gross_pct > MAX_GROSS_EXPOSURE_PCT),
+        "gross_over_limit": (gross_pct > MAX_GROSS_EXPOSURE_PCT
+                             if gross_pct is not None else None),
+        # The state the percentages above are relative to. "insolvent" is
+        # load-bearing: it is the difference between "this book is fine" and
+        # "this book has lost more than it started with and is refusing every
+        # trade", which looked identical before.
+        "solvent": solvent,
+        "state": "ok" if solvent else "insolvent",
+        "state_detail": None if solvent else (
+            f"equity is ${equity:,.2f} — the book has no capital to size "
+            f"against, so every open is refused and exposure cannot be "
+            f"expressed as a percentage"),
         "symbols": symbols,
         "symbols_over_limit": breaches,
         "top": symbols[0] if symbols else None,

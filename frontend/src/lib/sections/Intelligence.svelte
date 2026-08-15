@@ -1035,14 +1035,37 @@
                   {:else if !officialDetail[o.member_name]}
                     <StateNote status={feeds.status(`official:${o.member_name}`)} noun="filings" />
                   {:else}
+                  {@const pc = officialDetail[o.member_name].pricing_coverage}
+                  {#if pc}
+                    <div class="si-footnote">
+                      Price and share columns are ESTIMATES — the filing discloses an amount
+                      range and a date, never a price or a size. Priced {pc.priced} of {pc.total}
+                      from cached daily bars; {pc.unpriced} have no bar for that exact session
+                      and no nearby day is substituted.
+                    </div>
+                  {/if}
                   <table class="tbl">
-                    <thead><tr><th>Ticker</th><th>Action</th><th>Amount</th><th>Traded</th><th>Reported</th></tr></thead>
+                    <thead><tr><th>Ticker</th><th>Action</th><th>Amount</th><th>Est. price</th><th>Est. shares</th><th>Traded</th><th>Reported</th></tr></thead>
                     <tbody>
                       {#each officialDetail[o.member_name].trades as t (t.id)}
                         <tr>
                           <td class="sym">{t.ticker ?? "—"}</td>
                           <td class={t.transaction_code.startsWith("P") ? "pl-up" : t.transaction_code.startsWith("S") ? "pl-down" : "dim"}>{t.transaction_label}</td>
                           <td class="num">{t.amount_text ?? "—"}</td>
+                          <td class="num">
+                            {#if t.price_estimate}
+                              <span title="session {t.price_estimate.session} · open {t.price_estimate.open} high {t.price_estimate.high} low {t.price_estimate.low} — ESTIMATE, not disclosed">
+                                ~{t.price_estimate.close}
+                              </span>
+                            {:else}<span class="dim">—</span>{/if}
+                          </td>
+                          <td class="num">
+                            {#if t.price_estimate?.implied_shares_low != null}
+                              <span class="dim" title="from the disclosed RANGE at that session's close — a range, because the filing gives a range">
+                                {Math.round(t.price_estimate.implied_shares_low)}–{Math.round(t.price_estimate.implied_shares_high ?? 0)}
+                              </span>
+                            {:else}<span class="dim">—</span>{/if}
+                          </td>
                           <td class="num">{t.transaction_date}</td>
                           <td class="num">{t.notification_date}{#if t.filing_delay_days != null} <span class="dim">+{t.filing_delay_days}d</span>{/if}</td>
                         </tr>

@@ -1305,10 +1305,21 @@ def get_congress_official_detail(member_name: str, days: int = 365):
         trades = [_congress_trade_dict(t) for t in rows]
         chamber = rows[0].chamber if rows else None
         district = rows[0].state_district if rows else None
+
+    # Price is NOT in the filing and cannot be — the STOCK Act discloses an
+    # amount range and a date. This joins the disclosed date to the desk's
+    # own daily bars so the row can be read against what the security
+    # actually traded at, and every reconstructed number is labelled an
+    # estimate in its own field. Rows with no bar for that exact session get
+    # None rather than a neighbouring day's price.
+    from lib.disclosure_pricing import estimate_trades
+    trades, pricing = estimate_trades(trades)
+
     return {
         "member_name": member_name, "chamber": chamber or "House",
         "state_district": district, "window_days": days,
         "trade_count": len(trades), "trades": trades,
+        "pricing_coverage": pricing,
         "disclaimer": _CONGRESS_DISCLAIMER,
     }
 

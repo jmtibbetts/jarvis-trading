@@ -1626,7 +1626,16 @@ export const api = {
   // One official's filings, fetched when a row is opened.
   congressOfficialDetail: (memberName: string, days = 365) =>
     get<{ member_name: string; chamber: string; state_district: string | null;
-      trade_count: number; trades: CongressTrade[]; disclaimer?: string }>(
+      trade_count: number;
+      // price_estimate is RECONSTRUCTED from daily bars, never disclosed —
+      // the STOCK Act gives an amount range and a date and nothing else.
+      trades: (CongressTrade & { price_estimate?: {
+        basis: string; session: string; open: number; high: number; low: number;
+        close: number; implied_shares_low: number | null;
+        implied_shares_high: number | null; note: string;
+      } | null })[];
+      pricing_coverage?: { priced: number; total: number; unpriced: number; note: string };
+      disclaimer?: string }>(
       `/congress/official/${encodeURIComponent(memberName)}?days=${days}`),
   feeComparison: (notional = 10000, contracts = 1) =>
     get<{

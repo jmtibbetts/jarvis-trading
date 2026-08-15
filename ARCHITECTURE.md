@@ -67,6 +67,27 @@ everything else stays in-memory only until it earns promotion.
 - `lib/futures_curve.py` — per-contract quotes (verified live via
   Yahoo's per-contract tickers) snapshotted into term structure with
   the front identified by the tradability rule, not by volume.
+- `lib/onchain.py` — Coin Metrics community tier, daily. MVRV is the
+  cycle gauge and is only ever reported as a **percentile against the
+  asset's own trailing two years**; the level alone is meaningless
+  across assets. Stale past four days is dropped rather than joined —
+  `/onchain/context` labels that state instead of returning silence,
+  because "no data" and "data we refuse to use" need different fixes.
+- `lib/wallet_activity.py` — Solana wallet flow via Helius, **polled**.
+  An earlier design put an internet-facing mailbox VM in front of Helius
+  webhooks; polling reaches the same data with no exposed host, and the
+  most secure version of an exposed service is not running one. Two
+  disciplines, both learned from live payloads rather than docs:
+  **amounts come from `amount`, never derived from `amountRaw`/
+  `decimals`** (measured: a USDT transfer reported `amount` 49.7 against
+  `amountRaw` "50" and `decimals` 0 — reconciling under no exponent,
+  while every SOL row in the same response was exact), and identity is
+  the compound `signature:mint:counterparty:direction`, because one
+  signature legitimately moves several mints between several
+  counterparties and keying on it alone silently merges them. Idempotent
+  by `dedup_key` rather than cursor bookkeeping, so an overlapping
+  re-poll is free and no cursor can drift into skipping a window.
+  Shadow-only until an ablation earns it a place.
 
 ### Parity instrument (`lib/feed_parity.py`)
 Two venues measuring one market should agree. Cross-venue median

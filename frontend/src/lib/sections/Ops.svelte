@@ -2,7 +2,7 @@
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
-  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus } from "../api";
+  import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus, type WalletActivityStatus } from "../api";
   import { toastStore } from "../stores/toast.svelte";
   import { wsStore } from "../stores/ws.svelte";
 
@@ -21,6 +21,7 @@
   let platform = $state<DataPlatformHealth | null>(null);
   let parity = $state<ParityReport | null>(null);
   let corpus = $state<FeatureCorpus | null>(null);
+  let wallet = $state<WalletActivityStatus | null>(null);
 
   async function loadExecPrefs() {
     execPrefs = await api.tradingPreference().catch(() => null);
@@ -60,6 +61,7 @@
     platform = await api.dataPlatformHealth().catch(() => null);
     parity = await api.dataParity().catch(() => null);
     corpus = await api.featureCorpus().catch(() => null);
+    wallet = await api.walletActivityStatus().catch(() => null);
   }
 
   // Bytes/day per event kind — the §46 measurement, summed across symbols.
@@ -376,6 +378,50 @@ Save anyway?`)) return;
         </div>
       {:else}
         <div class="empty">Loading…</div>
+      {/if}
+    </Panel>
+  </div>
+
+  <div class="span-4">
+    <Panel
+      title="Wallet Flow (Helius)"
+      dotColor={!wallet ? "var(--dim)" : !wallet.configured ? "var(--dim)" : wallet.events_stored ? "var(--good)" : "var(--warn)"}
+      meta={wallet ? (wallet.configured ? `${wallet.wallets_watched} watched` : "not configured") : ""}
+    >
+      {#if !wallet}
+        <div class="empty">Loading…</div>
+      {:else}
+        <div class="stat-list">
+          <!-- Deliberately three states, not two. A collector that polls
+               happily and stores nothing looks identical to a quiet chain
+               unless the panel separates them. -->
+          <div class="stat">
+            <span>Status</span>
+            <b>
+              {#if !wallet.has_key}
+                no API key
+              {:else if !wallet.wallets_watched}
+                no wallets watched
+              {:else if wallet.events_stored}
+                collecting
+              {:else}
+                configured · nothing stored yet
+              {/if}
+            </b>
+          </div>
+          <div class="stat"><span>Events stored</span><b class="num">{(wallet.events_stored ?? 0).toLocaleString()}</b></div>
+          <div class="stat"><span>Parser</span><b>{wallet.parser}</b></div>
+          <div class="stat"><span>Page limit</span><b class="num">{wallet.page_limit}</b></div>
+          {#if wallet.store_error}
+            <div class="stat"><span>Store</span><b class="bad">{wallet.store_error}</b></div>
+          {/if}
+          {#each wallet.top_symbols ?? [] as [sym, n] (sym)}
+            <div class="stat">
+              <span>{sym.length > 12 ? sym.slice(0, 6) + "…" + sym.slice(-4) : sym}</span>
+              <b class="num">{n}</b>
+            </div>
+          {/each}
+        </div>
       {/if}
     </Panel>
   </div>

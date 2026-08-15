@@ -68,6 +68,7 @@ job_status = {
     'futures_curve': {'status': 'idle', 'last': None, 'error': None},
     'brief_push': {'status': 'idle', 'last': None, 'error': None},
     'onchain': {'status': 'idle', 'last': None, 'error': None},
+    'wallet_activity': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -688,6 +689,23 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('official_data', official_data_run),
                   'interval', hours=6, id='official_data',
                   next_run_time=now + timedelta(minutes=10),
+                  replace_existing=True, max_instances=1)
+
+    # Solana wallet flow (Helius). POLLED, not pushed — the webhook design
+    # this replaced needed an internet-facing mailbox host, and the most
+    # secure version of an exposed service is not running one. Inert
+    # without HELIUS_API_KEY and a non-empty HELIUS_WATCH_WALLETS, so
+    # registering it unconditionally costs an unconfigured desk nothing.
+    #
+    # 15 minutes because dedup_key makes an overlapping re-poll free: the
+    # window deliberately overlaps rather than tracking a cursor that
+    # could drift and skip.
+    def wallet_activity_run():
+        from lib.wallet_activity import collect_once
+        return collect_once()
+    sched.add_job(make_job_runner('wallet_activity', wallet_activity_run),
+                  'interval', minutes=15, id='wallet_activity',
+                  next_run_time=now + timedelta(minutes=3),
                   replace_existing=True, max_instances=1)
 
     # Futures term structure (4B): one snapshot per root per 4h bucket.

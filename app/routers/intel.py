@@ -269,6 +269,31 @@ def onchain_context():
                      "is the cycle gauge, not a trade trigger")}
 
 
+@router.get("/wallet/activity/status")
+def wallet_activity_status():
+    """Configuration and recent yield of the Solana wallet-flow collector.
+
+    Reports what is stored, not just that the poller ran: a collector that
+    fetches happily and lands nothing is the failure this desk keeps
+    meeting, and "0 events" must be distinguishable from "not configured".
+    """
+    from lib.wallet_activity import status as wa_status
+
+    out = wa_status()
+    try:
+        from lib.event_store import get_store
+        # kind_summary, NOT read(): read() filters on an exact symbol, so
+        # read(None, "onchain", ...) returns [] regardless of what is
+        # stored — a panel built on it would report "0 events" forever.
+        s = get_store().kind_summary("onchain", source="helius")
+        out["events_stored"] = s["events"]
+        out["newest_ingest_ts"] = s["newest_ingest_ts"]
+        out["top_symbols"] = s["by_symbol"][:8]
+    except Exception as e:
+        out["store_error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    return out
+
+
 @router.get("/market/chart-symbols")
 def market_chart_symbols():
     """Distinct (symbol, timeframe) coverage of the bar cache — the chart

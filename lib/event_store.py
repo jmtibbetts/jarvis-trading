@@ -61,6 +61,10 @@ class EventStore:
              limit: int = 1000) -> list[dict]:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def kind_summary(self, kind: str,
+                     source: str | None = None) -> dict:  # pragma: no cover
+        raise NotImplementedError
+
     def bytes_by_day(self) -> list[dict]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -142,6 +146,32 @@ class SQLiteEventStore(EventStore):
                 ORDER BY ingest_ts ASC LIMIT ?""",
                 (symbol, kind, since_ts, limit))
             return [json.loads(p) for (p,) in cur.fetchall()]
+
+    def kind_summary(self, kind: str, source: str | None = None) -> dict:
+        """Counts for a whole KIND, across every symbol.
+
+        read() takes an exact symbol and does `WHERE symbol = ?`, so
+        read(None, kind, ...) matches nothing and returns []. That is a
+        perfectly reasonable contract and a perfectly good trap: the empty
+        list is indistinguishable from "this feed has collected nothing",
+        which is precisely the reading an ops panel would draw from it.
+        Anything asking "how much of X do we have?" wants this instead.
+        """
+        sql = ("SELECT COUNT(*), MAX(ingest_ts), COALESCE(SUM(payload_bytes),0) "
+               "FROM events WHERE kind = ?")
+        args: list = [kind]
+        if source is not None:
+            sql += " AND source = ?"
+            args.append(source)
+        with self._conn() as c:
+            total, newest, nbytes = c.execute(sql, args).fetchone()
+            gsql = ("SELECT symbol, COUNT(*) FROM events WHERE kind = ?"
+                    + (" AND source = ?" if source is not None else "")
+                    + " GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 20")
+            by_symbol = c.execute(gsql, args).fetchall()
+        return {"kind": kind, "source": source, "events": int(total or 0),
+                "newest_ingest_ts": newest, "bytes": int(nbytes or 0),
+                "by_symbol": [(s, int(n)) for s, n in by_symbol]}
 
     def bytes_by_day(self) -> list[dict]:
         """THE §46 measurement: actual stored bytes per day per symbol per

@@ -330,6 +330,24 @@ export type OnChainAsset = {
 
 export type OnChainContext = { assets: OnChainAsset[]; note?: string };
 
+// Mirrors lib/wallet_activity.status plus what actually landed in the
+// store — a collector that polls happily and stores nothing is the
+// failure mode worth showing, so "0 events" and "not configured" are
+// separate states here.
+export type WalletActivityStatus = {
+  configured: boolean;
+  has_key: boolean;
+  wallets_watched: number;
+  base: string;
+  page_limit: number;
+  parser: string;
+  note?: string;
+  events_stored?: number;
+  newest_ingest_ts?: number;
+  top_symbols?: [string, number][];
+  store_error?: string;
+};
+
 // Mirrors lib/dex_discovery.discover. `rejected` and `rejection_reasons`
 // are first-class: the feed is overwhelmingly noise, and hiding that would
 // make the survivors look more special than they are.
@@ -1332,6 +1350,7 @@ export const api = {
   cryptoDerivatives: (symbol: string, liquidationHours = 24) =>
     get<CryptoDerivativesSnapshot>(`/crypto/${symbol}/derivatives?liquidation_hours=${liquidationHours}`),
   onChainContext: () => get<OnChainContext>(`/onchain/context`),
+  walletActivityStatus: () => get<WalletActivityStatus>(`/wallet/activity/status`),
   // Hits GeckoTerminal + DEX Screener live, so this is on-demand rather
   // than part of any page load.
   dexDiscovery: (confirm = true) =>

@@ -183,6 +183,10 @@ class OnChainEvent:
     metric: str
     value: float
     chain: str | None = None
+    # Webhooks redeliver on any ack timeout, so the same transaction can
+    # legitimately arrive several times. The storage layer's unique index
+    # makes that idempotent instead of triple-counting a whale's move.
+    dedup_key: str | None = None
     kind: str = "onchain"
 
 

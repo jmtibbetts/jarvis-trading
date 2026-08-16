@@ -100,30 +100,16 @@ def token_surge(limit: int = 20):
     a pair doing $2M every day is not news, and one that went from $5k to
     $500k in an hour is.
     """
-    from lib.token_surge import (enabled, extreme_threshold, score_snapshot,
-                                 snapshot_from_pool, surge_threshold)
-    from lib.geckoterminal import solana_pools
+    from lib.token_surge import enabled, scan_and_score
 
-    out, errors = [], []
-    for path in ("trending_pools", "new_pools"):
-        try:
-            for pool in solana_pools(path, errors=errors):
-                snap = snapshot_from_pool(pool)
-                if not snap:
-                    continue
-                # No stored history on this path yet, so every row is scored
-                # by the new-token model and SAYS so via baseline_quality.
-                scored = score_snapshot(snap, [])
-                scored["pool_address"] = snap.get("pool_address")
-                out.append(scored)
-        except Exception as e:
-            errors.append(f"{path}: {type(e).__name__}")
-
-    out.sort(key=lambda s: s.get("surge_score") or 0, reverse=True)
-    return {"enabled": enabled(), "tokens": out[:max(1, min(limit, 100))],
-            "thresholds": {"surge": surge_threshold(), "extreme": extreme_threshold()},
-            "errors": errors,
-            "provenance": "MEASURED market data; surge score is CALCULATED"}
+    # ONE pipeline. This route used to call `score_snapshot(snap, [])` — an
+    # empty history literal — so every token was permanently scored by the
+    # new-token model, and the rigorous baseline machinery it was calling
+    # never had anything to be rigorous about. scan_and_score persists each
+    # observation and scores against the token's own stored history, and
+    # wallet discovery reads the same result.
+    result = scan_and_score(limit=max(1, min(limit, 100)))
+    return {"enabled": enabled(), **result}
 
 
 # ── Virtual DEX book ─────────────────────────────────────────────────────

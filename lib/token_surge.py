@@ -273,3 +273,242 @@ def score_snapshot(current: dict, history: list[dict]) -> dict:
             f"low participant breadth, score halved")
 
     return out
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# THE CANONICAL PIPELINE
+#
+# Everything above is pure scoring. Everything below is the ONE production
+# path, and it exists because there were two definitions of "surge":
+#
+#   wallet_discovery.surge_metrics()   h1/h6/h24 buckets, NO baseline —
+#                                      used by the scheduled discovery pass
+#   token_surge.score_snapshot()       measured self-baselines — reachable
+#                                      ONLY from the /onchain/surge route,
+#                                      and called there as
+#                                      `score_snapshot(snap, [])`
+#
+# The empty-list literal meant the rigorous implementation ran permanently
+# in new-token mode: every token scored as though it had no history, which
+# is precisely the mode it was built to escape. Meanwhile TokenActivitySnapshot
+# and TokenSurgeState were declared in the schema with ZERO writers and ZERO
+# readers anywhere in the codebase.
+#
+# scan_and_score() is now the only way a surge score is produced. Discovery
+# and the UI consume the same rows.
+# ═════════════════════════════════════════════════════════════════════════
+
+SNAPSHOT_RETENTION_HOURS = 48
+
+# Hysteresis. A token scoring 85 for ten consecutive scans is one surge,
+# not ten — the difference between an alert and a stuck alarm.
+STATE_NORMAL = "NORMAL"
+STATE_SURGING = "SURGING"
+STATE_COOLDOWN = "COOLDOWN"
+# A surge must fall meaningfully below the threshold before it is over, so
+# a score oscillating around the line does not emit an event per scan.
+SURGE_EXIT_MARGIN = 10.0
+
+
+def persist_snapshot(session, snap: dict):
+    """Append one observation. Never updated in place — a baseline that
+    gets rewritten is not a baseline."""
+    from app.database import TokenActivitySnapshot
+
+    row = TokenActivitySnapshot(
+        mint=snap.get("mint"), pool_address=snap.get("pool_address"),
+        symbol=snap.get("symbol"), network="solana",
+        price_usd=snap.get("price_usd"), liquidity_usd=snap.get("liquidity_usd"),
+        volume_m5=snap.get("volume_m5"), volume_m15=snap.get("volume_m15"),
+        volume_m30=snap.get("volume_m30"), volume_h1=snap.get("volume_h1"),
+        volume_h6=snap.get("volume_h6"), volume_h24=snap.get("volume_h24"),
+        buys_m5=snap.get("buys_m5"), sells_m5=snap.get("sells_m5"),
+        buyers_m5=snap.get("buyers_m5"), sellers_m5=snap.get("sellers_m5"),
+        buys_h1=snap.get("buys_h1"), sells_h1=snap.get("sells_h1"),
+        buyers_h1=snap.get("buyers_h1"), sellers_h1=snap.get("sellers_h1"),
+        price_change_m5=snap.get("price_change_m5"),
+        price_change_h1=snap.get("price_change_h1"),
+        price_change_h6=snap.get("price_change_h6"),
+        price_change_h24=snap.get("price_change_h24"),
+    )
+    session.add(row)
+    return row
+
+
+def load_history(session, mint: str, *, hours: int = BASELINE_WINDOW_HOURS,
+                 exclude_id: str | None = None) -> list[dict]:
+    """This token's own recent observations, oldest last.
+
+    `exclude_id` drops the snapshot just written, so the current reading is
+    never part of the baseline it is measured against — including it would
+    drag the median toward the very spike being detected.
+    """
+    from app.database import TokenActivitySnapshot
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    q = (session.query(TokenActivitySnapshot)
+         .filter(TokenActivitySnapshot.mint == mint)
+         .filter(TokenActivitySnapshot.captured_at >= cutoff))
+    if exclude_id:
+        q = q.filter(TokenActivitySnapshot.id != exclude_id)
+    rows = q.order_by(TokenActivitySnapshot.captured_at.desc()).limit(200).all()
+    return [{
+        "volume_m5": r.volume_m5, "buys_m5": r.buys_m5, "sells_m5": r.sells_m5,
+        "buyers_m5": r.buyers_m5, "sellers_m5": r.sellers_m5,
+        "liquidity_usd": r.liquidity_usd, "captured_at": r.captured_at,
+    } for r in rows]
+
+
+def _update_state(session, scored: dict) -> dict:
+    """Carry the surge state forward, and stamp WHEN it started.
+
+    `surge_started_at` is the T0 pre-surge wallet discovery searches
+    backwards from. It is set on the transition into SURGING and cleared on
+    the return to NORMAL, so a token that has been surging for two hours
+    still reports the moment it began rather than the moment it was
+    last scanned.
+    """
+    from app.database import TokenSurgeState, now_iso
+
+    mint = scored.get("mint")
+    if not mint:
+        return scored
+    row = session.query(TokenSurgeState).filter(
+        TokenSurgeState.mint == mint).first()
+    if row is None:
+        row = TokenSurgeState(mint=mint, first_seen_at=now_iso())
+        session.add(row)
+        session.flush()
+
+    score = float(scored.get("surge_score") or 0.0)
+    now = now_iso()
+    was = row.state or STATE_NORMAL
+
+    if score >= surge_threshold():
+        if was != STATE_SURGING:
+            row.state = STATE_SURGING
+            row.surge_started_at = now
+            row.last_event_at = now
+            row.last_event_score = score
+        row.peak_score = max(float(row.peak_score or 0.0), score)
+    elif score < (surge_threshold() - SURGE_EXIT_MARGIN):
+        if was == STATE_SURGING:
+            row.state = STATE_COOLDOWN
+        else:
+            row.state = STATE_NORMAL
+            row.surge_started_at = None
+            row.peak_score = 0.0
+    # Between the threshold and the exit margin the state is held, which is
+    # the hysteresis band.
+
+    row.pool_address = scored.get("pool_address") or row.pool_address
+    row.symbol = scored.get("symbol") or row.symbol
+    row.surge_score = score
+    row.bias = scored.get("bias")
+    row.baseline_quality = scored.get("baseline_quality")
+    row.metrics_json = json.dumps({k: scored.get(k) for k in (
+        "volume_accel", "txn_accel", "wallet_accel", "liquidity_accel",
+        "buy_pressure", "liquidity_usd", "volume_m5", "baseline_samples")})
+    row.last_scan_at = now
+    row.scans = int(row.scans or 0) + 1
+
+    scored["state"] = row.state
+    scored["surge_started_at"] = row.surge_started_at
+    scored["peak_score"] = row.peak_score
+    scored["scans"] = row.scans
+    return scored
+
+
+def prune_snapshots(session, *, hours: int = SNAPSHOT_RETENTION_HOURS) -> int:
+    from app.database import TokenActivitySnapshot
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    n = (session.query(TokenActivitySnapshot)
+         .filter(TokenActivitySnapshot.captured_at < cutoff).delete())
+    return int(n or 0)
+
+
+def scan_and_score(*, paths=("trending_pools", "new_pools"),
+                   limit: int = 100, persist: bool = True) -> dict:
+    """THE surge pass. GeckoTerminal -> snapshot -> persist -> baseline ->
+    score -> state. Every consumer reads this result.
+
+    `persist=False` exists for read-only callers that must not write (a UI
+    poll on a replica, say). It is NOT a second definition: the scoring is
+    identical, only the storage is skipped, and `baseline_quality` still
+    reports honestly because history is read either way.
+    """
+    from app.database import get_db
+    from lib.geckoterminal import solana_pools
+
+    out, errors, seen = [], [], set()
+    with get_db() as session:
+        for path in paths:
+            try:
+                for pool in solana_pools(path, errors=errors):
+                    snap = snapshot_from_pool(pool)
+                    if not snap or snap["mint"] in seen:
+                        continue
+                    seen.add(snap["mint"])
+                    row_id = None
+                    if persist:
+                        row = persist_snapshot(session, snap)
+                        session.flush()
+                        row_id = row.id
+                    history = load_history(session, snap["mint"],
+                                           exclude_id=row_id)
+                    scored = score_snapshot(snap, history)
+                    scored["pool_address"] = snap.get("pool_address")
+                    if persist:
+                        scored = _update_state(session, scored)
+                    out.append(scored)
+            except Exception as e:
+                errors.append(f"{path}: {type(e).__name__}: {str(e)[:120]}")
+        if persist:
+            try:
+                prune_snapshots(session)
+            except Exception as e:
+                logger.debug(f"[TokenSurge] prune skipped: {e}")
+
+    out.sort(key=lambda s: s.get("surge_score") or 0, reverse=True)
+    measured = sum(1 for s in out if s.get("baseline_quality") == "measured")
+    return {
+        "tokens": out[:max(1, min(limit, 200))],
+        "scanned": len(out),
+        "measured_baselines": measured,
+        "new_tokens": len(out) - measured,
+        "errors": errors,
+        "thresholds": {"surge": surge_threshold(),
+                       "extreme": extreme_threshold()},
+        "provenance": ("MEASURED market data; surge score CALCULATED against "
+                       "each token's own stored history"),
+    }
+
+
+def surging_tokens(session=None, *, min_score: float | None = None) -> list[dict]:
+    """Tokens currently in a surge, with the T0 discovery needs.
+
+    Reads the SAME persisted state the scan writes, so wallet discovery and
+    the UI cannot disagree about what is surging.
+    """
+    from app.database import TokenSurgeState, get_db
+
+    threshold = surge_threshold() if min_score is None else min_score
+
+    def _run(s):
+        rows = (s.query(TokenSurgeState)
+                .filter(TokenSurgeState.state == STATE_SURGING)
+                .filter(TokenSurgeState.surge_score >= threshold)
+                .order_by(TokenSurgeState.surge_score.desc()).all())
+        return [{
+            "mint": r.mint, "pool": r.pool_address, "symbol": r.symbol,
+            "surge_score": r.surge_score, "peak_score": r.peak_score,
+            "bias": r.bias, "baseline_quality": r.baseline_quality,
+            "surge_started_at": r.surge_started_at,
+            "last_scan_at": r.last_scan_at, "scans": r.scans,
+            "metrics": json.loads(r.metrics_json) if r.metrics_json else {},
+        } for r in rows]
+
+    if session is not None:
+        return _run(session)
+    with get_db() as db:
+        return _run(db)

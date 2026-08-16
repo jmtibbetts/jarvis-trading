@@ -151,40 +151,47 @@ def surge_metrics(attrs: dict) -> dict:
 
 
 def interesting_solana_mints(limit: int = 10, errors: list | None = None) -> list[dict]:
-    """Mints worth investigating, from pools that have actually caught on.
+    """Mints worth investigating, from THE canonical surge engine.
 
-    Reuses GeckoTerminal, already the desk's DEX source. `dex_discovery`
-    queries the same endpoints but keeps only `pool_address` and drops
-    `relationships.base_token` — which is the mint, and the only field this
-    pipeline needs. Read here directly rather than widening that module's
-    contract for a different consumer.
+    This used to call `surge_metrics()` — a second, coarser definition of
+    "surge" built on the h1/h6/h24 buckets the market API happens to
+    return, with no stored baseline. Meanwhile `token_surge.score_snapshot`
+    supported measured self-baselines and was reachable only from the
+    /onchain/surge route, where it was called with an empty history.
+
+    Two definitions meant discovery and the UI could disagree about which
+    tokens were surging. Now both read `token_surge.scan_and_score`, which
+    persists each observation and scores against the token's own history —
+    and carries `surge_started_at`, the T0 that pre-surge wallet discovery
+    needs and that the bucket-based metric could never produce.
     """
-    from lib.geckoterminal import solana_pools
+    from lib.token_surge import scan_and_score
 
-    out: list[dict] = []
-    seen: set[str] = set()
-    for path in ("trending_pools", "new_pools"):
-        # Shared client: retries 429 rather than reporting an empty market.
-        for pool in solana_pools(path, errors=errors):
-            rel = pool.get("relationships") or {}
-            token_id = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
-            mint = token_id.split("_", 1)[1] if "_" in token_id else ""
-            if not mint or mint in seen:
-                continue
-            a = pool.get("attributes") or {}
-            seen.add(mint)
-            out.append({
-                "mint": mint,
-                "name": a.get("name"),
-                "pool": a.get("address"),
-                "source_list": path,
-                "volume_24h_usd": _f((a.get("volume_usd") or {}).get("h24")),
-                "liquidity_usd": _f(a.get("reserve_in_usd")),
-                **surge_metrics(a),
-            })
-    # Ranked by ACCELERATION, not size. See surge_metrics: absolute volume
-    # answers "which token is big", and the question here is "which token
-    # just woke up", where wallets that were early are still visible.
+    result = scan_and_score(limit=max(limit * 4, 40))
+    if errors is not None:
+        errors.extend(result.get("errors") or [])
+
+    out = []
+    for s in result.get("tokens") or []:
+        if not s.get("mint") or not s.get("pool_address"):
+            continue
+        out.append({
+            "mint": s["mint"],
+            "name": s.get("symbol"),
+            "pool": s.get("pool_address"),
+            "source_list": "token_surge",
+            "volume_24h_usd": _f(s.get("volume_h24")),
+            "liquidity_usd": _f(s.get("liquidity_usd")),
+            "surge_score": s.get("surge_score") or 0.0,
+            "bias": s.get("bias"),
+            # Provenance travels with the candidate: a "measured" baseline
+            # and a "new_token" guess must never look alike downstream.
+            "baseline_quality": s.get("baseline_quality"),
+            "surge_started_at": s.get("surge_started_at"),
+            "state": s.get("state"),
+        })
+    # Ranked by ACCELERATION, not size — scan_and_score already sorts this
+    # way; re-stated here because the ordering is the point of the module.
     out.sort(key=lambda t: t["surge_score"], reverse=True)
     return out[:limit]
 

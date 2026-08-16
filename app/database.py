@@ -1161,6 +1161,10 @@ class TokenSurgeState(Base):
     last_event_score = Column(Float)
     scans         = Column(Integer, default=0)
     cooldown_until = Column(String)
+    # WHEN the surge began — the T0 that pre-surge wallet discovery searches
+    # backwards from. Distinct from first_seen_at, which is only when this
+    # token was first scanned. Cleared on return to NORMAL.
+    surge_started_at = Column(String)
 
 
 class DexPosition(Base):
@@ -1785,6 +1789,13 @@ def _migrate_columns():
             ("gross_pnl",  "REAL DEFAULT 0.0"),   # before costs
             ("fees",       "REAL DEFAULT 0.0"),
             ("fee_basis",  "TEXT"),
+        ],
+        "token_surge_state": [
+            # WHEN the surge began, not merely when the row was created.
+            # Pre-surge wallet discovery asks "who entered before T0", and
+            # without a stored T0 there is no window to search backwards
+            # from. Cleared when the token returns to NORMAL.
+            ("surge_started_at", "TEXT"),
         ],
     }
     try:

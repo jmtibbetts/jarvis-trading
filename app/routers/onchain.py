@@ -268,6 +268,103 @@ def dex_sizing(reserve_usd: float, cash_usd: float | None = None):
             "provenance": "CALCULATED from pool reserve and constant-product math"}
 
 
+# ── Kamino: the book, and what it would take to break a position ─────────
+@router.get("/onchain/sweep")
+def kamino_book_sweep(limit: int = 40, min_debt: float | None = None):
+    """The whole Kamino book, ranked by what MATTERS rather than by size.
+
+    `lib/kamino_sweep` had no route. A $42M position 2% from liquidation
+    owned by a measured high-alpha wallet is a different event from the
+    same position owned by an unknown one, and ranking by collateral alone
+    cannot express that.
+
+    The registry overlap is reported even though it is currently zero: that
+    fact is informative, not a failure. Discovery finds wallets by TOKEN
+    ACTIVITY and this finds them by BORROWING, which are different
+    populations — a profitable spot trader need never touch a lending
+    market. Claiming coverage it does not have would be worse.
+    """
+    from lib.kamino_sweep import (band_summary, join_wallet_registry,
+                                  min_debt_usd, rank_by_significance,
+                                  sweep_obligations)
+
+    swept = sweep_obligations(min_debt=min_debt)
+    positions = swept.get("positions") or []
+    if not positions:
+        return {**swept, "ranked": [], "bands": [], "registry": {},
+                "detail": swept.get("error") or
+                          "no obligations above the debt floor"}
+
+    joined = join_wallet_registry(positions)
+    ranked = rank_by_significance(
+        positions, limit=max(1, min(limit, 200)),
+        wallet_scores=joined.get("scores") or {})
+    return {
+        "scanned": swept.get("scanned"),
+        "positions": len(positions),
+        "min_debt_usd": min_debt if min_debt is not None else min_debt_usd(),
+        "ranked": ranked,
+        "bands": band_summary(positions),
+        "registry": {k: v for k, v in joined.items() if k != "scores"},
+        "provenance": {
+            "position_values": "VERIFIED — canonical Kamino decode",
+            "significance": "CALCULATED — size, proximity and wallet quality",
+        },
+    }
+
+
+@router.get("/onchain/stress/{obligation}")
+def obligation_stress(obligation: str, days: int = 0,
+                      stable_depeg_pct: float = 0.0,
+                      sol_price_usd: float = 0.0):
+    """The stress matrix for ONE obligation, on three independent axes.
+
+    `lib/liquidation_matrix` had no route either. A single "distance to
+    liquidation" number answers one question badly, because the boundary
+    MOVES — with SOL, with LST basis, with the borrowed stable's own price,
+    and with time and carry.
+
+    `stable_depeg_pct` is a SELECTOR rather than a fourth grid dimension:
+    the principal matrix stays SOL x LST-depeg (which is readable), and the
+    stable axis picks which slice of it you are looking at. Positive means
+    the stable trades ABOVE par, which is adverse for a borrower and
+    favourable for a holder, and it is applied to BOTH sides so a
+    stable-collateral/stable-debt position nets out instead of being
+    shocked in one direction only.
+    """
+    from lib.capital_lending import obligation_by_address
+    from lib.liquidation_matrix import (DEFAULT_STABLE_DEPEG_SHOCKS,
+                                        liquidation_boundary,
+                                        position_risk_report,
+                                        stable_depeg_sensitivity,
+                                        stress_matrix)
+
+    try:
+        position = obligation_by_address(obligation, sol_price_usd=sol_price_usd)
+    except Exception as e:
+        return {"available": False,
+                "reason": f"could not decode {obligation[:8]}…: {type(e).__name__}"}
+    if not position:
+        return {"available": False,
+                "reason": f"no obligation found at {obligation[:8]}…"}
+
+    report = position_risk_report(position, carry_by_scenario={})
+    if not report.get("available"):
+        return report
+
+    return {
+        **report,
+        "obligation": obligation,
+        "matrix": stress_matrix(position, days=days,
+                                stable_depeg_pct=stable_depeg_pct),
+        "stable_axis": stable_depeg_sensitivity(position, days=days),
+        "stable_shocks_available": list(DEFAULT_STABLE_DEPEG_SHOCKS),
+        "boundary_at_selected_depeg": liquidation_boundary(
+            position, days=days, stable_depeg_pct=stable_depeg_pct),
+        "selected_stable_depeg_pct": stable_depeg_pct,
+    }
+
+
 # ── Capital: staking and lending ─────────────────────────────────────────
 @router.get("/onchain/stake/{wallet}")
 def wallet_stake(wallet: str, sol_price_usd: float = 0.0):

@@ -224,6 +224,55 @@ def obligations_for(wallet: str) -> list[dict]:
     return out
 
 
+def obligation_by_address(obligation: str, *, with_assets: bool = True) -> dict | None:
+    """ONE obligation, by its own account address.
+
+    The stress matrix works on a single position, and every existing reader
+    here fetches by OWNER (`obligations_for`) or sweeps the whole program.
+    Both are the wrong shape for "show me this position's boundary": one
+    needs a wallet the caller may not have, the other decodes 61,000 rows
+    to reach one.
+
+    Assets are named by default because the matrix identifies collateral by
+    MINT — the BSOL ticker collides with a US-listed ETF, and a stress
+    profile chosen by ticker would eventually apply liquid-staking depeg
+    assumptions to an equity.
+    """
+    from lib.helius_client import rpc
+
+    try:
+        acc = rpc("getAccountInfo", [obligation, {"encoding": "base64"}])
+    except Exception as e:
+        logger.debug(f"[CapitalLending] obligation {obligation[:8]}…: {e}")
+        return None
+
+    data = ((acc or {}).get("value") or {}).get("data")
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode(data[0])
+    except (IndexError, ValueError, TypeError):
+        return None
+
+    pos = decode_obligation(raw)
+    if not pos:
+        return None
+    pos["obligation"] = obligation
+    pos["protocol"] = "Kamino Lend"
+    pos.update(health_of(pos))
+    pos["_raw"] = raw
+    if with_assets:
+        try:
+            from lib.capital_reserves import name_positions
+            pos["assets"] = name_positions(raw)
+        except Exception as e:
+            # A position without named assets still has a health factor;
+            # say the names are missing rather than failing the whole read.
+            logger.debug(f"[CapitalLending] assets for {obligation[:8]}…: {e}")
+            pos["assets_error"] = f"{type(e).__name__}"
+    return pos
+
+
 def scan_positions_at_risk(limit_scanned: int = 20_000,
                            min_debt_usd: float | None = None) -> dict:
     """Sweep every obligation and rank the ones close to forced selling.

@@ -23,6 +23,7 @@
   import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import DexExchange from "../components/DexExchange.svelte";
+  import LiquidationStress from "../components/LiquidationStress.svelte";
 
   const feeds = new FeedTracker();
 
@@ -366,6 +367,21 @@
       before the trade is even wrong.
     </p>
     <DexExchange />
+  </div>
+
+  <!--
+    The Kamino sweep and the stress matrix. Both engines existed with no
+    route and no panel; §2's "stress matrix and sweep panels" is this.
+  -->
+  <div class="exchange">
+    <h2 class="sect">Lending Risk — Sweep &amp; Stress</h2>
+    <p class="note">
+      The book ranked by significance rather than size, and the liquidation
+      boundary on three independent axes. Certainty is not flat here: a
+      decoded position is VERIFIED, a health factor CALCULATED, and carry,
+      depeg and cascade MODELLED — the panel says which is which.
+    </p>
+    <LiquidationStress />
   </div>
 </div>
 

@@ -1602,6 +1602,68 @@ export type DexOpenRequest = {
 /** Every refusal names itself; `error` is a sentence, not a flag. */
 export type DexResult = { error?: string; [k: string]: unknown };
 
+// ── Kamino book sweep + liquidation stress ────────────────────────────────
+// Mirrors lib/kamino_sweep and lib/liquidation_matrix. Both existed with no
+// route and no panel.
+export type SweepBand = {
+  min_collateral_usd: number; positions: number;
+  collateral_usd: number; debt_usd: number;
+  within_5pct_of_liquidation: number; debt_within_5pct_usd: number;
+};
+export type SweepPosition = {
+  obligation: string; owner: string;
+  collateral_value_usd: number | null; debt_value_usd: number | null;
+  health_factor: number | null;
+  distance_to_liquidation_pct: number | null;
+  /** Ranked by what MATTERS — size, proximity and wallet quality — not size. */
+  significance_score: number | null;
+  significance_reasons?: string[];
+  wallet_status?: string | null;
+  smart_money_score?: number | null;
+};
+export type KaminoSweep = {
+  scanned: number | null; positions: number;
+  min_debt_usd: number;
+  ranked: SweepPosition[];
+  bands: SweepBand[];
+  registry: Record<string, unknown>;
+  provenance: Record<string, string>;
+  detail?: string;
+};
+export type StressCell = {
+  depeg_pct: number; health_factor: number | null; liquidatable: boolean | null;
+};
+export type StressRow = { sol_shock_pct: number; cells: StressCell[] };
+export type StableAxisCell = {
+  stable_depeg_pct: number; health_factor: number | null;
+  liquidatable: boolean | null; debt_value_usd: number | null;
+  boundary_sol_pct: number | null;
+};
+export type ObligationStress = {
+  available: boolean; reason?: string;
+  obligation?: string;
+  current_health_factor?: number;
+  static_sol_liquidation_pct?: number | null;
+  has_lst_collateral?: boolean;
+  legs?: Array<{
+    symbol: string | null; value_usd: number; shocked_value_usd: number;
+    liquidation_threshold_pct: number | null; mint: string | null;
+    identified_by: string;
+    took_sol_shock: boolean; took_depeg: boolean; took_stable_depeg: boolean;
+  }>;
+  matrix?: { days: number; sol_shocks: number[]; depeg_shocks: number[];
+             rows: StressRow[]; stable_depeg_pct: number };
+  /** The axis that did not exist: the DEBT side is a price too. */
+  stable_axis?: {
+    cells: StableAxisCell[]; sign_convention: string; basis: string;
+  };
+  stable_shocks_available?: number[];
+  boundary_at_selected_depeg?: number | null;
+  selected_stable_depeg_pct?: number;
+  /** VERIFIED / CALCULATED / MODELLED must never render at equal weight. */
+  provenance?: Record<string, string>;
+};
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1697,6 +1759,17 @@ export const api = {
   dexSizing: (reserveUsd: number, cashUsd?: number) => get<DexSizing>(
     `/onchain/dex/sizing?reserve_usd=${reserveUsd}`
     + (cashUsd !== undefined ? `&cash_usd=${cashUsd}` : "")),
+  // Sweeps the whole Kamino program, so it is on-demand rather than polled.
+  kaminoSweep: (limit = 40, minDebt?: number) => get<KaminoSweep>(
+    `/onchain/sweep?limit=${limit}`
+    + (minDebt !== undefined ? `&min_debt=${minDebt}` : "")),
+  obligationStress: (obligation: string, opts?: {
+    days?: number; stableDepegPct?: number; solPriceUsd?: number;
+  }) => get<ObligationStress>(
+    `/onchain/stress/${encodeURIComponent(obligation)}`
+    + `?days=${opts?.days ?? 0}`
+    + `&stable_depeg_pct=${opts?.stableDepegPct ?? 0}`
+    + (opts?.solPriceUsd ? `&sol_price_usd=${opts.solPriceUsd}` : "")),
   dexOpen: (body: DexOpenRequest) => post<DexResult>("/onchain/dex/open", body),
   dexClose: (body: {
     position_id: string; price_usd: number; reserve_usd?: number | null;

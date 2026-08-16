@@ -40,7 +40,13 @@ logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "helius_v1_transfers_v1"
 
-DEFAULT_BASE = "https://api.helius.xyz"
+
+def _base() -> str:
+    """The client's base, not a second copy of it. A local HELIUS_BASE
+    constant here would be a second source of truth for the endpoint —
+    exactly the pattern this consolidation removes."""
+    from lib.helius_client import WALLET_API_BASE
+    return WALLET_API_BASE
 
 
 def _page_limit() -> int:
@@ -67,12 +73,8 @@ def _config() -> tuple[str, str, list[str], int]:
         wallets = get_monitorable_wallets()
     except Exception as e:
         logger.warning(f"[WalletActivity] registry unavailable: {e}")
-    return (
-        (os.getenv("HELIUS_BASE") or DEFAULT_BASE).rstrip("/"),
-        os.getenv("HELIUS_API_KEY", "").strip(),
-        wallets,
-        _page_limit(),
-    )
+    return (_base(), os.getenv("HELIUS_API_KEY", "").strip(),
+            wallets, _page_limit())
 
 
 def parse_transfers(payload: dict, address: str) -> list[dict]:
@@ -120,21 +122,27 @@ def parse_transfers(payload: dict, address: str) -> list[dict]:
 
 
 def _fetch(address: str) -> tuple[dict | None, str | None]:
-    import httpx
+    """One page of transfers, through THE Helius client.
 
-    base, key, _, limit = _config()
+    This module used to own a private `httpx.get` with the key in the query
+    string (`?api-key=`), which put the credential into every URL and hence
+    into any log line or exception text that carried one — the code below it
+    then scrubbed the key back out of error strings, treating the symptom.
+
+    `helius_client` is the declared single access layer and provides header
+    auth, pacing, retry limited to 429/5xx, per-endpoint metrics and
+    normalized errors. A second transport meant none of that applied to the
+    most frequently-called Helius endpoint in the system.
+    """
+    from lib.helius_client import HeliusError, transfers
+
     try:
-        r = httpx.get(f"{base}/v1/wallet/{address}/transfers",
-                      params={"api-key": key, "limit": limit}, timeout=30.0)
-        r.raise_for_status()
-        return r.json(), None
+        return transfers(address, _page_limit()), None
+    except HeliusError as e:
+        # Already normalized and key-free by construction.
+        return None, str(e)[:200]
     except Exception as e:
-        # The key rides in the query string, so an httpx error message can
-        # carry the full URL. Never let it reach a log.
-        msg = f"{type(e).__name__}: {str(e)[:160]}"
-        if key:
-            msg = msg.replace(key, "<redacted>")
-        return None, msg
+        return None, f"{type(e).__name__}: {str(e)[:160]}"
 
 
 def collect_once() -> dict:

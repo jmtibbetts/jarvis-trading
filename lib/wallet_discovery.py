@@ -150,6 +150,40 @@ def surge_metrics(attrs: dict) -> dict:
     }
 
 
+def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
+    """Append one sighting of `owner` near `tok`. Returns 1 if new.
+
+    Cheap by construction: no classification, no Helius call, one insert
+    guarded by a uniqueness constraint. That is what makes it affordable to
+    record EVERY sighting rather than only first ones.
+    """
+    from lib.wallet_alpha import record_observation
+
+    try:
+        _, created = record_observation(
+            session,
+            wallet_address=owner,
+            mint=tok.get("mint"),
+            pool=tok.get("pool"),
+            token_symbol=tok.get("name"),
+            # Without a per-sighting signature the uniqueness key would
+            # collapse every appearance of one wallet on one mint into a
+            # single row. `traders_of_pool` supplies one; holder snapshots
+            # do not, so those are keyed by the surge episode instead — one
+            # observation per wallet per mint per surge, not per scan.
+            signature=(row.get("signature")
+                       or f"holders:{tok.get('surge_started_at') or 'nosurge'}"),
+            entry_timestamp=row.get("timestamp") or tok.get("surge_started_at"),
+            entry_amount=row.get("amount"),
+            discovery_source=source,
+            surge_started_at=tok.get("surge_started_at"),
+        )
+        return 1 if created else 0
+    except Exception as e:
+        logger.debug(f"[WalletDiscovery] observation skipped for {owner[:8]}…: {e}")
+        return 0
+
+
 def interesting_solana_mints(limit: int = 10, errors: list | None = None) -> list[dict]:
     """Mints worth investigating, from THE canonical surge engine.
 
@@ -313,6 +347,10 @@ def discover_from_tokens(max_tokens: int = 5, db=None,
 
     stats = {"tokens_scanned": 0, "owners_seen": 0, "candidates_created": 0,
              "excluded": 0, "already_known": 0, "errors": [],
+             # Sightings appended this pass. `already_known` counts wallets
+             # whose IDENTITY was already resolved; this counts the EVIDENCE
+             # those sightings produced, which used to be thrown away.
+             "observations_recorded": 0,
              # Tracked separately because the two sources find genuinely
              # different populations: holders are whoever is sitting on a
              # bag right now, traders are whoever ACTED.
@@ -359,6 +397,17 @@ def discover_from_tokens(max_tokens: int = 5, db=None,
                     WalletRegistry.address == owner).first()
                 if existing is not None:
                     stats["already_known"] += 1
+                    # RECORD THE SIGHTING, then skip the expensive work.
+                    # This used to `continue` outright, throwing away the
+                    # single most valuable signal the system produces: a
+                    # wallet appearing before ten independent token surges
+                    # is evidence, and being already-known is exactly what
+                    # made it worth noticing. Identity is not re-derived
+                    # (no classify() call, no Helius spend) — only the
+                    # observation is appended.
+                    if existing.status not in ("EXCLUDED_ENTITY", "ARCHIVED"):
+                        stats["observations_recorded"] += _observe(
+                            session, owner, tok, source, row)
                     continue
 
                 verdict = classify(owner)
@@ -388,6 +437,10 @@ def discover_from_tokens(max_tokens: int = 5, db=None,
                 w.entity_type = verdict["entity_type"]
                 stats["candidates_created"] += 1
                 stats["from_traders" if source == "pool_traders" else "from_holders"] += 1
+                # A first sighting is evidence too — the registry row says
+                # WHO, the observation says WHEN and NEAR WHAT.
+                stats["observations_recorded"] += _observe(
+                    session, owner, tok, source, row)
 
     if db is not None:
         _run(db)

@@ -165,6 +165,39 @@ def resolve_observation(session, row, price_lookup, *,
     return {"resolved": resolved, "all_done": bool(row.fully_resolved)}
 
 
+def resolve_due(limit: int = 300, db=None) -> dict:
+    """Fill every elapsed horizon across pending observations.
+
+    Selects on `fully_resolved`, not on recency, so an old observation
+    cannot starve behind a stream of newer ones — the queue-starvation
+    shape this repo has hit before.
+    """
+    from app.database import WalletObservation, get_db
+    from lib.token_price_history import price_at
+
+    def _run(session):
+        rows = (session.query(WalletObservation)
+                .filter(WalletObservation.fully_resolved == 0)
+                .order_by(WalletObservation.entry_timestamp.asc())
+                .limit(max(1, min(limit, 2000))).all())
+        stats = {"examined": len(rows), "horizons_filled": 0,
+                 "completed": 0, "awaiting_price": 0}
+        for row in rows:
+            before = row.horizons_resolved or ""
+            r = resolve_observation(session, row, price_at)
+            stats["horizons_filled"] += len(r.get("resolved") or [])
+            if r.get("all_done"):
+                stats["completed"] += 1
+            elif (row.horizons_resolved or "") == before and due_horizons(row):
+                stats["awaiting_price"] += 1
+        return stats
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
 def alpha_for_wallet(session, wallet_address: str) -> dict:
     """Aggregate post-entry alpha across this wallet's observations.
 

@@ -72,6 +72,8 @@ job_status = {
     'brief_push': {'status': 'idle', 'last': None, 'error': None},
     'onchain': {'status': 'idle', 'last': None, 'error': None},
     'wallet_activity': {'status': 'idle', 'last': None, 'error': None},
+    'wallet_lifecycle': {'status': 'idle', 'last': None, 'error': None},
+    'wallet_alpha': {'status': 'idle', 'last': None, 'error': None},
 }
 
 # Guards the check-then-set on job_status[name]['status'] below so two threads
@@ -656,6 +658,29 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('wallet_scoring', wallet_scoring_run),
                   'interval', minutes=30, id='wallet_scoring',
                   next_run_time=now + timedelta(minutes=8),
+                  replace_existing=True, max_instances=1)
+
+    # Lifecycle transitions. Deliberately a SEPARATE job from scoring:
+    # scoring measures, this decides, and coupling them is what left
+    # SMART_MONEY and HIGH_CONVICTION unreachable. Runs after scoring so it
+    # reads fresh numbers, and cheap because it touches no network.
+    def wallet_lifecycle_run():
+        from lib.wallet_lifecycle import run as lifecycle_run
+        return lifecycle_run(limit=200)
+    sched.add_job(make_job_runner('wallet_lifecycle', wallet_lifecycle_run),
+                  'interval', minutes=30, id='wallet_lifecycle',
+                  next_run_time=now + timedelta(minutes=12),
+                  replace_existing=True, max_instances=1)
+
+    # Resolve post-entry alpha horizons as they elapse. An observation is
+    # normally PARTIALLY resolved — 5m fills minutes after the entry and
+    # 24h a day later — so this runs often and does a little each time.
+    def wallet_alpha_run():
+        from lib.wallet_alpha import resolve_due
+        return resolve_due(limit=300)
+    sched.add_job(make_job_runner('wallet_alpha', wallet_alpha_run),
+                  'interval', minutes=10, id='wallet_alpha',
+                  next_run_time=now + timedelta(minutes=7),
                   replace_existing=True, max_instances=1)
 
     def candidates_run():

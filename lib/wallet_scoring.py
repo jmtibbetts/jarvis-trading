@@ -407,9 +407,12 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
             w.wallet_score_version = SCORE_VERSION
             if s.get("whale_score") is not None:
                 w.whale_score = s["whale_score"]
-            # Promotion is evidence-driven: a measured wallet leaves
-            # CANDIDATE only once there is something to measure.
-            w.status = "WATCH"
+            # SCORING DECIDES NOTHING. This used to write `w.status =
+            # "WATCH"` inline, which made promotion a side effect of
+            # measurement and was the ONLY lifecycle write in the codebase —
+            # so SMART_MONEY and HIGH_CONVICTION were unreachable states.
+            # lib/wallet_lifecycle owns transitions now, reading these
+            # scores plus the observation evidence.
             stats["scored"] += 1
         return stats
 

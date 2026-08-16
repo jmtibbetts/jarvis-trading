@@ -184,6 +184,69 @@ def rank_by_significance(positions: list[dict], limit: int = 50,
     return scored[:limit]
 
 
+def join_wallet_registry(positions: list[dict], db=None) -> dict:
+    """Attach what the wallet registry knows about each position's owner.
+
+    A $42M position 2% from liquidation owned by a measured high-alpha
+    wallet is a different event from the same position owned by an unknown
+    one: the first is a signal that someone skilled is about to be forced
+    out, the second is just leverage unwinding.
+
+    The overlap is reported because it is currently ZERO and that fact is
+    informative, not a failure. Discovery finds wallets by TOKEN ACTIVITY
+    while this finds them by BORROWING, and those are different
+    populations — a profitable spot trader need never touch a lending
+    market. The join is built so it fills in as both sides grow; claiming
+    coverage it does not have would be worse than reporting none.
+    """
+    from app.database import WalletRegistry, get_db
+
+    def _run(session):
+        owners = {p.get("owner") for p in positions if p.get("owner")}
+        if not owners:
+            return {}
+        found = {}
+        # Chunked: SQLite refuses very large IN clauses.
+        owner_list = list(owners)
+        for i in range(0, len(owner_list), 500):
+            for w in session.query(WalletRegistry).filter(
+                    WalletRegistry.address.in_(owner_list[i:i + 500])).all():
+                found[w.address] = {
+                    "status": w.status, "source": w.source,
+                    "pinned": bool(w.pinned), "is_trader": w.is_trader,
+                    "entity_type": w.entity_type, "entity_name": w.entity_name,
+                    # None means NOT MEASURED — never zero, which would rank
+                    # an unanalysed wallet as a bad one.
+                    "smart_money_score": w.smart_money_score,
+                    "alpha_score": w.alpha_score,
+                    "copy_score": w.copy_score,
+                }
+        return found
+
+    if db is not None:
+        known = _run(db)
+    else:
+        with get_db() as _db:
+            known = _run(_db)
+
+    enriched = []
+    for p in positions:
+        w = known.get(p.get("owner"))
+        enriched.append({**p, "wallet": w,
+                         "wallet_known": bool(w),
+                         "wallet_score": (w or {}).get("smart_money_score")})
+
+    matched = sum(1 for e in enriched if e["wallet_known"])
+    return {
+        "positions": enriched,
+        "owners_seen": len({p.get("owner") for p in positions if p.get("owner")}),
+        "owners_known": matched,
+        "note": ("Discovery finds wallets by token activity; this finds them "
+                 "by borrowing. Zero overlap means those populations have "
+                 "not intersected yet, not that the join failed."),
+    }
+
+
 def band_summary(positions: list[dict], bands=DEFAULT_BANDS) -> list[dict]:
     """Position counts and totals by collateral size."""
     out = []

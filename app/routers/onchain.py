@@ -102,37 +102,16 @@ def token_surge(limit: int = 20):
     """
     from lib.token_surge import (enabled, extreme_threshold, score_snapshot,
                                  snapshot_from_pool, surge_threshold)
-    from lib.wallet_discovery import GT_BASE
+    from lib.geckoterminal import solana_pools
 
-    import time
-
-    import httpx
     out, errors = [], []
     for path in ("trending_pools", "new_pools"):
         try:
-            # 429 means "ask again shortly" — it is the one status worth
-            # retrying, and without this the panel rendered "no surge
-            # candidates" while the truth was "could not look". Same retry
-            # shape as dex_discovery, which had the identical bug.
-            r = None
-            for attempt in range(3):
-                r = httpx.get(f"{GT_BASE}/networks/solana/{path}", timeout=30.0)
-                if r.status_code != 429:
-                    break
-                if attempt < 2:
-                    try:
-                        hinted = float(r.headers.get("Retry-After", "") or 0)
-                    except ValueError:
-                        hinted = 0.0
-                    time.sleep(max(hinted, (4.0, 9.0)[attempt]))
-            if r is None or r.status_code != 200:
-                errors.append(f"{path}: HTTP {r.status_code if r else 'no response'}")
-                continue
-            for pool in (r.json().get("data") or []):
+            for pool in solana_pools(path, errors=errors):
                 snap = snapshot_from_pool(pool)
                 if not snap:
                     continue
-                # No stored history yet on this path, so every row is scored
+                # No stored history on this path yet, so every row is scored
                 # by the new-token model and SAYS so via baseline_quality.
                 scored = score_snapshot(snap, [])
                 scored["pool_address"] = snap.get("pool_address")

@@ -159,39 +159,29 @@ def interesting_solana_mints(limit: int = 10, errors: list | None = None) -> lis
     pipeline needs. Read here directly rather than widening that module's
     contract for a different consumer.
     """
-    import httpx
+    from lib.geckoterminal import solana_pools
 
     out: list[dict] = []
     seen: set[str] = set()
     for path in ("trending_pools", "new_pools"):
-        try:
-            r = httpx.get(f"{GT_BASE}/networks/solana/{path}", timeout=30.0)
-            if r.status_code != 200:
-                if errors is not None:
-                    errors.append(f"{path}: HTTP {r.status_code}")
+        # Shared client: retries 429 rather than reporting an empty market.
+        for pool in solana_pools(path, errors=errors):
+            rel = pool.get("relationships") or {}
+            token_id = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
+            mint = token_id.split("_", 1)[1] if "_" in token_id else ""
+            if not mint or mint in seen:
                 continue
-            for pool in (r.json().get("data") or []):
-                rel = pool.get("relationships") or {}
-                token_id = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
-                # GeckoTerminal ids are "<network>_<address>".
-                mint = token_id.split("_", 1)[1] if "_" in token_id else ""
-                if not mint or mint in seen:
-                    continue
-                a = pool.get("attributes") or {}
-                seen.add(mint)
-                out.append({
-                    "mint": mint,
-                    "name": a.get("name"),
-                    "pool": a.get("address"),
-                    "source_list": path,
-                    "volume_24h_usd": _f((a.get("volume_usd") or {}).get("h24")),
-                    "liquidity_usd": _f(a.get("reserve_in_usd")),
-                    **surge_metrics(a),
-                })
-        except Exception as e:
-            if errors is not None:
-                errors.append(f"{path}: {type(e).__name__}")
-            logger.debug(f"[WalletDiscovery] {path}: {e}")
+            a = pool.get("attributes") or {}
+            seen.add(mint)
+            out.append({
+                "mint": mint,
+                "name": a.get("name"),
+                "pool": a.get("address"),
+                "source_list": path,
+                "volume_24h_usd": _f((a.get("volume_usd") or {}).get("h24")),
+                "liquidity_usd": _f(a.get("reserve_in_usd")),
+                **surge_metrics(a),
+            })
     # Ranked by ACCELERATION, not size. See surge_metrics: absolute volume
     # answers "which token is big", and the question here is "which token
     # just woke up", where wallets that were early are still visible.
@@ -244,7 +234,65 @@ def owners_of_token(mint: str, limit: int = HOLDERS_PER_TOKEN,
     return owners
 
 
-def discover_from_tokens(max_tokens: int = 5, db=None) -> dict:
+def traders_of_pool(pool_address: str, signatures: int = 30,
+                    inspect: int = 12, errors: list | None = None) -> list[dict]:
+    """Wallets that TRADED through a pool — a different population entirely.
+
+    `owners_of_token` finds who HOLDS the biggest bags right now. That is a
+    snapshot, and it systematically misses the wallet worth finding most: a
+    trader who buys early, sells into strength and is flat again by the time
+    anyone looks. Such a wallet never appears in the top 20 holders and is
+    invisible to holdings-based discovery, however profitable it is.
+
+    Reading the pool's recent signatures finds them, because a trade leaves
+    a signature whether or not the position survives. Costs more — one call
+    for the signature list plus one per transaction inspected — so it is
+    bounded and reserved for tokens that already look interesting.
+
+    Signers, not accountKeys generally: the fee payer and signers are the
+    parties that ACTED. Routers and pool accounts appear in the key list of
+    every swap without having chosen anything.
+    """
+    from lib.helius_client import rpc
+
+    out: list[dict] = []
+    try:
+        sigs = rpc("getSignaturesForAddress",
+                   [pool_address, {"limit": max(1, min(signatures, 100))}]) or []
+    except Exception as e:
+        if errors is not None:
+            errors.append(f"{pool_address[:8]}… signatures: {type(e).__name__}")
+        return out
+
+    seen: set[str] = set()
+    for entry in sigs[:max(1, min(inspect, len(sigs)))]:
+        sig = entry.get("signature")
+        if not sig:
+            continue
+        try:
+            tx = rpc("getTransaction", [sig, {"encoding": "jsonParsed",
+                                              "maxSupportedTransactionVersion": 0}])
+        except Exception as e:
+            if errors is not None:
+                errors.append(f"{sig[:8]}…: {type(e).__name__}")
+            continue
+        if not tx:
+            continue
+        msg = (tx.get("transaction") or {}).get("message") or {}
+        for k in (msg.get("accountKeys") or []):
+            addr = k.get("pubkey") if isinstance(k, dict) else k
+            is_signer = k.get("signer") if isinstance(k, dict) else False
+            if not (is_signer and addr) or addr in seen:
+                continue
+            seen.add(addr)
+            out.append({"owner": addr, "signature": sig,
+                        "block_time": tx.get("blockTime"),
+                        "slot": tx.get("slot")})
+    return out
+
+
+def discover_from_tokens(max_tokens: int = 5, db=None,
+                         include_traders: bool = True) -> dict:
     """One discovery pass: interesting tokens -> owners -> candidates.
 
     Every address is classified BEFORE it is written. Infrastructure is
@@ -257,7 +305,11 @@ def discover_from_tokens(max_tokens: int = 5, db=None) -> dict:
     from lib.wallet_registry import discovery_enabled, upsert_wallet
 
     stats = {"tokens_scanned": 0, "owners_seen": 0, "candidates_created": 0,
-             "excluded": 0, "already_known": 0, "errors": []}
+             "excluded": 0, "already_known": 0, "errors": [],
+             # Tracked separately because the two sources find genuinely
+             # different populations: holders are whoever is sitting on a
+             # bag right now, traders are whoever ACTED.
+             "from_holders": 0, "from_traders": 0}
 
     if not discovery_enabled():
         stats["errors"].append("discovery disabled "
@@ -275,7 +327,16 @@ def discover_from_tokens(max_tokens: int = 5, db=None) -> dict:
             return
         for tok in tokens:
             stats["tokens_scanned"] += 1
-            for row in owners_of_token(tok["mint"], errors=stats["errors"]):
+            candidates = [(r, "token_holders")
+                          for r in owners_of_token(tok["mint"], errors=stats["errors"])]
+            if include_traders and tok.get("pool"):
+                # The population holdings-based discovery cannot see: a
+                # wallet that bought early, sold into strength and is flat
+                # again never enters the top 20 holders, however good it is.
+                candidates += [(r, "pool_traders")
+                               for r in traders_of_pool(tok["pool"],
+                                                        errors=stats["errors"])]
+            for row, source in candidates:
                 owner = row["owner"]
                 stats["owners_seen"] += 1
                 existing = session.query(WalletRegistry).filter(
@@ -285,13 +346,14 @@ def discover_from_tokens(max_tokens: int = 5, db=None) -> dict:
                     continue
 
                 verdict = classify(owner)
-                reason = (f"holder of {tok.get('name') or tok['mint'][:8]} "
+                verb = "traded" if source == "pool_traders" else "holder of"
+                reason = (f"{verb} {tok.get('name') or tok['mint'][:8]} "
                           f"({tok['source_list']}, ${tok['volume_24h_usd']:,.0f} 24h vol); "
                           f"{verdict['reason']}")
                 if not verdict.get("is_trader"):
                     # Written, not skipped. A recorded exclusion is cheaper
                     # than re-classifying the same exchange every pass.
-                    w = upsert_wallet(session, owner, source="token_holders",
+                    w = upsert_wallet(session, owner, source=source,
                                       discovery_reason=reason)
                     w.status = "EXCLUDED_ENTITY"
                     w.entity_type = verdict["entity_type"]
@@ -300,9 +362,16 @@ def discover_from_tokens(max_tokens: int = 5, db=None) -> dict:
                     stats["excluded"] += 1
                     continue
 
-                upsert_wallet(session, owner, source="token_holders",
-                              discovery_reason=reason, status="CANDIDATE")
+                w = upsert_wallet(session, owner, source=source,
+                                  discovery_reason=reason, status="CANDIDATE")
+                # The classifier decided this; persist it. It was only ever
+                # written on the EXCLUDED path, so every trader candidate
+                # sat at NULL and "is_trader == True" matched nothing.
+                w.is_trader = True
+                w.is_protocol = False
+                w.entity_type = verdict["entity_type"]
                 stats["candidates_created"] += 1
+                stats["from_traders" if source == "pool_traders" else "from_holders"] += 1
 
     if db is not None:
         _run(db)

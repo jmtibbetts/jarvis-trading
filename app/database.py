@@ -867,6 +867,33 @@ class WalletRegistry(Base):
     # were computed by summing mixed quote units and are not comparable
     # with anything after it.
     wallet_score_version = Column(String)
+
+    # ── Analysis diagnostics ─────────────────────────────────────────────
+    # ZERO, UNKNOWN, INSUFFICIENT and PROVIDER_FAILURE are FOUR different
+    # states and must never collapse into one another. "we measured zero
+    # trades" and "we could not measure this run" are different facts, and
+    # a scorer that overwrites a known qualified_trades=12 with 0 because
+    # Helius timed out has destroyed evidence and called it a measurement.
+    #
+    # analysis_status:  MEASURED | INSUFFICIENT | NO_VERIFIED_TRADES
+    #                   | DEGRADED | FAILED
+    analysis_status       = Column(String)
+    # Why a score is absent, in the vocabulary the UI explains it with.
+    measurability_reason  = Column(String)
+    # False means "the sample does not support a score", NOT "bad wallet".
+    measurable            = Column(Boolean)
+    # What we had, and what we needed — so "3 of 15" is expressible and
+    # never has to be rendered as "0 of 15".
+    sample_count          = Column(Integer)
+    required_sample_count = Column(Integer)
+    # Round trips that could not be valued in USD, kept separate from
+    # trades that simply did not happen.
+    unpriced_trades       = Column(Integer)
+    # When analysis last RAN, as distinct from when a score last CHANGED —
+    # a failed run updates this and leaves last_score_update alone, so
+    # stale evidence is visible as stale rather than reading as current.
+    last_analysis_at      = Column(String)
+    analysis_error        = Column(String)
     # Confidence is separate from score so a 100% win rate over 2 trades
     # cannot outrank 71% over 167. §29's sample-size discipline.
     confidence_score   = Column(Float)
@@ -1890,6 +1917,17 @@ def _migrate_columns():
             # legacy_alpha_score so the two semantics never share a column.
             ("legacy_alpha_score", "REAL"),
             ("wallet_score_version", "TEXT"),
+            # ZERO / UNKNOWN / INSUFFICIENT / PROVIDER_FAILURE are four
+            # states, not one. Without these the scorer could only say
+            # "no score" and the UI had to guess which of the four it meant.
+            ("analysis_status", "TEXT"),
+            ("measurability_reason", "TEXT"),
+            ("measurable", "INTEGER"),
+            ("sample_count", "INTEGER"),
+            ("required_sample_count", "INTEGER"),
+            ("unpriced_trades", "INTEGER"),
+            ("last_analysis_at", "TEXT"),
+            ("analysis_error", "TEXT"),
         ],
         "token_surge_state": [
             # WHEN the surge began, not merely when the row was created.

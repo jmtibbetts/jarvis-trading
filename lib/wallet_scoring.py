@@ -255,8 +255,13 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     n = len(trades)
     out = {
         "trades_scored": n,
+        # Present on EVERY return path, including the unmeasurable one, so
+        # a caller persisting these never has to guess whether the key
+        # exists — an absent count and a zero count are different claims.
+        "winning_trades": 0, "losing_trades": 0,
         "whale_score": None, "smart_money_score": None,
         "alpha_score": None, "copy_score": None, "confidence_score": None,
+        "metrics": {},
         "measurable": False,
         "reason": "",
     }
@@ -327,7 +332,15 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
 
     out["confidence_score"] = round(confidence * 100.0, 2)
     out["measurable"] = True
+    # Counts the lifecycle gates on, surfaced at the top level rather than
+    # buried in `metrics` because they are evidence, not diagnostics.
+    out["winning_trades"] = len(wins)
+    out["losing_trades"] = len(losses)
+
+    sizes = [t["cost_basis_usd"] for t in trades if t.get("cost_basis_usd")]
     out["metrics"] = {
+        "average_size_usd": round(sum(sizes) / len(sizes), 2) if sizes else None,
+        "largest_size_usd": round(max(sizes), 2) if sizes else None,
         "win_rate": round(win_rate, 4),
         "profit_factor": (round(profit_factor, 3)
                           if profit_factor != float("inf") else None),
@@ -379,23 +392,88 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
                  "no_transfers": 0, "errors": 0}
         for w in rows:
             stats["attempted"] += 1
+            now = __import__("app.database", fromlist=["now_iso"]).now_iso()
             try:
                 raw = transfers(w.address, limit=100)
             except Exception as e:
+                # PROVIDER FAILURE — NOT a measurement of zero. Every count
+                # already on this row is LEFT INTACT: overwriting a known
+                # qualified_trades=12 with 0 because Helius timed out
+                # destroys evidence and calls the result a measurement.
+                # Only the run's own outcome is recorded, and
+                # last_score_update is deliberately not touched so the
+                # existing score keeps its real age.
                 logger.debug(f"[WalletScoring] {w.address[:8]}…: {e}")
+                w.analysis_status = "FAILED"
+                w.analysis_error = f"{type(e).__name__}: {str(e)[:160]}"
+                w.last_analysis_at = now
                 stats["errors"] += 1
                 continue
+
             legs = raw if isinstance(raw, list) else (
                 (raw or {}).get("transfers") or (raw or {}).get("data") or [])
             if not legs:
+                # A SUCCESSFUL read that found nothing. This IS a
+                # measurement — of zero — and is a different fact from the
+                # failure above.
+                w.analysis_status = "NO_VERIFIED_TRADES"
+                w.measurability_reason = "NO_TRANSFER_HISTORY"
+                w.measurable = False
+                w.sample_count = 0
+                w.required_sample_count = MIN_TRADES_FOR_SCORE
+                w.last_analysis_at = now
+                w.analysis_error = None
                 stats["no_transfers"] += 1
                 continue
             rec = reconstruct_trades(legs)
             s = score_wallet(rec)
             w.last_score_update = __import__("app.database", fromlist=["now_iso"]).now_iso()
+
+            # THE STATISTICS LIFECYCLE READS MUST BE THE STATISTICS SCORING
+            # WRITES. Every column here already existed on WalletRegistry and
+            # every value was already computed by score_wallet — but nothing
+            # wrote them, so `wallet.qualified_trades or 0` in
+            # wallet_lifecycle evaluated to 0 for every wallet ever scored and
+            # the SMART_MONEY gate (>= 15 qualified trades) was unreachable by
+            # construction. Schema, producer and consumer all correct; the
+            # assignment between them simply absent.
+            #
+            # Written BEFORE the measurability gate on purpose. A wallet with
+            # 3 round trips is not measurable, but "3 of 15" is the true and
+            # useful answer to "why is this not smart money?" — skipping the
+            # write left it indistinguishable from a wallet with none.
+            m = s.get("metrics") or {}
+            w.qualified_trades = s["trades_scored"]
+            w.winning_trades = s["winning_trades"]
+            w.losing_trades = s["losing_trades"]
+            w.win_rate = m.get("win_rate")
+            w.profit_factor = m.get("profit_factor")
+            w.average_trade_size = m.get("average_size_usd")
+            w.median_trade_size = m.get("median_size_usd")
+            w.largest_trade = m.get("largest_size_usd")
+            w.unpriced_trades = rec.get("unpriced")
+            w.sample_count = s["trades_scored"]
+            w.required_sample_count = MIN_TRADES_FOR_SCORE
+            w.last_analysis_at = now
+            w.analysis_error = None
+
             if not s["measurable"]:
+                # INSUFFICIENT — distinct from zero and from failure. The
+                # counts above are already persisted and true, so the
+                # diagnostic reads "3 of 15" rather than "0 of 15", and the
+                # scores stay NULL because the sample does not support them.
+                w.measurable = False
+                w.analysis_status = ("INSUFFICIENT" if s["trades_scored"]
+                                     else "NO_VERIFIED_TRADES")
+                w.measurability_reason = (
+                    "INSUFFICIENT_QUALIFIED_TRADES" if s["trades_scored"]
+                    else "NO_VERIFIED_TRADES")
                 stats["not_measurable"] += 1
                 continue
+
+            w.measurable = True
+            w.analysis_status = "MEASURED"
+            w.measurability_reason = None
             w.smart_money_score = s["smart_money_score"]
             # alpha_score stays NULL until W5 measures post-entry horizons.
             # Writing the realized return here is what made the missing

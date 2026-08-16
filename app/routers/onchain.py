@@ -209,17 +209,29 @@ def wallet_lending(wallet: str):
     from lib.capital_lending import (DECODER_SOURCE, DECODER_VERSION,
                                      obligations_for)
     positions = obligations_for(wallet)
+    # Assets are now NAMED: reserve decoding resolves each deposit and
+    # borrow to its mint, decimals, oracle price and liquidation threshold.
+    for p in positions:
+        raw = p.pop("_raw", None)
+        if raw:
+            from lib.capital_reserves import name_positions
+            p["assets"] = name_positions(raw)
     return {"wallet": wallet, "positions": positions,
             "count": len(positions),
             "decoder": {"source": DECODER_SOURCE, "version": DECODER_VERSION},
             "provenance": {
                 "position_values": "VERIFIED — canonical Kamino layout",
                 "health_factor": "CALCULATED from Kamino's own rule",
-                "asset_identity": ("UNAVAILABLE — reserve decoding not yet "
-                                   "ported, so deposits/borrows are counted "
-                                   "but not named"),
-                "liquidation_price": ("UNAVAILABLE — requires verified "
-                                      "reserve and oracle data"),
+                "asset_identity": "VERIFIED — canonical Kamino reserve layout",
+                "prices": ("VERIFIED — Kamino's reserve oracle, not exchange "
+                           "spot: liquidation is decided by the protocol's "
+                           "own price"),
+                "collateral_amounts": ("deposits are cTOKENS; the underlying "
+                                       "figure is derived from Kamino's own "
+                                       "position value, not amount x price"),
+                "liquidation_price": ("UNAVAILABLE for multi-collateral "
+                                      "positions — no single honest price "
+                                      "exists when several assets move health"),
             }}
 
 

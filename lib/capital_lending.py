@@ -218,6 +218,8 @@ def obligations_for(wallet: str) -> list[dict]:
         pos["obligation"] = row.get("pubkey")
         pos["protocol"] = "Kamino Lend"
         pos.update(health_of(pos))
+        # Carried so the caller can resolve assets without re-fetching.
+        pos["_raw"] = raw
         out.append(pos)
     return out
 

@@ -573,8 +573,24 @@ def _manage_open_positions(prices: dict) -> dict:
             return r
 
         is_c = _is_crypto(sym)
-        direction = pos["direction"].lower()
-        side = -1 if direction == "short" else 1
+        # `pos["direction"]` is the FULL direction string — "Short_10x",
+        # "Short_5x", "Short_Leveraged". Comparing it to the literal
+        # "short" therefore matched only the plain case, and EVERY
+        # leveraged short fell to the else branch and was marked to market
+        # as a LONG. The sign of the P&L on those positions was inverted:
+        # a winning short reported a loss, the loser reported a gain, and
+        # every learning row derived from them taught the opposite of what
+        # happened.
+        from lib.trade_side import SHORT, parse_side_strict
+        parsed = parse_side_strict(pos.get("direction"))
+        if parsed is None:
+            logger.warning(
+                f"[Paper] {sym}: cannot mark to market — direction "
+                f"{pos.get('direction')!r} is unreadable")
+            r.setdefault("invalid_direction", 0)
+            r["invalid_direction"] += 1
+            return r
+        side = -1 if parsed == SHORT else 1
         plpc = ((current_price - entry) / entry) * 100 * side
         # qty ALREADY carries the leveraged exposure (qty = margin*leverage/entry),
         # so multiplying by leverage again squared it — a 10x position reported

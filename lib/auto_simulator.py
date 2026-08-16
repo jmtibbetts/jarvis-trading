@@ -32,8 +32,17 @@ ELIGIBLE_STATUSES = {"Active", "PendingApproval"}
 _AUTO_SIM_LOCK = threading.Lock()
 
 
-def _side(direction: str | None) -> str:
-    return trade_side.normalize_side(direction)
+def _side(direction: str | None) -> str | None:
+    """Canonical side for a position about to be OPENED, or None to refuse.
+
+    Was `normalize_side`, the permissive reader, which turns any
+    unrecognised string into a LONG. That is the right rule for displaying
+    a legacy row and the wrong one for opening a position: it means a
+    malformed direction buys something. Every `position.side == "short"`
+    comparison downstream is correct precisely BECAUSE this normalises
+    once, at the boundary — so this is the one place that must be strict.
+    """
+    return trade_side.parse_side_strict(direction)
 
 
 def _leverage(direction: str | None) -> float:

@@ -137,7 +137,11 @@ class EntityClassificationTests(unittest.TestCase):
         protocol plumbing above every human on the chain.
 
         A user wallet is owned by the SYSTEM program. Nothing else is."""
-        for program in ("pAMMBay6oceH9fJKBRHGwLPKnCACo9AJ7YXFPz3mQzY",   # Pump.fun AMM
+        # Both VERIFIED on-chain as executable programs. The first was
+        # previously wrong: it was reconstructed from a 20-character
+        # truncated log line and the remaining 23 characters were
+        # invented. getAccountInfo says that address does not exist.
+        for program in ("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",   # Pump.fun AMM
                         "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"):  # Meteora DLMM
             c = classify(WALLET, _ev(owner_program=program))
             self.assertEqual(c["entity_type"], "PDA", program)

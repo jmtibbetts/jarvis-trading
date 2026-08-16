@@ -945,6 +945,149 @@ class WalletRelationship(Base):
     last_seen_at  = Column(String, default=now_iso)
 
 
+class WalletCapitalEvent(Base):
+    """One normalised capital action — the layer above BUY/SELL/TRANSFER.
+
+    WalletTrade can only describe a swap: mint, counterparty, direction,
+    quantity, price. It has nowhere to put a collateral deposit, a borrow,
+    a stake delegation or a liquidation, so a wallet that pledges JitoSOL,
+    borrows USDC and buys a token reads as one unexplained purchase with
+    the financing invisible.
+
+    `confidence` and `unparsed_programs` are first-class because the honest
+    answer is often partial. A transaction touching an unregistered program
+    is recorded as UNPARSEABLE with the program listed, never guessed into
+    the nearest familiar shape.
+    """
+    __tablename__ = "wallet_capital_events"
+    __table_args__ = (
+        # One signature legitimately produces several events (a Jupiter
+        # route through three pools), so identity includes the leg.
+        UniqueConstraint("signature", "event_index", name="uq_capital_event"),
+    )
+
+    id        = Column(String, primary_key=True, default=new_id)
+    address   = Column(String, index=True, nullable=False)
+    signature = Column(String, index=True, nullable=False)
+    event_index = Column(Integer, default=0)
+    block_time  = Column(String, index=True)
+    slot        = Column(Integer)
+
+    # SWAP_BUY | STAKE | LIQUID_STAKE | LENDING_DEPOSIT | BORROW | REPAY |
+    # COLLATERAL_DEPOSIT | LP_ADD | BRIDGE_IN | LIQUIDATION | UNPARSEABLE ...
+    event_type    = Column(String, index=True, nullable=False)
+    protocol      = Column(String, index=True)
+    protocol_type = Column(String)
+    program_id    = Column(String)
+
+    asset      = Column(String, index=True)
+    asset_symbol = Column(String)
+    amount     = Column(Float)
+    value_usd  = Column(Float)
+
+    # Populated for lending/leverage events only.
+    collateral_asset     = Column(String)
+    collateral_amount    = Column(Float)
+    collateral_value_usd = Column(Float)
+    borrow_asset     = Column(String)
+    borrow_amount    = Column(Float)
+    borrow_value_usd = Column(Float)
+    position_id      = Column(String, index=True)
+
+    health_factor        = Column(Float)
+    ltv                  = Column(Float)
+    liquidation_threshold = Column(Float)
+    liquidation_price    = Column(Float)
+
+    # Does the wallet still hold SOL exposure after this? SOL -> JitoSOL
+    # lowers the raw SOL balance and changes nothing about the position;
+    # without this the conversion is indistinguishable from a sale.
+    retains_sol_exposure = Column(Boolean)
+
+    strategy_chain_id = Column(String, index=True)
+    confidence        = Column(Float, default=0.0)
+    unparsed_programs = Column(Text)
+    raw_note          = Column(Text)
+    created_at        = Column(String, default=now_iso)
+
+
+class WalletStrategyChain(Base):
+    """Several capital events that are one intent.
+
+    stake -> collateral -> borrow -> swap is not four unrelated
+    transactions; it is one leveraged deployment, and the difference
+    decides whether the buy reads as ordinary conviction or as borrowed
+    conviction with a liquidation price attached.
+    """
+    __tablename__ = "wallet_strategy_chains"
+
+    id       = Column(String, primary_key=True, default=new_id)
+    address  = Column(String, index=True, nullable=False)
+    # LEVERAGED_LONG | SPOT_ACCUMULATION | DELEVERAGING | CAPITAL_PREP |
+    # LEVERAGED_STAKING | LIQUIDITY_PROVIDING | CAPITAL_ROTATION ...
+    strategy_type = Column(String, index=True)
+    status        = Column(String, default="open", index=True)
+
+    started_at = Column(String, default=now_iso, index=True)
+    updated_at = Column(String, default=now_iso)
+    closed_at  = Column(String)
+
+    capital_usd      = Column(Float)
+    borrowed_usd     = Column(Float)
+    leverage_estimate = Column(Float)
+    primary_asset    = Column(String)
+    secondary_asset  = Column(String)
+    protocols        = Column(Text)
+    event_count      = Column(Integer, default=0)
+    confidence       = Column(Float, default=0.0)
+    narrative        = Column(Text)
+
+
+class WalletLiquidationRisk(Base):
+    """A leveraged position's distance to forced selling.
+
+    Recalculated when PRICES move, not only when the wallet transacts — a
+    position walks toward liquidation while its owner does nothing, and a
+    risk engine that only wakes on transactions learns about the cascade
+    from the liquidation itself.
+    """
+    __tablename__ = "wallet_liquidation_risk"
+    __table_args__ = (
+        UniqueConstraint("address", "protocol", "position_id",
+                         name="uq_liquidation_position"),
+    )
+
+    id       = Column(String, primary_key=True, default=new_id)
+    address  = Column(String, index=True, nullable=False)
+    protocol = Column(String, index=True)
+    position_id = Column(String)
+
+    collateral_asset     = Column(String)
+    collateral_amount    = Column(Float)
+    collateral_value_usd = Column(Float)
+    debt_asset     = Column(String)
+    debt_amount    = Column(Float)
+    debt_value_usd = Column(Float)
+
+    ltv            = Column(Float)
+    health_factor  = Column(Float)
+    liquidation_threshold = Column(Float)
+    estimated_liquidation_price = Column(Float)
+    distance_to_liquidation_pct = Column(Float, index=True)
+
+    # SAFE | ELEVATED | HIGH | CRITICAL | LIQUIDATION_IN_PROGRESS | LIQUIDATED
+    risk_state = Column(String, default="SAFE", index=True)
+    risk_score = Column(Float, default=0.0, index=True)
+    potential_forced_sale_usd = Column(Float)
+    # Health factor trend, so a deteriorating position outranks a static one.
+    health_trend = Column(String)
+    previous_health_factor = Column(Float)
+
+    wallet_alpha_score = Column(Float)
+    last_updated = Column(String, default=now_iso, index=True)
+    last_price_check = Column(String)
+
+
 class TokenActivitySnapshot(Base):
     """One observation of a pool's activity, kept so acceleration can be
     measured against THIS token's own history.

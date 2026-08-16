@@ -852,9 +852,21 @@ class WalletRegistry(Base):
     # prevent: a wallet can be genuinely skilled and completely uncopyable.
     whale_score        = Column(Float)
     smart_money_score  = Column(Float)
+    # POST-ENTRY MARKET ALPHA — what happened to the token after this wallet
+    # entered. Populated from entry_alpha_* observations; NULL until enough
+    # of them exist. It previously held the wallet's own realized round-trip
+    # return under a comment claiming it was post-entry alpha, which is a
+    # different metric entirely.
     alpha_score        = Column(Float)
+    # The old number, preserved under its true name so a historical row
+    # stays interpretable and the two semantics never share a column.
+    legacy_alpha_score = Column(Float)
     coordination_score = Column(Float)
     copy_score         = Column(Float)
+    # Which scoring engine produced this row. Pre-USD-normalization scores
+    # were computed by summing mixed quote units and are not comparable
+    # with anything after it.
+    wallet_score_version = Column(String)
     # Confidence is separate from score so a 100% win rate over 2 trades
     # cannot outrank 71% over 167. §29's sample-size discipline.
     confidence_score   = Column(Float)
@@ -1789,6 +1801,13 @@ def _migrate_columns():
             ("gross_pnl",  "REAL DEFAULT 0.0"),   # before costs
             ("fees",       "REAL DEFAULT 0.0"),
             ("fee_basis",  "TEXT"),
+        ],
+        "wallet_registry": [
+            # W4/W5. Existing alpha_score values were the wallet's own
+            # realized return, not post-entry alpha; they move to
+            # legacy_alpha_score so the two semantics never share a column.
+            ("legacy_alpha_score", "REAL"),
+            ("wallet_score_version", "TEXT"),
         ],
         "token_surge_state": [
             # WHEN the surge began, not merely when the row was created.

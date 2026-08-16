@@ -53,7 +53,7 @@ class ReconstructionTests(unittest.TestCase):
     def test_a_round_trip_produces_pnl_and_hold_time(self):
         r = reconstruct_trades(buy(1, "m", 100, 1000, 1000) + sell(2, "m", 100, 1300, 2000))
         t = r["trades"][0]
-        self.assertEqual(t["pnl"], 300.0)
+        self.assertEqual(t["pnl_usd"], 300.0)
         self.assertEqual(t["return_pct"], 30.0)
         self.assertEqual(t["hold_seconds"], 1000.0)
 
@@ -92,7 +92,8 @@ class SampleSizeTests(unittest.TestCase):
     def test_enough_trades_produces_scores(self):
         s = score_wallet(reconstruct_trades(book(20)))
         self.assertTrue(s["measurable"])
-        for k in ("smart_money_score", "alpha_score", "copy_score", "confidence_score"):
+        for k in ("smart_money_score", "legacy_alpha_score", "copy_score",
+                  "confidence_score"):
             self.assertIsNotNone(s[k])
 
     def test_confidence_scales_with_sample_and_pulls_toward_neutral(self):
@@ -128,7 +129,7 @@ class ScoreSeparationTests(unittest.TestCase):
     def test_metrics_are_reported_alongside_the_scores(self):
         s = score_wallet(reconstruct_trades(book(20)))
         for k in ("win_rate", "profit_factor", "median_return_pct",
-                  "median_size_usd", "total_pnl"):
+                  "median_size_usd", "total_pnl_usd"):
             self.assertIn(k, s["metrics"])
 
 

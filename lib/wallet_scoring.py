@@ -40,8 +40,49 @@ logger = logging.getLogger(__name__)
 MIN_TRADES_FOR_SCORE = 8
 FULL_CONFIDENCE_TRADES = 40
 
+# Quote handling lives in lib/quote_valuation — one authority for "what was
+# this leg worth in dollars, at the moment it traded". These names are kept
+# for the modules that still import them, but nothing here decides value
+# from a symbol set any more.
+from lib.quote_valuation import (ESTIMATED, MEASURED, is_valuable_quote,  # noqa: E402
+                                 value_in_usd)
+
 STABLE_SYMBOLS = {"USDC", "USDT", "PYUSD", "USDS"}
 SOL_SYMBOLS = {"SOL", "WSOL", "wSOL"}
+
+# Bumped whenever the arithmetic behind a score changes materially. Scores
+# from different versions are NOT comparable and must not be pooled:
+#   v1  quote amounts summed across USDC and SOL as though both were USD
+#   v2  every leg normalized to USD at its own timestamp; alpha_score
+#       vacated because it held realized return, not post-entry alpha
+SCORE_VERSION = "v2_usd_normalized"
+
+
+def migrate_legacy_alpha(db=None) -> dict:
+    """Move pre-v2 alpha_score values to legacy_alpha_score, once.
+
+    Those numbers are the wallet's own realized round-trip return computed
+    from mixed quote units. Leaving them in `alpha_score` under the
+    corrected definition would mix two incompatible semantics in one time
+    series — the thing the audit forbids explicitly.
+    """
+    from app.database import WalletRegistry, get_db
+
+    def _run(session):
+        rows = (session.query(WalletRegistry)
+                .filter(WalletRegistry.alpha_score.isnot(None))
+                .filter(WalletRegistry.wallet_score_version.is_(None)).all())
+        for w in rows:
+            if w.legacy_alpha_score is None:
+                w.legacy_alpha_score = w.alpha_score
+            w.alpha_score = None
+            w.wallet_score_version = "v1_legacy_migrated"
+        return {"legacy_alpha_migrated": len(rows)}
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
 
 
 def _f(v) -> float:
@@ -80,6 +121,7 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
 
     opens: dict[str, list[dict]] = {}
     trades, unpriced = [], 0
+    unpriced_reasons: list[str] = []
 
     for sig, legs in sorted(by_sig.items(),
                             key=lambda kv: min(_f(x.get("timestamp")) for x in kv[1])):
@@ -94,7 +136,7 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
         # BUY: token in, quote out.
         for leg in ins:
             sym = leg.get("symbol") or ""
-            if sym in STABLE_SYMBOLS | SOL_SYMBOLS:
+            if is_valuable_quote(sym):
                 continue
             if not quote_out:
                 unpriced += 1
@@ -104,15 +146,31 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
             if qty <= 0 or spent <= 0:
                 unpriced += 1
                 continue
+            # NORMALIZE AT THE LEG. The quote amount is a quantity of some
+            # asset, not a dollar figure, and it is converted here — at the
+            # trade's own timestamp — so nothing downstream can add SOL to
+            # dollars. See lib/quote_valuation.
+            ts = _f(leg.get("timestamp"))
+            v = value_in_usd(spent, quote_out.get("symbol"), ts)
+            if v["usd_value"] is None:
+                unpriced += 1
+                unpriced_reasons.append(v["reason"] or "unpriced buy quote")
+                continue
             opens.setdefault(leg.get("mint"), []).append({
-                "qty": qty, "cost": spent, "ts": _f(leg.get("timestamp")),
-                "quote": quote_out.get("symbol"),
+                "qty": qty,
+                "cost_usd": v["usd_value"],
+                "ts": ts,
+                "quote_symbol": quote_out.get("symbol"),
+                "quote_amount": spent,
+                "quote_price_usd": v["quote_price_usd"],
+                "price_source": v["price_source"],
+                "price_quality": v["price_quality"],
             })
 
         # SELL: token out, quote in — closed FIFO against the open lots.
         for leg in outs:
             sym = leg.get("symbol") or ""
-            if sym in STABLE_SYMBOLS | SOL_SYMBOLS:
+            if is_valuable_quote(sym):
                 continue
             if not quote_in:
                 unpriced += 1
@@ -123,29 +181,53 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
             if qty <= 0 or proceeds <= 0 or not lots:
                 unpriced += 1
                 continue
-            remaining, cost_basis, opened_ts = qty, 0.0, None
+            closed_ts = _f(leg.get("timestamp"))
+            pv = value_in_usd(proceeds, quote_in.get("symbol"), closed_ts)
+            if pv["usd_value"] is None:
+                unpriced += 1
+                unpriced_reasons.append(pv["reason"] or "unpriced sell quote")
+                continue
+
+            remaining, cost_basis_usd, opened_ts = qty, 0.0, None
+            entry_quotes, entry_quality = set(), set()
             while remaining > 1e-12 and lots:
                 lot = lots[0]
                 take = min(remaining, lot["qty"])
-                cost_basis += lot["cost"] * (take / lot["qty"]) if lot["qty"] else 0.0
+                cost_basis_usd += lot["cost_usd"] * (take / lot["qty"]) if lot["qty"] else 0.0
                 opened_ts = opened_ts or lot["ts"]
+                entry_quotes.add(lot["quote_symbol"])
+                entry_quality.add(lot["price_quality"])
                 lot["qty"] -= take
-                lot["cost"] -= lot["cost"] * (take / (lot["qty"] + take)) if (lot["qty"] + take) else 0
+                lot["cost_usd"] -= lot["cost_usd"] * (take / (lot["qty"] + take)) if (lot["qty"] + take) else 0
                 remaining -= take
                 if lot["qty"] <= 1e-12:
                     lots.pop(0)
-            if cost_basis <= 0:
+            if cost_basis_usd <= 0:
                 unpriced += 1
                 continue
+
+            pnl_usd = pv["usd_value"] - cost_basis_usd
+            # The weakest link decides the trade's provenance: a MEASURED
+            # exit against an ESTIMATED entry is an ESTIMATED round trip.
+            quality = (ESTIMATED if ESTIMATED in (entry_quality | {pv["price_quality"]})
+                       else MEASURED)
             trades.append({
                 "mint": leg.get("mint"), "symbol": leg.get("symbol"),
-                "cost_basis": round(cost_basis, 6),
-                "proceeds": round(proceeds, 6),
-                "pnl": round(proceeds - cost_basis, 6),
-                "return_pct": round((proceeds - cost_basis) / cost_basis * 100.0, 4),
-                "quote": quote_in.get("symbol"),
-                "opened_ts": opened_ts, "closed_ts": _f(leg.get("timestamp")),
-                "hold_seconds": (_f(leg.get("timestamp")) - opened_ts) if opened_ts else None,
+                # ── USD, the only unit anything may aggregate ──
+                "cost_basis_usd": round(cost_basis_usd, 6),
+                "proceeds_usd": round(pv["usd_value"], 6),
+                "pnl_usd": round(pnl_usd, 6),
+                "notional_usd": round(cost_basis_usd, 6),
+                "return_pct": round(pnl_usd / cost_basis_usd * 100.0, 4),
+                # ── the quote identity that produced them ──
+                "quote_symbol": pv["quote_symbol"],
+                "quote_amount": pv["quote_amount"],
+                "quote_price_usd": pv["quote_price_usd"],
+                "entry_quote_symbols": sorted(q for q in entry_quotes if q),
+                "price_source": pv["price_source"],
+                "price_quality": quality,
+                "opened_ts": opened_ts, "closed_ts": closed_ts,
+                "hold_seconds": (closed_ts - opened_ts) if opened_ts else None,
             })
 
     return {
@@ -153,8 +235,11 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
         "closed": len(trades),
         "still_open": sum(len(v) for v in opens.values()),
         "unpriced_legs": unpriced,
-        "note": ("Only round trips quoted in a stablecoin or SOL are scored. "
-                 "Token-to-token swaps are counted as unpriced rather than "
+        "unpriced_reasons": sorted(set(unpriced_reasons))[:5],
+        "note": ("Every trade is normalized to USD at its own timestamp before "
+                 "any aggregation. Stablecoin quotes use the assumed peg; SOL "
+                 "quotes use the hourly close at the trade. A quote this desk "
+                 "cannot value leaves the trade UNPRICED and excluded, never "
                  "valued with an invented price."),
     }
 
@@ -188,11 +273,15 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
                          f"means anything")
         return out
 
-    wins = [t for t in trades if t["pnl"] > 0]
-    losses = [t for t in trades if t["pnl"] <= 0]
+    # EVERY sum below is in USD, because reconstruct_trades normalized each
+    # leg at its own timestamp. This aggregation used to add `t["pnl"]`
+    # across trades whose quote was USDC for one and SOL for the next, and
+    # call the total dollars.
+    wins = [t for t in trades if t["pnl_usd"] > 0]
+    losses = [t for t in trades if t["pnl_usd"] <= 0]
     win_rate = len(wins) / n
-    gross_win = sum(t["pnl"] for t in wins)
-    gross_loss = abs(sum(t["pnl"] for t in losses))
+    gross_win = sum(t["pnl_usd"] for t in wins)
+    gross_loss = abs(sum(t["pnl_usd"] for t in losses))
     profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (
         float("inf") if gross_win > 0 else 0.0)
     returns = [t["return_pct"] for t in trades]
@@ -208,13 +297,27 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     raw_smart = 0.45 * pf_component + 0.35 * wr_component + 0.20 * consistency
     out["smart_money_score"] = round(50.0 + (raw_smart - 50.0) * confidence, 2)
 
-    # Alpha: the token's move after entry, which is what a follower would
-    # actually capture. Median, so one moonshot cannot carry the score.
-    out["alpha_score"] = round(min(100.0, max(0.0, 50.0 + median_return * 2.0)), 2)
+    # WHAT THIS ACTUALLY IS: the wallet's own median REALIZED round-trip
+    # return. It is NOT post-entry market alpha, and the comment that used
+    # to sit here claimed it was — "the token's move after entry, which is
+    # what a follower would actually capture" — directly above arithmetic
+    # over closed trades. A reviewer reading that would conclude the
+    # post-entry-alpha feature already existed, which is how the missing
+    # capability stayed hidden.
+    #
+    # Named `legacy_alpha_score` until W5 replaces it with measured
+    # post-entry horizons. The two definitions must never share a field.
+    out["legacy_alpha_score"] = round(
+        min(100.0, max(0.0, 50.0 + median_return * 2.0)), 2)
+    out["alpha_score"] = None
+    out["alpha_basis"] = ("NOT MEASURED — post-entry market alpha requires "
+                          "forward price observations after each entry, which "
+                          "are not yet collected. legacy_alpha_score is the "
+                          "wallet's own realized return, a different metric.")
 
     # Copyability. Tiny positions and very fast flips are the two things
     # that make a profitable wallet unfollowable.
-    median_size = statistics.median([t["cost_basis"] for t in trades])
+    median_size = statistics.median([t["cost_basis_usd"] for t in trades])
     holds = [t["hold_seconds"] for t in trades if t.get("hold_seconds")]
     median_hold = statistics.median(holds) if holds else 0
     size_ok = min(1.0, median_size / 5_000.0)
@@ -231,7 +334,13 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
         "median_return_pct": round(median_return, 4),
         "median_size_usd": round(median_size, 2),
         "median_hold_seconds": median_hold,
-        "total_pnl": round(sum(t["pnl"] for t in trades), 2),
+        "total_pnl_usd": round(sum(t["pnl_usd"] for t in trades), 2),
+        # Provenance of the money itself: a book priced entirely off the
+        # assumed peg is a weaker claim than one priced off measured bars.
+        "priced_measured": sum(1 for t in trades
+                               if t.get("price_quality") == MEASURED),
+        "priced_estimated": sum(1 for t in trades
+                                if t.get("price_quality") == ESTIMATED),
     }
     out["reason"] = (f"{n} closed round trips, {win_rate:.0%} win rate, "
                      f"confidence {confidence:.0%} of full")
@@ -251,9 +360,20 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
     from lib.helius_client import transfers
 
     def _run(session):
+        # Two populations need scoring, and only the first was selected:
+        #   1. never scored (CANDIDATE with a null score)
+        #   2. scored by a SUPERSEDED engine — v1 summed mixed quote units,
+        #      so its numbers are not comparable with v2's and would
+        #      otherwise sit in the registry forever, since a promoted
+        #      wallet is no longer a CANDIDATE and never re-qualifies.
+        from sqlalchemy import or_
         rows = (session.query(WalletRegistry)
-                .filter(WalletRegistry.status == "CANDIDATE",
-                        WalletRegistry.smart_money_score.is_(None))
+                .filter(~WalletRegistry.status.in_(("EXCLUDED_ENTITY", "ARCHIVED")))
+                .filter(or_(
+                    (WalletRegistry.status == "CANDIDATE")
+                    & WalletRegistry.smart_money_score.is_(None),
+                    WalletRegistry.wallet_score_version.is_(None),
+                    WalletRegistry.wallet_score_version != SCORE_VERSION))
                 .limit(max(1, min(limit, 200))).all())
         stats = {"attempted": 0, "scored": 0, "not_measurable": 0,
                  "no_transfers": 0, "errors": 0}
@@ -277,9 +397,14 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
                 stats["not_measurable"] += 1
                 continue
             w.smart_money_score = s["smart_money_score"]
+            # alpha_score stays NULL until W5 measures post-entry horizons.
+            # Writing the realized return here is what made the missing
+            # capability invisible for so long.
             w.alpha_score = s["alpha_score"]
+            w.legacy_alpha_score = s["legacy_alpha_score"]
             w.copy_score = s["copy_score"]
             w.confidence_score = s["confidence_score"]
+            w.wallet_score_version = SCORE_VERSION
             if s.get("whale_score") is not None:
                 w.whale_score = s["whale_score"]
             # Promotion is evidence-driven: a measured wallet leaves

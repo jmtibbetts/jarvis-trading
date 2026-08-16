@@ -63,6 +63,7 @@ job_status = {
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
     'candidates': {'status': 'idle', 'last': None, 'error': None},
     'wallet_discovery': {'status': 'idle', 'last': None, 'error': None},
+    'wallet_scoring': {'status': 'idle', 'last': None, 'error': None},
     'kraken_sync': {'status': 'idle', 'last': None, 'error': None},
     'feature_snapshots': {'status': 'idle', 'last': None, 'error': None},
     'feature_labels': {'status': 'idle', 'last': None, 'error': None},
@@ -643,6 +644,18 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('wallet_discovery', wallet_discovery_run),
                   'interval', minutes=20, id='wallet_discovery',
                   next_run_time=now + timedelta(minutes=3),
+                  replace_existing=True, max_instances=1)
+
+    # Scoring the discovered wallets. Bounded per pass because each wallet
+    # costs a Helius call, and most candidates genuinely cannot be scored
+    # from transfer history — that outcome is recorded rather than filled
+    # in with a placeholder.
+    def wallet_scoring_run():
+        from lib.wallet_scoring import score_registry_wallets
+        return score_registry_wallets(limit=25)
+    sched.add_job(make_job_runner('wallet_scoring', wallet_scoring_run),
+                  'interval', minutes=30, id='wallet_scoring',
+                  next_run_time=now + timedelta(minutes=8),
                   replace_existing=True, max_instances=1)
 
     def candidates_run():

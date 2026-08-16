@@ -1159,6 +1159,13 @@ def close_paper_position(pos_id: str, close_price: float, reason: str = "manual"
             signal_reasoning=log_reasoning,
             ta_profile=None,   # TA not re-fetched at paper close — populated next cycle
             market_regime=None,
+            # THE LINK. `pos_signal_id` was read at the top of this function
+            # and then not passed, so every paper outcome arrived at learning
+            # detached from the signal that produced it. Without it an
+            # outcome cannot be attributed to a strategy, timeframe, setup,
+            # signal source or model version — it becomes an anonymous
+            # win/loss that can only teach an aggregate.
+            signal_id=pos_signal_id,
             paper_mode=True,
         )
     except Exception as _le:
@@ -1276,7 +1283,10 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
         _record_outcome(
             symbol=pos_symbol, asset_class=pos_asset_cls, direction=pos_direction,
             entry_price=entry, exit_price=close_price, qty=close_qty,
-            exit_reason=reason, paper_mode=True,
+            exit_reason=reason,
+            # A partial exit is still evidence about the SAME thesis.
+            signal_id=pos_signal_id,
+            paper_mode=True,
         )
     except Exception as _le:
         logger.warning(f"[Paper][Learning] partial-close record_outcome failed: {_le}")

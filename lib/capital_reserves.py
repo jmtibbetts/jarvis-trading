@@ -229,11 +229,22 @@ def name_positions(obligation_raw: bytes, reserves: dict | None = None) -> dict:
         underlying = (market_value / price) if (is_deposit and price and market_value) else None
         info = lst_info(mint)
         symbol = (info or {}).get("symbol")
+        symbol_source = "lst_registry" if symbol else None
         if not symbol:
             from lib.solana_protocols import USDC_MINT, USDT_MINT, WSOL_MINT
             symbol = {WSOL_MINT: "SOL", USDC_MINT: "USDC",
                       USDT_MINT: "USDT"}.get(mint)
+            symbol_source = "known_mint" if symbol else None
+        if not symbol:
+            # IDENTIFIED but UNNAMED — a different thing from unresolved.
+            # The mint IS the authoritative identity; a missing friendly
+            # symbol only means this mint is not in the local registry, and
+            # rendering that as "unresolved" would imply the position could
+            # not be decoded when in fact everything about it is known.
+            symbol = f"{mint[:4]}…{mint[-4:]}"
+            symbol_source = "mint_address"
         return {**entry, "asset": mint, "symbol": symbol,
+                "symbol_source": symbol_source,
                 "decimals": dec,
                 # Named for what it IS. `amount` was ambiguous across the two
                 # position types and silently wrong for deposits.

@@ -259,6 +259,7 @@ def scan_positions_at_risk(limit_scanned: int = 20_000,
         pos["obligation"] = row.get("pubkey")
         pos["protocol"] = "Kamino Lend"
         pos.update(health_of(pos))
+        pos["_raw"] = raw          # so the caller can resolve assets
         out["tracked"] += 1
         out["total_debt_usd"] += pos["debt_value_usd"]
         if pos["risk_state"] in ("ELEVATED", "HIGH", "CRITICAL",

@@ -274,19 +274,80 @@
         </div>
         {#if riskScan.positions?.length}
           <table class="tbl">
-            <thead><tr><th>Owner</th><th class="num">Collateral</th><th class="num">Debt</th><th class="num">Health</th><th>Risk</th></tr></thead>
+            <thead><tr>
+              <th>Owner</th><th>Collateral</th><th>Debt</th>
+              <th class="num">Value</th><th class="num">Health</th><th>Risk</th>
+            </tr></thead>
             <tbody>
               {#each riskScan.positions.slice(0, 12) as p}
                 <tr>
                   <td class="sym" title={p.owner}>{short(p.owner)}</td>
+                  <!-- Assets are NAMED now: reserve decoding resolves each
+                       leg to its mint, decimals and oracle price. -->
+                  <td class="assets">
+                    {#each p.assets?.deposits ?? [] as d}
+                      <span class="leg" class:unres={!d.resolved}>
+                        {d.symbol ?? "UNRESOLVED"}
+                        {#if d.resolved}<em>{num(d.amount, 4)}</em>{/if}
+                      </span>
+                    {:else}<span class="dim">—</span>{/each}
+                  </td>
+                  <td class="assets">
+                    {#each p.assets?.borrows ?? [] as b}
+                      <span class="leg" class:unres={!b.resolved}>
+                        {b.symbol ?? "UNRESOLVED"}
+                        {#if b.resolved}<em>{num(b.amount, 4)}</em>{/if}
+                      </span>
+                    {:else}<span class="dim">—</span>{/each}
+                  </td>
                   <td class="num">{usd(p.collateral_value_usd)}</td>
-                  <td class="num">{usd(p.debt_value_usd)}</td>
                   <td class="num">{num(p.health_factor, 3)}</td>
                   <td><Pill label={p.risk_state} tone={riskTone(p.risk_state)} /></td>
                 </tr>
               {/each}
             </tbody>
           </table>
+        {/if}
+
+        {#if riskScan.by_asset?.by_family}
+          <div class="sub">Exposure by correlated family</div>
+          <table class="tbl">
+            <thead><tr><th>Family</th><th class="num">Collateral</th><th class="num">Debt</th></tr></thead>
+            <tbody>
+              {#each Object.entries(riskScan.by_asset.by_family) as [fam, v]}
+                {@const vv = v as any}
+                <tr><td class="sym">{fam}</td>
+                    <td class="num">{usd(vv.collateral_usd)}</td>
+                    <td class="num">{usd(vv.debt_usd)}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+          <p class="note">{riskScan.by_asset.note}</p>
+        {/if}
+
+        {#if riskScan.stress?.SOL_FAMILY?.ladder?.length}
+          {@const L = riskScan.stress.SOL_FAMILY}
+          <div class="sub">
+            SOL-family price stress — {L.positions_considered} positions exposed
+            {#if L.already_liquidatable}· {L.already_liquidatable} already liquidatable{/if}
+          </div>
+          <table class="tbl">
+            <thead><tr>
+              <th class="num">Shock</th><th class="num">Newly liquidatable</th>
+              <th class="num">New debt</th><th class="num">Cumulative</th>
+            </tr></thead>
+            <tbody>
+              {#each L.ladder as r}
+                <tr class:hit={r.newly_liquidatable > 0}>
+                  <td class="num">−{r.shock_pct}%</td>
+                  <td class="num">{r.newly_liquidatable}</td>
+                  <td class="num">{usd(r.newly_liquidatable_debt_usd)}</td>
+                  <td class="num">{usd(r.cumulative_liquidatable_debt_usd)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <p class="note"><b>Scenario, not a forecast.</b> {L.basis}</p>
         {/if}
         <div class="prov">
           <b>Provenance.</b>
@@ -359,4 +420,12 @@
               border-radius: var(--radius-sm); padding: 9px 11px; }
   .degraded ul { margin: 5px 0 0; padding-left: 18px; color: var(--ink-dim); }
   .degraded em { font-style: normal; color: var(--warm); }
+  .sub { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+         color: var(--ink-faint); margin: 12px 0 2px; }
+  .assets { display: flex; flex-wrap: wrap; gap: 4px; }
+  .leg { display: inline-flex; align-items: baseline; gap: 3px; font-size: 10.5px;
+         border: 1px solid var(--line-bright); border-radius: 3px; padding: 1px 5px; }
+  .leg em { font-style: normal; font-family: var(--mono); color: var(--ink-dim); font-size: 9.5px; }
+  .leg.unres { border-color: var(--warm); color: var(--warm); }
+  tr.hit td { background: color-mix(in srgb, var(--bad) 8%, transparent); }
 </style>

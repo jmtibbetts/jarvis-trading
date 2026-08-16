@@ -246,11 +246,40 @@ def lending_risk_scan(limit_scanned: int = 5000, min_debt_usd: float = 10_000.0)
     from lib.capital_lending import scan_positions_at_risk
     res = scan_positions_at_risk(limit_scanned=max(100, min(limit_scanned, 50_000)),
                                  min_debt_usd=min_debt_usd)
-    res["positions"] = res.get("positions", [])[:50]
+
+    # Name the assets, then model the shock ladder over them. Both steps
+    # need reserve data, so a position whose reserve will not decode stays
+    # UNRESOLVED and is counted rather than quietly dropped.
+    from lib.capital_reserves import load_reserves, name_positions, position_reserves
+    from lib.liquidation_stress import aggregate_by_asset, stress_ladder
+
+    positions = res.get("positions", [])[:50]
+    wanted = []
+    for p in positions:
+        raw = p.get("_raw")
+        if raw:
+            slots = position_reserves(raw)
+            wanted += [d["reserve"] for d in slots["deposits"]]
+            wanted += [b["reserve"] for b in slots["borrows"]]
+    reserves = load_reserves(wanted) if wanted else {}
+    for p in positions:
+        raw = p.pop("_raw", None)
+        if raw:
+            p["assets"] = name_positions(raw, reserves)
+
+    res["positions"] = positions
+    res["by_asset"] = aggregate_by_asset(positions)
+    res["stress"] = {
+        fam: stress_ladder(positions, family=fam)
+        for fam in ("SOL_FAMILY", "STABLE")
+    }
     res["provenance"] = {
         "values": "VERIFIED — canonical Kamino decode",
-        "risk_state": "CALCULATED",
-        "forced_sale": "ESTIMATED — debt value, not a market-impact model",
+        "asset_identity": "VERIFIED — canonical Kamino reserve layout",
+        "prices": "VERIFIED — Kamino reserve oracle, not exchange spot",
+        "risk_state": "CALCULATED from Kamino's own health rule",
+        "stress_ladder": ("MODELLED — hypothetical prices over verified "
+                          "positions. Not a forecast."),
     }
     return res
 

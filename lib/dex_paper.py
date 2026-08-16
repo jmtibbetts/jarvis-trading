@@ -74,7 +74,8 @@ def get_portfolio(db, user_id: str | None = None):
 
 
 def size_for_pool(reserve_usd: float, cash_usd: float, *,
-                  risk_usd: float | None = None, dex: str | None = None) -> dict:
+                  risk_usd: float | None = None, dex: str | None = None,
+                  depth_confidence: str | None = None) -> dict:
     """How much this pool can actually absorb — the DEX sizing primitive.
 
     Takes the SMALLEST of three ceilings and says which one bound the
@@ -94,6 +95,14 @@ def size_for_pool(reserve_usd: float, cash_usd: float, *,
 
     cap = max_impact_pct()
     depth_cap = max_size_for_impact(reserve_usd, cap, dex=dex)
+    # DEPTH CERTAINTY IS NOT A LABEL. A pool whose local depth has only
+    # been MODELLED must not be sized like one whose reserves were read
+    # off the chain — otherwise the provenance is honest and the
+    # behaviour is not. Uncertainty is asymmetric here: being wrong about
+    # depth costs far more than trading smaller than necessary.
+    from lib.dex_swap_math import depth_adjusted_size
+    adj = depth_adjusted_size(depth_cap, depth_confidence)
+    depth_cap = adj["size_usd"]
     wanted = risk_usd if risk_usd is not None else cash_usd
     candidates = {"impact_cap": depth_cap, "cash": cash_usd,
                   "requested": float(wanted)}
@@ -106,6 +115,9 @@ def size_for_pool(reserve_usd: float, cash_usd: float, *,
     return {
         "ok": True, "size_usd": round(size, 6), "bound_by": bound_by,
         "impact_cap_pct": cap, "depth_cap_usd": round(depth_cap, 6),
+        "depth_confidence": adj["depth_confidence"],
+        "depth_size_factor": adj["size_factor"],
+        "impact_uncertainty_multiplier": adj["impact_multiplier"],
         "fee_bps": pool_fee_bps(dex),
         "reason": (f"${size:,.2f} — limited by {bound_by} "
                    f"(pool depth allows ${depth_cap:,.2f} at {cap}% impact)"),

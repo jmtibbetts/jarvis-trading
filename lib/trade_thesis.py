@@ -39,6 +39,23 @@ logger = logging.getLogger(__name__)
 
 THESIS_VERSION = "thesis_v1"
 
+# How coarsely a level is bucketed before it enters the thesis identity.
+#
+# EXACT FLOATS MANUFACTURE FAKE INDEPENDENCE. The scheduler regenerates the
+# same setup every pass, and prices drift a few basis points between them.
+# On raw floats, "BTC 15m breakout long, entry 100.01" and the same setup
+# re-emitted at 100.03 become two different theses — so ONE market claim
+# votes twice, which is the exact double-count thesis_id exists to prevent,
+# arriving through a different door.
+#
+# 25bp buckets: wide enough to absorb regeneration drift, narrow enough
+# that a genuinely different entry on the same instrument stays distinct.
+LEVEL_BUCKET_BP = 25.0
+
+# Time bucket for the same reason. A setup regenerated eight minutes later
+# is the same claim; one found the next session is not.
+BIRTH_BUCKET_MINUTES = 60
+
 # Experiment arms. Same thesis, different policy.
 AGENT = "AGENT"                  # what JARVIS actually chose
 SHADOW = "SHADOW"                # standardized control policy
@@ -50,6 +67,35 @@ ARMS = frozenset({AGENT, SHADOW, COUNTERFACTUAL})
 DECLINED = "DECLINED"            # the policy chose not to
 UNFILLED = "UNFILLED"            # it tried and the market did not fill it
 INELIGIBLE = "INELIGIBLE"        # it could not have traded this at all
+
+
+def _bucket_level(price: float | None) -> str | None:
+    """Round a level onto a log grid of LEVEL_BUCKET_BP-wide steps.
+
+    A log grid keeps the tolerance PROPORTIONAL, so 25bp means the same
+    thing on a $0.000004 memecoin and a $95,000 BTC print. A fixed
+    absolute epsilon would merge every distinct memecoin level into one
+    bucket while separating BTC entries that are effectively identical.
+    """
+    import math
+    if price in (None, "") or float(price) <= 0:
+        return None
+    step = math.log(1.0 + LEVEL_BUCKET_BP / 10_000.0)
+    return str(int(math.log(float(price)) / step))
+
+
+def _bucket_time(created_at: str | None) -> str | None:
+    """Round a birth time down to a BIRTH_BUCKET_MINUTES window."""
+    if not created_at:
+        return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return str(int(t.timestamp() // (BIRTH_BUCKET_MINUTES * 60)))
+    except (TypeError, ValueError):
+        return str(created_at)
 
 
 @dataclass
@@ -96,7 +142,12 @@ class TradeThesis:
             return self._thesis_id
         parts = "|".join(str(x) for x in (
             self.instrument_id, self.side, self.strategy, self.timeframe,
-            self.entry, self.stop, self.target, self.created_at,
+            # BUCKETED, not exact. See LEVEL_BUCKET_BP — raw floats let a
+            # regenerated setup drift into a second "independent" thesis.
+            _bucket_level(self.entry),
+            _bucket_level(self.stop),
+            _bucket_level(self.target),
+            _bucket_time(self.created_at),
             self.thesis_version))
         self._thesis_id = hashlib.sha256(parts.encode()).hexdigest()[:24]
         return self._thesis_id
@@ -130,6 +181,52 @@ def build(*, symbol: str, side: str, **kw) -> TradeThesis:
            if k in TradeThesis.__dataclass_fields__ and not k.startswith("_")})
 
 
+# ── Attribution levels ───────────────────────────────────────────────────
+# FIVE IDS, FIVE DIFFERENT QUESTIONS. Collapsing any two of them loses a
+# question the system needs to answer:
+#
+#   signal_id     which generated signal produced this
+#   thesis_id     which MARKET CLAIM is being tested  <- the sample unit
+#   arm_id        how that claim was acted upon (policy)
+#   execution_id  which simulated execution
+#   outcome_id    which final result
+#
+# Sample size is counted on thesis_id. Everything below it is an
+# experimental variable, not a new observation.
+
+# Outcomes that predate reliable linkage. THEY STAY THIS WAY.
+LEGACY_UNATTRIBUTED = "LEGACY_UNATTRIBUTED"
+
+
+def make_arm_id(thesis_id: str, arm: str, policy: str | None = None) -> str:
+    """Identity of one POLICY acting on one claim.
+
+    `policy` distinguishes arms that share a name but differ in what they
+    are testing — two Agent arms at different sizing, say — so an A/B on
+    position size does not silently overwrite itself.
+    """
+    parts = "|".join(str(x) for x in (thesis_id, arm, policy or "default"))
+    return hashlib.sha256(parts.encode()).hexdigest()[:20]
+
+
+def is_attributable(signal_id: str | None, thesis_id: str | None) -> bool:
+    """Whether an outcome may enter attributed analysis at all.
+
+    DO NOT FUZZY-MATCH. A historical win cannot be assigned to a strategy
+    by resembling one — matching on symbol, direction and a nearby
+    timestamp would attach real outcomes to claims that never produced
+    them, and every per-strategy statistic downstream would inherit the
+    guesswork while looking exactly as confident as measured evidence.
+    A larger sample built that way is worse than a smaller honest one.
+    """
+    return bool(signal_id) and bool(thesis_id)
+
+
+def attribution_state(signal_id: str | None, thesis_id: str | None) -> str:
+    return ("ATTRIBUTED" if is_attributable(signal_id, thesis_id)
+            else LEGACY_UNATTRIBUTED)
+
+
 @dataclass
 class ArmResult:
     """What ONE policy did with a thesis. A refusal is a result."""
@@ -138,12 +235,49 @@ class ArmResult:
     traded: bool = False
     no_trade_reason: str | None = None
 
+    # The rest of the attribution chain.
+    signal_id: str | None = None
+    arm_id: str | None = None
+    execution_id: str | None = None
+    outcome_id: str | None = None
+    policy: str | None = None
+
     outcome = None                 # a RealizedOutcome when traded
     net_r: float | None = None
     net_pnl_usd: float | None = None
     entry_fill: float | None = None
     exit_reason: str | None = None
     venue_type: str | None = None
+
+    def __post_init__(self):
+        if not self.arm_id:
+            self.arm_id = make_arm_id(self.thesis_id, self.arm, self.policy)
+
+    @property
+    def attribution(self) -> str:
+        return attribution_state(self.signal_id, self.thesis_id)
+
+
+def paired_deltas(results: list) -> list:
+    """delta_net_r = agent_net_r - shadow_net_r, per shared thesis.
+
+    500 unique theses give 500 PAIRED differences, which is a stronger
+    analysis than pretending to 1,000 independent trades — the pairing
+    removes the market's own variance, so what remains is policy value.
+    """
+    by_thesis: dict = {}
+    for r in results or []:
+        if r is not None:
+            by_thesis.setdefault(r.thesis_id, {})[r.arm] = r
+
+    out = []
+    for t, arms in by_thesis.items():
+        a, s = arms.get(AGENT), arms.get(SHADOW)
+        if a and s and a.net_r is not None and s.net_r is not None:
+            out.append({"thesis_id": t, "agent_net_r": a.net_r,
+                        "shadow_net_r": s.net_r,
+                        "delta_net_r": a.net_r - s.net_r})
+    return out
 
 
 def sample_count(results: list) -> int:

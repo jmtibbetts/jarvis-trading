@@ -87,6 +87,101 @@ def pool_fee_bps(dex: str | None) -> int:
     return DEFAULT_FEE_BPS
 
 
+# ── Depth certainty drives SIZING, not just display ──────────────────────
+# UNCERTAIN DEPTH MUST MAKE JARVIS LESS CERTAIN ABOUT EXECUTABLE LIQUIDITY.
+#
+# Leaving these as provenance labels would let the simulator size a
+# concentrated pool it has only modelled exactly as aggressively as one
+# whose reserves it actually read. The label would be honest and the
+# behaviour would not.
+#
+# Coefficients are a starting point to be CALIBRATED against realized
+# impact, not derived truths — which is why predicted impact is stored
+# alongside the realized figure.
+DEPTH_SIZE_FACTOR = {
+    "VERIFIED": 1.00,                 # real reserves, full ceiling
+    "ASSUMED_BALANCED_POOL": 0.60,    # half-of-total is an assumption
+    "MODELLED_ESTIMATE": 0.30,        # local depth genuinely unknown
+}
+# What to multiply predicted impact by when deciding whether a size is
+# acceptable. Uncertainty is asymmetric: being wrong about depth is far
+# more expensive than trading smaller than necessary.
+DEPTH_IMPACT_MULTIPLIER = {
+    "VERIFIED": 1.0, "ASSUMED_BALANCED_POOL": 1.5, "MODELLED_ESTIMATE": 2.5,
+}
+DEFAULT_DEPTH_CONFIDENCE = "MODELLED_ESTIMATE"
+
+
+def depth_adjusted_size(size_usd: float, depth_confidence: str | None) -> dict:
+    """Shrink a proposed size by how well the depth is actually known.
+
+    An UNKNOWN confidence falls to the most conservative factor, not the
+    most permissive — a pool nobody classified is not a pool anybody
+    measured.
+    """
+    conf = depth_confidence if depth_confidence in DEPTH_SIZE_FACTOR else DEFAULT_DEPTH_CONFIDENCE
+    factor = DEPTH_SIZE_FACTOR[conf]
+    return {
+        "size_usd": float(size_usd or 0) * factor,
+        "requested_usd": float(size_usd or 0),
+        "depth_confidence": conf,
+        "size_factor": factor,
+        "impact_multiplier": DEPTH_IMPACT_MULTIPLIER[conf],
+        "reason": (f"depth is {conf}; size scaled to {factor:.0%} and "
+                   f"predicted impact weighted "
+                   f"{DEPTH_IMPACT_MULTIPLIER[conf]:.1f}x for uncertainty"),
+    }
+
+
+def failed_transaction_cost(*, priority_lamports: int = 0,
+                            sol_price_usd: float = 0.0,
+                            reached_chain: bool = True) -> dict:
+    """A transaction that reached the chain and failed STILL COSTS GAS.
+
+    No asset exchange, a real fee. Modelling failure as free teaches the
+    desk that bad route selection is costless, so it never learns to avoid
+    routes that revert — and reverts cluster exactly where the opportunity
+    looks best.
+    """
+    if not reached_chain:
+        return {"network_fee_sol": 0.0, "network_fee_usd": 0.0,
+                "tokens_out": 0.0, "reached_chain": False,
+                "reason": "rejected before submission — nothing was spent"}
+    lamports = BASE_FEE_LAMPORTS + max(0, int(priority_lamports))
+    sol = lamports / LAMPORTS_PER_SOL
+    return {
+        "network_fee_sol": sol,
+        "network_fee_usd": sol * float(sol_price_usd or 0),
+        "tokens_out": 0.0,
+        "reached_chain": True,
+        "reason": ("transaction executed and failed — gas consumed, no swap"),
+    }
+
+
+def spendable_native(balance_sol: float, *, priority_lamports: int = 0,
+                     reserve_multiple: float = 3.0) -> dict:
+    """How much SOL can be swapped while leaving enough to transact.
+
+    A wallet that spends its last lamport on a swap cannot pay for that
+    swap. Allowing it teaches a transaction the chain would simply refuse,
+    and the state it produces — tokens held, no gas — is precisely the one
+    the simulator most needs to be able to reach honestly.
+    """
+    lamports = BASE_FEE_LAMPORTS + max(0, int(priority_lamports))
+    reserve = (lamports / LAMPORTS_PER_SOL) * max(1.0, float(reserve_multiple))
+    bal = float(balance_sol or 0)
+    spendable = max(0.0, bal - reserve)
+    return {
+        "balance_sol": bal,
+        "execution_reserve_sol": reserve,
+        "max_spendable_sol": spendable,
+        "can_transact": bal >= reserve,
+        "reason": (None if spendable > 0 else
+                   f"balance {bal:.9f} SOL is below the {reserve:.9f} SOL "
+                   f"needed to execute a transaction at all"),
+    }
+
+
 def quote_swap_native(amount_in: float, reserve_in: float, reserve_out: float,
                       *, dex: str | None = None, fee_bps: int | None = None,
                       priority_lamports: int = DEFAULT_PRIORITY_LAMPORTS,

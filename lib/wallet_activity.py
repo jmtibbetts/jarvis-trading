@@ -50,7 +50,31 @@ def _base() -> str:
 
 
 def _page_limit() -> int:
-    return max(1, min(int(os.getenv("HELIUS_PAGE_LIMIT", "100") or 100), 1000))
+    """PER-REQUEST page size, clamped to what the API actually serves.
+
+    This allowed up to 1000. The Transfers endpoint caps a page at 100, so
+    every value above that was either rejected or silently clamped — and
+    the caller believed it had asked for, and received, ten times more
+    history than it did. Depth comes from PAGES now, not from a bigger
+    page: see HELIUS_MAX_PAGES_PER_POLL and HELIUS_BACKFILL_LIMIT.
+    """
+    from lib.helius_client import MAX_TRANSFER_PAGE
+    return max(1, min(int(os.getenv("HELIUS_PAGE_LIMIT", "100") or 100),
+                      MAX_TRANSFER_PAGE))
+
+
+def _max_pages() -> int:
+    return max(1, min(int(os.getenv("HELIUS_MAX_PAGES_PER_POLL", "5") or 5), 50))
+
+
+def _backfill_limit() -> int:
+    """TOTAL records per wallet per poll — a budget, not a page size.
+
+    `.env.example` advertised HELIUS_BACKFILL_LIMIT=500 while the collector
+    requested a single page, so the setting documented an analysis depth
+    that nothing performed.
+    """
+    return max(1, min(int(os.getenv("HELIUS_BACKFILL_LIMIT", "500") or 500), 5000))
 
 
 def _config() -> tuple[str, str, list[str], int]:
@@ -133,11 +157,18 @@ def _fetch(address: str) -> tuple[dict | None, str | None]:
     auth, pacing, retry limited to 429/5xx, per-endpoint metrics and
     normalized errors. A second transport meant none of that applied to the
     most frequently-called Helius endpoint in the system.
+
+    Pagination is FOLLOWED here rather than merely noticed. This used to
+    fetch one page, see `hasMore`, record the wallet as truncated and stop —
+    so a wallet busier than one page between polls permanently lost the
+    overflow, and the busiest wallets are the ones most worth watching.
     """
-    from lib.helius_client import HeliusError, transfers
+    from lib.helius_client import HeliusError, transfers_paged
 
     try:
-        return transfers(address, _page_limit()), None
+        return transfers_paged(address, page_size=_page_limit(),
+                               max_records=_backfill_limit(),
+                               max_pages=_max_pages()), None
     except HeliusError as e:
         # Already normalized and key-free by construction.
         return None, str(e)[:200]
@@ -165,6 +196,7 @@ def collect_once() -> dict:
         return {"skipped": f"no monitorable wallets — {why}"}
 
     observations, errors, truncated = [], [], []
+    pages_fetched = drained = 0
     for address in wallets:
         payload, err = _fetch(address)
         if err:
@@ -177,10 +209,16 @@ def collect_once() -> dict:
             # quiet chain.
             errors.append(f"{address[:8]}…: {len(payload['data'])} rows, 0 parsed")
         observations.extend(obs)
-        # A wallet busier than one page between polls loses the overflow.
-        # Say so rather than let a gap read as calm.
-        if ((payload or {}).get("pagination") or {}).get("hasMore"):
-            truncated.append(address)
+
+        pages_fetched += payload.get("pages_fetched") or 0
+        if payload.get("fully_drained"):
+            drained += 1
+        else:
+            # A BUDGET stopped the walk, which is a different statement from
+            # the old "there was more and we did not fetch it". Naming the
+            # bound that stopped it is what keeps a partial read from
+            # reading as a complete one.
+            truncated.append(f"{address[:8]}…: {payload.get('truncation_reason')}")
 
     stored = _store(observations)
     out = {
@@ -188,6 +226,14 @@ def collect_once() -> dict:
         "stored": stored, "duplicates": len(observations) - stored,
         "errors": errors, "page_limit": limit,
         "truncated_wallets": truncated, "parser": PARSER_VERSION,
+        # Cost and completeness, per pass. Without these a budget-truncated
+        # collection is indistinguishable from a quiet chain.
+        "pages_fetched": pages_fetched,
+        "wallets_fully_drained": drained,
+        "wallets_truncated": len(truncated),
+        "credits_estimated": pages_fetched,
+        "max_pages_per_poll": _max_pages(),
+        "backfill_limit": _backfill_limit(),
     }
     if observations or errors:
         logger.info(f"[WalletActivity] {out}")

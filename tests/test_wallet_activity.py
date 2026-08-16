@@ -290,17 +290,42 @@ class CollectorTests(unittest.TestCase):
         self.assertTrue(out["errors"], "0 parsed from 2 rows must be reported")
         self.assertIn("0 parsed", out["errors"][0])
 
-    def test_a_busy_wallet_reports_truncation(self):
+    def test_a_budget_truncated_wallet_names_the_bound(self):
+        """`hasMore` no longer means "we gave up" — the collector follows
+        the cursor. Truncation now means a BUDGET stopped the walk, and the
+        report says which one rather than leaving a gap that reads as calm.
+        """
         from unittest.mock import patch
 
         from lib import wallet_activity
         os.environ["HELIUS_API_KEY"] = "x" * 36
         self._watch(TRADER)
+        budget_stopped = {**LIVE_TRANSFERS, "pages_fetched": 5,
+                          "fully_drained": False,
+                          "truncated_due_budget": True,
+                          "truncation_reason": "max_pages (5)"}
         with patch.object(wallet_activity, "_fetch",
-                          return_value=(LIVE_TRANSFERS, None)):
+                          return_value=(budget_stopped, None)):
             out = wallet_activity.collect_once()
-        self.assertEqual(out["truncated_wallets"], [TRADER],
-                         "a dropped overflow must not read as calm")
+        self.assertEqual(out["wallets_truncated"], 1)
+        self.assertEqual(out["wallets_fully_drained"], 0)
+        self.assertIn("max_pages", out["truncated_wallets"][0])
+
+    def test_a_fully_drained_wallet_is_not_reported_as_truncated(self):
+        from unittest.mock import patch
+
+        from lib import wallet_activity
+        os.environ["HELIUS_API_KEY"] = "x" * 36
+        self._watch(TRADER)
+        drained = {**LIVE_TRANSFERS, "pages_fetched": 2,
+                   "fully_drained": True, "truncated_due_budget": False,
+                   "truncation_reason": None}
+        with patch.object(wallet_activity, "_fetch",
+                          return_value=(drained, None)):
+            out = wallet_activity.collect_once()
+        self.assertEqual(out["truncated_wallets"], [])
+        self.assertEqual(out["wallets_fully_drained"], 1)
+        self.assertEqual(out["pages_fetched"], 2)
 
     def test_a_fetch_error_never_raises(self):
         from unittest.mock import patch

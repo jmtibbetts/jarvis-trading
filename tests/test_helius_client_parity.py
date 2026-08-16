@@ -173,7 +173,11 @@ class TransportBehaviourTests(unittest.TestCase):
             payload, err = wallet_activity._fetch("addr")
         t.assert_called_once()
         self.assertIsNone(err)
-        self.assertEqual(payload, {"data": []})
+        # `_fetch` now returns the paginator's envelope rather than the raw
+        # page body: the rows plus how completely they were collected.
+        self.assertEqual(payload["data"], [])
+        self.assertTrue(payload["fully_drained"])
+        self.assertEqual(payload["pages_fetched"], 1)
 
     def test_a_rate_limit_is_not_reported_as_an_empty_chain(self):
         """429 must never look like 'this wallet was quiet'."""

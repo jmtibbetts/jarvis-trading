@@ -234,10 +234,88 @@ def balance_at(address: str, mint: str, *, time_s: int | None = None,
     return r.json() or {}
 
 
-def transfers(address: str, limit: int = 100) -> dict:
+# The Transfers API caps a page at 100 records. Asking for more is not a
+# bigger page — it is a rejected or silently-clamped request, and the
+# caller then believes it received everything.
+MAX_TRANSFER_PAGE = 100
+
+
+def transfers(address: str, limit: int = 100, cursor: str | None = None) -> dict:
+    """One page of transfers. `limit` is CLAMPED to the API maximum.
+
+    Pagination lives here and nowhere else: a second implementation would
+    be a second set of retry, pacing and metric semantics for the most
+    frequently-called endpoint in the system.
+    """
+    params = {"limit": max(1, min(int(limit or MAX_TRANSFER_PAGE),
+                                  MAX_TRANSFER_PAGE))}
+    if cursor:
+        params["cursor"] = cursor
     r = _request("GET", f"{WALLET_API_BASE}/v1/wallet/{address}/transfers",
-                 "wallet/transfers", params={"limit": limit})
+                 "wallet/transfers", params=params)
     return r.json() or {}
+
+
+def transfers_paged(address: str, *, page_size: int = MAX_TRANSFER_PAGE,
+                    max_records: int = 500, max_pages: int = 10,
+                    max_seconds: float = 20.0) -> dict:
+    """Follow `pagination.nextCursor` until exhausted or the budget stops it.
+
+    The collector previously fetched ONE page, noticed `hasMore` and
+    recorded the wallet as truncated — then never fetched the rest. A
+    wallet busier than one page between polls permanently lost the
+    overflow, and the busiest wallets are exactly the ones worth watching.
+
+    Every bound is explicit because one pathological address must not be
+    able to spend the whole Helius budget: records, pages and wall-clock
+    are all capped. When a bound stops the walk early the result says
+    `truncated_due_budget` rather than implying completeness — the whole
+    point is that a partial read announces itself.
+    """
+    out: list[dict] = []
+    cursor, pages, truncated, reason = None, 0, False, None
+    started = time.time()
+
+    while True:
+        if pages >= max_pages:
+            truncated, reason = True, f"max_pages ({max_pages})"
+            break
+        if time.time() - started > max_seconds:
+            truncated, reason = True, f"max_seconds ({max_seconds})"
+            break
+
+        remaining = max_records - len(out)
+        if remaining <= 0:
+            # Only a truncation if the server had more to give.
+            break
+
+        body = transfers(address, limit=min(page_size, remaining), cursor=cursor)
+        pages += 1
+        rows = (body or {}).get("data") or []
+        # Enforce the budget on what ARRIVES, not only on what was asked
+        # for. A server that returns more rows than requested would
+        # otherwise walk straight past max_records.
+        if len(rows) > remaining:
+            rows = rows[:remaining]
+        out.extend(rows)
+
+        pg = (body or {}).get("pagination") or {}
+        cursor = pg.get("nextCursor")
+        if not pg.get("hasMore") or not cursor or not rows:
+            break
+        if len(out) >= max_records:
+            truncated, reason = True, f"max_records ({max_records})"
+            break
+
+    return {
+        "data": out,
+        "pages_fetched": pages,
+        "transfers_fetched": len(out),
+        "fully_drained": not truncated,
+        "truncated_due_budget": truncated,
+        "truncation_reason": reason,
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
 
 
 # ── JSON-RPC ─────────────────────────────────────────────────────────────

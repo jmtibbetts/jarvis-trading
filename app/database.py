@@ -945,6 +945,81 @@ class WalletRelationship(Base):
     last_seen_at  = Column(String, default=now_iso)
 
 
+class TokenActivitySnapshot(Base):
+    """One observation of a pool's activity, kept so acceleration can be
+    measured against THIS token's own history.
+
+    Without stored snapshots the only available baseline is whatever
+    buckets the market API happens to return in the same response, which
+    answers "is h1 busier than h24/24" — a fixed, coarse comparison that
+    cannot see a token whose normal 5m volume is $1,200 suddenly doing
+    $85,000. A median over the token's own recent snapshots can.
+
+    Deliberately append-only and cheap: one row per pool per scan, pruned
+    by age, never updated in place. A baseline that gets rewritten is not a
+    baseline.
+    """
+    __tablename__ = "token_activity_snapshots"
+
+    id           = Column(String, primary_key=True, default=new_id)
+    mint         = Column(String, index=True, nullable=False)
+    pool_address = Column(String, index=True)
+    symbol       = Column(String)
+    network      = Column(String, default="solana")
+    captured_at  = Column(String, default=now_iso, index=True)
+
+    price_usd     = Column(Float)
+    liquidity_usd = Column(Float)
+
+    volume_m5   = Column(Float)
+    volume_m15  = Column(Float)
+    volume_m30  = Column(Float)
+    volume_h1   = Column(Float)
+    volume_h6   = Column(Float)
+    volume_h24  = Column(Float)
+
+    buys_m5    = Column(Integer)
+    sells_m5   = Column(Integer)
+    buyers_m5  = Column(Integer)
+    sellers_m5 = Column(Integer)
+    buys_h1    = Column(Integer)
+    sells_h1   = Column(Integer)
+    buyers_h1  = Column(Integer)
+    sellers_h1 = Column(Integer)
+
+    price_change_m5  = Column(Float)
+    price_change_h1  = Column(Float)
+    price_change_h6  = Column(Float)
+    price_change_h24 = Column(Float)
+
+
+class TokenSurgeState(Base):
+    """Current surge standing per token, with hysteresis.
+
+    Exists so a token scoring 85 for ten consecutive scans emits ONE event
+    rather than ten identical ones — the difference between an alert and a
+    stuck alarm nobody reads.
+    """
+    __tablename__ = "token_surge_state"
+
+    mint          = Column(String, primary_key=True)
+    pool_address  = Column(String)
+    symbol        = Column(String)
+    # NORMAL | SURGING | INVESTIGATING | MONITORED | COOLDOWN
+    state         = Column(String, default="NORMAL", index=True)
+    surge_score   = Column(Float, default=0.0, index=True)
+    peak_score    = Column(Float, default=0.0)
+    bias          = Column(String)            # bullish | bearish | mixed | unknown
+    baseline_quality = Column(String)         # measured | insufficient | new_token
+    metrics_json  = Column(Text)
+    first_seen_at = Column(String, default=now_iso)
+    last_scan_at  = Column(String, default=now_iso)
+    last_event_at = Column(String)
+    last_event_score = Column(Float)
+    scans         = Column(Integer, default=0)
+    cooldown_until = Column(String)
+
+
 class DexPosition(Base):
     """A simulated on-chain spot position. Deliberately NOT PaperPosition.
 

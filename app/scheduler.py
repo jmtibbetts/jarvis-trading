@@ -62,6 +62,7 @@ job_status = {
     'postmortem':{'status': 'idle', 'last': None, 'error': None},
     'crypto_derivatives': {'status': 'idle', 'last': None, 'error': None},
     'candidates': {'status': 'idle', 'last': None, 'error': None},
+    'wallet_discovery': {'status': 'idle', 'last': None, 'error': None},
     'kraken_sync': {'status': 'idle', 'last': None, 'error': None},
     'feature_snapshots': {'status': 'idle', 'last': None, 'error': None},
     'feature_labels': {'status': 'idle', 'last': None, 'error': None},

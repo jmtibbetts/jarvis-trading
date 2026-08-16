@@ -895,6 +895,21 @@ class WalletRegistry(Base):
     last_analysis_at      = Column(String)
     analysis_error        = Column(String)
 
+    # ── Helius identity cache ────────────────────────────────────────────
+    # Asking Helius whether the same address is Binance, every scoring pass,
+    # forever, is pure waste — an exchange does not stop being an exchange.
+    # Cached with a long TTL and rechecked on schedule, not per pass.
+    #
+    # A 404 or an unlabelled result is NOT proof of "human trader". It means
+    # no Helius label was available, and on-chain classification continues
+    # afterwards. Identity is EVIDENCE, not omniscience.
+    identity_source     = Column(String)   # helius | cache | none
+    identity_type       = Column(String)   # CEX | PROTOCOL | BRIDGE | ...
+    identity_name       = Column(String)
+    identity_category   = Column(String)
+    identity_tags       = Column(String)   # comma-separated
+    identity_checked_at = Column(String)
+
     # ── Swap-history cursor ──────────────────────────────────────────────
     # Restart-safe, incremental history walking. Without this the scorer
     # re-downloaded the same newest ~100 records for every unscorable
@@ -1979,6 +1994,14 @@ def _migrate_columns():
             ("last_deep_backfill_at", "TEXT"),
             ("history_status", "TEXT"),
             ("history_error", "TEXT"),
+            # Identity is cached because an exchange does not stop being an
+            # exchange between scoring passes.
+            ("identity_source", "TEXT"),
+            ("identity_type", "TEXT"),
+            ("identity_name", "TEXT"),
+            ("identity_category", "TEXT"),
+            ("identity_tags", "TEXT"),
+            ("identity_checked_at", "TEXT"),
         ],
         "wallet_trades": [
             # Quote identity must survive to USD valuation, or aggregation

@@ -78,9 +78,131 @@ def on_chain_evidence(address: str) -> dict:
         from lib.helius_client import rpc
         sigs = rpc("getSignaturesForAddress", [address, {"limit": 25}]) or []
         out["signature_count"] = len(sigs)
+        out["activity_checked"] = True
     except Exception as e:
+        # signature_count stays None, and downstream MUST read that as
+        # UNKNOWN rather than as zero or as permission to proceed. The
+        # account lookup succeeding does not make the wallet measurable.
         out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+        out["activity_checked"] = False
     return out
+
+
+# How long a Helius identity label stays trustworthy. An exchange does not
+# stop being an exchange, so this is long by design — the cost being
+# avoided is asking whether the same address is Binance on every pass.
+IDENTITY_TTL_DAYS = 30
+
+# Helius identity type -> this module's entity taxonomy. Mapped rather than
+# adopted verbatim so one vocabulary governs eligibility.
+_IDENTITY_TO_ENTITY = {
+    "exchange": "CEX", "cex": "CEX",
+    "program": "PROGRAM", "protocol": "PROGRAM",
+    "pool": "LIQUIDITY_POOL", "amm": "LIQUIDITY_POOL",
+    "bridge": "BRIDGE",
+    "treasury": "TREASURY",
+    "market_maker": "MARKET_MAKER", "mm": "MARKET_MAKER",
+    "custody": "CUSTODY", "custodian": "CUSTODY",
+    "validator": "PROGRAM",
+    "burn": "BURN",
+}
+
+
+def identity_is_fresh(checked_at: str | None, *, ttl_days: int = IDENTITY_TTL_DAYS) -> bool:
+    if not checked_at:
+        return False
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(str(checked_at).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - t).days
+        return age < ttl_days
+    except (TypeError, ValueError):
+        return False
+
+
+def entity_from_identity(identity: dict | None) -> str | None:
+    """Helius identity -> an entity type this module gates on, or None.
+
+    None means "no label was available", which is the COMMON case and is
+    NOT evidence of a human trader. Structural classification continues
+    afterwards; this only ever adds knowledge, never concludes innocence.
+    """
+    if not identity:
+        return None
+    t = str(identity.get("type") or "").strip().lower()
+    if not t or t == "unknown":
+        return None
+    return _IDENTITY_TO_ENTITY.get(t)
+
+
+def resolve_identities(session, addresses: list[str], *,
+                       ttl_days: int = IDENTITY_TTL_DAYS,
+                       max_lookups: int = 100) -> dict:
+    """Batch-resolve identity for addresses whose cache is cold or stale.
+
+    `batch_identity` existed in the client and had NO callers — the entity
+    layer was relying on a ten-entry hardcoded infrastructure map plus
+    on-chain account shape, and paying nothing for Helius's own labels
+    because nothing asked for them.
+
+    Cached to the registry, because the wasteful pattern is not the lookup;
+    it is the same lookup repeated every pass forever.
+    """
+    from app.database import WalletRegistry, now_iso
+
+    rows = {w.address: w for w in session.query(WalletRegistry)
+            .filter(WalletRegistry.address.in_(list(dict.fromkeys(addresses)))).all()}
+    stale = [a for a, w in rows.items()
+             if not identity_is_fresh(w.identity_checked_at, ttl_days=ttl_days)]
+    stats = {"requested": len(addresses), "cached": len(rows) - len(stale),
+             "looked_up": 0, "labelled": 0, "unlabelled": 0, "errors": 0}
+    if not stale:
+        return stats
+
+    stale = stale[:max_lookups]
+    try:
+        from lib.helius_client import batch_identity
+        found = batch_identity(stale)
+    except Exception as e:
+        # A failed lookup leaves every cached label INTACT. Identity we
+        # already knew is not invalidated by a network problem.
+        logger.debug(f"[WalletClassify] batch identity failed: {e}")
+        stats["errors"] = len(stale)
+        return stats
+
+    stats["looked_up"] = len(stale)
+    for addr in stale:
+        w = rows.get(addr)
+        if w is None:
+            continue
+        ident = found.get(addr) or {}
+        entity = entity_from_identity(ident)
+        w.identity_checked_at = now_iso()
+        w.identity_source = "helius"
+        if entity is None:
+            # Explicitly recorded so the negative result is cached too —
+            # otherwise every unlabelled address is re-queried forever,
+            # and unlabelled is the common case.
+            w.identity_type = None
+            w.identity_name = None
+            stats["unlabelled"] += 1
+            continue
+        w.identity_type = entity
+        w.identity_name = ident.get("name")
+        w.identity_category = ident.get("category") or ident.get("type")
+        tags = ident.get("tags")
+        w.identity_tags = ",".join(tags) if isinstance(tags, list) else (tags or None)
+        stats["labelled"] += 1
+        # A labelled infrastructure entity is excluded from trader scoring
+        # immediately — that is the whole point of asking.
+        if entity in NON_TRADER_ENTITIES:
+            w.entity_type = entity
+            w.entity_name = w.identity_name
+            if w.status not in ("EXCLUDED_ENTITY", "ARCHIVED"):
+                w.status = "EXCLUDED_ENTITY"
+    return stats
 
 
 def resolve_token_account_owner(address: str) -> str | None:
@@ -214,13 +336,37 @@ def trader_eligibility(address: str, evidence: dict | None = None,
         return {**cls, "eligible": False,
                 "eligibility_reason": "no account on chain to analyse"}
 
+    # FAIL CLOSED ON UNKNOWN ACTIVITY.
+    #
+    # `signature_count` is None in two completely different situations: the
+    # activity call was never made, or it FAILED. Both used to fall past
+    # this check straight into `eligible: True` — so a Helius timeout on
+    # getSignaturesForAddress promoted an unmeasured address to "active
+    # enough to analyse", and the expensive history work that follows was
+    # spent on evidence nobody had.
+    #
+    # ELIGIBLE / INELIGIBLE / UNKNOWN are three answers. UNKNOWN means
+    # retry later; it must never mean yes.
     sigs = ev.get("signature_count")
-    if sigs is not None and sigs < min_signatures:
-        return {**cls, "eligible": False,
+    if sigs is None:
+        return {**cls, "eligible": False, "eligibility": "UNKNOWN",
+                "activity_checked": bool(ev.get("checked")),
+                "activity_error": ev.get("error"),
+                "retry": True,
+                "eligibility_reason": (
+                    "activity could not be measured this pass"
+                    + (f" ({ev['error']})" if ev.get("error") else "")
+                    + " — UNKNOWN, not eligible; will retry")}
+
+    if sigs < min_signatures:
+        return {**cls, "eligible": False, "eligibility": "INELIGIBLE",
+                "activity_checked": True, "activity_count": sigs,
+                "retry": False,
                 "eligibility_reason": (
                     f"only {sigs} recent signature(s); below the {min_signatures} "
                     f"needed before any performance claim is honest")}
 
-    return {**cls, "eligible": True,
+    return {**cls, "eligible": True, "eligibility": "ELIGIBLE",
+            "activity_checked": True, "activity_count": sigs,
             "eligibility_reason": "structurally valid, not infrastructure, "
                                   "and active enough to analyse"}

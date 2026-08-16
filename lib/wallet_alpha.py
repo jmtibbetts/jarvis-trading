@@ -218,7 +218,20 @@ def resolve_observation(session, row, price_lookup, *,
     resolved = []
     for name in due_horizons(row, now=now):
         secs = dict(HORIZONS)[name]
-        px = price_lookup(row.mint, entry + timedelta(seconds=secs))
+        # PASS THE HORIZON. `price_at` scales its match tolerance from it —
+        # a 5m alpha must reject a snapshot taken far from T+5m, while a
+        # 24h alpha can legitimately accept one several minutes off, since
+        # minutes are noise at that scale. Calling without the horizon
+        # pinned every lookup to the MINIMUM tolerance, so long-horizon
+        # observations stayed unresolved for want of a precision the
+        # question never needed.
+        try:
+            px = price_lookup(row.mint, entry + timedelta(seconds=secs),
+                              horizon_s=secs)
+        except TypeError:
+            # A caller supplying a simple two-argument lookup (tests, and
+            # any custom price source) still works.
+            px = price_lookup(row.mint, entry + timedelta(seconds=secs))
         if px is None:
             continue
         setattr(row, f"price_{name}", float(px))

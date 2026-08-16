@@ -63,6 +63,7 @@ class Checkpoint3Tests(unittest.TestCase):
             row, _ = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint=mint,
                 signature=f"sig-{mint}", entry_timestamp=T0.isoformat(),
+                evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
                 entry_price_usd=entry_px)
 
             def lookup(_mint, when):
@@ -131,7 +132,8 @@ class HorizonResolutionTests(unittest.TestCase):
         with get_db() as db:
             row, _ = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="s1",
-                entry_timestamp=T0.isoformat(), entry_price_usd=10.0)
+                entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=10.0)
             # Only 20 minutes have passed: 5m and 15m are due, 1h is not.
             due = wallet_alpha.due_horizons(row, now=T0 + timedelta(minutes=20))
             self.assertEqual(due, ["5m", "15m"])
@@ -145,7 +147,8 @@ class HorizonResolutionTests(unittest.TestCase):
         with get_db() as db:
             row, _ = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="s2",
-                entry_timestamp=T0.isoformat(), entry_price_usd=10.0)
+                entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=10.0)
             wallet_alpha.resolve_observation(
                 db, row, lambda m, w: None, now=T0 + timedelta(days=2))
             self.assertIsNone(row.return_1h)
@@ -160,13 +163,16 @@ class HorizonResolutionTests(unittest.TestCase):
         with get_db() as db:
             _, made1 = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="sigX",
-                entry_timestamp=T0.isoformat(), entry_price_usd=1.0)
+                entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=1.0)
             _, made2 = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="sigX",
-                entry_timestamp=T0.isoformat(), entry_price_usd=1.0)
+                entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=1.0)
             _, made3 = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="sigY",
-                entry_timestamp=T0.isoformat(), entry_price_usd=1.0)
+                entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=1.0)
             self.assertTrue(made1)
             self.assertFalse(made2, "a re-scan of one signature is one sighting")
             self.assertTrue(made3, "a NEW signature from a known wallet IS evidence")
@@ -179,7 +185,8 @@ class HorizonResolutionTests(unittest.TestCase):
             row, _ = wallet_alpha.record_observation(
                 db, wallet_address=WALLET, mint="m", signature="early",
                 entry_timestamp=(T0 - timedelta(minutes=20)).isoformat(),
-                surge_started_at=T0.isoformat(), entry_price_usd=1.0)
+                surge_started_at=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=1.0)
             self.assertAlmostEqual(row.seconds_before_surge, -1200.0, places=1)
 
 
@@ -197,7 +204,8 @@ class AggregationTests(unittest.TestCase):
                 row, _ = wallet_alpha.record_observation(
                     db, wallet_address=WALLET, mint=f"m{i}",
                     signature=f"s{i}", entry_timestamp=T0.isoformat(),
-                    entry_price_usd=10.0)
+                    evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=10.0)
                 wallet_alpha.resolve_observation(
                     db, row,
                     lambda m, w: 10.0 * (1 + one_hour_return / 100.0),
@@ -228,7 +236,8 @@ class AggregationTests(unittest.TestCase):
             for i in range(6):
                 row, _ = wallet_alpha.record_observation(
                     db, wallet_address=WALLET, mint=f"p{i}", signature=f"p{i}",
-                    entry_timestamp=T0.isoformat(), entry_price_usd=10.0)
+                    entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=10.0)
                 # only the first two are old enough for 24h
                 when = (T0 + timedelta(days=2) if i < 2
                         else T0 + timedelta(hours=2))
@@ -254,7 +263,8 @@ class CopyabilityTests(unittest.TestCase):
             for i in range(8):
                 row, _ = wallet_alpha.record_observation(
                     db, wallet_address=WALLET, mint=f"c{i}", signature=f"c{i}",
-                    entry_timestamp=T0.isoformat(), entry_price_usd=10.0)
+                    entry_timestamp=T0.isoformat(), evidence_class=wallet_alpha.VERIFIED_BUY_ENTRY,
+                entry_price_usd=10.0)
                 wallet_alpha.resolve_observation(
                     db, row, lambda m, w: 10.4, now=T0 + timedelta(days=2))
             db.flush()

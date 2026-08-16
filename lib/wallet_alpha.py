@@ -65,12 +65,61 @@ def _parse_ts(v) -> datetime | None:
         return None
 
 
+# ── Evidence classes ─────────────────────────────────────────────────────
+# A SIGNER IS NOT A BUYER AND A HOLDER IS NOT AN ENTRY.
+#
+# Being a signer on a pool transaction proves the wallet participated in
+# something involving that address. It does not prove it bought the surged
+# token, in what size, or at what price. A holder snapshot is weaker still:
+# "owns 500,000 TOKEN X" says nothing about WHEN it was acquired or what
+# was paid — and the one thing post-entry alpha needs is a real entry.
+#
+# These were previously indistinguishable. Alpha was protected only
+# INCIDENTALLY, because signer and holder rows happen not to carry an
+# entry price, so `resolve` skipped them. That is protection by accident:
+# the day any code path filled in a plausible price, holder snapshots would
+# silently have started producing alpha observations.
+POOL_TX_SIGNER = "POOL_TX_SIGNER"            # signed a tx touching the pool
+PARTICIPANT_SIGHTING = "PARTICIPANT_SIGHTING"  # present, role unproven
+HOLDER_SNAPSHOT = "HOLDER_SNAPSHOT"          # owns it now; acquisition unknown
+VERIFIED_BUY_ENTRY = "VERIFIED_BUY_ENTRY"    # proven swap in, priced, timed
+VERIFIED_SELL_EXIT = "VERIFIED_SELL_EXIT"    # proven swap out
+
+# ONLY a verified buy may act as an entry for post-entry alpha.
+ALPHA_ELIGIBLE_CLASSES = frozenset({VERIFIED_BUY_ENTRY})
+
+EVIDENCE_CLASSES = frozenset({
+    POOL_TX_SIGNER, PARTICIPANT_SIGHTING, HOLDER_SNAPSHOT,
+    VERIFIED_BUY_ENTRY, VERIFIED_SELL_EXIT,
+})
+
+# Which class each discovery source may claim. Deliberately conservative:
+# a source earns a stronger class by PROVING a balance change, never by
+# being trusted here.
+SOURCE_EVIDENCE_CLASS = {
+    "pool_traders": POOL_TX_SIGNER,
+    "holders": HOLDER_SNAPSHOT,
+    "token_holders": HOLDER_SNAPSHOT,
+}
+
+
+def evidence_class_for(discovery_source: str | None) -> str:
+    """The strongest class a source may claim without further proof."""
+    return SOURCE_EVIDENCE_CLASS.get(str(discovery_source or ""),
+                                     PARTICIPANT_SIGHTING)
+
+
+def is_alpha_eligible(evidence_class: str | None) -> bool:
+    return str(evidence_class or "") in ALPHA_ELIGIBLE_CLASSES
+
+
 def record_observation(session, *, wallet_address: str, mint: str,
                        signature: str, entry_timestamp, entry_price_usd=None,
                        entry_amount=None, entry_notional_usd=None,
                        pool=None, token_symbol=None, discovery_source=None,
                        surge_event_id=None, surge_started_at=None,
-                       price_source=None, price_quality=None):
+                       price_source=None, price_quality=None,
+                       evidence_class=None):
     """Append one sighting. Idempotent on (wallet, signature, mint).
 
     Returns (row, created). An existing sighting is NOT new evidence — a
@@ -86,6 +135,14 @@ def record_observation(session, *, wallet_address: str, mint: str,
                         WalletObservation.mint == mint).first())
     if existing is not None:
         return existing, False
+
+    # Derived from the source unless the caller PROVED something stronger.
+    # A caller cannot claim VERIFIED_BUY_ENTRY without an entry price:
+    # "verified" that carries no price is exactly the fabrication these
+    # classes exist to prevent.
+    ec = evidence_class or evidence_class_for(discovery_source)
+    if ec == VERIFIED_BUY_ENTRY and not entry_price_usd:
+        ec = PARTICIPANT_SIGHTING
 
     entry_dt = _parse_ts(entry_timestamp)
     surge_dt = _parse_ts(surge_started_at)
@@ -105,6 +162,7 @@ def record_observation(session, *, wallet_address: str, mint: str,
         entry_timestamp=entry_dt.isoformat() if entry_dt else None,
         entry_amount=entry_amount, entry_notional_usd=entry_notional_usd,
         entry_price_usd=entry_price_usd,
+        evidence_class=ec, alpha_eligible=int(is_alpha_eligible(ec)),
         price_source=price_source, price_quality=price_quality,
         horizons_resolved="", fully_resolved=0, observed_at=now_iso(),
     )
@@ -141,6 +199,16 @@ def resolve_observation(session, row, price_lookup, *,
     available, and the horizon stays NULL and unresolved so a later pass can
     try again — it must never be recorded as a zero return.
     """
+    # EXPLICIT class gate, ahead of the price check. Alpha was previously
+    # protected only because signer and holder rows happen to carry no
+    # entry price — protection by accident. Any code path that later filled
+    # in a plausible price would have turned holder snapshots into alpha
+    # observations without a single line changing here.
+    if not is_alpha_eligible(getattr(row, "evidence_class", None)):
+        return {"resolved": [],
+                "skipped": (f"{getattr(row, 'evidence_class', None)} is not an "
+                            f"entry — only a verified buy can anchor alpha")}
+
     entry = _parse_ts(row.entry_timestamp)
     entry_px = row.entry_price_usd
     if entry is None or not entry_px:

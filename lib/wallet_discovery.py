@@ -191,7 +191,7 @@ def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
     guarded by a uniqueness constraint. That is what makes it affordable to
     record EVERY sighting rather than only first ones.
     """
-    from lib.wallet_alpha import record_observation
+    from lib.wallet_alpha import evidence_class_for, record_observation
 
     try:  # noqa: SIM105 — the observation write must never break a pass
         _, created = record_observation(
@@ -216,6 +216,12 @@ def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
             entry_timestamp=_event_timestamp(row),
             entry_amount=row.get("amount"),
             discovery_source=source,
+            # A pool signer is POOL_TX_SIGNER and a holder is
+            # HOLDER_SNAPSHOT — neither is an entry, and neither may anchor
+            # post-entry alpha. Promotion to VERIFIED_BUY_ENTRY requires a
+            # proven balance change with a reconstructed price, which this
+            # cheap path deliberately does not attempt.
+            evidence_class=evidence_class_for(source),
             surge_started_at=tok.get("surge_started_at"),
         )
         return 1 if created else 0

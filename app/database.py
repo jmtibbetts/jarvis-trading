@@ -997,6 +997,17 @@ class WalletObservation(Base):
     pool           = Column(String)
     token_symbol   = Column(String)
 
+    # HOW STRONG IS THIS EVIDENCE? A signer on a pool transaction is not a
+    # buyer, and a holder snapshot is not an entry — "owns 500,000 TOKEN X"
+    # says nothing about when it was acquired or what was paid. See
+    # lib/wallet_alpha: only VERIFIED_BUY_ENTRY may anchor post-entry alpha.
+    #   POOL_TX_SIGNER | PARTICIPANT_SIGHTING | HOLDER_SNAPSHOT
+    #   VERIFIED_BUY_ENTRY | VERIFIED_SELL_EXIT
+    evidence_class = Column(String, index=True)
+    # Denormalized so the ineligible population can be counted without
+    # re-deriving the rule in a query.
+    alpha_eligible = Column(Integer, default=0)
+
     # Where this sighting came from, and what it was near.
     discovery_source = Column(String)      # token_holders | pool_traders | ...
     surge_event_id   = Column(String, index=True)
@@ -1928,6 +1939,14 @@ def _migrate_columns():
             ("unpriced_trades", "INTEGER"),
             ("last_analysis_at", "TEXT"),
             ("analysis_error", "TEXT"),
+        ],
+        "wallet_observations": [
+            # A signer is not a buyer; a holder is not an entry. Existing
+            # rows are left NULL, which is_alpha_eligible() treats as
+            # ineligible — the safe direction for evidence recorded before
+            # the distinction existed.
+            ("evidence_class", "TEXT"),
+            ("alpha_eligible", "INTEGER DEFAULT 0"),
         ],
         "token_surge_state": [
             # WHEN the surge began, not merely when the row was created.

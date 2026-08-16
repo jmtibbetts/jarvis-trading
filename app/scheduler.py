@@ -75,6 +75,7 @@ job_status = {
     # The only writer of surge snapshots and state. Its lag is a real
     # health signal: a stalled sampler starves every baseline downstream.
     'token_surge': {'status': 'idle', 'last': None, 'error': None},
+    'dex_autotrade': {'status': 'idle', 'last': None, 'error': None},
     'wallet_lifecycle': {'status': 'idle', 'last': None, 'error': None},
     'wallet_alpha': {'status': 'idle', 'last': None, 'error': None},
 }
@@ -663,6 +664,19 @@ def create_scheduler() -> BackgroundScheduler:
     sched.add_job(make_job_runner('token_surge', token_surge_run),
                   'interval', seconds=_surge_secs, id='token_surge',
                   next_run_time=now + timedelta(seconds=30),
+                  replace_existing=True, max_instances=1, coalesce=True)
+
+    # Autonomous virtual DEX trading. Reads the SAME surge result the UI
+    # reads — one surge engine, no second definition — and applies the full
+    # gate: gas, pool depth, weighted impact, then NET expectancy after
+    # every DEX cost. Inert unless DEX_AUTOTRADE_ENABLED is set, so a desk
+    # that has not opted in pays nothing for its registration.
+    def dex_autotrade_run():
+        from lib.dex_autotrade import run_once
+        return run_once(max_positions=3)
+    sched.add_job(make_job_runner('dex_autotrade', dex_autotrade_run),
+                  'interval', minutes=10, id='dex_autotrade',
+                  next_run_time=now + timedelta(minutes=5),
                   replace_existing=True, max_instances=1, coalesce=True)
 
     def wallet_discovery_run():

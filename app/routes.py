@@ -9,6 +9,7 @@ from app.routers.trading import *  # noqa: F401,F403
 from app.routers.learning import *  # noqa: F401,F403
 from app.routers.intel import *  # noqa: F401,F403
 from app.routers.platform import *  # noqa: F401,F403
+from app.routers.onchain import *  # noqa: F401,F403
 
 # LAST on purpose: every domain module also exports a name `router` (its
 # own sub-router), and star imports above would otherwise leave whichever

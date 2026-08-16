@@ -9,6 +9,7 @@
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
   import Intelligence from "./lib/sections/Intelligence.svelte";
+  import OnChain from "./lib/sections/OnChain.svelte";
   import Performance from "./lib/sections/Performance.svelte";
   import Ops from "./lib/sections/Ops.svelte";
   import { sectionStore, SECTIONS, isPopout, popPanel } from "./lib/stores/section.svelte";
@@ -59,6 +60,8 @@
       <Intelligence view="macro" />
     {:else if sectionStore.current === "cryptodesk"}
       <Intelligence view="cryptodesk" />
+    {:else if sectionStore.current === "onchain"}
+      <OnChain />
     {:else if sectionStore.current === "performance"}
       <Performance />
     {:else if sectionStore.current === "ops"}

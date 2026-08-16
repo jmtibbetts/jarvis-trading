@@ -8,6 +8,7 @@ export type SectionId =
   | "smartmoney"
   | "macro"
   | "cryptodesk"
+  | "onchain"
   | "performance"
   | "ops";
 
@@ -21,6 +22,7 @@ export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
   { id: "smartmoney", label: "Smart Money", ready: true },
   { id: "macro", label: "Macro Desk", ready: true },
   { id: "cryptodesk", label: "Crypto Desk", ready: true },
+  { id: "onchain", label: "On-Chain Desk", ready: true },
   { id: "performance", label: "Performance & Learning", ready: true },
   { id: "ops", label: "Ops", ready: true },
 ];

@@ -213,8 +213,40 @@ def close_dex_position(position_id: str, price_usd: float, *,
         q = quote_swap(gross_out, res, dex=pos.dex,
                        sol_price_usd=sol_price_usd, concentrated=concentrated)
         if not q.get("ok"):
-            # Never strand a position because the exit could not be priced.
-            proceeds, exit_impact, pool_fee, net_fee = gross_out, 0.0, 0.0, 0.0
+            # AN UNPRICEABLE EXIT IS A RISK EVENT, NOT A FREE ONE.
+            #
+            # This used to book `proceeds = gross_out` with zero impact,
+            # zero pool fee and zero network fee — so the ONE scenario a
+            # DEX trader actually fears, liquidity vanishing underneath an
+            # open position, resolved as the best possible outcome: a
+            # perfect fill at the mid with no costs at all.
+            #
+            # A model that rewards illiquidity teaches the desk to seek it.
+            # The position stays OPEN and is marked EXIT_PENDING_NO_LIQUIDITY
+            # so it appears in risk as what it is: capital that cannot
+            # currently be recovered.
+            pos.status = "Open"
+            pos.exit_state = "EXIT_PENDING_NO_LIQUIDITY"
+            pos.exit_blocked_reason = (q.get("reason")
+                                       or "no route could price this exit")[:300]
+            pos.exit_last_attempt_at = _now()
+            session.flush()
+            logger.warning(
+                f"[DexPaper] {pos.symbol}: exit could not be priced "
+                f"({pos.exit_blocked_reason}) — held EXIT_PENDING_NO_LIQUIDITY "
+                f"rather than booked as a costless fill")
+            return {
+                "error": "exit_unpriceable",
+                "state": "EXIT_PENDING_NO_LIQUIDITY",
+                "position_id": pos.id,
+                "reason": pos.exit_blocked_reason,
+                "detail": ("The position is still open. An exit that cannot "
+                           "be routed is a liquidity failure, and booking it "
+                           "at the mid would record a perfect escape from "
+                           "the exact situation that loses real money."),
+                "mark_value_usd": round(gross_out, 6),
+                "executable_value_usd": None,
+            }
         else:
             proceeds = q["received_usd"]
             exit_impact = q["price_impact_pct"]

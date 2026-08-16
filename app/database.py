@@ -1385,6 +1385,19 @@ class DexPosition(Base):
     current_price_usd = Column(Float)
     unrealized_pnl_usd = Column(Float, default=0.0)
 
+    # ── Exit state ───────────────────────────────────────────────────────
+    # An exit that cannot be ROUTED is a liquidity failure, and the close
+    # path used to resolve it by booking the gross mid with zero impact,
+    # zero pool fee and zero network fee. That made the one scenario a DEX
+    # trader actually fears — liquidity vanishing under an open position —
+    # the single best outcome in the simulator, and a model that rewards
+    # illiquidity teaches the desk to seek it.
+    #
+    #   OPEN | EXIT_PENDING | EXIT_PENDING_NO_LIQUIDITY | PARTIALLY_EXITED
+    exit_state           = Column(String)
+    exit_blocked_reason  = Column(String)
+    exit_last_attempt_at = Column(String)
+
     signal_id  = Column(String, index=True)
     opened_at  = Column(String, default=now_iso, index=True)
     updated_at = Column(String, default=now_iso)
@@ -2002,6 +2015,12 @@ def _migrate_columns():
             ("identity_category", "TEXT"),
             ("identity_tags", "TEXT"),
             ("identity_checked_at", "TEXT"),
+        ],
+        "dex_positions": [
+            # A liquidity failure must never resolve as a perfect exit.
+            ("exit_state", "TEXT"),
+            ("exit_blocked_reason", "TEXT"),
+            ("exit_last_attempt_at", "TEXT"),
         ],
         "wallet_trades": [
             # Quote identity must survive to USD valuation, or aggregation

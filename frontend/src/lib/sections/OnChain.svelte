@@ -22,6 +22,7 @@
   import { api } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
+  import DexExchange from "../components/DexExchange.svelte";
 
   const feeds = new FeedTracker();
 
@@ -36,13 +37,20 @@
   let riskBusy = $state(false);
 
   async function loadAll() {
+    // NO third argument. `load(key, fn, opts?)` takes `{ keepLast }` — the
+    // old signature took the caller's previous value, and this call site
+    // still passed its own `$state` there. Two things followed: the opts
+    // object was nonsense, and worse, reading those six variables inside a
+    // function called from an `$effect` that then WRITES all six made the
+    // effect re-trigger itself. That is the measured 34-requests-in-10s
+    // storm — fixed inside FeedTracker, still live here.
     const [w, d, s, b, p, h] = await Promise.all([
-      feeds.load("wallets", () => api.raw<any>("/onchain/wallets?limit=60"), wallets),
-      feeds.load("discovery", () => api.raw<any>("/onchain/discovery/status"), discovery),
-      feeds.load("surge", () => api.raw<any>("/onchain/surge?limit=15"), surge),
-      feeds.load("book", () => api.raw<any>("/onchain/dex/book"), book),
-      feeds.load("protocols", () => api.raw<any>("/onchain/protocols"), protocols),
-      feeds.load("helius", () => api.raw<any>("/helius/health"), helius),
+      feeds.load("wallets", () => api.raw<any>("/onchain/wallets?limit=60")),
+      feeds.load("discovery", () => api.raw<any>("/onchain/discovery/status")),
+      feeds.load("surge", () => api.raw<any>("/onchain/surge?limit=15")),
+      feeds.load("book", () => api.dexBook()),
+      feeds.load("protocols", () => api.raw<any>("/onchain/protocols")),
+      feeds.load("helius", () => api.raw<any>("/helius/health")),
     ]);
     wallets = w; discovery = d; surge = s; book = b; protocols = p; helius = h;
   }
@@ -194,45 +202,6 @@
       {/if}
     </Panel>
 
-    <Panel title="Virtual DEX Book" status={feeds.status("book")}
-           meta="AMM-priced — no leverage, no shorts">
-      {#if book}
-        <div class="stat-list">
-          <div class="stat"><span>Equity</span><b class="num">{usd(book.equity_usd)}</b></div>
-          <div class="stat"><span>Cash</span><b class="num">{usd(book.cash_usd)}</b></div>
-          <div class="stat"><span>Open</span><b class="num">{book.open_positions}</b></div>
-          <div class="stat"><span>Realized</span>
-            <b class="num {(book.realized_pnl_usd ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{usd(book.realized_pnl_usd)}</b></div>
-          <div class="stat"><span>Trades</span><b class="num">{book.total_trades} ({book.wins}W/{book.losses}L)</b></div>
-        </div>
-        {#if book.positions?.length}
-          <table class="tbl">
-            <thead><tr><th>Token</th><th class="num">Size</th><th class="num">Entry impact</th><th class="num">Pool</th></tr></thead>
-            <tbody>
-              {#each book.positions as p}
-                <tr>
-                  <td class="sym">{p.symbol ?? short(p.mint)}</td>
-                  <td class="num">{usd(p.notional_usd)}</td>
-                  <td class="num {p.entry_impact_pct > 1 ? 'pl-down' : ''}">{num(p.entry_impact_pct)}%</td>
-                  <td class="num dim">{usd(p.pool_reserve_usd_at_entry)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else}
-          <div class="empty">No open on-chain positions</div>
-        {/if}
-        <p class="note">
-          Separate from paper and Auto Sim because a swap is not a broker fill.
-          Size is bounded by POOL DEPTH before equity: $25,000 into a $50,000
-          pool is 49.9% price impact — half the stake gone on entry, before the
-          trade is even wrong. {book.limits?.leverage}.
-        </p>
-      {:else}
-        <StateNote status={feeds.status("book")} noun="DEX book" />
-      {/if}
-    </Panel>
-
     <Panel title="Wallet Registry" status={feeds.status("wallets")}
            meta="{wallets?.wallets?.length ?? 0} shown · scores null until measured">
       {#if wallets?.wallets?.length}
@@ -380,10 +349,33 @@
       {/if}
     </Panel>
   </div>
+
+  <!--
+    The virtual DEX exchange, full width because it is a working surface
+    rather than a readout. It replaces the read-only "Virtual DEX Book"
+    panel that used to sit in the grid above — two surfaces for one book
+    is the same duplication this whole pass exists to remove.
+  -->
+  <div class="exchange">
+    <h2 class="sect">Virtual DEX Exchange</h2>
+    <p class="note">
+      AMM-priced against real pool depth. No leverage — a constant-product
+      pool does not lend — and no short side, because you cannot borrow from
+      one. Size is bounded by POOL DEPTH before equity: $25,000 into a
+      $50,000 pool is 49.9% price impact, half the stake gone on entry
+      before the trade is even wrong.
+    </p>
+    <DexExchange />
+  </div>
 </div>
 
 <style>
   .oc { padding: 16px 20px; overflow-y: auto; }
+  .exchange { margin-top: 20px; }
+  .sect {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0 0 4px; font-weight: 600;
+  }
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 14px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 12px; align-items: start; }
   .stat-list { display: flex; flex-direction: column; gap: 5px; }
@@ -398,7 +390,6 @@
   .small { font-size: 10.5px; }
   .dim { color: var(--ink-dim); }
   .pin { margin-left: 4px; font-size: 9px; }
-  .empty { color: var(--ink-faint); font-size: 12px; padding: 10px 2px; }
   .note { font-size: 11px; color: var(--ink-dim); line-height: 1.5; margin: 10px 0 0; }
   .btn.small { margin-top: 10px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }

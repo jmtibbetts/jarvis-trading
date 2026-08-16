@@ -1532,6 +1532,76 @@ export type BriefNews = {
   newest_age: string | null; as_of: string; note: string;
 };
 
+// ── DEX virtual exchange ──────────────────────────────────────────────────
+// Mirrors lib/dex_paper + lib/dex_swap_math. Deliberately NOT the paper
+// book's shape: an AMM swap and a broker fill differ in the fields that
+// matter. There is no leverage (a pool does not lend) and no short side
+// (you cannot borrow from a constant-product pool), and size is bounded by
+// POOL DEPTH rather than account equity.
+export type DexLimits = {
+  max_impact_pct: number; min_pool_reserve_usd: number;
+  leverage?: string; shorting?: string;
+};
+export type DexPosition = {
+  id: string; mint: string; symbol: string | null; dex: string | null;
+  qty_tokens: number | null;
+  entry_price_usd: number | null;
+  /** What the pool quoted vs what the mid was — the two differ by impact. */
+  quoted_price_usd: number | null;
+  current_price_usd: number | null;
+  notional_usd: number | null;
+  entry_impact_pct: number | null;
+  entry_pool_fee_usd: number | null;
+  entry_network_fee_usd: number | null;
+  pool_reserve_usd_at_entry: number | null;
+  opened_at: string | null; notes: string | null;
+};
+export type DexBook = {
+  starting_usd: number; cash_usd: number; equity_usd: number;
+  open_positions: number; open_value_usd: number;
+  realized_pnl_usd: number; total_trades: number;
+  wins: number; losses: number; reset_at: string | null;
+  limits: DexLimits;
+  positions: DexPosition[];
+};
+export type DexTrade = {
+  id: string; mint: string; symbol: string | null; dex: string | null;
+  qty_tokens: number | null;
+  entry_price_usd: number | null; exit_price_usd: number | null;
+  notional_usd: number | null;
+  gross_pnl_usd: number | null; net_pnl_usd: number | null;
+  pnl_pct: number | null;
+  /** Kept apart from fees: impact is YOUR size against depth, not a charge. */
+  entry_impact_pct: number | null; exit_impact_pct: number | null;
+  total_fees_usd: number | null;
+  exit_reason: string | null;
+  opened_at: string | null; closed_at: string | null;
+};
+export type DexQuote = {
+  ok: boolean; reason?: string;
+  amount_usd?: number; tokens_out?: number;
+  price_impact_pct?: number; pool_fee_usd?: number;
+  network_fee_usd?: number; effective_price_usd?: number;
+  round_trip_cost_pct?: number;
+  /** How far the token must move before the round trip breaks even. */
+  breakeven_move_pct?: number;
+  max_size_1pct_impact?: number; max_size_2pct_impact?: number;
+};
+export type DexSizing = {
+  size_usd?: number; reason?: string; capped_by?: string;
+  reserve_usd: number; cash_usd: number; limits: DexLimits;
+  provenance: string;
+};
+export type DexOpenRequest = {
+  mint: string; symbol?: string | null; pool_address?: string | null;
+  dex?: string | null; reserve_usd: number; price_usd: number;
+  size_usd?: number | null;
+  stop_price_usd?: number | null; target_price_usd?: number | null;
+  sol_price_usd?: number; concentrated?: boolean;
+};
+/** Every refusal names itself; `error` is a sentence, not a flag. */
+export type DexResult = { error?: string; [k: string]: unknown };
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1613,6 +1683,25 @@ export const api = {
   // than part of any page load.
   dexDiscovery: (confirm = true) =>
     get<DexDiscovery>(`/dex/discovery?confirm=${confirm}`),
+  // ── DEX virtual exchange ──
+  dexBook: () => get<DexBook>("/onchain/dex/book"),
+  dexTrades: (limit = 50) => get<{ trades: DexTrade[]; count: number }>(
+    `/onchain/dex/trades?limit=${limit}`),
+  dexQuote: (amountUsd: number, reserveUsd: number, opts?: {
+    dex?: string; solPriceUsd?: number; concentrated?: boolean;
+  }) => get<DexQuote>(
+    `/onchain/dex/quote?amount_usd=${amountUsd}&reserve_usd=${reserveUsd}`
+    + (opts?.dex ? `&dex=${encodeURIComponent(opts.dex)}` : "")
+    + (opts?.solPriceUsd ? `&sol_price_usd=${opts.solPriceUsd}` : "")
+    + (opts?.concentrated ? `&concentrated=true` : "")),
+  dexSizing: (reserveUsd: number, cashUsd?: number) => get<DexSizing>(
+    `/onchain/dex/sizing?reserve_usd=${reserveUsd}`
+    + (cashUsd !== undefined ? `&cash_usd=${cashUsd}` : "")),
+  dexOpen: (body: DexOpenRequest) => post<DexResult>("/onchain/dex/open", body),
+  dexClose: (body: {
+    position_id: string; price_usd: number; reserve_usd?: number | null;
+    reason?: string; sol_price_usd?: number; concentrated?: boolean;
+  }) => post<DexResult>("/onchain/dex/close", body),
   opportunitiesRanked: (limit = 30) => get<RankedOpportunity[]>(`/opportunities/ranked?limit=${limit}`),
   psychology: () => get<PsychologyIndex>("/psychology"),
   ipoPipeline: (limit = 40) => get<IpoPipelineResponse>(`/ipo/pipeline?limit=${limit}`),

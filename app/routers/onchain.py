@@ -12,7 +12,7 @@ layout is verified, a liquidation distance derived from it is calculated,
 and a cascade estimate is modelled. Collapsing those into one confident
 number is how a model starts being read as a measurement.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 
 from app.routers.common import *  # noqa: F401,F403
 
@@ -156,6 +156,116 @@ def dex_quote(amount_usd: float, reserve_usd: float, dex: str = None,
             "breakeven_move_pct": rt.get("breakeven_move_pct"),
             "max_size_1pct_impact": max_size_for_impact(reserve_usd, 1.0, dex=dex),
             "max_size_2pct_impact": max_size_for_impact(reserve_usd, 2.0, dex=dex)}
+
+
+@router.get("/onchain/dex/trades")
+def dex_trades(limit: int = 50):
+    """Closed swaps, newest first — the book's actual record.
+
+    Costs are itemised rather than netted into one P&L figure, because on
+    a DEX they fail differently: price impact is a function of YOUR size
+    against pool depth, the pool fee is the venue's cut, and the network
+    fee is the chain's. Collapsing them hides which one made a trade
+    unprofitable.
+    """
+    from app.database import DexTrade, get_db
+
+    with get_db() as db:
+        rows = (db.query(DexTrade)
+                .order_by(DexTrade.closed_at.desc())
+                .limit(max(1, min(limit, 500))).all())
+        return {"trades": [{
+            "id": t.id, "mint": t.mint, "symbol": t.symbol, "dex": t.dex,
+            "qty_tokens": t.qty_tokens,
+            "entry_price_usd": t.entry_price_usd,
+            "exit_price_usd": t.exit_price_usd,
+            "notional_usd": t.notional_usd,
+            "gross_pnl_usd": t.gross_pnl_usd,
+            "net_pnl_usd": t.net_pnl_usd,
+            "pnl_pct": t.pnl_pct,
+            "entry_impact_pct": t.entry_impact_pct,
+            "exit_impact_pct": t.exit_impact_pct,
+            "total_fees_usd": t.total_fees_usd,
+            "exit_reason": t.exit_reason,
+            "opened_at": t.opened_at, "closed_at": t.closed_at,
+        } for t in rows], "count": len(rows)}
+
+
+@router.post("/onchain/dex/open")
+def dex_open(payload: dict = Body(...)):
+    """Simulate a buy against real pool depth.
+
+    Every refusal names itself — "impact 4.2% exceeds the 3.0% ceiling" is
+    actionable, an empty response is not.
+    """
+    from lib.dex_paper import open_dex_position
+
+    required = ("mint", "reserve_usd", "price_usd")
+    missing = [k for k in required if payload.get(k) in (None, "")]
+    if missing:
+        return {"error": f"missing required field(s): {', '.join(missing)}"}
+
+    return open_dex_position(
+        mint=str(payload["mint"]),
+        symbol=payload.get("symbol"),
+        pool_address=payload.get("pool_address"),
+        dex=payload.get("dex"),
+        reserve_usd=float(payload["reserve_usd"]),
+        price_usd=float(payload["price_usd"]),
+        size_usd=(float(payload["size_usd"])
+                  if payload.get("size_usd") not in (None, "") else None),
+        stop_price_usd=(float(payload["stop_price_usd"])
+                        if payload.get("stop_price_usd") not in (None, "") else None),
+        target_price_usd=(float(payload["target_price_usd"])
+                          if payload.get("target_price_usd") not in (None, "") else None),
+        sol_price_usd=float(payload.get("sol_price_usd") or 0.0),
+        concentrated=bool(payload.get("concentrated")),
+    )
+
+
+@router.post("/onchain/dex/close")
+def dex_close(payload: dict = Body(...)):
+    """Simulate the sell, priced against pool depth on the way OUT too.
+
+    Getting in cheaply and being unable to get out is the characteristic
+    on-chain failure, so exit impact is quoted rather than assumed.
+    """
+    from lib.dex_paper import close_dex_position
+
+    if not payload.get("position_id"):
+        return {"error": "position_id is required"}
+    if payload.get("price_usd") in (None, ""):
+        return {"error": "price_usd is required — the exit needs a price"}
+
+    return close_dex_position(
+        str(payload["position_id"]),
+        float(payload["price_usd"]),
+        reserve_usd=(float(payload["reserve_usd"])
+                     if payload.get("reserve_usd") not in (None, "") else None),
+        reason=str(payload.get("reason") or "manual"),
+        sol_price_usd=float(payload.get("sol_price_usd") or 0.0),
+        concentrated=bool(payload.get("concentrated")),
+    )
+
+
+@router.get("/onchain/dex/sizing")
+def dex_sizing(reserve_usd: float, cash_usd: float | None = None):
+    """The size this pool can absorb, and why it is bounded there.
+
+    On-chain the binding constraint is POOL DEPTH, not account equity — a
+    book that sizes off cash alone will happily propose a trade the pool
+    cannot fill without moving the price against itself.
+    """
+    from lib.dex_paper import (max_impact_pct, min_pool_reserve_usd,
+                               size_for_pool, summary)
+
+    cash = cash_usd if cash_usd is not None else summary().get("cash_usd", 0.0)
+    out = size_for_pool(float(reserve_usd), float(cash))
+    return {**out,
+            "reserve_usd": reserve_usd, "cash_usd": cash,
+            "limits": {"max_impact_pct": max_impact_pct(),
+                       "min_pool_reserve_usd": min_pool_reserve_usd()},
+            "provenance": "CALCULATED from pool reserve and constant-product math"}
 
 
 # ── Capital: staking and lending ─────────────────────────────────────────

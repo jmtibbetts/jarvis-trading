@@ -406,6 +406,140 @@ def sync_wallet_history(address: str, *, session=None, max_pages: int = 5,
         return _run(db)
 
 
+# Where an entry price came from, strongest first. The distinction is the
+# point: an execution price is what THIS wallet paid, a market price is
+# what the market was doing nearby. They are different numbers and only
+# the first is evidence about the wallet.
+PRICE_EXECUTION = "EXECUTION_BALANCE_DELTA"   # the wallet's own economics
+PRICE_MARKET_FALLBACK = "MARKET_HISTORY_FALLBACK"  # labelled approximation
+PRICE_UNAVAILABLE = "UNAVAILABLE"
+
+
+def verified_entry_for(session, wallet_address: str, mint: str, *,
+                       before_ts: float | None = None,
+                       allow_market_fallback: bool = False) -> dict:
+    """The wallet's actual BUY of `mint`, reconstructed from the ledger.
+
+    This is what turns a HOLDER_SNAPSHOT into a VERIFIED_BUY_ENTRY. A
+    holder snapshot says "owns 500,000 TOKEN X" and nothing about when it
+    was acquired or what was paid; the ledger knows both, because it was
+    built from the transaction that did it.
+
+    Several buys are aggregated into one weighted-average entry, which is
+    what a follower would actually have paid across a scale-in. Returns
+    `entry_price_usd=None` with a reason rather than a guess when the
+    evidence does not support a number — the alpha engine already refuses
+    those, and that refusal must stay meaningful.
+
+    `allow_market_fallback` exists for callers that explicitly want an
+    approximation. It is OFF by default and the provenance says
+    MARKET_HISTORY_FALLBACK, because a market candle silently substituted
+    for an execution price makes every reconstruction agree with the market
+    by construction.
+    """
+    from app.database import WalletTrade
+
+    q = (session.query(WalletTrade)
+         .filter(WalletTrade.address == wallet_address,
+                 WalletTrade.mint == mint,
+                 WalletTrade.direction == BUY))
+    rows = q.all()
+    if before_ts is not None:
+        rows = [r for r in rows if _row_ts(r) is not None and _row_ts(r) <= before_ts]
+    if not rows:
+        return {"entry_price_usd": None, "entry_price_source": PRICE_UNAVAILABLE,
+                "reason": "no verified buy in the ledger for this wallet and mint",
+                "buys": 0}
+
+    priced = [r for r in rows if r.value_usd and r.quantity]
+    unpriced = len(rows) - len(priced)
+    if not priced:
+        return {"entry_price_usd": None, "entry_price_source": PRICE_UNAVAILABLE,
+                "reason": (f"{len(rows)} buys found but none could be valued "
+                           f"— the quote leg had no price"),
+                "buys": len(rows), "unpriced_buys": unpriced}
+
+    total_usd = sum(float(r.value_usd) for r in priced)
+    total_qty = sum(float(r.quantity) for r in priced)
+    if total_qty <= 0:
+        return {"entry_price_usd": None, "entry_price_source": PRICE_UNAVAILABLE,
+                "reason": "zero total quantity across priced buys",
+                "buys": len(rows)}
+
+    first = min(priced, key=lambda r: _row_ts(r) or float("inf"))
+    # ESTIMATED anywhere in the set demotes the whole aggregate: a
+    # weighted average is only as good as its weakest input.
+    quality = ("ESTIMATED" if any(r.price_quality == "ESTIMATED" for r in priced)
+               else "MEASURED")
+    return {
+        "entry_price_usd": total_usd / total_qty,
+        "entry_price_source": PRICE_EXECUTION,
+        "price_quality": quality,
+        "entry_timestamp": _row_ts(first),
+        "entry_signature": first.signature,
+        "entry_amount": total_qty,
+        "entry_notional_usd": total_usd,
+        "buys": len(rows), "priced_buys": len(priced), "unpriced_buys": unpriced,
+        "reason": (f"weighted average of {len(priced)} verified buy(s)"
+                   + (f"; {unpriced} unvalued and excluded" if unpriced else "")),
+    }
+
+
+def _row_ts(row) -> float | None:
+    from datetime import datetime
+    v = getattr(row, "opened_at", None)
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def promote_holder_to_verified_entry(session, observation) -> dict:
+    """Upgrade one HOLDER_SNAPSHOT / signer sighting using the ledger.
+
+    The audit's stated path: holder -> historical swap lookup -> locate the
+    verified acquisition -> VERIFIED_BUY_ENTRY. The observation is only
+    upgraded when the ledger actually proves the buy; otherwise it keeps
+    its weaker class and stays ineligible for alpha.
+    """
+    from lib.wallet_alpha import VERIFIED_BUY_ENTRY, is_alpha_eligible
+
+    if is_alpha_eligible(getattr(observation, "evidence_class", None)):
+        return {"promoted": False, "reason": "already a verified entry"}
+
+    ev = verified_entry_for(session, observation.wallet_address,
+                            observation.mint)
+    if not ev.get("entry_price_usd"):
+        return {"promoted": False, "reason": ev.get("reason")}
+
+    observation.entry_price_usd = ev["entry_price_usd"]
+    observation.entry_amount = ev.get("entry_amount")
+    observation.entry_notional_usd = ev.get("entry_notional_usd")
+    observation.price_source = ev["entry_price_source"]
+    observation.price_quality = ev.get("price_quality")
+    observation.evidence_class = VERIFIED_BUY_ENTRY
+    observation.alpha_eligible = 1
+    if ev.get("entry_timestamp"):
+        from datetime import datetime, timezone
+        observation.entry_timestamp = datetime.fromtimestamp(
+            ev["entry_timestamp"], tz=timezone.utc).isoformat()
+        # The surge offset was computed against the OLD timestamp, so it is
+        # recomputed here rather than left describing a different entry.
+        surge = getattr(observation, "surge_started_at", None)
+        if surge:
+            try:
+                s = datetime.fromisoformat(str(surge).replace("Z", "+00:00"))
+                observation.seconds_before_surge = (
+                    datetime.fromtimestamp(ev["entry_timestamp"], tz=timezone.utc) - s
+                ).total_seconds()
+            except (TypeError, ValueError):
+                pass
+    return {"promoted": True, "entry_price_usd": ev["entry_price_usd"],
+            "reason": ev.get("reason")}
+
+
 def _persist(db, row: dict) -> bool:
     """Idempotent on (address, signature). Returns True if newly stored."""
     from app.database import WalletTrade

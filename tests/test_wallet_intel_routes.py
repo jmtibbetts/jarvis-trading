@@ -59,14 +59,26 @@ class HeliusHealthRouteTests(unittest.TestCase):
 
 class WalletIntelRouteTests(unittest.TestCase):
     def _run(self, wallets, **patches):
-        cfg = ("https://api.helius.xyz", "key" if wallets else "", wallets, 100)
+        # The population comes from the REGISTRY now, not from
+        # wallet_activity._config reading HELIUS_WATCH_WALLETS. Patching the
+        # canonical selector is what keeps this test honest about W1: if the
+        # route ever goes back to an env-derived list, these stubs stop
+        # controlling it and the tests fail.
         defaults = {
             "lib.helius_client.batch_identity": {},
             "lib.helius_client.funded_by": {},
             "lib.token_pricing.resolve_prices": {},
         }
         defaults.update(patches)
-        stack = [mock.patch("lib.wallet_activity._config", return_value=cfg)]
+        stack = [
+            mock.patch("lib.wallet_registry.get_monitorable_wallets",
+                       return_value=wallets),
+            mock.patch("lib.wallet_registry.monitorable_breakdown",
+                       return_value={"monitored": len(wallets), "by_status": {},
+                                     "reason": "stubbed"}),
+            mock.patch.dict("os.environ",
+                            {"HELIUS_API_KEY": "key" if wallets else ""}),
+        ]
         for target, value in defaults.items():
             stack.append(mock.patch(target, **(value if isinstance(value, dict)
                                                and "side_effect" in value
@@ -101,8 +113,12 @@ class WalletIntelRouteTests(unittest.TestCase):
         The original intent — say something specific rather than going
         quiet — is preserved and now has more to say.
         """
-        with mock.patch("lib.wallet_activity._config",
-                        return_value=("https://x", "key", [], 100)), \
+        with mock.patch("lib.wallet_registry.get_monitorable_wallets",
+                        return_value=[]), \
+             mock.patch("lib.wallet_registry.monitorable_breakdown",
+                        return_value={"monitored": 0, "by_status": {},
+                                      "reason": "no wallet has been promoted yet"}), \
+             mock.patch.dict("os.environ", {"HELIUS_API_KEY": "key"}), \
              mock.patch("lib.helius_client.configured", return_value=True):
             out = intel_routes.wallet_intel_report()
 
@@ -115,15 +131,19 @@ class WalletIntelRouteTests(unittest.TestCase):
                           "no wallets means no analysis was run, and the "
                           "response should say so rather than fake an "
                           "empty result")
-        self.assertIn("No wallets to analyse", out["detail"])
+        self.assertIn("No monitorable wallets", out["detail"])
+        self.assertIn("promoted", out["detail"],
+                      "the response must say WHICH emptiness this is")
+        self.assertEqual(out["population_source"], "wallet_registry")
         self.assertEqual(out["research_population"], "WALLET_ALPHA")
 
     def test_missing_key_is_still_unconfigured(self):
         """The correction above must not swing too far: no Helius key IS
         genuinely unconfigured, and that has to stay distinguishable from
         'configured but nothing discovered yet'."""
-        with mock.patch("lib.wallet_activity._config",
-                        return_value=("https://x", "", [], 100)), \
+        with mock.patch("lib.wallet_registry.get_monitorable_wallets",
+                        return_value=[]), \
+             mock.patch.dict("os.environ", {"HELIUS_API_KEY": ""}), \
              mock.patch("lib.helius_client.configured", return_value=False):
             out = intel_routes.wallet_intel_report()
         self.assertFalse(out["configured"])

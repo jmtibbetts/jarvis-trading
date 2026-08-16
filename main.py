@@ -84,6 +84,23 @@ async def lifespan(app_: FastAPI):
     from app.ws import manager as ws_manager
     ws_manager.bind_loop(asyncio.get_running_loop())
 
+    # Wallet registry bootstrap: exclusions, then operator seeds. This runs
+    # BEFORE the scheduler so the first discovery/activity pass sees the
+    # seeded population rather than an empty table.
+    #
+    # It had never been wired. `import_seeds()` existed, was tested, and had
+    # zero production callers — and the tests that assert "seeds are
+    # re-imported on every boot" call it directly, so they passed against a
+    # startup path that never invoked it. Registry bootstrap is idempotent
+    # (upsert never downgrades a promotion or overwrites an earned score),
+    # so doing it on every boot costs nothing.
+    try:
+        from lib.wallet_registry import bootstrap as wallet_bootstrap
+        logger.info(f"[Server] Wallet registry bootstrap — {wallet_bootstrap()}")
+    except Exception as e:
+        # A seeding failure must not stop the desk from starting.
+        logger.warning(f"[Server] Wallet registry bootstrap failed: {e}")
+
     # JARVIS_DISABLE_SCHEDULER=1 runs the API/UI without any background jobs —
     # for dev/debug instances that must never fetch data or place orders.
     if os.getenv("JARVIS_DISABLE_SCHEDULER") == "1":

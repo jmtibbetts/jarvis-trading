@@ -62,6 +62,11 @@ LIVE_TRANSFERS = {
 
 ADDR = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
 
+# A plain trader address for the collector tests. ADDR above is Binance 2
+# and lives in KNOWN_INFRASTRUCTURE, so the registry correctly refuses to
+# monitor it — using it here would test the exclusion, not the collector.
+TRADER = "JDd3hy3gQn2V982mi1zqhNqUw1GfV2UL6g76STojCJPN"
+
 
 class ParserTests(unittest.TestCase):
     def test_every_live_row_parses(self):
@@ -198,9 +203,17 @@ class StoredCountIsActuallyCountedTests(unittest.TestCase):
 
 
 class CollectorTests(unittest.TestCase):
+    """The population comes from the REGISTRY, not from the environment.
+
+    These tests used to establish a watchlist by setting
+    HELIUS_WATCH_WALLETS. That env var is now seed input only, so they seed
+    the registry instead — which is the architecture under test.
+    """
+
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in
                        ("HELIUS_API_KEY", "HELIUS_WATCH_WALLETS")}
+        self._clear_registry()
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -208,19 +221,50 @@ class CollectorTests(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        self._clear_registry()
+
+    @staticmethod
+    def _clear_registry():
+        from app.database import WalletRegistry, get_db
+        with get_db() as db:
+            db.query(WalletRegistry).delete()
+
+    @staticmethod
+    def _watch(address):
+        """Put one wallet into the monitored population."""
+        from app.database import get_db
+        from lib import wallet_registry as reg
+        with get_db() as db:
+            reg.upsert_wallet(db, address, status=reg.WATCH)
 
     def test_no_key_is_inert_not_an_error(self):
         from lib.wallet_activity import collect_once
         os.environ.pop("HELIUS_API_KEY", None)
         self.assertIn("skipped", collect_once())
 
-    def test_no_watchlist_does_not_invent_one(self):
+    def test_empty_registry_does_not_invent_a_population(self):
         from lib.wallet_activity import collect_once
         os.environ["HELIUS_API_KEY"] = "x" * 36
         os.environ["HELIUS_WATCH_WALLETS"] = ""
         out = collect_once()
         self.assertIn("skipped", out)
-        self.assertIn("WATCH_WALLETS", out["skipped"])
+        self.assertIn("monitorable", out["skipped"])
+
+    def test_registry_wallet_is_polled_with_an_empty_env_var(self):
+        """The W1 regression, at the collector: an empty HELIUS_WATCH_WALLETS
+        must NOT stop a promoted registry wallet from being polled."""
+        from unittest.mock import patch
+
+        from lib import wallet_activity
+        os.environ["HELIUS_API_KEY"] = "x" * 36
+        os.environ["HELIUS_WATCH_WALLETS"] = ""
+        self._watch(TRADER)
+        with patch.object(wallet_activity, "_fetch",
+                          return_value=(LIVE_TRANSFERS, None)) as fetch:
+            out = wallet_activity.collect_once()
+        self.assertNotIn("skipped", out)
+        self.assertEqual(out["wallets"], 1)
+        fetch.assert_called_once_with(TRADER)
 
     def test_status_reports_configuration_without_leaking_the_key(self):
         from lib.wallet_activity import status
@@ -237,7 +281,7 @@ class CollectorTests(unittest.TestCase):
 
         from lib import wallet_activity
         os.environ["HELIUS_API_KEY"] = "x" * 36
-        os.environ["HELIUS_WATCH_WALLETS"] = ADDR
+        self._watch(TRADER)
         unparseable = {"data": [{"nope": 1}, {"nope": 2}], "pagination": {}}
         with patch.object(wallet_activity, "_fetch",
                           return_value=(unparseable, None)):
@@ -251,11 +295,11 @@ class CollectorTests(unittest.TestCase):
 
         from lib import wallet_activity
         os.environ["HELIUS_API_KEY"] = "x" * 36
-        os.environ["HELIUS_WATCH_WALLETS"] = ADDR
+        self._watch(TRADER)
         with patch.object(wallet_activity, "_fetch",
                           return_value=(LIVE_TRANSFERS, None)):
             out = wallet_activity.collect_once()
-        self.assertEqual(out["truncated_wallets"], [ADDR],
+        self.assertEqual(out["truncated_wallets"], [TRADER],
                          "a dropped overflow must not read as calm")
 
     def test_a_fetch_error_never_raises(self):
@@ -263,7 +307,7 @@ class CollectorTests(unittest.TestCase):
 
         from lib import wallet_activity
         os.environ["HELIUS_API_KEY"] = "x" * 36
-        os.environ["HELIUS_WATCH_WALLETS"] = ADDR
+        self._watch(TRADER)
         with patch.object(wallet_activity, "_fetch",
                           return_value=(None, "HTTPError: boom")):
             out = wallet_activity.collect_once()

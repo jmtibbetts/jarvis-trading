@@ -227,6 +227,14 @@ def upsert_wallet(db, address: str, *, source: str = "manual_seed",
         row.pinned = pinned
         row.label = label or SEED_LABELS.get(address)
         db.add(row)
+        # FLUSH, so the row is visible to the next query in this same
+        # session. Without it a second upsert of the same address inside one
+        # transaction sees nothing and inserts a duplicate, tripping the
+        # UNIQUE constraint. That is not hypothetical: bootstrap seeds
+        # infrastructure and then operator seeds, discovery upserts the same
+        # wallet as both a token holder and a pool trader in a single pass,
+        # and `load_seed_wallets` de-duplicates only within its own list.
+        db.flush()
         return row
 
     if pinned:
@@ -294,6 +302,164 @@ def seed_known_infrastructure(db=None) -> dict:
         return _run(db)
     with get_db() as _db:
         return _run(_db)
+
+
+# ── Lifecycle ────────────────────────────────────────────────────────────
+# The states were already in use as bare string literals across four
+# modules. Naming them here is what lets `get_monitorable_wallets` and the
+# discovery cap talk about the SAME sets instead of each re-deciding.
+DISCOVERED = "DISCOVERED"
+CANDIDATE = "CANDIDATE"
+ANALYZING = "ANALYZING"
+WATCH = "WATCH"
+SMART_MONEY = "SMART_MONEY"
+HIGH_CONVICTION = "HIGH_CONVICTION"
+DEGRADED = "DEGRADED"
+ARCHIVED = "ARCHIVED"
+EXCLUDED_ENTITY = "EXCLUDED_ENTITY"
+
+# Wallets whose activity is worth spending API budget on every pass. These
+# are the PROVEN ones plus anything the operator pinned by hand.
+MONITORABLE_STATUSES = frozenset({WATCH, SMART_MONEY, HIGH_CONVICTION})
+
+# States that consume expensive candidate-analysis capacity, and therefore
+# the only ones the discovery cap may count. A registry row for an archived
+# wallet or a known exchange costs nothing per pass; counting it toward the
+# cap is what let registry growth silently switch discovery off.
+ACTIVE_ANALYSIS_STATUSES = frozenset({DISCOVERED, CANDIDATE, ANALYZING})
+
+# Never monitored and never analysed, whatever else is true of the row —
+# including `pinned`, so a mistakenly pinned exchange cannot buy its way
+# back into the scoring pipeline.
+NEVER_MONITOR_STATUSES = frozenset({EXCLUDED_ENTITY, ARCHIVED})
+
+
+def get_monitorable_wallets(db=None, *, limit: int | None = None) -> list[str]:
+    """THE wallet population, for every runtime consumer without exception.
+
+    This function exists because there were two universes. `wallet_registry`
+    was documented as the source of truth while `wallet_activity` and
+    `/wallet/intel` both read `HELIUS_WATCH_WALLETS` directly and skipped
+    when it was blank — which it is on this deployment. Autonomous discovery
+    was therefore filling a table that no runtime analytics loop read, and
+    the collector reported "skipped" every fifteen minutes while doing it.
+
+    The population is:
+      - any wallet in a PROVEN state (WATCH / SMART_MONEY / HIGH_CONVICTION)
+      - plus anything `pinned`, which is an explicit operator instruction
+        and is how imported seeds keep being watched — a seed lands as a
+        pinned CANDIDATE, so the addresses that used to be polled straight
+        out of the env var still are, through the registry
+      - minus anything EXCLUDED_ENTITY or ARCHIVED, which no flag overrides
+
+    Ordered so the most-proven wallets survive truncation: a caller bounded
+    at 12 addresses should spend them on HIGH_CONVICTION before CANDIDATE.
+    """
+    from sqlalchemy import or_
+
+    from app.database import WalletRegistry, get_db
+
+    def _run(session):
+        rows = (session.query(WalletRegistry)
+                .filter(~WalletRegistry.status.in_(tuple(NEVER_MONITOR_STATUSES)))
+                .filter(or_(WalletRegistry.status.in_(tuple(MONITORABLE_STATUSES)),
+                            WalletRegistry.pinned.is_(True)))
+                .all())
+        rank = {HIGH_CONVICTION: 0, SMART_MONEY: 1, WATCH: 2}
+        rows.sort(key=lambda r: (rank.get(r.status, 3),
+                                 not bool(r.pinned),
+                                 r.first_discovered_at or ""))
+        out = [r.address for r in rows]
+        return out[:limit] if limit else out
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
+def monitorable_breakdown(db=None) -> dict:
+    """Why the monitored population is the size it is.
+
+    An empty list is a legitimate state and must never look like a failure,
+    so the caller needs to be able to say WHICH emptiness this is: nothing
+    discovered yet, nothing promoted yet, or everything excluded.
+    """
+    from sqlalchemy import func, or_
+
+    from app.database import WalletRegistry, get_db
+
+    def _run(session):
+        rows = (session.query(WalletRegistry.status,
+                              func.count(WalletRegistry.address))
+                .filter(~WalletRegistry.status.in_(tuple(NEVER_MONITOR_STATUSES)))
+                .filter(or_(WalletRegistry.status.in_(tuple(MONITORABLE_STATUSES)),
+                            WalletRegistry.pinned.is_(True)))
+                .group_by(WalletRegistry.status).all())
+        by = {s: n for s, n in rows}
+        total = sum(by.values())
+        return {
+            "monitored": total,
+            "by_status": by,
+            "reason": (
+                "registry is empty — no seeds imported and discovery has found nothing"
+                if total == 0 and _registry_total(session) == 0 else
+                "no wallet has been promoted or pinned yet; discovery is still building evidence"
+                if total == 0 else
+                f"{total} wallet(s) proven or pinned"),
+        }
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
+def _registry_total(session) -> int:
+    from app.database import WalletRegistry
+    return session.query(WalletRegistry).count()
+
+
+def active_analysis_count(db=None) -> int:
+    """How many wallets are actually consuming candidate-analysis capacity.
+
+    `HELIUS_DISCOVERY_MAX_CANDIDATES` was compared against an unfiltered
+    `count()` of the whole registry, so every archived wallet, every known
+    exchange and every promoted SMART_MONEY row counted toward a cap meant
+    to bound EXPENSIVE work. The registry is designed to accumulate learned
+    identities permanently; under that comparison, doing its job eventually
+    disabled discovery.
+    """
+    from app.database import WalletRegistry, get_db
+
+    def _run(session):
+        return (session.query(WalletRegistry)
+                .filter(WalletRegistry.status.in_(tuple(ACTIVE_ANALYSIS_STATUSES)))
+                .count())
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
+def bootstrap(db=None) -> dict:
+    """The one startup call: exclusions first, then operator seeds.
+
+    Order matters. `seed_known_infrastructure` must run BEFORE `import_seeds`
+    so that an address appearing in both lands as EXCLUDED_ENTITY rather than
+    as a pinned candidate — `upsert_wallet` will re-exclude it either way,
+    but only this order avoids a window where it is monitorable.
+
+    Idempotent by construction: `upsert_wallet` never downgrades a promoted
+    wallet and never overwrites an earned score, so running this on every
+    boot is free.
+    """
+    infra = seed_known_infrastructure(db)
+    seeds = import_seeds(db)
+    out = {**infra, **seeds}
+    logger.info(f"[WalletRegistry] bootstrap: {out}")
+    return out
 
 
 def counts(db=None) -> dict:

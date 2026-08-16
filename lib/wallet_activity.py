@@ -43,13 +43,35 @@ PARSER_VERSION = "helius_v1_transfers_v1"
 DEFAULT_BASE = "https://api.helius.xyz"
 
 
+def _page_limit() -> int:
+    return max(1, min(int(os.getenv("HELIUS_PAGE_LIMIT", "100") or 100), 1000))
+
+
 def _config() -> tuple[str, str, list[str], int]:
+    """(base, key, WALLETS FROM THE REGISTRY, page limit).
+
+    The wallet list used to come straight from `HELIUS_WATCH_WALLETS`, which
+    made this module a second wallet universe: discovery populated
+    `wallet_registry` while this loop watched an env var that is blank on
+    this deployment, so it reported "skipped" every fifteen minutes and the
+    two populations never met. The env var is now SEED INPUT ONLY — it is
+    imported into the registry at startup, and this reads the registry.
+
+    Registry access is wrapped because a context feed must not be able to
+    take the desk down: if the DB is unavailable this yields an empty
+    population, which `collect_once` reports honestly rather than crashing.
+    """
+    wallets: list[str] = []
+    try:
+        from lib.wallet_registry import get_monitorable_wallets
+        wallets = get_monitorable_wallets()
+    except Exception as e:
+        logger.warning(f"[WalletActivity] registry unavailable: {e}")
     return (
         (os.getenv("HELIUS_BASE") or DEFAULT_BASE).rstrip("/"),
         os.getenv("HELIUS_API_KEY", "").strip(),
-        [w.strip() for w in os.getenv("HELIUS_WATCH_WALLETS", "").split(",")
-         if w.strip()],
-        max(1, min(int(os.getenv("HELIUS_PAGE_LIMIT", "100") or 100), 1000)),
+        wallets,
+        _page_limit(),
     )
 
 
@@ -124,9 +146,15 @@ def collect_once() -> dict:
     if not key:
         return {"skipped": "HELIUS_API_KEY not configured"}
     if not wallets:
-        # An empty watchlist is a configuration state, not a failure, and
-        # this module does not invent addresses to follow.
-        return {"skipped": "HELIUS_WATCH_WALLETS is empty"}
+        # An empty population is a legitimate state, not a failure — but it
+        # now has several distinct causes, and "skipped" without saying
+        # which is the ambiguity this consolidation was meant to remove.
+        try:
+            from lib.wallet_registry import monitorable_breakdown
+            why = monitorable_breakdown().get("reason", "no monitorable wallets")
+        except Exception:
+            why = "no monitorable wallets in the registry"
+        return {"skipped": f"no monitorable wallets — {why}"}
 
     observations, errors, truncated = [], [], []
     for address in wallets:
@@ -194,10 +222,22 @@ def _store(observations: list[dict]) -> int:
 
 def status() -> dict:
     base, key, wallets, limit = _config()
+    breakdown = {}
+    try:
+        from lib.wallet_registry import monitorable_breakdown
+        breakdown = monitorable_breakdown()
+    except Exception:
+        pass
     return {
-        "configured": bool(key and wallets),
+        # `configured` describes whether the SUBSYSTEM can work — a key and
+        # a reachable registry — not whether anything has been promoted yet.
+        # Conflating the two is what reported a working client as unconfigured.
+        "configured": bool(key),
         "has_key": bool(key),
         "wallets_watched": len(wallets),
+        "population_source": "wallet_registry",
+        "population_reason": breakdown.get("reason"),
+        "by_status": breakdown.get("by_status", {}),
         "base": base,
         "page_limit": limit,
         "parser": PARSER_VERSION,

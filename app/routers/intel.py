@@ -356,11 +356,19 @@ def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
     from collections import defaultdict
 
     from lib import helius_client, token_pricing, wallet_intel
-    from lib.wallet_activity import _config, parse_transfers
+    from lib.wallet_activity import _page_limit, parse_transfers
 
     from lib import wallet_registry
 
-    _, key, wallets, page_limit = _config()
+    import os
+    key = os.getenv("HELIUS_API_KEY", "").strip()
+    page_limit = _page_limit()
+    # THE population — the same selector wallet_activity uses. This route
+    # previously called `wallet_activity._config()`, which read
+    # `HELIUS_WATCH_WALLETS`, so it analysed a different population from the
+    # one discovery was filling while importing wallet_registry on the very
+    # next line for its counts.
+    wallets = wallet_registry.get_monitorable_wallets()
 
     # §21: `configured` reflects whether the SUBSYSTEM can work — a Helius
     # connection and the feature switch — not whether somebody hand-typed a
@@ -392,12 +400,14 @@ def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
     # still needs at least one wallet. That is a different statement from
     # "the subsystem is unconfigured", and the response now says which.
     if not wallets:
+        why = wallet_registry.monitorable_breakdown().get("reason", "")
         return {**base,
-                "detail": ("No wallets to analyse yet. Discovery is "
+                "detail": (f"No monitorable wallets yet — {why}. Discovery is "
                            + ("enabled and will populate the registry."
                               if base["discovery"]["enabled"]
                               else "disabled; set HELIUS_WALLET_DISCOVERY_ENABLED=true "
                                    "or add seeds to HELIUS_WATCH_WALLETS.")),
+                "population_source": "wallet_registry",
                 "analysis": None}
 
     watched = wallets[:_WALLET_INTEL_MAX_WALLETS]

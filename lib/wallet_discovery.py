@@ -320,10 +320,19 @@ def discover_from_tokens(max_tokens: int = 5, db=None,
     max_candidates = _cfg_int("HELIUS_DISCOVERY_MAX_CANDIDATES", 5000)
 
     def _run(session):
-        from app.database import WalletRegistry
-        if session.query(WalletRegistry).count() >= max_candidates:
+        # Count only the wallets consuming expensive analysis capacity, not
+        # the whole registry. The unfiltered count() this replaces meant
+        # every archived wallet, every known exchange and every promoted
+        # SMART_MONEY row pushed against a cap that exists to bound WORK —
+        # so the registry doing its job (accumulating learned identities
+        # permanently) would eventually switch discovery off entirely.
+        from lib.wallet_registry import active_analysis_count
+        active = active_analysis_count(session)
+        if active >= max_candidates:
             stats["errors"].append(
-                f"registry at HELIUS_DISCOVERY_MAX_CANDIDATES ({max_candidates})")
+                f"{active} wallets awaiting analysis, at "
+                f"HELIUS_DISCOVERY_MAX_CANDIDATES ({max_candidates}) — "
+                f"the cap bounds the analysis queue, not registry size")
             return
         for tok in tokens:
             stats["tokens_scanned"] += 1

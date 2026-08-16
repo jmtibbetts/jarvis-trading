@@ -18,6 +18,19 @@ def health():
             "time": datetime.now(timezone.utc).isoformat()}
 
 
+@router.get("/platform/mode")
+def platform_mode_status():
+    """What JARVIS is currently permitted to do with real money.
+
+    Surfaced so the UI can render LIVE EXECUTION DISABLED — TRAINING MODE
+    as the CURRENT STATE rather than as a broken feed. An operator who
+    sees a red "unavailable" badge will try to repair it; one who sees a
+    declared training mode will not.
+    """
+    from lib.platform_mode import status as mode_status
+    return mode_status()
+
+
 @router.get("/mcp/status")
 def get_mcp_status():
     """Connectivity/auth status of the configured MCP servers — the same

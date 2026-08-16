@@ -11,6 +11,7 @@ position's stop and pyramided it unprotected.
 Meanwhile SUI/USD burned a rejected API call every cycle because nothing
 checked Alpaca's 73-asset crypto listing first.
 """
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -34,10 +35,21 @@ class EntryGuardTests(unittest.TestCase):
     def setUp(self):
         _tradable_cache["syms"] = {"LINK/USD", "BTC/USD", "ETH/USD"}
         _tradable_cache["at"] = 9e12    # never expires during the test
+        # These exercise the LIVE executor's own guards — duplicate
+        # positions, unlisted symbols, orphan sweeps — so the platform
+        # mode must permit reaching them. The VIRTUAL_ONLY boundary is
+        # tested separately in test_platform_mode.py; here it would just
+        # short-circuit the code under test.
+        self._mode = os.environ.get("JARVIS_PLATFORM_MODE")
+        os.environ["JARVIS_PLATFORM_MODE"] = "LIVE_ENABLED"
 
     def tearDown(self):
         _tradable_cache["syms"] = None
         _tradable_cache["at"] = 0.0
+        if self._mode is None:
+            os.environ.pop("JARVIS_PLATFORM_MODE", None)
+        else:
+            os.environ["JARVIS_PLATFORM_MODE"] = self._mode
 
     def test_an_unlisted_symbol_is_refused_before_any_submit(self):
         with patch("lib.alpaca_client.get_trading_client") as gtc:

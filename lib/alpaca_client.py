@@ -230,6 +230,14 @@ def submit_bracket_order(symbol: str, qty: float, entry_price: float,
               These are NOT linked (no OCO), so the position manager is
               responsible for cancelling the orphan order after a leg fills.
     """
+    # HARD GUARD. Real order submission is refused unless the platform is
+    # explicitly in a live-capable mode. Checked HERE, at the boundary,
+    # rather than near each decision — intent is produced in a dozen
+    # places and submission happens in a few, and a guard near the
+    # decision is one a new caller can walk past without noticing.
+    from lib.platform_mode import assert_may_increase_exposure
+    assert_may_increase_exposure("bracket order submission")
+
     sym, crypto = normalize_symbol(symbol)
     client = get_trading_client()
     order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL

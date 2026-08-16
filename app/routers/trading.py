@@ -404,14 +404,30 @@ def get_signal_sizing(signal_id: str):
         explicit = float(m.group(1))
     leverage = explicit or score_leverage(score)
 
-    sizing = size_position(equity, entry, stop, leverage, cash, symbol=symbol)
+    # The concentration headroom the OPEN path applies. Without it the
+    # preview sized against equity alone and advertised positions the book
+    # would then refuse — a card promising $67k of exposure that could
+    # never be taken.
+    notional_cap = None
+    try:
+        from lib.concentration import headroom_for_book
+        notional_cap = headroom_for_book(symbol, equity, book="paper").get("max_notional")
+    except Exception as e:
+        logger.debug(f"[Sizing] no concentration headroom for {symbol}: {e}")
+
+    sizing = size_position(equity, entry, stop, leverage, cash, symbol=symbol,
+                           notional_cap_usd=notional_cap)
     if not sizing.get("ok"):
         return {"ok": False, "reason": sizing.get("reason"), "leverage": leverage}
 
     gain_at_target = sizing["qty"] * abs(target - entry) if target > 0 else None
     return {
         "ok": True,
-        "leverage": leverage,
+        # The leverage ACTUALLY used, not the one requested. Echoing the
+        # request made every card read "1x" while the engine sized at 25x,
+        # so margin x leverage never matched the exposure printed beside it.
+        "leverage": round(float(sizing.get("leverage") or leverage), 2),
+        "leverage_requested": leverage,
         "leverage_source": "explicit in direction" if explicit else f"conviction score {float(score or 0):.0f}",
         "margin": round(sizing["margin"], 2),
         "notional": round(sizing["notional"], 2),

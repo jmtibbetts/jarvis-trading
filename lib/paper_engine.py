@@ -435,6 +435,18 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         decision = solve_position(
             entry=entry, stop=stop, risk_budget_usd=margin,
             free_cash=free_cash, symbol=symbol,
+            # Deliberately None when the score asks for 1.0. Forcing 1x here
+            # looks safer and breaks risk parity: with a tight stop, reaching
+            # the risk budget needs a large notional, and an unleveraged
+            # account cannot fund it, so the position shrinks and risks LESS
+            # than budget. tests/test_risk_first_paper.py pins that — wide
+            # and tight stops must risk the same dollars.
+            #
+            # Leverage here is financing, not risk. Loss at stop is bounded
+            # by the budget whichever leverage is used; what leverage changes
+            # is the cash committed. The real defect was the endpoint
+            # REPORTING the requested leverage instead of the one used, so a
+            # 25x position printed "1x" beside a $67k exposure.
             requested_leverage=leverage if leverage > 1.0 else None,
             max_margin_frac_of_cash=MAX_MARGIN_PCT_OF_CASH / 100.0,
             notional_cap_usd=notional_cap_usd,

@@ -894,6 +894,23 @@ class WalletRegistry(Base):
     # stale evidence is visible as stale rather than reading as current.
     last_analysis_at      = Column(String)
     analysis_error        = Column(String)
+
+    # ── Swap-history cursor ──────────────────────────────────────────────
+    # Restart-safe, incremental history walking. Without this the scorer
+    # re-downloaded the same newest ~100 records for every unscorable
+    # candidate every 30 minutes, forever, and learned nothing new from any
+    # of it. `newest` bounds an incremental pass; `oldest` is where a deep
+    # backfill RESUMES rather than restarting.
+    history_newest_signature = Column(String)
+    history_oldest_signature = Column(String)
+    history_records_loaded   = Column(Integer, default=0)
+    history_backfill_complete = Column(Integer, default=0)
+    last_history_sync_at     = Column(String)
+    last_deep_backfill_at    = Column(String)
+    # OK | FAILED. A failed page must never advance the cursor or look
+    # like the end of history.
+    history_status           = Column(String)
+    history_error            = Column(String)
     # Confidence is separate from score so a 100% win rate over 2 trades
     # cannot outrank 71% over 167. §29's sample-size discipline.
     confidence_score   = Column(Float)
@@ -941,6 +958,19 @@ class WalletTrade(Base):
     price_source = Column(String)
     dex          = Column(String)
     fees_usd     = Column(Float)
+
+    # ── Quote identity ───────────────────────────────────────────────────
+    # WHAT WAS PAID, and what it was worth at the time. Quote identity has
+    # to survive to the point of USD valuation or a later aggregation can
+    # add 500 USDC to 3 SOL and call the total dollars.
+    quote_mint      = Column(String)
+    quote_amount    = Column(Float)
+    quote_price_usd = Column(Float)
+    price_quality   = Column(String)   # MEASURED | ESTIMATED
+    # Which reconstruction produced this row. Rows from different ledger
+    # versions are not comparable: the pre-v1 heuristic paired transfer
+    # legs and counted withdrawals, airdrops and LP moves as trades.
+    ledger_version  = Column(String)
 
     opened_at        = Column(String, index=True)
     closed_at        = Column(String)
@@ -1939,6 +1969,25 @@ def _migrate_columns():
             ("unpriced_trades", "INTEGER"),
             ("last_analysis_at", "TEXT"),
             ("analysis_error", "TEXT"),
+            # Restart-safe incremental history. Without a cursor the scorer
+            # re-downloaded the same shallow window every 30 minutes forever.
+            ("history_newest_signature", "TEXT"),
+            ("history_oldest_signature", "TEXT"),
+            ("history_records_loaded", "INTEGER DEFAULT 0"),
+            ("history_backfill_complete", "INTEGER DEFAULT 0"),
+            ("last_history_sync_at", "TEXT"),
+            ("last_deep_backfill_at", "TEXT"),
+            ("history_status", "TEXT"),
+            ("history_error", "TEXT"),
+        ],
+        "wallet_trades": [
+            # Quote identity must survive to USD valuation, or aggregation
+            # adds 500 USDC to 3 SOL and calls the total dollars.
+            ("quote_mint", "TEXT"),
+            ("quote_amount", "REAL"),
+            ("quote_price_usd", "REAL"),
+            ("price_quality", "TEXT"),
+            ("ledger_version", "TEXT"),
         ],
         "wallet_observations": [
             # A signer is not a buyer; a holder is not an entry. Existing

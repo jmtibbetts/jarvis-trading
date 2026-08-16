@@ -89,6 +89,23 @@ def variants(symbol: str | None) -> set[str]:
     return out
 
 
+def is_stablecoin(symbol: str | None) -> bool:
+    """True when the symbol's BASE has no USD price thesis to trade.
+
+    A dollar-pegged asset's ATR is near zero BY DESIGN, so every
+    volatility-derived stop collapses to something inside the spread.
+    Measured on live candidates: DAI/USD produced a 0.0003% stop and a
+    3,397R cost estimate, USDT/USD 72R — not thin trades, non-trades.
+
+    Delegates to `lib.pegged_assets`, which is the one registry, because
+    the answer is NOT a flat boolean over "stablecoins": PAXG and XAUT are
+    pegged too, and they track gold, which is fully directional in USD.
+    Base only — `BTC/USDT` is a bet on BTC and stays tradeable.
+    """
+    from lib.pegged_assets import is_non_directional
+    return is_non_directional(canonical(symbol))
+
+
 def asset_class_of(symbol: str | None) -> str:
     """Equity | Crypto | Futures | Forex — from the symbol's shape and the
     known-crypto registry, one rule for every module."""

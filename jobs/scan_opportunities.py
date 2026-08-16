@@ -291,6 +291,13 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None,
         if not last_price or last_price <= 0:
             return None
 
+        # A pegged asset has no directional thesis to scan for, and its
+        # near-zero ATR turns every stop below into noise. Refuse it here,
+        # before any level is built from a volatility that does not exist.
+        from lib.instruments import is_stablecoin
+        if is_stablecoin(sym):
+            return None
+
         atr_pct = atr_data.get("pct", 0) if atr_data else 0
         if atr_pct < MIN_ATR_PCT and not intraday_bars:
             return None  # too low volatility — not worth trading
@@ -477,6 +484,28 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None,
             stop_loss    = round(last_price + atr_val * 1.5, 6 if last_price < 1 else 2)
             target_price = round(last_price - atr_val * 2.5, 6 if last_price < 1 else 2)
 
+        # The economics floor. `clamp_stop_to_atr` carries the cost floor,
+        # the ATR band and the per-contract viability refusal, and it was
+        # reachable ONLY from jobs/generate_signals.py — so every scanner
+        # signal skipped all three. Measured over two days of candidates:
+        # 5,054 of 7,106 cost rejections came from this path, including
+        # every absurd one (DAI/USD at 3,397R, NZDUSD=X at 37.9R). The gate
+        # was refusing them correctly; they should never have been built.
+        entry_px = round(last_price, 6 if last_price < 1 else 2)
+        levelled = {
+            "asset_symbol": sym, "direction": direction,
+            "entry_price": entry_px, "stop_loss": stop_loss,
+            "target_price": target_price, "order_type": "market",
+        }
+        from lib.signal_levels import clamp_stop_to_atr
+        levelled, _clamped, _why = clamp_stop_to_atr(levelled, atr_pct)
+        if levelled.get("untradeable_reason"):
+            return None
+        stop_loss = levelled["stop_loss"]
+        target_price = levelled.get("target_price", target_price)
+        stop_source = levelled.get("stop_source")
+        target_source = levelled.get("target_source")
+
         rr = abs(target_price - last_price) / max(abs(last_price - stop_loss), 0.0001)
 
         tf_snapshot = []
@@ -497,9 +526,14 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None,
             "direction":    direction,
             "confidence":   confidence,
             "setup_type":   setup_type,
-            "entry_price":  round(last_price, 6 if last_price < 1 else 2),
+            "entry_price":  entry_px,
             "target_price": target_price,
             "stop_loss":    stop_loss,
+            # Both legs are Jarvis arithmetic over ATR, not market levels.
+            # Saying so is what stops `rr_is_self_referential` from scoring
+            # this R:R as if the market had offered it.
+            "stop_source":   stop_source or LevelSource.ATR_FALLBACK,
+            "target_source": target_source or LevelSource.ATR_FALLBACK,
             "rr_ratio":     round(rr, 2),
             "timeframe":    selected_timeframe,
             "momentum":     "Bullish" if is_long_side else "Bearish",

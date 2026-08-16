@@ -42,6 +42,44 @@ DEFAULT_ILLIQUID_SPREAD_PCT = 0.0040   # 40 bps for thin names
 # assuming better than measured reality.
 DEFAULT_SLIPPAGE_PCT = 0.0021
 
+# ── Spot FX ──────────────────────────────────────────────────────────────
+# FX was priced as an EQUITY, because the only classifier here was a
+# crypto/not-crypto binary and `NZDUSD=X` is not crypto. That charged every
+# FX pair the equity 5bps spread AND the 0.21% slippage median measured
+# from this system's own equity and crypto fills — 0.47% round trip on the
+# deepest market in the world. Measured consequence: NZDUSD=X priced at
+# 37.9R of cost, 33.9R of it slippage, on a live candidate.
+#
+# Majors quote in pips (0.0001 of price, or 0.01 for JPY crosses). The
+# defaults below are expressed as fractions of price so they compose with
+# the rest of this module, with the pip arithmetic shown:
+#   spread    ~1.8 pips on NZDUSD @ 0.589  ->  0.00018/0.589 = 3.0 bps
+#   slippage  ~0.6 pips                    ->  1.0 bp
+# Both are deliberately on the wide side of what a major actually costs,
+# because this is the no-measurement path. Crosses and exotics are wider
+# still and are covered by `illiquid=True`, exactly as thin equities are.
+DEFAULT_FX_SPREAD_PCT = 0.00030        # 3 bps
+DEFAULT_FX_SLIPPAGE_PCT = 0.00010      # 1 bp
+FX_FEE_PCT = 0.00002                   # 0.2 bps/side, ECN-style commission
+
+
+def is_fx_symbol(symbol: str) -> bool:
+    """Spot FX, by the same rule every other module uses."""
+    try:
+        from lib.instruments import asset_class_of
+        return asset_class_of(symbol) == "Forex"
+    except Exception:
+        return str(symbol or "").upper().endswith("=X")
+
+
+def default_slippage_pct(symbol: str) -> float:
+    """The slippage assumption that belongs to this instrument's market.
+
+    One number for every asset class is the bug this replaces: the 0.21%
+    median came from equity and crypto fills and says nothing about spot FX.
+    """
+    return DEFAULT_FX_SLIPPAGE_PCT if is_fx_symbol(symbol) else DEFAULT_SLIPPAGE_PCT
+
 # A market order crosses the spread; a resting limit does not.
 MARKET_ORDER_SPREAD_MULTIPLIER = 1.0
 LIMIT_ORDER_SPREAD_MULTIPLIER = 0.0
@@ -68,6 +106,8 @@ def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
         return float(quoted_spread_pct), "quoted"
     if illiquid:
         return DEFAULT_ILLIQUID_SPREAD_PCT, "default_illiquid"
+    if is_fx_symbol(symbol):
+        return DEFAULT_FX_SPREAD_PCT, "default_fx"
 
     if is_crypto_symbol(symbol):
         # 1. The live book, if the stream has it. This is the current
@@ -105,6 +145,8 @@ def fee_pct(symbol: str, maker: bool = False, venue: str | None = None,
     back to the module constants when the venue registry is unavailable, so a
     missing import can never make a trade look free.
     """
+    if is_fx_symbol(symbol):
+        return FX_FEE_PCT
     if not is_crypto_symbol(symbol):
         return EQUITY_FEE_PCT
     # A LEVERAGED position is a perpetual, and perpetuals are priced on a
@@ -258,7 +300,7 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         per_side_fee = fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged)
         fee_cost_pct = per_side_fee * 2.0          # in and out
 
-    slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else float(slippage_pct)
+    slip = default_slippage_pct(symbol) if slippage_pct is None else float(slippage_pct)
     slip_cost_pct = abs(slip) * 2.0            # both sides
 
     fund_pct, fund_src = funding_cost_pct(symbol, hold_hours, funding_rate_8h, is_short)
@@ -283,7 +325,9 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         "fee_venue": (venue or __import__("lib.venues", fromlist=["DEFAULT_VENUE"]).DEFAULT_VENUE)
                      if is_crypto_symbol(symbol) else "equity",
         "slippage_pct": round(slip_cost_pct, 6),
-        "slippage_source": "measured" if slippage_pct is not None else "default_from_measured_median",
+        "slippage_source": ("measured" if slippage_pct is not None
+                            else ("default_fx" if is_fx_symbol(symbol)
+                                  else "default_from_measured_median")),
         "funding_pct": round(fund_pct, 6),
         "funding_source": fund_src,
         "borrow_pct": round(borrow_pct, 6),
@@ -356,7 +400,7 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
     spread_pct, _ = estimate_spread_pct(symbol, quoted_spread_pct, illiquid, venue)
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
-    slip = DEFAULT_SLIPPAGE_PCT if slippage_pct is None else abs(float(slippage_pct))
+    slip = default_slippage_pct(symbol) if slippage_pct is None else abs(float(slippage_pct))
     total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged) * 2.0 + slip * 2.0
     if max_cost_r <= 0:
         return float("inf")

@@ -33,6 +33,13 @@ DEFAULT_SOL_SHOCKS = (0.0, 5.0, 10.0, 15.0, 20.0, 30.0)
 DEFAULT_DEPEG_SHOCKS = (0.0, 1.0, 2.0, 5.0, 10.0)
 DEFAULT_HORIZONS_DAYS = (0, 1, 7, 30, 90)
 
+# The stable axis is SIGNED, unlike the other two. A borrowed dollar asset
+# trading BELOW par is a windfall for the borrower and ABOVE par is a
+# squeeze, and both happen — USDC traded to 0.878 in March 2023 and USDT
+# has repeatedly traded above 1.00 in risk-off flight. A one-sided ladder
+# would only ever show the half that flatters the book.
+DEFAULT_STABLE_DEPEG_SHOCKS = (-2.0, -1.0, 0.0, 1.0, 2.0, 5.0)
+
 
 class LSTStressProfile:
     """Basis-risk assumptions for ONE liquid staking token.
@@ -143,15 +150,50 @@ def _grow(annual_pct: float, days: int) -> float:
     return (1.0 + annual_pct / 100.0) ** (days / 365.0)
 
 
+def takes_stable_depeg(leg: dict | str | None) -> bool:
+    """True when this leg is a USD-pegged asset whose price is NOT an axiom.
+
+    Identity by MINT first, for the same reason `is_lst` does it: a ticker
+    can collide, a mint cannot.
+    """
+    from lib.pegged_assets import lookup
+    mint = _mint_of(leg) if isinstance(leg, dict) else None
+    sym = leg.get("symbol") if isinstance(leg, dict) else leg
+    a = lookup(sym, mint=mint)
+    return bool(a and a.is_usd_pegged)
+
+
 def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
-                   depeg_shock_pct: float = 0.0,
+                   depeg_shock_pct: float = 0.0, stable_depeg_pct: float = 0.0,
                    carry: dict | None = None) -> dict | None:
-    """Health factor under one (time, SOL shock, depeg) combination.
+    """Health factor under one (time, SOL shock, LST depeg, stable depeg).
 
     Each collateral leg is repriced with the terms that actually apply to
     it: a plain SOL deposit takes the SOL shock only, an LST takes the SOL
     shock AND the depeg, and an unrelated asset takes neither. Its own
     reserve liquidation threshold is applied — never a family average.
+
+    THE DEBT SIDE IS ALSO A PRICE. Until `stable_depeg_pct` existed, debt
+    was summed at face value and grown only by interest — i.e. borrowed
+    USDC was modelled as debt that stays exactly $1.00 forever. That makes
+    the worst realistic case inexpressible, because the dangerous scenario
+    is not collateral falling OR the debt repricing, it is both at once:
+
+        SOL -20%, bSOL/SOL -3%, USDC/USD -1%   collateral down, debt cheaper
+        SOL -20%, bSOL/SOL -3%, USDC/USD +2%   collateral down, debt DEARER
+
+    For a bSOL-collateralised USDC borrower the second pulls liquidation
+    substantially forward, and the two were previously the same number.
+
+    Sign convention: POSITIVE `stable_depeg_pct` means the pegged asset
+    trades ABOVE par — adverse for a borrower, favourable for a holder. It
+    is applied to BOTH sides, so a stable-collateral/stable-debt position
+    correctly nets out rather than being shocked in one direction only.
+
+    Only USD-pegged par-tracking assets take it. PAXG and XAUT are pegged
+    to GOLD and are deliberately excluded — their USD move is a commodity
+    move, not a depeg, and folding them in here would silently understate
+    a gold position's real risk.
     """
     assets = position.get("assets") or {}
     deposits = assets.get("deposits") or []
@@ -161,6 +203,7 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
 
     sol_factor = 1.0 - (sol_shock_pct / 100.0)
     depeg_factor = 1.0 - (depeg_shock_pct / 100.0)
+    stable_factor = 1.0 + (stable_depeg_pct / 100.0)
     carry = carry or {}
     col_growth = _grow(float(carry.get("collateral_growth_apy_pct") or 0.0), days)
     debt_growth = _grow(float(carry.get("debt_growth_apy_pct") or 0.0), days)
@@ -178,6 +221,9 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
             f *= sol_factor
             if is_lst(d):
                 f *= depeg_factor
+        stable_leg = takes_stable_depeg(d)
+        if stable_leg:
+            f *= stable_factor
         shocked = value * f * col_growth
         raw_collateral += shocked
         # THE protocol parameter, per reserve, never averaged.
@@ -188,9 +234,20 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
                      "mint": _mint_of(d),
                      "identified_by": "mint" if _mint_of(d) else "symbol (no mint on leg)",
                      "took_sol_shock": is_sol_derived(d),
-                     "took_depeg": is_lst(d)})
+                     "took_depeg": is_lst(d),
+                     "took_stable_depeg": stable_leg})
 
-    debt = sum(float(b.get("value_usd") or 0) for b in borrows) * debt_growth
+    debt = 0.0
+    debt_legs = []
+    for b in borrows:
+        value = float(b.get("value_usd") or 0)
+        stable_leg = takes_stable_depeg(b)
+        shocked = value * (stable_factor if stable_leg else 1.0) * debt_growth
+        debt += shocked
+        debt_legs.append({"symbol": b.get("symbol"), "value_usd": round(value, 2),
+                          "shocked_value_usd": round(shocked, 2),
+                          "mint": _mint_of(b),
+                          "took_stable_depeg": stable_leg})
     if debt <= 0:
         return None
     return {
@@ -200,32 +257,69 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
         "debt_value_usd": round(debt, 2),
         "days": days, "sol_shock_pct": sol_shock_pct,
         "depeg_shock_pct": depeg_shock_pct,
+        "stable_depeg_pct": stable_depeg_pct,
         "legs": legs,
+        "debt_legs": debt_legs,
         "liquidatable": (weighted_collateral / debt) <= 1.0,
     }
 
 
 def stress_matrix(position: dict, *, sol_shocks=DEFAULT_SOL_SHOCKS,
                   depeg_shocks=DEFAULT_DEPEG_SHOCKS, days: int = 0,
+                  stable_depeg_pct: float = 0.0,
                   carry: dict | None = None) -> dict:
-    """The SOL-shock x depeg grid at one horizon."""
+    """The SOL-shock x LST-depeg grid at one horizon, on one stable slice."""
     rows = []
     for s in sol_shocks:
         cells = []
         for d in depeg_shocks:
             r = project_health(position, days=days, sol_shock_pct=s,
-                               depeg_shock_pct=d, carry=carry)
+                               depeg_shock_pct=d,
+                               stable_depeg_pct=stable_depeg_pct, carry=carry)
             cells.append({"depeg_pct": d,
                           "health_factor": (r or {}).get("health_factor"),
                           "liquidatable": (r or {}).get("liquidatable")})
         rows.append({"sol_shock_pct": s, "cells": cells})
     return {"days": days, "sol_shocks": list(sol_shocks),
             "depeg_shocks": list(depeg_shocks), "rows": rows,
+            "stable_depeg_pct": stable_depeg_pct,
             "carry_scenario": (carry or {}).get("scenario", "none")}
+
+
+def stable_depeg_sensitivity(position: dict, *, days: int = 0,
+                             sol_shock_pct: float = 0.0,
+                             depeg_shock_pct: float = 0.0,
+                             stable_shocks=DEFAULT_STABLE_DEPEG_SHOCKS,
+                             carry: dict | None = None) -> dict:
+    """How the boundary moves as the DEBT reprices, holding the rest fixed.
+
+    This is the axis that did not exist. It answers the question directly:
+    at this SOL shock, how much does a 1-2% move in the borrowed stable's
+    own price change where liquidation sits?
+    """
+    cells = []
+    for sd in stable_shocks:
+        r = project_health(position, days=days, sol_shock_pct=sol_shock_pct,
+                           depeg_shock_pct=depeg_shock_pct,
+                           stable_depeg_pct=sd, carry=carry)
+        cells.append({
+            "stable_depeg_pct": sd,
+            "health_factor": (r or {}).get("health_factor"),
+            "liquidatable": (r or {}).get("liquidatable"),
+            "debt_value_usd": (r or {}).get("debt_value_usd"),
+            "boundary_sol_pct": liquidation_boundary(
+                position, days=days, depeg_shock_pct=depeg_shock_pct,
+                stable_depeg_pct=sd, carry=carry),
+        })
+    return {"days": days, "sol_shock_pct": sol_shock_pct,
+            "depeg_shock_pct": depeg_shock_pct, "cells": cells,
+            "sign_convention": "positive = stable trades ABOVE par (adverse for a borrower)",
+            "basis": "ASSUMED — see lib/pegged_assets.depeg_profile for the tier defaults"}
 
 
 def liquidation_boundary(position: dict, *, days: int = 0,
                          depeg_shock_pct: float = 0.0,
+                         stable_depeg_pct: float = 0.0,
                          carry: dict | None = None,
                          precision: float = 0.1) -> float | None:
     """The SOL decline that puts this position exactly at health 1.0.
@@ -234,21 +328,23 @@ def liquidation_boundary(position: dict, *, days: int = 0,
     be tracked as it MOVES with time and carry — which is the thing a fixed
     ladder cannot show.
     """
-    base = project_health(position, days=days, sol_shock_pct=0.0,
-                          depeg_shock_pct=depeg_shock_pct, carry=carry)
+    def at(sol):
+        return project_health(position, days=days, sol_shock_pct=sol,
+                              depeg_shock_pct=depeg_shock_pct,
+                              stable_depeg_pct=stable_depeg_pct, carry=carry)
+
+    base = at(0.0)
     if not base:
         return None
     if base["liquidatable"]:
         return 0.0
     lo, hi = 0.0, 99.0
-    worst = project_health(position, days=days, sol_shock_pct=hi,
-                           depeg_shock_pct=depeg_shock_pct, carry=carry)
+    worst = at(hi)
     if not worst or not worst["liquidatable"]:
         return None                       # survives even a 99% decline
     while hi - lo > precision:
         mid = (lo + hi) / 2.0
-        r = project_health(position, days=days, sol_shock_pct=mid,
-                           depeg_shock_pct=depeg_shock_pct, carry=carry)
+        r = at(mid)
         if r and r["liquidatable"]:
             hi = mid
         else:

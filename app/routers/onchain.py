@@ -108,8 +108,21 @@ def token_surge(limit: int = 20):
     # never had anything to be rigorous about. scan_and_score persists each
     # observation and scores against the token's own stored history, and
     # wallet discovery reads the same result.
-    result = scan_and_score(limit=max(1, min(limit, 100)))
-    return {"enabled": enabled(), **result}
+    # READ-ONLY. This route used to run the pass with persistence ON, so a
+    # dashboard refresh wrote a TokenActivitySnapshot, advanced the baseline
+    # and updated surge state. The operator's refresh rate then became an
+    # input to the model: leaving the tab open on a 10-second poll would
+    # manufacture a dense baseline, and closing it would starve one. How
+    # often someone LOOKS at a detector must never change what it measures.
+    #
+    # Ingestion is owned by the scheduled `token_surge` sampler, on a fixed
+    # cadence. Scoring here is identical — only the storage is skipped — and
+    # baseline_quality still reports honestly because history is read either
+    # way.
+    result = scan_and_score(limit=max(1, min(limit, 100)), persist=False)
+    return {"enabled": enabled(), "read_only": True,
+            "ingestion": "scheduled sampler owns snapshots and surge state",
+            **result}
 
 
 # ── Virtual DEX book ─────────────────────────────────────────────────────

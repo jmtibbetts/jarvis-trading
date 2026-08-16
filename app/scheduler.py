@@ -6,7 +6,7 @@ APScheduler-based job scheduler v2.1
 - News sentiment per-symbol scoring fed into position manager
 - Signal generation is aware of current positions (no duplicate buys, adds to winners)
 """
-import logging, threading
+import logging, os, threading
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -72,6 +72,9 @@ job_status = {
     'brief_push': {'status': 'idle', 'last': None, 'error': None},
     'onchain': {'status': 'idle', 'last': None, 'error': None},
     'wallet_activity': {'status': 'idle', 'last': None, 'error': None},
+    # The only writer of surge snapshots and state. Its lag is a real
+    # health signal: a stalled sampler starves every baseline downstream.
+    'token_surge': {'status': 'idle', 'last': None, 'error': None},
     'wallet_lifecycle': {'status': 'idle', 'last': None, 'error': None},
     'wallet_alpha': {'status': 'idle', 'last': None, 'error': None},
 }
@@ -640,6 +643,28 @@ def create_scheduler() -> BackgroundScheduler:
     # 20 minutes because that is roughly the useful life of the signal: a
     # surge worth investigating is hours old at most, and each pass costs
     # 2 GeckoTerminal calls plus 2 Helius RPC calls per token.
+    # THE surge sampler — cheap, frequent, and the ONLY writer of
+    # TokenActivitySnapshot / TokenSurgeState.
+    #
+    # Two problems it fixes. The GET route used to persist, so the
+    # operator's refresh rate was an input to the model. And the only other
+    # writer was wallet_discovery at 20-minute intervals — far too sparse to
+    # baseline a detector whose inputs include 5-minute volume, transactions
+    # and unique wallets. Three samples an hour cannot describe a
+    # five-minute acceleration.
+    #
+    # GeckoTerminal only, no Helius: this tier must stay cheap enough to run
+    # often, which is what makes the expensive Helius escalation selective.
+    def token_surge_run():
+        from lib.token_surge import scan_and_score
+        return scan_and_score(limit=100, persist=True)
+    _surge_secs = max(30, min(int(os.getenv("TOKEN_SURGE_SCAN_INTERVAL_SECONDS",
+                                            "120") or 120), 3600))
+    sched.add_job(make_job_runner('token_surge', token_surge_run),
+                  'interval', seconds=_surge_secs, id='token_surge',
+                  next_run_time=now + timedelta(seconds=30),
+                  replace_existing=True, max_instances=1, coalesce=True)
+
     def wallet_discovery_run():
         from lib.wallet_discovery import discover_from_tokens
         return discover_from_tokens(max_tokens=5)

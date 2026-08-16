@@ -6,7 +6,7 @@ import os, uuid, json
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import (create_engine, Column, String, Float, Boolean, Text, Integer,
-                        UniqueConstraint, event, text)
+                        Index, UniqueConstraint, event, text)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from contextlib import contextmanager
 
@@ -933,6 +933,88 @@ class WalletTrade(Base):
 
     population = Column(String, default="WALLET_ALPHA")
     created_at = Column(String, default=now_iso)
+
+
+class WalletObservation(Base):
+    """One sighting of one wallet entering one token. APPEND-ONLY.
+
+    The registry holds ONE row per wallet — its identity. This holds MANY
+    rows per wallet — its evidence. Discovery used to see an existing
+    registry row and immediately `continue`, throwing away the sighting.
+    If wallet A appears before ten independent token surges, that recurrence
+    is among the most valuable evidence in the system, and it was being
+    discarded because the wallet was already "known".
+
+    It also carries POST-ENTRY MARKET ALPHA, which is a different question
+    from whether the wallet traded well:
+
+        realized return   did the WALLET make money?
+        post-entry alpha  what did the TOKEN do after the wallet entered?
+
+    A wallet can buy at $10, watch the token run to $15 within the hour,
+    hold too long and exit at $9. Its realized return is negative and its
+    1h post-entry alpha is strongly positive — a follower who copied the
+    entry and took the hour would have done well. Those two numbers must
+    never be collapsed, which is exactly what the old `alpha_score` did.
+
+    Horizons are resolved independently and late: `return_1h` is filled an
+    hour after the entry, `return_24h` a day after. A NULL horizon means
+    not-yet-resolved, never zero.
+    """
+    __tablename__ = "wallet_observations"
+
+    id = Column(String, primary_key=True, default=new_id)
+
+    wallet_address = Column(String, index=True, nullable=False)
+    mint           = Column(String, index=True, nullable=False)
+    pool           = Column(String)
+    token_symbol   = Column(String)
+
+    # Where this sighting came from, and what it was near.
+    discovery_source = Column(String)      # token_holders | pool_traders | ...
+    surge_event_id   = Column(String, index=True)
+    surge_started_at = Column(String)
+    # NEGATIVE means the wallet was EARLY — it entered before the surge
+    # crossed its threshold, which is the population worth finding.
+    seconds_before_surge = Column(Float)
+
+    signature      = Column(String, index=True)
+    entry_timestamp = Column(String, index=True)
+    entry_amount   = Column(Float)
+    entry_notional_usd = Column(Float)
+    entry_price_usd = Column(Float)
+
+    # Forward prices, resolved as each horizon elapses. NULL = pending.
+    price_5m  = Column(Float)
+    price_15m = Column(Float)
+    price_1h  = Column(Float)
+    price_4h  = Column(Float)
+    price_24h = Column(Float)
+
+    return_5m  = Column(Float)
+    return_15m = Column(Float)
+    return_1h  = Column(Float)
+    return_4h  = Column(Float)
+    return_24h = Column(Float)
+
+    # Which horizons have actually been resolved, so a pending observation
+    # is never mistaken for a flat one.
+    horizons_resolved = Column(String, default="")
+    fully_resolved    = Column(Integer, default=0, index=True)
+
+    price_source  = Column(String)
+    price_quality = Column(String)
+
+    observed_at = Column(String, default=now_iso, index=True)
+    updated_at  = Column(String, default=now_iso, onupdate=now_iso)
+
+    __table_args__ = (
+        # One observation per wallet per entry. A re-scan of the same
+        # signature is the same sighting, not new evidence.
+        UniqueConstraint("wallet_address", "signature", "mint",
+                         name="uq_wallet_observation"),
+        Index("ix_obs_wallet_time", "wallet_address", "entry_timestamp"),
+    )
 
 
 class WalletRelationship(Base):

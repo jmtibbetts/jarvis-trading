@@ -150,6 +150,40 @@ def surge_metrics(attrs: dict) -> dict:
     }
 
 
+# Every field name a discovery source has ever used for "when this
+# actually happened on chain". Sources normalize INTO `event_timestamp`;
+# the rest are accepted here so a source that has not been migrated yet
+# degrades to the right answer instead of to silence.
+_TIMESTAMP_FIELDS = ("event_timestamp", "block_time", "blockTime",
+                     "timestamp", "ts")
+
+
+def _event_timestamp(row: dict):
+    """The real on-chain time of a sighting, or None.
+
+    Deliberately returns None rather than a default. The bug this replaces
+    was a lookup for `timestamp` against rows that carried `block_time`:
+    the read missed every time, fell through to `surge_started_at`, and
+    stamped every discovered wallet as entering at the exact moment the
+    surge began. A wallet that bought twelve minutes early was recorded
+    with seconds_before_surge = 0 — so the one question this pipeline
+    exists to answer, "who was early?", could only ever answer "nobody".
+    """
+    for f in _TIMESTAMP_FIELDS:
+        v = row.get(f)
+        if v in (None, "", 0):
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            try:                       # ISO strings from non-RPC sources
+                from datetime import datetime
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
     """Append one sighting of `owner` near `tok`. Returns 1 if new.
 
@@ -159,7 +193,7 @@ def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
     """
     from lib.wallet_alpha import record_observation
 
-    try:
+    try:  # noqa: SIM105 — the observation write must never break a pass
         _, created = record_observation(
             session,
             wallet_address=owner,
@@ -173,7 +207,13 @@ def _observe(session, owner: str, tok: dict, source: str, row: dict) -> int:
             # observation per wallet per mint per surge, not per scan.
             signature=(row.get("signature")
                        or f"holders:{tok.get('surge_started_at') or 'nosurge'}"),
-            entry_timestamp=row.get("timestamp") or tok.get("surge_started_at"),
+            # NO FALLBACK TO surge_started_at. A missing transaction time is
+            # unknown, and substituting T0 does not fill the gap — it
+            # asserts the wallet entered at the exact moment the surge
+            # began, which is the one claim that makes an early buyer look
+            # like a latecomer. `entry_timestamp=None` is honest and the
+            # alpha engine already refuses observations it cannot time.
+            entry_timestamp=_event_timestamp(row),
             entry_amount=row.get("amount"),
             discovery_source=source,
             surge_started_at=tok.get("surge_started_at"),
@@ -327,6 +367,16 @@ def traders_of_pool(pool_address: str, signatures: int = 30,
                 continue
             seen.add(addr)
             out.append({"owner": addr, "signature": sig,
+                        # ONE canonical timestamp name across every
+                        # discovery source. This row used to carry
+                        # `block_time` while observation creation read
+                        # `timestamp`, so the read silently missed and fell
+                        # through to surge_started_at — recording every
+                        # pre-surge buyer as having entered exactly at T0
+                        # with seconds_before_surge = 0. The whole point of
+                        # this path is finding who was EARLY, and it was
+                        # reporting that nobody ever was.
+                        "event_timestamp": tx.get("blockTime"),
                         "block_time": tx.get("blockTime"),
                         "slot": tx.get("slot")})
     return out

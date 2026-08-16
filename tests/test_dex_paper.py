@@ -80,7 +80,17 @@ class ConstantProductMathTests(unittest.TestCase):
         cl = quote_swap(1000, 500_000, fee_bps=25, concentrated=True)
         self.assertFalse(cp["concentrated"])
         self.assertTrue(cl["concentrated"])
-        self.assertIn("ROUGH", cl["depth_model"])
+        # `depth_model` is now the model NAME and `depth_confidence` states
+        # how much to trust it — a concentrated pool's local depth around
+        # the current tick may be nothing like half the total, in either
+        # direction, so it is MODELLED_ESTIMATE rather than a measurement.
+        self.assertEqual(cl["depth_model"], "CONCENTRATED_LIQUIDITY")
+        self.assertEqual(cl["depth_confidence"], "MODELLED_ESTIMATE")
+        self.assertIn("ROUGH", cl["provenance"])
+        # Even the constant-product path declares that "half of total" is
+        # an ASSUMPTION about pool balance, not something it measured.
+        self.assertEqual(cp["depth_model"], "CONSTANT_PRODUCT_AMM")
+        self.assertEqual(cp["depth_confidence"], "ASSUMED_BALANCED_POOL")
 
 
 class DexBookRulesTests(unittest.TestCase):

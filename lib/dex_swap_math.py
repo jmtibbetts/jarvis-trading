@@ -87,6 +87,67 @@ def pool_fee_bps(dex: str | None) -> int:
     return DEFAULT_FEE_BPS
 
 
+def quote_swap_native(amount_in: float, reserve_in: float, reserve_out: float,
+                      *, dex: str | None = None, fee_bps: int | None = None,
+                      priority_lamports: int = DEFAULT_PRIORITY_LAMPORTS,
+                      sol_price_usd: float = 0.0) -> dict:
+    """x*y=k in NATIVE TOKEN UNITS, from the pool's actual reserves.
+
+    Preferred over the USD form whenever real reserves are available. The
+    USD path has to assume the pool is balanced — half the reported total
+    on each side — and a pool that is not balanced prices very differently
+    from one that is. With both reserves known, no assumption is needed:
+    the curve is evaluated on the numbers the chain reports.
+
+    Returns tokens out, so nothing downstream has to divide by a mid price
+    to recover a quantity the AMM already determined exactly.
+    """
+    amount_in = float(amount_in or 0)
+    reserve_in = float(reserve_in or 0)
+    reserve_out = float(reserve_out or 0)
+    if amount_in <= 0:
+        return {"ok": False, "reason": "amount must be positive"}
+    if reserve_in <= 0 or reserve_out <= 0:
+        return {"ok": False, "reason": "pool reserves unavailable on one side"}
+
+    bps = fee_bps if fee_bps is not None else pool_fee_bps(dex)
+    fee_rate = bps / 10_000.0
+
+    fee_in = amount_in * fee_rate
+    a_eff = amount_in - fee_in
+
+    # Exact constant product: out = (a * Y) / (X + a)
+    tokens_out = (a_eff * reserve_out) / (reserve_in + a_eff)
+
+    spot_price = reserve_out / reserve_in           # out per in, before impact
+    ideal_out = a_eff * spot_price
+    impact_tokens = ideal_out - tokens_out
+    impact_pct = (impact_tokens / ideal_out * 100.0) if ideal_out else 0.0
+
+    lamports = BASE_FEE_LAMPORTS + max(0, int(priority_lamports))
+    network_fee_sol = lamports / LAMPORTS_PER_SOL
+
+    return {
+        "ok": True,
+        "amount_in": amount_in,
+        "tokens_out": tokens_out,
+        "effective_price": (amount_in / tokens_out) if tokens_out else None,
+        "spot_price": spot_price,
+        "pool_fee_tokens_in": fee_in,
+        "price_impact_tokens": impact_tokens,
+        "price_impact_pct": round(impact_pct, 4),
+        "reserve_in": reserve_in, "reserve_out": reserve_out,
+        # Gas leaves the SOL balance; it does not shrink tokens_out.
+        "network_fee_sol": round(network_fee_sol, 9),
+        "network_fee_usd": round(network_fee_sol * float(sol_price_usd or 0), 6),
+        "gas_paid_separately": True,
+        "fee_bps": bps,
+        "depth_model": "CONSTANT_PRODUCT_AMM",
+        "depth_confidence": "VERIFIED",
+        "provenance": "native reserves — no balanced-pool assumption",
+    }
+
+
 def quote_swap(amount_usd: float, reserve_usd: float, *,
                dex: str | None = None, fee_bps: int | None = None,
                priority_lamports: int = DEFAULT_PRIORITY_LAMPORTS,
@@ -123,7 +184,21 @@ def quote_swap(amount_usd: float, reserve_usd: float, *,
     network_fee_usd = (lamports / LAMPORTS_PER_SOL) * float(sol_price_usd or 0)
 
     total_cost_usd = pool_fee_usd + impact_usd + network_fee_usd
-    received_usd = out_usd - network_fee_usd
+    # THE POOL OUTPUT IS NOT REDUCED BY GAS.
+    #
+    # This used to return `out_usd - network_fee_usd`, which models a chain
+    # where the AMM hands you fewer tokens because the validator was paid.
+    # That is not what happens: the pool gives you exactly what the curve
+    # says, and the network fee is debited SEPARATELY from the wallet's SOL
+    # balance.
+    #
+    # It matters beyond bookkeeping. Netting gas out of the output hides
+    # the one failure this simulator should teach — a wallet with tokens
+    # but no SOL cannot transact at all — and it silently scales the fee
+    # with trade size when a Solana fee is flat.
+    received_usd = out_usd
+    # Charged against the gas balance, not the position.
+    network_fee_sol = lamports / LAMPORTS_PER_SOL
 
     impact_pct = impact * 100.0
     severity = ("severe" if impact_pct >= IMPACT_SEVERE_PCT
@@ -138,6 +213,11 @@ def quote_swap(amount_usd: float, reserve_usd: float, *,
         "pool_fee_usd": round(pool_fee_usd, 6),
         "price_impact_usd": round(impact_usd, 6),
         "network_fee_usd": round(network_fee_usd, 6),
+        # Paid in SOL from the wallet, NEVER deducted from the pool output.
+        # A wallet holding tokens but no SOL cannot transact, and that is a
+        # real training signal rather than a rounding detail.
+        "network_fee_sol": round(network_fee_sol, 9),
+        "gas_paid_separately": True,
         "total_cost_usd": round(total_cost_usd, 6),
         "total_cost_pct": round(100.0 * total_cost_usd / amount_usd, 4),
         "price_impact_pct": round(impact_pct, 4),
@@ -145,10 +225,20 @@ def quote_swap(amount_usd: float, reserve_usd: float, *,
         "priority_lamports": lamports,
         "impact_severity": severity,
         # Provenance for the estimate, carried with it.
-        "depth_model": ("concentrated liquidity — half-of-total-reserve is a "
-                        "ROUGH proxy and the error direction is unknown"
-                        if concentrated else
-                        "constant product, half of total reserve per side"),
+        "depth_model": ("CONCENTRATED_LIQUIDITY" if concentrated
+                        else "CONSTANT_PRODUCT_AMM"),
+        # Half-of-total is an ASSUMPTION that the pool is balanced. Say so,
+        # rather than presenting a modelled depth as a measured one — and
+        # for a concentrated pool the local depth around the current tick
+        # may be nothing like half the total, in either direction.
+        "depth_confidence": ("MODELLED_ESTIMATE" if concentrated
+                             else "ASSUMED_BALANCED_POOL"),
+        "provenance": ("concentrated liquidity — half-of-total-reserve is a "
+                       "ROUGH proxy and the error direction is unknown; "
+                       "prefer quote_swap_native with real reserves"
+                       if concentrated else
+                       "constant product, ASSUMING half of total reserve per "
+                       "side; prefer quote_swap_native when reserves are known"),
         "concentrated": bool(concentrated),
     }
 

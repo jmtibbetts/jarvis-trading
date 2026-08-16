@@ -712,6 +712,10 @@ def record_trade_outcome(
     ta_summary: str = None,
     market_regime: str = None,
     entered_at: str = None,
+    # The canonical outcome from lib/realized_outcome, computed once by the
+    # engine that executed the trade. When present, learning records it
+    # verbatim and derives nothing. Everything below it is the legacy path.
+    realized=None,
     paper_mode: bool = False,
 ):
     _lazy_ensure()
@@ -719,14 +723,55 @@ def record_trade_outcome(
     from sqlalchemy import text
 
     try:
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price else 0.0
-        if direction and direction.upper() in ("SELL", "SHORT", "SELL_SHORT"):
-            pnl_pct = -pnl_pct
-        pnl_usd = pnl_pct / 100.0 * entry_price * (qty or 0)
+        # THE EXCHANGE DECIDES, LEARNING RECORDS. `realized` is the
+        # canonical outcome computed once by whoever executed the trade.
+        # When it is supplied, nothing here recomputes anything.
+        #
+        # The arithmetic this replaced was wrong twice:
+        #
+        #   direction.upper() in ("SELL", "SHORT", "SELL_SHORT")
+        #
+        # "Short_10x" is not in that tuple, nor is "Short_5x",
+        # "Short_Leveraged" or "Bearish" — so every leveraged short kept a
+        # LONG sign and a winning short was recorded as a loss. And:
+        #
+        #   pnl_usd = pnl_pct / 100 * entry_price * qty
+        #
+        # had no multiplier, so one MES contract moving 10 points booked
+        # $10 instead of $50 and futures looked like a low-impact asset
+        # class.
+        if realized is not None:
+            pnl_usd = float(getattr(realized, "net_pnl_usd", 0.0))
+            pnl_pct = float(getattr(realized, "net_r", 0.0) or 0.0) * 100.0
+            if not pnl_pct and entry_price:
+                notional = abs(float(entry_price) * float(qty or 0)
+                               * float(getattr(realized, "multiplier", 1.0) or 1.0))
+                pnl_pct = (pnl_usd / notional * 100.0) if notional else 0.0
+            outcome = getattr(realized, "outcome", "BREAKEVEN")
+        else:
+            # LEGACY CALLERS ONLY. Same shape as before, but strict on side
+            # and instrument-aware on size, so a caller that has not
+            # migrated yet is at least not recording the inverse.
+            from lib.instruments import resolve
+            from lib.trade_side import SHORT, parse_side_strict
 
-        if pnl_pct > 0.1:   outcome = "WIN"
-        elif pnl_pct < -0.1: outcome = "LOSS"
-        else:                 outcome = "BREAKEVEN"
+            side = parse_side_strict(direction)
+            if side is None:
+                logger.warning(
+                    f"[Learning] refusing outcome for {symbol}: direction "
+                    f"{direction!r} is unreadable — recording it as a long "
+                    f"would teach the opposite of what happened")
+                return None
+            mult = float(resolve(symbol).multiplier or 1.0)
+            sign = -1 if side == SHORT else 1
+
+            pnl_pct = (((exit_price - entry_price) / entry_price) * 100 * sign
+                       if entry_price else 0.0)
+            pnl_usd = (float(exit_price) - float(entry_price)) * float(qty or 0) * mult * sign
+
+            if pnl_pct > 0.1:   outcome = "WIN"
+            elif pnl_pct < -0.1: outcome = "LOSS"
+            else:                 outcome = "BREAKEVEN"
 
         hold_duration_m = None
         if entered_at:

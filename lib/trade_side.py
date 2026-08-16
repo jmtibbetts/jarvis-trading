@@ -47,9 +47,17 @@ def parse_side_strict(direction: str | None) -> str | None:
     d = str(direction or "").strip().lower().replace("-", "_").replace(" ", "_")
     if not d:
         return None
-    if any(m in d for m in _SHORT_MARKERS):
+    has_short = any(m in d for m in _SHORT_MARKERS)
+    has_long = any(m in d for m in _LONG_MARKERS)
+    # BOTH markers is ambiguous, not short. Checking short first and
+    # returning on the first hit silently resolved "longshort" — and any
+    # future phrasing that mentions both sides — to SHORT. An input that
+    # names two sides has not stated one.
+    if has_short and has_long:
+        return None
+    if has_short:
         return SHORT
-    if any(m in d for m in _LONG_MARKERS):
+    if has_long:
         return LONG
     return None
 
@@ -85,7 +93,15 @@ def leverage_from_direction(direction: str | None) -> float | None:
 
 def validate_levels(direction: str | None, entry: float, stop: float,
                     target: float) -> tuple[bool, str | None]:
-    """(ok, reason). Checks the LAYOUT for the stated side — never repairs it."""
+    """(ok, reason). Checks the LAYOUT for the stated side — never repairs it.
+
+    STRICT on direction. This used to call the permissive `is_short()`,
+    which turns any unrecognised string into a LONG — so a validator whose
+    entire job is to refuse malformed input would happily validate
+    `direction="Aggressive_Moon_Mode"` against long-side geometry and pass
+    it. A validation function must not contain the repair it exists to
+    prevent.
+    """
     try:
         entry, stop, target = float(entry or 0), float(stop or 0), float(target or 0)
     except (TypeError, ValueError):
@@ -93,7 +109,12 @@ def validate_levels(direction: str | None, entry: float, stop: float,
     if entry <= 0 or stop <= 0 or target <= 0:
         return False, "missing or non-positive price level"
 
-    if is_short(direction):
+    side = parse_side_strict(direction)
+    if side is None:
+        return False, (f"unparseable direction {direction!r} — a side cannot be "
+                       f"assumed, and an unknown one must never buy")
+
+    if side == SHORT:
         if stop <= entry:
             return False, f"short stop {stop:g} must sit ABOVE entry {entry:g}"
         if target >= entry:
@@ -129,7 +150,15 @@ def loss_at_stop(qty: float, entry: float, stop: float) -> float:
 
 
 def stop_side_ok(direction: str | None, entry: float, stop: float) -> bool:
-    """Cheap layout check used by callers that only hold a stop."""
-    if is_short(direction):
+    """Cheap layout check used by callers that only hold a stop.
+
+    STRICT, for the same reason `validate_levels` is: an unknown direction
+    has no correct stop side, so the honest answer is False rather than
+    "assume long and check against that".
+    """
+    side = parse_side_strict(direction)
+    if side is None:
+        return False
+    if side == SHORT:
         return float(stop) > float(entry)
     return float(stop) < float(entry)

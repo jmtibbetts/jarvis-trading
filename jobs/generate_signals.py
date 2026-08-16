@@ -184,7 +184,19 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
     s["asset_symbol"] = sym
     s["asset_name"] = s.get("asset_name") or sym
 
-    direction = (s.get("direction") or "Long").replace(" ", "_").replace("-", "_")
+    # STRICT. An unparseable direction produces NO SIGNAL — it is never
+    # repaired into a Long. If the model returns "Aggressive_Moon_Mode" the
+    # honest outcome is INVALID_DIRECTION and a dropped candidate; the model
+    # can be retried, but its semantic intent must never be silently
+    # changed on the way through.
+    from lib.trade_side import SHORT, parse_side_strict
+    raw_direction = s.get("direction")
+    if parse_side_strict(raw_direction) is None:
+        logger.warning(
+            f"[Signals] {sym}: dropping candidate — unparseable direction "
+            f"{raw_direction!r}")
+        return None
+    direction = str(raw_direction).replace(" ", "_").replace("-", "_")
 
     if is_paper:
         dir_map = {
@@ -212,13 +224,34 @@ def normalize_signal(s, ta_profiles, asset_map, is_paper=False):
         }
         direction = dir_map.get(direction, dir_map.get(direction.capitalize(), direction))
         if direction not in PAPER_DIRECTIONS:
-            direction = "Long"
+            # Was `direction = "Long"`. A direction the map does not know is
+            # not a long — it is an unsupported instruction, and guessing
+            # picks a side the model never asked for.
+            logger.warning(
+                f"[Signals] {sym}: dropping candidate — {direction!r} is not a "
+                f"supported paper direction")
+            return None
         s["direction"] = direction
         s["paper_mode"] = True
         s["paper_direction"] = direction
     else:
+        # The live path is long-only. It used to rewrite ANY other direction
+        # to "Long" — including an explicit "Short", which does not default a
+        # missing value, it INVERTS a stated one: the model says sell, the
+        # desk buys. A short on a long-only path is routed to paper, and
+        # anything else is dropped.
         d_cap = direction.capitalize()
-        s["direction"] = "Long" if d_cap not in ("Bounce", "Long") else d_cap
+        if d_cap in ("Bounce", "Long"):
+            s["direction"] = d_cap
+        elif parse_side_strict(direction) == SHORT and direction in PAPER_DIRECTIONS:
+            s["direction"] = direction
+            s["paper_mode"] = True
+            s["paper_direction"] = direction
+        else:
+            logger.warning(
+                f"[Signals] {sym}: dropping candidate — {direction!r} is not "
+                f"executable on the long-only live path")
+            return None
 
     ta = ta_profiles.get(sym, {})
     entry = float(s.get("entry_price") or 0)

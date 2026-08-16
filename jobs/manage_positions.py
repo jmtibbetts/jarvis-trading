@@ -141,7 +141,13 @@ def _exit_levels_are_sane(reference_price: float, side: str, stop_price: float,
                           target_price: float, is_crypto: bool = False) -> bool:
     if reference_price <= 0 or stop_price <= 0 or target_price <= 0:
         return False
-    is_short = "short" in str(side or "").lower()
+    # STRICT: an unreadable side has no correct stop/target layout, so the
+    # coherence check must fail rather than assume long geometry.
+    from lib.trade_side import SHORT, parse_side_strict
+    parsed = parse_side_strict(side)
+    if parsed is None:
+        return False
+    is_short = parsed == SHORT
     directional = (
         target_price < reference_price < stop_price if is_short
         else stop_price < reference_price < target_price

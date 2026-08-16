@@ -120,7 +120,13 @@ def signal_matches_preference(signal: dict, preference) -> bool:
         classes, directions = set(), set()
     if classes and signal.get("asset_class") not in classes:
         return False
-    side = "short" if "short" in str(signal.get("direction") or "").lower() else "long"
+    # STRICT: an unreadable side matches no configured direction filter.
+    # Defaulting it to "long" let an unparseable signal satisfy a
+    # long-only account policy.
+    from lib.trade_side import parse_side_strict
+    side = parse_side_strict(signal.get("direction"))
+    if side is None:
+        return False
     return not directions or side in {str(value).lower() for value in directions}
 
 
@@ -136,8 +142,19 @@ def redact_secrets(value):
 
 
 def requires_paper_only(direction: str | None) -> bool:
+    """True for anything the live long-only path must never execute.
+
+    STRICT, and fails CLOSED: a direction that cannot be read — or that
+    names two sides — is paper-only. `"short" in value` answered this
+    question for `LONGSHORT` by seeing "short", which happened to be safe,
+    and for `BUYSELL` by seeing neither, which was not: an ambiguous value
+    would have been routed to LIVE.
+    """
+    from lib.trade_side import SHORT, parse_side_strict
     value = str(direction or "").lower()
-    return "short" in value or "leverag" in value or re.search(r"(?:^|_)\d+x(?:_|$)", value) is not None
+    if parse_side_strict(direction) in (None, SHORT):
+        return True
+    return "leverag" in value or re.search(r"(?:^|_)\d+x(?:_|$)", value) is not None
 
 
 def signals_for_user(db, user_id: str):

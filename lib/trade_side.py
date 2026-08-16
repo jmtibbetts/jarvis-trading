@@ -25,13 +25,127 @@ from __future__ import annotations
 LONG = "long"
 SHORT = "short"
 
-# Directions that mean "short" regardless of decoration (_5x, _Leveraged...).
-_SHORT_MARKERS = ("short", "bear", "put")
+# ── Vocabulary ───────────────────────────────────────────────────────────
+# RECOGNISABLE DIRECTIONAL TEXT IS NOT THE SAME THING AS UNAMBIGUOUS
+# DIRECTIONAL EVIDENCE. That is the whole rule this module enforces.
+#
+# `LONGSHORT` contains "short". `BUYSELL` contains "buy". Substring matching
+# resolves both to a confident side, and the side it picks is decided by
+# which test happens to run first — so reordering the checks changes the
+# answer without changing the input. Ordering cannot fix this; it only
+# changes which wrong answer wins. Conflicting evidence has to be DETECTED
+# and refused.
+#
+# Exact token aliases are the primary mechanism. Substring markers remain
+# as a fallback for decorated forms ("Bearish", "breakout_up") and are
+# scanned for BOTH sides before either is believed.
 
-# Directions that affirmatively mean "long". Strict parsing requires a
-# POSITIVE match on one of these — absence of "short" is not evidence of
-# "long", it is evidence of a malformed direction.
+# Whole-token aliases, matched after splitting on separators.
+_LONG_ALIASES = frozenset({
+    "long", "buy", "bull", "bullish", "call", "bounce", "up", "l",
+})
+_SHORT_ALIASES = frozenset({
+    "short", "sell", "bear", "bearish", "put", "down", "s",
+})
+
+# Substring markers — the fallback for decorated words no token match
+# reaches. "sell" is included here and in the alias set: it was absent
+# from BOTH, so `BUYSELL` and `SELLBUY` resolved to LONG on the strength
+# of "buy" with nothing to contradict it.
+_SHORT_MARKERS = ("short", "bear", "put", "sell")
 _LONG_MARKERS = ("long", "bull", "call", "buy", "bounce", "breakout_up")
+
+# Decorations that are never directional on their own.
+_NOISE_TOKENS = frozenset({
+    "leveraged", "leverage", "x", "2x", "3x", "5x", "10x", "20x", "25x",
+    "50x", "100x", "mode", "entry", "position", "trade", "signal", "",
+})
+
+# Provenance labels, so a caller can tell an explicit alias from a guess
+# and an unknown value from a contradictory one.
+SRC_EXACT = "explicit_alias"
+SRC_TOKEN = "token_alias"
+SRC_SUBSTRING = "substring_marker"
+SRC_AMBIGUOUS = "ambiguous_raw_value"
+SRC_UNRECOGNISED = "unrecognised_raw_value"
+SRC_EMPTY = "empty"
+
+
+def _split_tokens(d: str) -> list[str]:
+    import re
+    return [t for t in re.split(r"[^a-z0-9]+", d) if t]
+
+
+def parse_side_detailed(direction: str | None) -> dict:
+    """Canonical direction parse WITH provenance.
+
+    Returns {"side": LONG|SHORT|None, "source": <SRC_*>, "raw": <input>,
+             "ambiguous": bool, "evidence": [...]}.
+
+    `side is None` means REFUSE. `ambiguous` separates "this value named
+    two sides" from "this value named none" — they need different handling
+    upstream, because the first is a data-quality defect worth surfacing
+    and the second is usually just an empty field.
+    """
+    raw = direction
+    d = str(direction or "").strip().lower()
+    if not d:
+        return {"side": None, "source": SRC_EMPTY, "raw": raw,
+                "ambiguous": False, "evidence": []}
+
+    # 1. Exact whole-value alias — the documented structured values.
+    flat = d.replace("-", "_").replace(" ", "_").replace("/", "_")
+    if flat in _LONG_ALIASES:
+        return {"side": LONG, "source": SRC_EXACT, "raw": raw,
+                "ambiguous": False, "evidence": [flat]}
+    if flat in _SHORT_ALIASES:
+        return {"side": SHORT, "source": SRC_EXACT, "raw": raw,
+                "ambiguous": False, "evidence": [flat]}
+
+    # 2. Token aliases. `buy_maybe` -> {buy, maybe} -> LONG, because "buy"
+    #    is an intentionally supported long alias and "maybe" is not
+    #    directional. `long_short` -> {long, short} -> two sides -> refuse.
+    tokens = _split_tokens(flat)
+    tok_long = sorted({t for t in tokens if t in _LONG_ALIASES})
+    tok_short = sorted({t for t in tokens if t in _SHORT_ALIASES})
+    if tok_long and tok_short:
+        return {"side": None, "source": SRC_AMBIGUOUS, "raw": raw,
+                "ambiguous": True, "evidence": tok_long + tok_short}
+    if tok_long:
+        return {"side": LONG, "source": SRC_TOKEN, "raw": raw,
+                "ambiguous": False, "evidence": tok_long}
+    if tok_short:
+        return {"side": SHORT, "source": SRC_TOKEN, "raw": raw,
+                "ambiguous": False, "evidence": tok_short}
+
+    # 3. Substring fallback for decorated words, scanning BOTH sides before
+    #    believing either. This is where LONGSHORT and BUYSELL are caught:
+    #    they are one token, match no alias, and contain both vocabularies.
+    sub_long = [m for m in _LONG_MARKERS if m in flat]
+    sub_short = [m for m in _SHORT_MARKERS if m in flat]
+    if sub_long and sub_short:
+        return {"side": None, "source": SRC_AMBIGUOUS, "raw": raw,
+                "ambiguous": True, "evidence": sub_long + sub_short}
+    if sub_long:
+        return {"side": LONG, "source": SRC_SUBSTRING, "raw": raw,
+                "ambiguous": False, "evidence": sub_long}
+    if sub_short:
+        return {"side": SHORT, "source": SRC_SUBSTRING, "raw": raw,
+                "ambiguous": False, "evidence": sub_short}
+
+    return {"side": None, "source": SRC_UNRECOGNISED, "raw": raw,
+            "ambiguous": False, "evidence": []}
+
+
+def is_ambiguous_direction(direction: str | None) -> bool:
+    """True when the value named MORE THAN ONE side.
+
+    Distinct from "unknown": these rows must be excluded from P&L
+    reconstruction, win/loss counts, qualified-trade sets, smart-money
+    scoring, alpha entry observations and confluence — and they are worth
+    reporting, because a stream producing them has a real defect upstream.
+    """
+    return parse_side_detailed(direction)["ambiguous"]
 
 
 def parse_side_strict(direction: str | None) -> str | None:
@@ -44,22 +158,7 @@ def parse_side_strict(direction: str | None) -> str | None:
     buys things. Unknown direction on an order is a validation error, not
     a long.
     """
-    d = str(direction or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if not d:
-        return None
-    has_short = any(m in d for m in _SHORT_MARKERS)
-    has_long = any(m in d for m in _LONG_MARKERS)
-    # BOTH markers is ambiguous, not short. Checking short first and
-    # returning on the first hit silently resolved "longshort" — and any
-    # future phrasing that mentions both sides — to SHORT. An input that
-    # names two sides has not stated one.
-    if has_short and has_long:
-        return None
-    if has_short:
-        return SHORT
-    if has_long:
-        return LONG
-    return None
+    return parse_side_detailed(direction)["side"]
 
 
 def normalize_side(direction: str | None) -> str:

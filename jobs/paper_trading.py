@@ -440,8 +440,19 @@ def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data:
     # ~0.15% move and guaranteed the noise-triggered exits above.
     risk_per_unit = hard_loss / qty
     lock_per_unit = PROFIT_LOCK_USD / (qty * leverage) if PROFIT_LOCK_USD else 0
-    direction = str(pos.get("direction") or "Long").lower()
-    is_short = "short" in direction
+    # STRICT. `"short" in direction` with an `or "Long"` default trails an
+    # unreadable direction the wrong way — and a trailing stop moving the
+    # wrong way does not sit unused, it walks INTO the position. A side we
+    # cannot read means we cannot manage this stop, so it is left alone.
+    from lib.trade_side import SHORT, parse_side_detailed
+    side_info = parse_side_detailed(pos.get("direction"))
+    if side_info["side"] is None:
+        logger.warning(
+            f"[Paper] {pos.get('asset_symbol')}: not trailing — direction "
+            f"{side_info['raw']!r} is "
+            f"{'ambiguous' if side_info['ambiguous'] else 'unreadable'}")
+        return None
+    is_short = side_info["side"] == SHORT
     old_stop = float(pos.get("stop_loss") or 0)
     old_target = float(pos.get("target_price") or 0)
 
@@ -484,7 +495,12 @@ def _maybe_scale_out_paper(pos: dict, current_price: float) -> dict | None:
     if entry <= 0 or target <= 0 or qty <= 0:
         return None
 
-    is_short = "short" in str(pos.get("direction") or "").lower()
+    # STRICT: scaling out on the wrong side sells into a losing position.
+    from lib.trade_side import SHORT as _SHORT, parse_side_strict as _pss
+    _side = _pss(pos.get("direction"))
+    if _side is None:
+        return None
+    is_short = _side == _SHORT
     if is_short:
         if target >= entry:
             return None

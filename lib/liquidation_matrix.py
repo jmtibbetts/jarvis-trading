@@ -69,29 +69,71 @@ class LSTStressProfile:
                 "note": self.note}
 
 
+# KEYED BY MINT, not by ticker. "BSOL" is also the Bitwise Solana Staking
+# ETF, a US-listed equity, and JARVIS trades both asset classes — so a
+# symbol-keyed profile would eventually apply liquid-staking depeg
+# assumptions to an ETF share, or miss a real LST because the ticker
+# arrived cased differently. Today "bSOL" and "BSOL" happen not to collide
+# because nothing uppercases, which is luck rather than design. The mint is
+# the authoritative identity, exactly as it is in capital_reserves.
+#
 # Ordered roughly by liquidity depth. Kamino's own liquidation thresholds
 # rank them the same way (mSOL 60%, bSOL 55%), which is corroboration from
 # an independent source rather than agreement by construction.
 LST_PROFILES: dict[str, LSTStressProfile] = {
-    "mSOL": LSTStressProfile("mSOL", 0.3, 1.5, 4.0, 12.0, 3.0,
-                             "deep secondary liquidity; Kamino liq threshold 60%"),
-    "JitoSOL": LSTStressProfile("JitoSOL", 0.3, 1.5, 4.0, 12.0, 3.0,
-                                "largest LST by TVL"),
-    "bSOL": LSTStressProfile("bSOL", 0.5, 2.5, 6.0, 18.0, 5.0,
-                             "thinner liquidity; Kamino liq threshold 55%, "
-                             "the lowest of the SOL family"),
-    "jupSOL": LSTStressProfile("jupSOL", 0.4, 2.0, 5.0, 15.0, 4.0, ""),
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So":
+        LSTStressProfile("mSOL", 0.3, 1.5, 4.0, 12.0, 3.0,
+                         "deep secondary liquidity; Kamino liq threshold 60%"),
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn":
+        LSTStressProfile("JitoSOL", 0.3, 1.5, 4.0, 12.0, 3.0,
+                         "largest LST by TVL"),
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1":
+        LSTStressProfile("bSOL", 0.5, 2.5, 6.0, 18.0, 5.0,
+                         "thinner liquidity; Kamino liq threshold 55%, the "
+                         "lowest of the SOL family. NOTE: ticker collides "
+                         "with the Bitwise Solana Staking ETF — this profile "
+                         "is the MINT, never the ticker"),
 }
 
-SOL_DERIVED = set(LST_PROFILES) | {"SOL", "wSOL"}
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+SOL_DERIVED_MINTS = set(LST_PROFILES) | {WSOL_MINT}
+
+# Display-name fallback ONLY, for positions that arrive without a mint.
+# Never used to select a stress profile.
+_SOL_SYMBOLS = {"SOL", "wSOL", "mSOL", "bSOL", "JitoSOL", "jupSOL"}
 
 
-def is_lst(symbol: str | None) -> bool:
-    return bool(symbol) and symbol in LST_PROFILES
+def _mint_of(leg: dict | None) -> str | None:
+    return (leg or {}).get("asset") or (leg or {}).get("mint")
 
 
-def profile_for(symbol: str | None) -> LSTStressProfile | None:
-    return LST_PROFILES.get(symbol or "")
+def is_lst(leg: dict | str | None) -> bool:
+    """True for a liquid staking token, decided by MINT.
+
+    Accepts a position leg (preferred) or a bare symbol (legacy). A bare
+    symbol cannot distinguish bSOL-the-LST from BSOL-the-ETF, so that path
+    is deliberately conservative and matches nothing on its own.
+    """
+    if isinstance(leg, dict):
+        return _mint_of(leg) in LST_PROFILES
+    return False
+
+
+def is_sol_derived(leg: dict | str | None) -> bool:
+    if isinstance(leg, dict):
+        mint = _mint_of(leg)
+        if mint:
+            return mint in SOL_DERIVED_MINTS
+        # No mint on the leg — fall back to the symbol, which is all that
+        # is available, and say so at the call site.
+        return (leg.get("symbol") or "") in _SOL_SYMBOLS
+    return (leg or "") in _SOL_SYMBOLS
+
+
+def profile_for(leg: dict | str | None) -> LSTStressProfile | None:
+    if isinstance(leg, dict):
+        return LST_PROFILES.get(_mint_of(leg) or "")
+    return None
 
 
 def _grow(annual_pct: float, days: int) -> float:
@@ -131,9 +173,10 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
         value = float(d.get("value_usd") or 0)
         thr = float(d.get("liquidation_threshold_pct") or 0) / 100.0
         f = 1.0
-        if sym in SOL_DERIVED:
+        # Identity by MINT — see LST_PROFILES on the BSOL ticker collision.
+        if is_sol_derived(d):
             f *= sol_factor
-            if is_lst(sym):
+            if is_lst(d):
                 f *= depeg_factor
         shocked = value * f * col_growth
         raw_collateral += shocked
@@ -142,8 +185,10 @@ def project_health(position: dict, *, days: int = 0, sol_shock_pct: float = 0.0,
         legs.append({"symbol": sym, "value_usd": round(value, 2),
                      "shocked_value_usd": round(shocked, 2),
                      "liquidation_threshold_pct": d.get("liquidation_threshold_pct"),
-                     "took_sol_shock": sym in SOL_DERIVED,
-                     "took_depeg": is_lst(sym)})
+                     "mint": _mint_of(d),
+                     "identified_by": "mint" if _mint_of(d) else "symbol (no mint on leg)",
+                     "took_sol_shock": is_sol_derived(d),
+                     "took_depeg": is_lst(d)})
 
     debt = sum(float(b.get("value_usd") or 0) for b in borrows) * debt_growth
     if debt <= 0:
@@ -230,8 +275,8 @@ def position_risk_report(position: dict, *, carry_by_scenario: dict,
         "current_health_factor": current["health_factor"],
         "static_sol_liquidation_pct": liquidation_boundary(position),
         "has_lst_collateral": bool(lst_legs),
-        "lst_profiles": [profile_for(l["symbol"]).as_dict()
-                         for l in lst_legs if profile_for(l["symbol"])],
+        "lst_profiles": [profile_for(l).as_dict()
+                         for l in lst_legs if profile_for(l)],
         "legs": current["legs"],
         "carry": {}, "boundary_over_time": {}, "matrix": {},
         "provenance": {

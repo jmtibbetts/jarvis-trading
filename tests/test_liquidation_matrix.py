@@ -11,7 +11,7 @@ and a position can survive one and not the other.
 """
 import unittest
 
-from lib.liquidation_matrix import (LST_PROFILES, SOL_DERIVED, is_lst,
+from lib.liquidation_matrix import (LST_PROFILES, SOL_DERIVED_MINTS, is_lst,
                                     liquidation_boundary,
                                     position_risk_report, profile_for,
                                     project_health, stress_matrix)
@@ -21,14 +21,18 @@ from lib.reserve_economics import (borrow_apr_at, borrow_curve, carry_rates)
 def position(bsol=3_160_000, sol=1_610_000, usdc=2_490_000):
     deps = []
     if bsol:
-        deps.append({"symbol": "bSOL", "value_usd": bsol,
+        deps.append({"symbol": "bSOL", "asset": BSOL_MINT, "value_usd": bsol,
                      "liquidation_threshold_pct": 55})
     if sol:
-        deps.append({"symbol": "SOL", "value_usd": sol,
+        deps.append({"symbol": "SOL", "asset": WSOL_MINT, "value_usd": sol,
                      "liquidation_threshold_pct": 75})
     return {"obligation": "t", "assets": {
         "deposits": deps, "borrows": [{"symbol": "USDC", "value_usd": usdc}]}}
 
+
+BSOL_MINT = "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1"
+MSOL_MINT = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
 
 CARRY_COL = [{"supply_apr_pct": 0.01}]
 CARRY_DEBT = [{"borrow_apr_pct": 4.33, "stressed_borrow_apr_pct": 30.40}]
@@ -153,15 +157,27 @@ class ProfileTests(unittest.TestCase):
     def test_each_lst_carries_its_own_basis_assumptions(self):
         """mSOL, bSOL and JitoSOL differ in liquidity and mechanics, so one
         shared basis assumption would repeat the collateral-factor mistake."""
-        self.assertNotEqual(profile_for("bSOL").stress_depeg_pct,
-                            profile_for("mSOL").stress_depeg_pct)
-        for sym, p in LST_PROFILES.items():
+        self.assertNotEqual(profile_for({"asset": BSOL_MINT}).stress_depeg_pct,
+                            profile_for({"asset": MSOL_MINT}).stress_depeg_pct)
+        for mint, p in LST_PROFILES.items():
             self.assertIn("ASSUMED", p.as_dict()["basis"])
 
     def test_plain_sol_is_sol_derived_but_not_an_lst(self):
-        self.assertIn("SOL", SOL_DERIVED)
-        self.assertFalse(is_lst("SOL"))
-        self.assertTrue(is_lst("bSOL"))
+        self.assertIn(WSOL_MINT, SOL_DERIVED_MINTS)
+        self.assertFalse(is_lst({"asset": WSOL_MINT, "symbol": "SOL"}))
+        self.assertTrue(is_lst({"asset": BSOL_MINT, "symbol": "bSOL"}))
+
+    def test_the_bsol_etf_ticker_cannot_borrow_the_lst_profile(self):
+        """BSOL is also the Bitwise Solana Staking ETF, a US-listed equity,
+        and JARVIS trades both asset classes. A ticker-keyed profile would
+        eventually apply liquid-staking depeg assumptions to an ETF share."""
+        etf = {"symbol": "BSOL", "asset": None}          # equity, no mint
+        self.assertIsNone(profile_for(etf))
+        self.assertFalse(is_lst(etf))
+        # And the real LST is still found, by mint, whatever its ticker says.
+        lst = {"symbol": "WHATEVER", "asset": BSOL_MINT}
+        self.assertTrue(is_lst(lst))
+        self.assertEqual(profile_for(lst).symbol, "bSOL")
 
 
 class ReportTests(unittest.TestCase):

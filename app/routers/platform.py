@@ -307,7 +307,7 @@ def trigger_job(job_name: str):
              "autosim":("jobs.auto_simulator","run"),
              "evaluation":("jobs.evaluate_signals","run"),
              "paper":("jobs.paper_trading","run"),
-             "guardian":("app.scheduler","portfolio_guardian"),
+             "guardian":("app.scheduler","external_alpaca_guardian"),
              "scanner_premarket":("jobs.scan_opportunities","run_pre_market"),
              "scanner_intraday":("jobs.scan_opportunities","run_intraday"),
              "scanner_crypto":("jobs.scan_opportunities","run_crypto"),

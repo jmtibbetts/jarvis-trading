@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+#
+# Report the state of this JARVIS machine. Diagnose only.
+#
+#     scripts/doctor.sh
+#
+# READ-ONLY, WITHOUT EXCEPTION. It creates no directories, installs
+# nothing, starts nothing, and opens no operator database for writing. A
+# diagnostic that repairs things cannot tell you what was wrong, and the one
+# time a probe here opened the operator's DB without JARVIS_DB_PATH it
+# destroyed a table.
+#
+# It also does not fail. Every check reports; the exit code is 0 unless a
+# check could not be performed at all. Deciding what is acceptable is the
+# operator's job, and a doctor that exits 1 on a cosmetic difference stops
+# being read.
+#
+# WHAT IS NOT A PROBLEM, and is therefore not reported as one:
+#
+#   * No Intel NPU. The supported runtime is WSL2/Ubuntu 24.04, where
+#     OpenVINO enumerates ['CPU'] and no NPU is passed through. CPU is the
+#     required baseline and the NPU is optional — measured, it is not even
+#     faster (CPU 0.121 ms vs NPU 0.376 ms), it is spare capacity. Printing
+#     a warning for its absence trains the reader to ignore warnings.
+#
+#   * A discovered LM Studio address that differs from any config. It is
+#     supposed to differ; see lib/lmstudio.py.
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
+
+# A failing probe must not abort the report — the rest of it is still what
+# the reader came for.
+set +e
+
+note() { printf '    %-22s %s\n' "$1" "$2"; }
+
+step "Machine"
+if [[ -r /etc/os-release ]]; then
+  . /etc/os-release
+  note "os" "${PRETTY_NAME:-unknown}"
+fi
+note "kernel" "$(uname -r)"
+if uname -r | grep -qi microsoft; then
+  note "wsl" "yes (${WSL_DISTRO_NAME:-distro name unset})"
+  gw="$(awk '$2=="00000000" && $3!="00000000" {print $3; exit}' /proc/net/route 2>/dev/null)"
+  if [[ -n "$gw" ]]; then
+    ip=$(printf '%d.%d.%d.%d' \
+      $((0x${gw:6:2})) $((0x${gw:4:2})) $((0x${gw:2:2})) $((0x${gw:0:2})))
+    note "windows host" "$ip (per-boot; never stored)"
+  fi
+else
+  note "wsl" "no"
+fi
+note "cpu cores" "$(nproc 2>/dev/null || echo '?')"
+note "memory" "$(free -h 2>/dev/null | awk '/^Mem:/{print $2" total, "$7" available"}')"
+
+step "Repository"
+note "path" "$JARVIS_ROOT"
+case "$JARVIS_ROOT" in
+  /mnt/*) warn "on a Windows mount — SQLite WAL locking and small-file IO both suffer here" ;;
+  *)      note "filesystem" "Linux-native (correct)" ;;
+esac
+if command -v git >/dev/null 2>&1; then
+  note "commit" "$(git -C "$JARVIS_ROOT" log --oneline -1 2>/dev/null)"
+  dirty="$(git -C "$JARVIS_ROOT" status --porcelain 2>/dev/null | wc -l)"
+  note "working tree" "$( ((dirty)) && echo "$dirty file(s) modified" || echo clean )"
+fi
+note "disk" "$(df -h "$JARVIS_ROOT" 2>/dev/null | awk 'NR==2{print $4" free of "$2}')"
+
+step "Python"
+PY="$JARVIS_ROOT/.venv/bin/python"
+if [[ -x "$PY" ]]; then
+  note "interpreter" "$PY"
+  note "version" "$("$PY" --version 2>&1)"
+  "$PY" -m pip check >/dev/null 2>&1 \
+    && note "pip check" "clean" \
+    || note "pip check" "reports conflicts (run: $PY -m pip check)"
+  "$PY" - <<'PY' 2>/dev/null
+import importlib
+for m in ("sqlalchemy", "fastapi", "uvicorn", "httpx", "apscheduler",
+          "order_book", "cryptofeed"):
+    try:
+        importlib.import_module(m)
+        print(f"    {'import ' + m:<22} ok")
+    except Exception as e:
+        print(f"    {'import ' + m:<22} FAILED: {type(e).__name__}: {e}")
+PY
+else
+  warn "no virtualenv at $PY — run scripts/bootstrap_ubuntu.sh"
+fi
+
+step "Node"
+node_bin="$(command -v node 2>/dev/null)"
+if [[ -z "$node_bin" ]]; then
+  note "node" "not installed"
+elif [[ "$node_bin" == /mnt/* ]]; then
+  warn "node resolves to the WINDOWS binary at $node_bin — native modules will build for the wrong platform"
+else
+  note "node" "$(node --version) at $node_bin"
+fi
+
+step "Predictive runtime"
+# The whole point of this section: CPU is the baseline and must work. The
+# NPU is a bonus and its absence is a fact, not a finding.
+if [[ -x "$PY" ]]; then
+  "$PY" - <<'PY' 2>/dev/null || note "openvino" "not installed (optional)"
+try:
+    import openvino as ov
+except Exception as e:
+    raise SystemExit(1)
+core = ov.Core()
+devices = core.available_devices
+print(f"    {'openvino':<22} {ov.__version__}")
+print(f"    {'devices':<22} {devices}")
+if "CPU" in devices:
+    print(f"    {'cpu baseline':<22} present (required)")
+else:
+    print(f"    {'cpu baseline':<22} MISSING — this one IS a problem")
+print(f"    {'npu':<22} "
+      + ("present (optional bonus)" if "NPU" in devices
+         else "absent — expected on WSL2, not a problem"))
+PY
+fi
+
+step "Databases"
+# Sizes and integrity only, and only through a READ-ONLY connection.
+# Opening the operator DB read-write from a probe is how dex_portfolios was
+# destroyed once already.
+for db in jarvis events ohlcv_cache; do
+  f="$JARVIS_ROOT/data/$db.db"
+  if [[ -f "$f" ]]; then
+    size="$(du -h "$f" | cut -f1)"
+    if command -v sqlite3 >/dev/null 2>&1; then
+      mode="$(sqlite3 "file:$f?mode=ro" 'PRAGMA journal_mode;' 2>/dev/null)"
+      note "$db.db" "$size, journal=${mode:-unknown}"
+    else
+      note "$db.db" "$size"
+    fi
+  else
+    note "$db.db" "absent"
+  fi
+done
+
+step "Server"
+mapfile -t PIDS < <(jarvis_pids)
+if ((${#PIDS[@]} == 0)); then
+  note "process" "not running"
+else
+  for pid in "${PIDS[@]}"; do
+    sched="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep '^JARVIS_DISABLE_SCHEDULER=' | cut -d= -f2-)"
+    note "process" "pid $pid, scheduler $( [[ "$sched" == 1 ]] && echo DISABLED || echo ENABLED )"
+  done
+fi
+PORT_NUM="$(jarvis_port)"
+curl -fsS --max-time 3 "http://127.0.0.1:$PORT_NUM/api/health" >/dev/null 2>&1 \
+  && note "api" "healthy on :$PORT_NUM" \
+  || note "api" "not answering on :$PORT_NUM"
+
+step "LLM endpoint"
+# Resolved live rather than read from config, because it is not IN any
+# config — that is the design. Uses the same resolver the server uses.
+if [[ -x "$PY" ]]; then
+  cd "$JARVIS_ROOT" && "$PY" - <<'PY' 2>/dev/null || note "resolver" "could not run"
+from lib import lmstudio as L
+res = L.resolve_endpoint()
+print(f"    {'selected':<22} {res.url or '(none)'}  [{res.provenance}]  {res.status}")
+for c in res.candidates:
+    print(f"    {'  tried':<22} {c.url}  [{c.provenance}]  {c.status}"
+          + (f"  models={len(c.models)}" if c.models else "")
+          + (f"  {c.detail}" if c.detail else ""))
+PY
+fi
+
+step "Done"
+info "This report changed nothing. Acting on it is the operator's call."
+exit 0

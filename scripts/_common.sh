@@ -135,6 +135,35 @@ _resolve_absolute() {
   printf '%s' "${base%/}${tail:+/$tail}"
 }
 
+# _resolve_logical PATH — absolute and ..-free, WITHOUT following symlinks.
+#
+# A different question from _resolve_absolute, and the difference matters.
+# `.venv/bin/python` is a symlink to /usr/bin/python3.12, so resolving it
+# physically answers "which binary", when what identifies a JARVIS process
+# is "which path was it launched by". Containment checks want the physical
+# form — a symlink pointing out of the repo is an escape. Identity wants
+# this one.
+_resolve_logical() {
+  local p="${1-}"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -ms -- "$p" 2>/dev/null && return 0
+  fi
+  [[ "$p" == /* ]] || p="$PWD/$p"
+  local -a out=() parts=()
+  local part old_ifs="$IFS"
+  IFS='/' read -ra parts <<< "$p"
+  IFS="$old_ifs"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|'.') ;;
+      '..')   ((${#out[@]})) && unset 'out[-1]' ;;
+      *)      out+=("$part") ;;
+    esac
+  done
+  ((${#out[@]})) || { printf '/'; return 0; }
+  printf '/%s' "${out[@]}"
+}
+
 # require_within_repo PATH — die unless PATH is inside JARVIS_ROOT.
 #
 # Anything a JARVIS script creates, moves or removes lives in the repo. A
@@ -195,3 +224,73 @@ JARVIS_RUN_DIR="$JARVIS_ROOT/run"
 JARVIS_PID_FILE="$JARVIS_RUN_DIR/jarvis.pid"
 JARVIS_SERVER_LOG="$JARVIS_LOG_DIR/jarvis.log"
 readonly JARVIS_LOG_DIR JARVIS_RUN_DIR JARVIS_PID_FILE JARVIS_SERVER_LOG
+
+jarvis_port() { printf '%s' "${PORT:-3000}"; }
+
+# ── Process identity ──────────────────────────────────────────────────────
+#
+# NEVER `pkill python`, `pkill -f main.py`, or any pattern match over the
+# process table. This machine runs Claude Code, a hermes agent and LM
+# Studio's own runtime, all of them Python or matching on "main". A pattern
+# that is merely "specific enough" is how you take down the operator's
+# tooling while trying to restart a web server.
+#
+# Identity here is a conjunction of three facts that nothing else on the box
+# can satisfy at once:
+#
+#   1. argv[0] resolves to THIS repository's venv interpreter
+#   2. argv[1] is main.py
+#   3. the process's cwd is THIS repository
+#
+# (3) is what separates two checkouts of JARVIS from each other, which a
+# command-line match alone never could.
+
+# jarvis_pid_matches PID — true when PID is a JARVIS server for this repo.
+jarvis_pid_matches() {
+  local pid="${1-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  local dir="/proc/$pid"
+  [[ -r "$dir/cmdline" ]] || return 1
+
+  local cwd
+  cwd="$(readlink -f "$dir/cwd" 2>/dev/null || true)"
+  [[ "$cwd" == "$JARVIS_ROOT" ]] || return 1
+
+  # argv is NUL-separated. Read it as a list, not as text: joining it first
+  # would let `grep main.py` or an editor session match.
+  local -a argv=()
+  mapfile -d '' -t argv < "$dir/cmdline" 2>/dev/null || return 1
+  ((${#argv[@]} >= 2)) || return 1
+
+  # argv[0] is frequently relative (".venv/bin/python") because that is how
+  # the process was launched. Resolve it against its own cwd.
+  local exe="${argv[0]}"
+  [[ "$exe" == /* ]] || exe="$cwd/$exe"
+  [[ "$(_resolve_logical "$exe")" == "$JARVIS_ROOT/.venv/bin/python" ]] || return 1
+  [[ "$(basename -- "${argv[1]}")" == "main.py" ]] || return 1
+  return 0
+}
+
+# jarvis_pids — every JARVIS server PID belonging to this repository.
+jarvis_pids() {
+  local dir pid
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    jarvis_pid_matches "$pid" && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+# jarvis_pid_from_file — the recorded PID, but only if it is still OURS.
+#
+# A PID file is a claim, not evidence: PIDs are recycled, and a stale file
+# pointing at whatever now holds that number is how a stop script kills a
+# stranger. The number is only ever used after the identity check passes.
+jarvis_pid_from_file() {
+  [[ -r "$JARVIS_PID_FILE" ]] || return 1
+  local pid
+  pid="$(tr -dc '0-9' < "$JARVIS_PID_FILE" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  jarvis_pid_matches "$pid" || return 1
+  printf '%s' "$pid"
+}

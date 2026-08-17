@@ -201,6 +201,89 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
         return _run(_db)
 
 
+# ── Executable exit economics ────────────────────────────────────────────
+# A DEX POSITION IS WORTH WHAT THE BOOK CAN ACTUALLY GET OUT.
+#
+# `qty_tokens * current_price_usd` is a MARK. It is what a mid-price
+# multiplication says, and on-chain that is frequently not recoverable: the
+# same position can mark at $10,000 and quote an executable exit of $7,800,
+# or of nothing at all when the route has gone. Crediting the mark to equity
+# is the simulator paying the book money it could not have withdrawn — which
+# is the precise failure the golden rule forbids.
+#
+# This is the ONE exit pricer. close_dex_position() and summary() both call
+# it, so what the book is worth and what closing it would actually yield can
+# never be computed two different ways.
+
+EXIT_OK = "PRICED"
+EXIT_UNPRICEABLE = "UNPRICEABLE"
+EXIT_NO_MARK = "NO_MARK_PRICE"
+
+
+def exit_quote(pos, *, price_usd: float | None = None,
+               reserve_usd: float | None = None,
+               sol_price_usd: float = 0.0,
+               concentrated: bool = False) -> dict:
+    """What this position would actually realise if it were closed now.
+
+    Never falls back to the mark. An exit that cannot be routed returns
+    `executable_value_usd = None` with a reason — substituting the mark
+    would record a perfect escape from the exact situation that loses real
+    money, and a model that rewards illiquidity teaches the desk to seek it.
+    """
+    from lib.dex_swap_math import quote_swap
+
+    qty = float(pos.qty_tokens or 0)
+    mark_price = float(price_usd if price_usd is not None
+                       else (pos.current_price_usd or 0) or 0)
+    mark_value = qty * mark_price
+
+    base = {
+        "position_id": pos.id,
+        "mark_price_usd": mark_price,
+        "mark_value_usd": round(mark_value, 6),
+        "executable_value_usd": None,
+        "exit_impact_pct": None,
+        "pool_fee_usd": None,
+        "network_fee_usd": None,
+        "depth_confidence": None,
+        "route": pos.dex,
+        "quoted_at": _now(),
+    }
+
+    if mark_value <= 0:
+        # No mark means no basis for a quote — and no basis to claim a
+        # value either. Both stay unknown rather than becoming zero.
+        return {**base, "status": EXIT_NO_MARK,
+                "reason": "no current price on file for this position"}
+
+    res = float(reserve_usd if reserve_usd is not None
+                else (pos.pool_reserve_usd_at_entry or 0))
+    q = quote_swap(mark_value, res, dex=pos.dex,
+                   sol_price_usd=sol_price_usd, concentrated=concentrated)
+    if not q.get("ok"):
+        return {**base, "status": EXIT_UNPRICEABLE,
+                "reason": q.get("reason") or "no route could price this exit"}
+
+    executable = float(q["received_usd"])
+    return {
+        **base,
+        "status": EXIT_OK,
+        "executable_value_usd": round(executable, 6),
+        "exit_impact_pct": q["price_impact_pct"],
+        "pool_fee_usd": q["pool_fee_usd"],
+        "network_fee_usd": q["network_fee_usd"],
+        "network_fee_sol": q.get("network_fee_sol"),
+        "depth_confidence": q.get("depth_confidence"),
+        "depth_model": q.get("depth_model"),
+        # What the mid-price multiplication overstates the position by.
+        "exit_drag_usd": round(mark_value - executable, 6),
+        "exit_drag_pct": (round(100.0 * (mark_value - executable) / mark_value, 4)
+                          if mark_value else None),
+        "reason": None,
+    }
+
+
 def close_dex_position(position_id: str, price_usd: float, *,
                        reserve_usd: float | None = None,
                        reason: str = "manual", sol_price_usd: float = 0.0,
@@ -218,12 +301,19 @@ def close_dex_position(position_id: str, price_usd: float, *,
             return {"error": "position not found or already closed"}
 
         pf = get_portfolio(session)
-        gross_out = float(pos.qty_tokens or 0) * float(price_usd or 0)
-        res = float(reserve_usd if reserve_usd is not None
-                    else (pos.pool_reserve_usd_at_entry or 0))
-
-        q = quote_swap(gross_out, res, dex=pos.dex,
-                       sol_price_usd=sol_price_usd, concentrated=concentrated)
+        # THE SAME PRICER THE BOOK IS VALUED WITH. If closing used one
+        # arithmetic and equity used another, the book would be worth one
+        # number until you sold it and a different one afterwards — and
+        # the discrepancy would look like slippage rather than a bug.
+        eq = exit_quote(pos, price_usd=price_usd, reserve_usd=reserve_usd,
+                        sol_price_usd=sol_price_usd, concentrated=concentrated)
+        gross_out = float(eq["mark_value_usd"])
+        q = {"ok": eq["status"] == EXIT_OK,
+             "reason": eq.get("reason"),
+             "received_usd": eq["executable_value_usd"],
+             "price_impact_pct": eq["exit_impact_pct"],
+             "pool_fee_usd": eq["pool_fee_usd"],
+             "network_fee_usd": eq["network_fee_usd"]}
         if not q.get("ok"):
             # AN UNPRICEABLE EXIT IS A RISK EVENT, NOT A FREE ONE.
             #
@@ -324,27 +414,108 @@ def close_dex_position(position_id: str, price_usd: float, *,
         return _run(_db)
 
 
-def summary(db=None) -> dict:
-    """Book state. Equity counts only trades after `reset_at`."""
+def summary(db=None, *, sol_price_usd: float = 0.0) -> dict:
+    """Book state, on MARK and on EXECUTABLE economics, side by side.
+
+    Equity counts only trades after `reset_at`.
+
+    Two totals, because the difference is the point:
+
+        equity_mark_usd        what a mid-price multiplication says
+        equity_executable_usd  what the book could actually get out
+
+    `equity_executable_usd` is the ECONOMIC, RISK and LEARNING authority.
+    The mark is display and reference only.
+
+    UNPRICEABLE POSITIONS ARE NOT SILENTLY MARKED. A position whose exit
+    cannot be routed contributes NOTHING to executable equity — its mark
+    is reported separately as `unpriceable_mark_value_usd`, so the operator
+    sees "$X is currently unrecoverable" rather than one confident total
+    that has quietly absorbed it. Manufacturing a precise-looking number
+    out of a genuinely unknown one is the failure this replaces.
+    """
     from app.database import DexPosition, get_db
 
     def _run(session):
         pf = get_portfolio(session)
         open_rows = session.query(DexPosition).filter(
             DexPosition.status == "Open").all()
-        open_value = sum(float(p.qty_tokens or 0) * float(p.current_price_usd or 0)
-                         for p in open_rows)
+
+        mark_total = 0.0
+        executable_total = 0.0
+        unpriceable_mark = 0.0
+        unpriceable = 0
+        rows: list[dict] = []
+
+        for p in open_rows:
+            q = exit_quote(p, sol_price_usd=sol_price_usd)
+            mark_total += float(q["mark_value_usd"] or 0)
+            if q["status"] == EXIT_OK:
+                executable_total += float(q["executable_value_usd"] or 0)
+            else:
+                unpriceable += 1
+                unpriceable_mark += float(q["mark_value_usd"] or 0)
+            rows.append({
+                "position_id": p.id, "symbol": p.symbol, "mint": p.mint,
+                "qty_tokens": p.qty_tokens,
+                "mark_value_usd": q["mark_value_usd"],
+                "executable_exit_value_usd": q["executable_value_usd"],
+                "exit_drag_usd": q.get("exit_drag_usd"),
+                "exit_drag_pct": q.get("exit_drag_pct"),
+                "current_exit_impact_pct": q["exit_impact_pct"],
+                "current_exit_pool_fees_usd": q["pool_fee_usd"],
+                "current_exit_network_fee_usd": q["network_fee_usd"],
+                "current_route": q["route"],
+                "current_depth_confidence": q["depth_confidence"],
+                "exit_quote_at": q["quoted_at"],
+                "exit_quote_status": q["status"],
+                "exit_state": p.exit_state,
+                "exit_blocked_reason": p.exit_blocked_reason,
+                "notional_usd": p.notional_usd,
+                "executable_net_unrealized_pnl_usd": (
+                    round(float(q["executable_value_usd"]) - float(p.notional_usd or 0), 6)
+                    if q["executable_value_usd"] is not None else None),
+            })
+
         cash = float(pf.cash_usd or 0)
         return {
             "starting_usd": float(pf.starting_usd or 0),
             "cash_usd": round(cash, 2),
             "open_positions": len(open_rows),
-            "open_value_usd": round(open_value, 2),
-            "equity_usd": round(cash + open_value, 2),
+
+            # Display / reference.
+            "open_value_mark_usd": round(mark_total, 2),
+            "equity_mark_usd": round(cash + mark_total, 2),
+
+            # THE AUTHORITY. Cash plus what the open book could realise.
+            "open_value_executable_usd": round(executable_total, 2),
+            "equity_executable_usd": round(cash + executable_total, 2),
+            "known_executable_equity_usd": round(cash + executable_total, 2),
+
+            # Reported beside it rather than folded into it.
+            "unpriceable_positions": unpriceable,
+            "unpriceable_mark_value_usd": round(unpriceable_mark, 2),
+
+            "exit_drag_usd": round(mark_total - executable_total - unpriceable_mark, 2),
+
+            # `equity_usd` is retained as an alias of the EXECUTABLE total,
+            # not the mark. Every existing caller that reads it was reading
+            # a number that overstated the book, and the conservative
+            # reading is the one that should win a name collision.
+            "equity_usd": round(cash + executable_total, 2),
+
             "realized_pnl_usd": round(float(pf.realized_pnl_usd or 0), 2),
             "total_trades": int(pf.total_trades or 0),
             "wins": int(pf.wins or 0), "losses": int(pf.losses or 0),
             "reset_at": pf.reset_at,
+            "positions_valuation": rows,
+            "valuation_policy": (
+                "equity_executable_usd is cash plus what the open book could "
+                "actually be sold for now, priced against pool depth. "
+                "Positions whose exit cannot be routed contribute ZERO to it "
+                "and are reported separately as unpriceable_mark_value_usd — "
+                "their mark is not recoverable capital and is never added."
+            ),
             "limits": {"max_impact_pct": max_impact_pct(),
                        "min_pool_reserve_usd": min_pool_reserve_usd(),
                        "leverage": "none — a pool does not lend",

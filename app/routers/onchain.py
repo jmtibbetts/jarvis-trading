@@ -132,6 +132,14 @@ def dex_book():
     from app.database import DexPosition, get_db
     from lib.dex_paper import summary
 
+    # ONE SESSION FOR THE WHOLE SNAPSHOT.
+    #
+    # This read positions in one session and then called summary(), which
+    # opened a SECOND — so the position rows and the equity that supposedly
+    # described them came from two different instants and were returned as
+    # one atomic book. Harmless while nothing else wrote; wrong as soon as
+    # autonomous DEX trading writes concurrently, and wrong in exactly the
+    # way that is hardest to reproduce.
     with get_db() as db:
         rows = db.query(DexPosition).filter(DexPosition.status == "Open").all()
         positions = [{
@@ -147,9 +155,23 @@ def dex_book():
             "entry_pool_fee_usd": p.entry_pool_fee_usd,
             "entry_network_fee_usd": p.entry_network_fee_usd,
             "pool_reserve_usd_at_entry": p.pool_reserve_usd_at_entry,
+            "exit_state": p.exit_state,
+            "exit_blocked_reason": p.exit_blocked_reason,
             "opened_at": p.opened_at, "notes": p.notes,
         } for p in rows]
-    return {**summary(), "positions": positions}
+        book = summary(db)
+
+    # Each position carries its own exit economics inline, so the UI never
+    # has to join two lists to answer "what is this actually worth".
+    by_id = {v["position_id"]: v for v in book.get("positions_valuation", [])}
+    for pos in positions:
+        val = by_id.get(pos["id"])
+        if val:
+            pos.update({k: v for k, v in val.items()
+                        if k not in ("position_id", "symbol", "mint",
+                                     "qty_tokens", "notional_usd",
+                                     "exit_state", "exit_blocked_reason")})
+    return {**book, "positions": positions}
 
 
 @router.get("/onchain/dex/quote")

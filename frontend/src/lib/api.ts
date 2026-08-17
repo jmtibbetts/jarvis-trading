@@ -1556,13 +1556,63 @@ export type DexPosition = {
   pool_reserve_usd_at_entry: number | null;
   opened_at: string | null; notes: string | null;
 };
+// Per-position exit economics. A DEX position is worth what the book can
+// actually get out, not what a mid-price multiplication says.
+export type DexPositionValuation = {
+  position_id: string; symbol: string | null; mint: string | null;
+  qty_tokens: number | null;
+  /** What a mid-price multiplication says. Display only. */
+  mark_value_usd: number | null;
+  /** What closing it now would actually realise. NULL when unroutable —
+   *  never silently replaced by the mark. */
+  executable_exit_value_usd: number | null;
+  exit_drag_usd: number | null;
+  exit_drag_pct: number | null;
+  current_exit_impact_pct: number | null;
+  current_exit_pool_fees_usd: number | null;
+  current_exit_network_fee_usd: number | null;
+  current_route: string | null;
+  /** VERIFIED | ASSUMED_BALANCED_POOL | MODELLED_ESTIMATE */
+  current_depth_confidence: string | null;
+  exit_quote_at: string | null;
+  /** PRICED | UNPRICEABLE | NO_MARK_PRICE */
+  exit_quote_status: string;
+  exit_state: string | null;
+  exit_blocked_reason: string | null;
+  notional_usd: number | null;
+  executable_net_unrealized_pnl_usd: number | null;
+};
 export type DexBook = {
-  starting_usd: number; cash_usd: number; equity_usd: number;
-  open_positions: number; open_value_usd: number;
+  starting_usd: number; cash_usd: number;
+  open_positions: number;
+
+  /** Display / reference — the mid-price multiplication. */
+  open_value_mark_usd: number;
+  equity_mark_usd: number;
+
+  /** THE ECONOMIC / RISK / LEARNING AUTHORITY. Cash plus what the open
+   *  book could actually be sold for. */
+  open_value_executable_usd: number;
+  equity_executable_usd: number;
+  known_executable_equity_usd: number;
+
+  /** Positions whose exit cannot be routed contribute ZERO to executable
+   *  equity and are reported here instead of being folded in. */
+  unpriceable_positions: number;
+  unpriceable_mark_value_usd: number;
+
+  exit_drag_usd: number;
+
+  /** Alias of the EXECUTABLE total — the conservative reading wins the
+   *  name, because every caller reading it was overstating the book. */
+  equity_usd: number;
+
   realized_pnl_usd: number; total_trades: number;
   wins: number; losses: number; reset_at: string | null;
   limits: DexLimits;
   positions: DexPosition[];
+  positions_valuation: DexPositionValuation[];
+  valuation_policy: string;
 };
 // Mirrors lib/dex_contracts.ClosedDexTrade — the ONE canonical contract.
 // Three names had drifted (`pnl_pct`, `total_fees_usd`, `exit_reason`) and

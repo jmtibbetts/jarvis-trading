@@ -106,7 +106,7 @@
     <KpiTile label="Candidates" value={String(c.candidates ?? "—")} period="discovered + seeded" />
     <KpiTile label="Excluded" value={String(c.excluded_entities ?? "—")} period="exchanges, pools, PDAs" />
     <KpiTile label="Smart Money" value={String(c.smart_money ?? 0)} period="none until measured" />
-    <KpiTile label="DEX Equity" value={usd(book?.equity_usd)} period="virtual on-chain book" />
+    <KpiTile label="DEX Equity" value={usd(book?.equity_executable_usd)} period="executable — what the book could realise" />
   </div>
 
   <div class="grid">

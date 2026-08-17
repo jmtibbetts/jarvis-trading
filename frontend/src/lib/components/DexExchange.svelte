@@ -160,15 +160,40 @@
   <Panel title="DEX Book" status={feeds.status("book")}
          meta={book ? `${book.open_positions} open · reset ${book.reset_at?.slice(0, 10) ?? "never"}` : ""}>
     {#if book}
+      <!--
+        EXECUTABLE LEADS. The mark is what a mid-price multiplication says;
+        the executable total is what this book could actually get out. They
+        are shown together because the gap between them IS the on-chain
+        risk, and the old single "Equity" tile was the mark wearing the
+        executable's name.
+      -->
       <div class="kpis">
-        <KpiTile label="Equity" value={money(book.equity_usd)} />
+        <KpiTile label="Equity (executable)" value={money(book.equity_executable_usd)}
+                 period="what could actually be realised" />
+        <KpiTile label="Equity (mark)" value={money(book.equity_mark_usd)}
+                 period="mid-price × qty — reference only" />
         <KpiTile label="Cash" value={money(book.cash_usd)} />
-        <KpiTile label="Open value" value={money(book.open_value_usd)} />
+        <KpiTile label="Exit drag" value={money(book.exit_drag_usd)}
+                 period="cost of getting out" />
         <KpiTile label="Realized P&L" value={money(book.realized_pnl_usd)}
                  trend={book.realized_pnl_usd > 0 ? "up" : book.realized_pnl_usd < 0 ? "down" : undefined} />
         <KpiTile label="Trades" value={`${book.total_trades}`} />
-        <KpiTile label="W / L" value={`${book.wins} / ${book.losses}`} />
       </div>
+
+      {#if book.unpriceable_positions}
+        <!-- Reported beside the total, never folded into it: this capital
+             is not currently recoverable, and one confident number that had
+             quietly absorbed it would say the opposite. -->
+        <div class="unpriceable">
+          <b>{book.unpriceable_positions} position{book.unpriceable_positions === 1 ? "" : "s"}
+            cannot currently be exited</b>
+          <span>
+            {money(book.unpriceable_mark_value_usd)} of mark value is NOT counted as
+            recoverable equity. A mid-price multiplication says it is worth that;
+            no route says it can be sold for anything.
+          </span>
+        </div>
+      {/if}
       <div class="limits">
         <Pill tone="neutral" label={`max impact ${book.limits.max_impact_pct}%`} />
         <Pill tone="neutral" label={`min pool ${money(book.limits.min_pool_reserve_usd, 0)}`} />
@@ -333,6 +358,19 @@
 </div>
 
 <style>
+  .unpriceable {
+    border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+    background: color-mix(in srgb, var(--bad) 10%, transparent);
+    border-radius: 7px;
+    padding: 8px 10px;
+    margin: 10px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .unpriceable b { font-size: 12px; color: var(--bad); }
+  .unpriceable span { font-size: 11px; color: var(--muted, #8b96a8); line-height: 1.45; }
+
   .dex { display: flex; flex-direction: column; gap: 14px; }
   .kpis {
     display: grid; gap: 10px;

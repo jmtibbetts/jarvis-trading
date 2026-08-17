@@ -187,7 +187,12 @@ def price_expression(*, venue: str, product: str, symbol: str,
         costs = estimate_costs(
             symbol, float(entry), float(stop), venue=venue,
             hold_hours=hold_hours,
-            leveraged=(product == "CRYPTO_PERP"),
+            # THE PRODUCT, STATED. This router is the one place that always
+            # knew which expression it was pricing, and it was throwing that
+            # away into a `leveraged` boolean — the same collapse that let a
+            # perpetual be billed as spot.
+            product=product,
+            leveraged=(product == CRYPTO_PERP),
             is_short=(str(side).lower().startswith("s")))
     except Exception as ex:
         e.reason, e.detail = UNPRICEABLE, f"cost model failed: {ex}"

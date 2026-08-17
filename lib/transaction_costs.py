@@ -136,7 +136,7 @@ def estimate_spread_pct(symbol: str, quoted_spread_pct: float | None = None,
 
 
 def fee_pct(symbol: str, maker: bool = False, venue: str | None = None,
-            leveraged: bool = False) -> float:
+            leveraged: bool = False, product: str | None = None) -> float:
     """Per-side fee as a fraction of notional, for the venue that will fill it.
 
     Venue matters more than it looks: Kraken's base taker fee is 0.40% against
@@ -144,24 +144,46 @@ def fee_pct(symbol: str, maker: bool = False, venue: str | None = None,
     assumption wrong by 60% moves the line between tradeable and not. Falls
     back to the module constants when the venue registry is unavailable, so a
     missing import can never make a trade look free.
+
+    A PERPETUAL CAN NO LONGER FALL THROUGH TO THE SPOT SCHEDULE. It used to:
+    `futures_fee_for()` returns None under VENUE_REGION=us — correctly, since
+    US perpetuals are priced PER CONTRACT and cannot be expressed as a rate —
+    and execution then continued into `fee_for(asset_class="crypto")`, which
+    is the spot path. A CRYPTO_PERP was billed 0.80%/side instead of
+    0.05%/side, in the direction that makes viable setups look unaffordable.
+
+    A spot rate is not a conservative perp estimate; it is a measurement of a
+    different instrument. The perp branch now terminates in a PERPETUAL rate
+    and never reaches the branch below it.
+
+    `product` states the product outright. `leveraged` is the older, weaker
+    signal for the same thing and is still honoured for callers not yet
+    threaded — but PRODUCT IS NOT LEVERAGE, and a perp at 1x should arrive
+    here as product=CRYPTO_PERP rather than relying on leveraged=True.
     """
+    from lib import product_router as PR
+
     if is_fx_symbol(symbol):
         return FX_FEE_PCT
     if not is_crypto_symbol(symbol):
         return EQUITY_FEE_PCT
-    # A LEVERAGED position is a perpetual, and perpetuals are priced on a
-    # different schedule entirely — 0.05% taker against spot's 0.80%, a 16x
-    # difference. Charging spot fees on a derivative overstates its cost by
-    # that factor, which in a system that rejects above 0.50R means refusing
-    # setups that are comfortably viable.
-    if leveraged:
-        try:
-            from lib.venues import futures_fee_for
-            rate, _ = futures_fee_for(symbol, maker=maker)
-            if rate is not None:
-                return rate
-        except Exception:
-            pass
+
+    prod = str(product or "").upper()
+    is_perp = (prod == PR.CRYPTO_PERP) or (not prod and bool(leveraged))
+    if is_perp:
+        # ONE authority, perpetual end to end. Its answer is in DOLLARS; the
+        # rate is read back only because this function's callers are
+        # percentage-shaped, which is the shape problem lib/fee_authority
+        # exists to fix.
+        from lib import fee_authority as FA
+        quote = FA.leg_fee(symbol, notional=1.0, price=1.0,
+                           product=PR.CRYPTO_PERP, venue=venue, maker=maker)
+        if quote.ok and quote.rate is not None:
+            return float(quote.rate)
+        # Still never spot: the published PERPETUAL base tier is the floor.
+        from lib.venues import KRAKEN_PERP_BASE_MAKER, KRAKEN_PERP_BASE_TAKER
+        return KRAKEN_PERP_BASE_MAKER if maker else KRAKEN_PERP_BASE_TAKER
+
     try:
         from lib.venues import fee_for, DEFAULT_VENUE
         rate, _ = fee_for(venue or DEFAULT_VENUE, maker=maker, asset_class="crypto")
@@ -274,8 +296,15 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
                    borrow_rate_annual: float | None = None,
                    hard_to_borrow: bool = False,
                    venue: str | None = None,
-                   leveraged: bool = False) -> dict:
-    """Full round-trip cost estimate, in both percent and R."""
+                   leveraged: bool = False,
+                   product: str | None = None) -> dict:
+    """Full round-trip cost estimate, in both percent and R.
+
+    `product` names what is being traded (CRYPTO_SPOT vs CRYPTO_PERP); it is
+    passed straight through to the fee authority so a perpetual is priced as
+    one. `leveraged` remains for callers not yet threaded, but leverage has
+    never been what selects a fee schedule.
+    """
     entry = float(entry or 0)
     risk_distance = abs(entry - float(stop or 0))
     if entry <= 0:
@@ -297,7 +326,8 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
         fee_cost_pct = ((spec.commission * 2.0) / contract_notional_value
                         if contract_notional_value > 0 else 0.0)
     else:
-        per_side_fee = fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged)
+        per_side_fee = fee_pct(symbol, maker=maker, venue=venue,
+                               leveraged=leveraged, product=product)
         fee_cost_pct = per_side_fee * 2.0          # in and out
 
     slip = default_slippage_pct(symbol) if slippage_pct is None else float(slippage_pct)
@@ -378,7 +408,8 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
                         slippage_pct: float | None = None,
                         illiquid: bool = False,
                         venue: str | None = None,
-                        leveraged: bool = False) -> float:
+                        leveraged: bool = False,
+                        product: str | None = None) -> float:
     """The tightest stop, as a fraction of entry, that can still pay for itself.
 
     This is the inverse of estimate_costs. Cost in R is
@@ -401,7 +432,10 @@ def min_viable_stop_pct(symbol: str, *, max_cost_r: float = 0.50,
     crossing = (MARKET_ORDER_SPREAD_MULTIPLIER
                 if str(order_type).lower() == "market" else LIMIT_ORDER_SPREAD_MULTIPLIER)
     slip = default_slippage_pct(symbol) if slippage_pct is None else abs(float(slippage_pct))
-    total_cost_pct = spread_pct * crossing + fee_pct(symbol, maker=maker, venue=venue, leveraged=leveraged) * 2.0 + slip * 2.0
+    total_cost_pct = (spread_pct * crossing
+                      + fee_pct(symbol, maker=maker, venue=venue,
+                                leveraged=leveraged, product=product) * 2.0
+                      + slip * 2.0)
     if max_cost_r <= 0:
         return float("inf")
     return total_cost_pct / max_cost_r

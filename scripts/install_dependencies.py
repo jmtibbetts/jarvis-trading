@@ -145,8 +145,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--with-test", action="store_true",
                     help="also install the test runner")
+    ap.add_argument("--with-inference", action="store_true",
+                    help="also install requirements-inference.txt (numpy + openvino; no GPU needed)")
     ap.add_argument("--with-ml", action="store_true",
-                    help="also install requirements-ml.txt (openvino et al)")
+                    help="also install requirements-ml.txt — TRAINING, needs the CUDA wheel index")
     ap.add_argument("--check-only", action="store_true",
                     help="verify the current environment without installing")
     args = ap.parse_args()
@@ -171,15 +173,30 @@ def main() -> int:
         pip("install", "-r", str(REPO / "requirements.txt"),
             what="install project requirements")
 
+        # INFERENCE AND TRAINING ARE DIFFERENT INSTALLS.
+        #
+        # Without openvino, 11 predictive-runtime tests SKIP rather than
+        # run — and they cover abstention semantics (schema mismatch, stale
+        # features, a device that raises), which is exactly the "UNKNOWN
+        # stays UNKNOWN" behaviour this system depends on. Coverage that
+        # silently disappears is not coverage.
+        #
+        # But those tests need numpy and openvino, not torch. --with-ml
+        # used to be the only way to get them, and it cannot resolve on a
+        # machine without the CUDA wheel index, so switching it on in CI
+        # failed the whole bootstrap. --with-inference is the flag CI wants.
+        if args.with_inference or args.with_ml:
+            pip("install", "-r", str(REPO / "requirements-inference.txt"),
+                what="install inference extras")
+
         if args.with_ml:
-            # Without openvino, 11 predictive-runtime tests SKIP rather
-            # than run — and they cover abstention semantics (schema
-            # mismatch, stale features, a device that raises), which is
-            # exactly the "UNKNOWN stays UNKNOWN" behaviour this system
-            # depends on. Coverage that silently disappears is not
-            # coverage.
+            # torch==2.11.0+cu128 lives ONLY on the PyTorch CUDA index.
+            # --extra-index-url rather than --index-url: that index is
+            # partial and does not carry numpy or openvino, so replacing
+            # PyPI with it makes the rest of the file unresolvable.
             pip("install", "-r", str(REPO / "requirements-ml.txt"),
-                what="install ML extras")
+                "--extra-index-url", "https://download.pytorch.org/whl/cu128",
+                what="install ML training extras (CUDA wheels)")
 
         if args.with_test:
             pip("install", "pytest", what="install test runner")

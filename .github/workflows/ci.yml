@@ -20,12 +20,19 @@
 # exactly; "latest" silently becomes 26.04 one morning and the gate stops
 # describing the machine it is supposed to be protecting.
 #
-# ML EXTRAS ARE INSTALLED. Without openvino, the predictive-runtime tests
-# SKIP rather than run, and what they cover is abstention semantics —
-# schema mismatch, stale features, a device that raises. That is the
-# "UNKNOWN stays UNKNOWN" behaviour the risk layer leans on. Coverage that
-# silently disappears is not coverage, and a skip is invisible in a green
-# check.
+# THE INFERENCE EXTRAS ARE INSTALLED. Without openvino, 11
+# predictive-runtime tests SKIP rather than run, and what they cover is
+# abstention semantics — schema mismatch, stale features, a device that
+# raises. That is the "UNKNOWN stays UNKNOWN" behaviour the risk layer
+# leans on. Coverage that silently disappears is not coverage, and a skip
+# is invisible inside a green check.
+#
+# --with-inference, NOT --with-ml. The first attempt used --with-ml and
+# failed the whole bootstrap: requirements-ml.txt pins torch==2.11.0+cu128,
+# which exists only on the PyTorch CUDA index, and the runner has no GPU
+# and no reason to download 2 GB of CUDA wheels. The inference half is now
+# its own file — numpy and openvino, both from PyPI — which is what
+# actually gates those tests.
 #
 # The frontend is a RELEASE GATE. This repository serves a built Svelte
 # application; a green backend check while the UI fails to compile is a
@@ -59,7 +66,7 @@ jobs:
   pytest:
     name: pytest (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45         # ML extras add install time; the suite is ~30s
+    timeout-minutes: 45         # install dominates; the suite itself is ~40s
     steps:
       # NOTE ON SUPPLY CHAIN: these are major-version tags, which are
       # mutable. Pinning to verified commit SHAs is the correct hardening
@@ -84,7 +91,7 @@ jobs:
       # lesson is not: every step is checked and the first failure exits
       # non-zero, on every shell.
       - name: Install dependencies (fail-closed)
-        run: python scripts/install_dependencies.py --with-test --with-ml
+        run: python scripts/install_dependencies.py --with-test --with-inference
 
       - name: Run suite
         env:

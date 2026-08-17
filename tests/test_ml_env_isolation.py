@@ -55,11 +55,56 @@ class TradingPathDoesNotImportTheMlStackTests(unittest.TestCase):
         for pkg in ("torch", "scikit-learn", "nncf"):
             self.assertNotIn(pkg, req, f"requirements.txt pulls {pkg}")
 
+    def reachable_from(self, name: str, seen=None) -> str:
+        """The REQUIREMENT LINES of a file and everything it `-r` includes.
+
+        Two things this has to get right, both learned the hard way.
+
+        Comments are stripped. These files explain themselves at length,
+        and requirements-inference.txt's header names torch precisely to
+        say it is NOT here — a search over raw text reads that as the
+        opposite of what it says. Searching source for a thing and matching
+        the prose about it has cost this project time four separate times.
+
+        Includes are followed. The numpy pin used to sit in
+        requirements-ml.txt and now sits in requirements-inference.txt,
+        which that file includes. Reading one file would call the pin
+        missing while it is still enforced — and would go green again the
+        day somebody moved it without the include."""
+        seen = seen if seen is not None else set()
+        if name in seen:
+            return ""
+        seen.add(name)
+        lines = []
+        for raw in (ROOT / name).read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("-r "):
+                lines.append(self.reachable_from(line[3:].strip(), seen))
+            else:
+                lines.append(line)
+        return "\n".join(lines)
+
     def test_numpy_is_pinned_in_the_ml_requirements(self):
         """Installing scipy unpinned upgraded numpy 1.26.4 -> 2.5.2, silently
         replacing the numerical foundation under fee and P&L arithmetic."""
-        ml = (ROOT / "requirements-ml.txt").read_text(encoding="utf-8", errors="replace")
-        self.assertIn("numpy==1.26.4", ml)
+        self.assertIn("numpy==1.26.4", self.reachable_from("requirements-ml.txt"))
+
+    def test_the_pin_holds_for_an_inference_only_install_too(self):
+        """CI installs the inference half alone. A pin that lived only in
+        the training file would leave the gate running on a different numpy
+        from the desk — the exact substitution this pin exists to stop."""
+        self.assertIn("numpy==1.26.4", self.reachable_from("requirements-inference.txt"))
+
+    def test_the_inference_half_needs_no_gpu_wheel_index(self):
+        """torch==2.11.0+cu128 resolves only from the PyTorch CUDA index, so
+        anything reachable from the inference file has to come from PyPI.
+        When it did not, the ML extras silently failed to install in CI and
+        11 predictive tests skipped inside a green check."""
+        reachable = self.reachable_from("requirements-inference.txt")
+        self.assertNotIn("torch", reachable)
+        self.assertNotIn("+cu", reachable)
 
     def test_the_installed_numpy_matches_the_pin(self):
         import numpy

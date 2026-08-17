@@ -1,0 +1,25 @@
+# Inference-only predictive stack: CPU (and an Intel NPU where one exists).
+#
+# SPLIT OUT OF requirements-ml.txt BECAUSE CI COULD NOT INSTALL THAT FILE.
+# requirements-ml.txt pins torch==2.11.0+cu128, which exists only on the
+# PyTorch CUDA index, so a plain `pip install -r requirements-ml.txt` fails
+# to resolve it — and the ML extras therefore never installed in CI, which
+# meant 11 predictive-runtime tests SKIPPED inside a green check.
+#
+# Everything here resolves from PyPI, needs no GPU, and is what actually
+# gates those tests. Training lives next door and stays there: it is a
+# batch activity on the RTX 5090 and must never become a runtime dependency
+# of the trading system. JARVIS has to start and trade with none of it.
+
+# numpy IS PINNED, and the pin matters more than it looks.
+# Installing scikit-learn/scipy unpinned pulled numpy 1.26.4 -> 2.5.2,
+# because scipy >= 1.15 requires numpy >= 2.0. That silently replaced the
+# numerical foundation the entire trading system has been tested against,
+# as a side effect of adding an ML library. numpy 2 changes scalar
+# promotion, default integer width, and copy semantics — none of which
+# should move underneath fee, P&L or position-sizing arithmetic without a
+# deliberate decision.
+numpy==1.26.4
+
+# openvino also constrains numpy to <2.6.0, which the pin above satisfies.
+openvino==2026.3.0

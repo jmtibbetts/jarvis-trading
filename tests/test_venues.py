@@ -5,6 +5,7 @@ The cost model previously assumed one crypto fee for every venue — Alpaca's
 AssetPairs endpoint. Since P0 rejects trades whose costs exceed 0.50R, a
 fee wrong by 60% silently moves the line between tradeable and not.
 """
+import os
 import unittest
 
 from lib.venues import (fee_for, validate_order, is_tradeable_on,
@@ -278,10 +279,54 @@ class AccountFeeTests(unittest.TestCase):
     BTC table reads 0.40%/0.25% — pricing from the table understated true
     cost by HALF, in the direction that lets bad trades through."""
 
+    # ── Deterministic: the PREFERENCE ORDER, with no account involved ───
+    # These used to exist only in credentialed form, so the rule "a measured
+    # fee beats the published table" went untested on every machine without
+    # Kraken keys — which is every CI runner. The account read is stubbed;
+    # what is under test is which number wins, not whether Kraken answers.
+    MEASURED = {"taker": 0.008, "maker": 0.004, "volume_30d": 0.0}
+
+    def test_a_measured_fee_is_preferred_over_the_published_table(self):
+        from unittest.mock import patch
+        from lib import venues
+        with patch.object(venues, "account_fee", lambda venue="kraken": self.MEASURED):
+            rate, why = venues.fee_for("kraken")
+        self.assertIn("MEASURED", why)
+        self.assertAlmostEqual(rate, 0.008, places=6)
+
+    def test_an_unreadable_account_falls_back_to_the_table_not_to_optimism(self):
+        """The direction of the fallback is the safety property: a failed
+        measurement must never make trading look cheaper than the table."""
+        from unittest.mock import patch
+        from lib import venues
+        with patch.object(venues, "account_fee", lambda venue="kraken": None):
+            rate, why = venues.fee_for("kraken")
+        self.assertNotIn("MEASURED", why)
+        self.assertGreater(rate, 0)
+
+    def test_a_dearer_measured_fee_never_makes_more_trades_viable(self):
+        """Monotonicity, deterministically. Higher real costs must widen the
+        minimum viable stop, never narrow it."""
+        from unittest.mock import patch
+        from lib import venues
+        from lib.transaction_costs import min_viable_stop_pct
+        with patch.object(venues, "account_fee", lambda venue="kraken": None):
+            cheap = min_viable_stop_pct("BTC/USD", venue="kraken")
+        with patch.object(venues, "account_fee", lambda venue="kraken": self.MEASURED):
+            dear = min_viable_stop_pct("BTC/USD", venue="kraken")
+        self.assertGreaterEqual(dear, cheap,
+                                "a dearer fee produced a TIGHTER viable stop")
+
+    # ── EXTERNAL_INTEGRATION: needs operator credentials ────────────────
+    @unittest.skipUnless(os.getenv("RUN_KRAKEN_INTEGRATION") == "1",
+                         "EXTERNAL_INTEGRATION: needs operator Kraken "
+                         "credentials - set RUN_KRAKEN_INTEGRATION=1")
     def test_measured_fee_is_preferred_when_readable(self):
+        """READ-ONLY. Reads the account's fee tier and places NO order; see
+        scripts/kraken_readonly_smoke.py for the standalone version."""
         from lib.venues import fee_for, account_fee
-        if account_fee("kraken") is None:
-            self.skipTest("no Kraken credentials configured")
+        self.assertIsNotNone(account_fee("kraken"),
+                             "credentials were provided but the fee is unreadable")
         _, why = fee_for("kraken")
         self.assertIn("MEASURED", why)
 
@@ -296,13 +341,15 @@ class AccountFeeTests(unittest.TestCase):
         rate, _ = fee_for("kraken", volume_30d=0)   # forces the table path
         self.assertGreater(rate, 0)
 
+    @unittest.skipUnless(os.getenv("RUN_KRAKEN_INTEGRATION") == "1",
+                         "EXTERNAL_INTEGRATION: needs operator Kraken "
+                         "credentials - set RUN_KRAKEN_INTEGRATION=1")
     def test_a_dearer_measured_fee_widens_the_minimum_viable_stop(self):
-        """The safety property: higher real costs must make FEWER trades
-        viable, never more."""
+        """READ-ONLY. The live counterpart of the deterministic monotonicity
+        test above: it proves the REAL tier is still the dear one."""
         from lib.transaction_costs import min_viable_stop_pct
         from lib.venues import account_fee
-        if account_fee("kraken") is None:
-            self.skipTest("no Kraken credentials configured")
+        self.assertIsNotNone(account_fee("kraken"))
         measured = min_viable_stop_pct("BTC/USD", venue="kraken")
         self.assertGreater(measured, 0.02)   # 0.8% taker demands a wide stop
 

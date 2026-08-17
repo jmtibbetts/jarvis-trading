@@ -571,5 +571,57 @@ class TheFailureIsSaidOutLoudTests(EndpointTestCase):
         self.assertIn("no other endpoint was tried", health["error"])
 
 
+class TheSuiteNeverReachesARealLlmTests(unittest.TestCase):
+    """Resolution PROBES, and a probe is a real network call.
+
+    Adding the probing resolver quietly made the suite reach the operator's
+    live LM Studio: two HTTP requests per resolve, to loopback and then to
+    the WSL gateway. That is non-deterministic (green or red depending on
+    whether a desktop application happens to be running), it cost 24 s in
+    one test alone, and a "hermetic" suite could send a prompt to a real
+    model. conftest pins LM_STUDIO_URL to a discard port; an explicit
+    override is honoured exactly and never probed."""
+
+    def test_conftest_pins_the_endpoint(self):
+        import os
+        self.assertTrue(os.environ.get("LM_STUDIO_URL"),
+                        "conftest must pin LM_STUDIO_URL for the session")
+
+    def test_resolution_never_reaches_anything_but_the_pinned_endpoint(self):
+        """An override IS probed once — that is deliberate, so health can
+        report HOW it is broken. What must never happen is a probe of the
+        automatic candidates, because the WSL gateway is a real machine
+        running a real model."""
+        import os
+        import httpx
+        from urllib.parse import urlsplit
+        pinned = urlsplit(os.environ["LM_STUDIO_URL"]).netloc
+        calls = []
+
+        def spy(url, *a, **k):
+            calls.append(url)
+            raise httpx.ConnectError("refused")
+
+        L.reset_endpoint_cache()
+        with patch.object(httpx, "get", spy):
+            res = L.resolve_endpoint()
+        self.assertTrue(calls, "the override should be probed exactly once")
+        for url in calls:
+            self.assertIn(pinned, url,
+                          f"the suite probed something other than the pinned "
+                          f"endpoint: {url}")
+        self.assertEqual(res.provenance, L.PROV_ENV,
+                         "an unpinned session would fall through to discovery")
+
+    def test_the_pinned_port_is_one_nothing_listens_on(self):
+        """Port 9 is DISCARD. A pin at 1234 would still find the operator's
+        LM Studio on a developer machine, which is the whole problem."""
+        import os
+        from urllib.parse import urlsplit
+        port = urlsplit(os.environ["LM_STUDIO_URL"]).port
+        self.assertNotEqual(port, L.LM_STUDIO_DEFAULT_PORT,
+                            "pinned to the port LM Studio actually uses")
+
+
 if __name__ == "__main__":
     unittest.main()

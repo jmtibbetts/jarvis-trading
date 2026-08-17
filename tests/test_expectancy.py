@@ -14,6 +14,18 @@ import unittest
 
 from lib.expectancy import (HIERARCHY, MIN_NET_R, MIN_SAMPLE, NO_TRADE,
                             _r_of, evaluate, lookup, summary, wilson_interval)
+from tests.support.outcome_history import seed_outcomes
+
+
+def setUpModule():
+    """Build a deterministic closed-trade history first.
+
+    Twelve tests below used to skip whenever `lookup()` returned None, which
+    on any hermetic run is always — so the cost gate, the thing that refuses
+    a setup carrying 13R of round-trip cost, had never actually been
+    exercised in CI. The history is constructed rather than sampled, so
+    every number asserted here is one the fixture chose."""
+    seed_outcomes()
 
 
 class ResultInRTests(unittest.TestCase):
@@ -71,16 +83,14 @@ class HierarchyTests(unittest.TestCase):
 
     def test_a_lookup_names_its_bucket_and_sample(self):
         got = lookup("unclassified", "equity", "long", "4H")
-        if got is None:
-            self.skipTest("no outcome history in this environment")
+        self.assertIsNotNone(got, "the seeded history must produce this bucket")
         self.assertIn("bucket", got)
         self.assertGreaterEqual(got["sample"], MIN_SAMPLE)
         self.assertIn("exact_match", got)
 
     def test_an_unknown_combination_falls_back_rather_than_failing(self):
         got = lookup("no_such_strategy", "equity", "long", "4H")
-        if got is None:
-            self.skipTest("no outcome history in this environment")
+        self.assertIsNotNone(got, "an unknown strategy must still fall back, not vanish")
         self.assertFalse(got["exact_match"],
                          "an unmatched strategy reported an exact match")
 
@@ -95,15 +105,13 @@ class NetExpectancyDecidesTests(unittest.TestCase):
         """The measured case: costs of 13R on a 0.08% stop. No win rate
         rescues that, and the old scorer would have ranked it well."""
         r = evaluate(self._sig("BTC/USD", "crypto", "Long", "15m", 63800.0, 63750.0))
-        if r["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertNotEqual(r["verdict"], "UNKNOWN", "the fixture seeds this bucket")
         self.assertEqual(r["verdict"], NO_TRADE)
         self.assertLess(r["net"]["net_expected_r"], 0)
 
     def test_a_wide_stop_on_a_measured_edge_is_allowed(self):
         r = evaluate(self._sig("NVDA", "equity", "Long", "4H", 224.0, 218.0))
-        if r["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertNotEqual(r["verdict"], "UNKNOWN", "the fixture seeds this bucket")
         self.assertEqual(r["verdict"], "TRADE")
         self.assertGreaterEqual(r["net"]["net_expected_r"], MIN_NET_R)
 
@@ -112,15 +120,13 @@ class NetExpectancyDecidesTests(unittest.TestCase):
         distance differs, and that alone decides whether costs eat it."""
         wide = evaluate(self._sig("NVDA", "equity", "Long", "4H", 224.0, 218.0))
         tight = evaluate(self._sig("NVDA", "equity", "Long", "4H", 224.0, 223.5))
-        if wide["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertNotEqual(wide["verdict"], "UNKNOWN", "the fixture seeds this bucket")
         self.assertEqual(wide["verdict"], "TRADE")
         self.assertEqual(tight["verdict"], NO_TRADE)
 
     def test_the_reason_shows_the_arithmetic(self):
         r = evaluate(self._sig("NVDA", "equity", "Long", "4H", 224.0, 218.0))
-        if r["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertNotEqual(r["verdict"], "UNKNOWN")
         self.assertIn("R", r["reason"])
         self.assertIn("trades", r["reason"])
 
@@ -158,15 +164,13 @@ class RobustnessTests(unittest.TestCase):
         r = evaluate({"asset_symbol": "NVDA", "asset_class": "equity",
                       "direction": "Long", "timeframe": "4H",
                       "entry_price": 224.0, "stop_loss": 218.0})
-        if r["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertNotEqual(r["verdict"], "UNKNOWN")
         self.assertIn("robust", r)
         self.assertIsNotNone(r["net_lower"])
 
     def test_the_lower_bound_is_never_the_more_optimistic_number(self):
         got = lookup("unclassified", "equity", "long", "4H")
-        if got is None:
-            self.skipTest("no outcome history in this environment")
+        self.assertIsNotNone(got)
         self.assertLessEqual(got["gross_expected_r_lower"], got["gross_expected_r"])
 
 
@@ -202,16 +206,16 @@ class WiredIntoTheScorerTests(unittest.TestCase):
     def test_the_verdict_reaches_the_breakdown(self):
         out = self._score(224.0, 218.0)
         ev = out["score_breakdown"].get("expectancy")
-        if not ev or ev["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertTrue(ev, "the verdict must reach the scorer breakdown")
+        self.assertNotEqual(ev["verdict"], "UNKNOWN")
         self.assertIn(ev["verdict"], ("TRADE", NO_TRADE))
         self.assertIn("net_expected_r", ev)
 
     def test_a_cost_doomed_setup_is_flagged_no_trade_on_the_signal(self):
         out = self._score(63800.0, 63750.0, tf="15m", symbol="BTC/USD", cls="crypto")
         ev = out["score_breakdown"].get("expectancy")
-        if not ev or ev["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertTrue(ev)
+        self.assertNotEqual(ev["verdict"], "UNKNOWN")
         self.assertEqual(ev["verdict"], NO_TRADE)
         self.assertTrue(out.get("no_trade"))
         self.assertTrue(out.get("no_trade_reason"))
@@ -219,8 +223,9 @@ class WiredIntoTheScorerTests(unittest.TestCase):
     def test_a_viable_setup_is_not_flagged(self):
         out = self._score(224.0, 218.0)
         ev = out["score_breakdown"].get("expectancy")
-        if not ev or ev["verdict"] != "TRADE":
-            self.skipTest("bucket not tradeable in this environment")
+        self.assertTrue(ev)
+        self.assertEqual(ev["verdict"], "TRADE",
+                         "the seeded equity 4H bucket is deliberately tradeable")
         self.assertFalse(out.get("no_trade"))
 
     def test_the_sample_size_travels_with_the_verdict(self):
@@ -228,7 +233,7 @@ class WiredIntoTheScorerTests(unittest.TestCase):
         codebase keeps getting burned by."""
         out = self._score(224.0, 218.0)
         ev = out["score_breakdown"].get("expectancy")
-        if not ev or ev["verdict"] == "UNKNOWN":
-            self.skipTest("no outcome history in this environment")
+        self.assertTrue(ev)
+        self.assertNotEqual(ev["verdict"], "UNKNOWN")
         self.assertIsNotNone(ev["sample"])
         self.assertIsNotNone(ev["bucket"])

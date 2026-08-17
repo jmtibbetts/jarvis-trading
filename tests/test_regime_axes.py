@@ -11,6 +11,7 @@ say so, not report neutral — "we could not measure liquidity" and
 "liquidity is normal" are different statements, and only one of them should
 be allowed to affect a trade.
 """
+import os
 import unittest
 
 from lib.regime_axes import (AXES, BENCHMARKS, OUT_OF_REGIME_PENALTY,
@@ -292,13 +293,52 @@ class FieldNamesMatchTheTaEngineTests(unittest.TestCase):
         cats = [c["category"] for c in ev["supporting"]]
         self.assertIn("trend", cats)
 
+    # The snapshot shape benchmark_snapshot() emits, transcribed from the
+    # function itself. The bug this guards against was a KEY NAME — "ema"
+    # where the producer writes "emas" — so the fixture must carry the real
+    # names or it cannot catch a recurrence.
+    LIVE_SHAPED_SNAPSHOT = {
+        "primary": {"symbol": "SPY", "close": 601.2, "ema21": 594.0,
+                    "ema50": 585.5, "adx": 27.4, "atr_pct": 0.94,
+                    "atr_percentile": 46.0, "volume_ratio": 1.08},
+        "secondary": {"symbol": "QQQ", "close": 528.4, "ema21": 519.9,
+                      "ema50": 508.1, "adx": 25.1, "atr_pct": 1.12,
+                      "atr_percentile": 52.0, "volume_ratio": 1.15},
+    }
+
+    def test_a_well_formed_benchmark_measures_its_trend(self):
+        """DETERMINISTIC. This used to call the live provider and skip when
+        the network was absent, so on every hermetic run the assertion below
+        never executed — and the defect it guards (a snapshot whose keys the
+        measurer cannot read) is exactly the kind that hides behind a skip.
+
+        No network: the fixture reproduces the producer's field names and
+        shapes, and the trend axis must measure rather than abstain."""
+        r = measure("equity", self.LIVE_SHAPED_SNAPSHOT)
+        self.assertFalse(r["axes"]["trend"]["abstained"],
+                         "trend abstained against a well-formed benchmark")
+
+    def test_a_snapshot_missing_its_emas_abstains_rather_than_inventing(self):
+        """The other half of the contract, and the reason the key name
+        matters: absent inputs must produce an abstention, never a number.
+        UNKNOWN STAYS UNKNOWN."""
+        blind = {"primary": dict(self.LIVE_SHAPED_SNAPSHOT["primary"],
+                                 ema21=None, ema50=None)}
+        r = measure("equity", blind)
+        self.assertTrue(r["axes"]["trend"]["abstained"],
+                        "trend produced a reading with no EMAs to read")
+
+    @unittest.skipUnless(os.getenv("RUN_PROVIDER_INTEGRATION") == "1",
+                         "EXTERNAL_INTEGRATION: needs a live market-data "
+                         "provider - set RUN_PROVIDER_INTEGRATION=1")
     def test_a_live_benchmark_measures_its_trend(self):
-        """The end-to-end check the unit tests could not make: real fields,
-        real shapes, trend actually measured rather than abstained."""
+        """The provider-connectivity half, kept and kept SEPARATE. It proves
+        the real feed still emits the shape the fixture above asserts, which
+        no offline test can. Opt-in, never part of the normal gate."""
         from lib.regime_axes import benchmark_snapshot
         snap = benchmark_snapshot("equity")
-        if not snap.get("primary"):
-            self.skipTest("no market data available")
+        self.assertTrue(snap.get("primary"),
+                        "the live provider returned no primary benchmark")
         r = measure("equity", snap)
         self.assertFalse(r["axes"]["trend"]["abstained"],
                          "trend abstained against a live benchmark")

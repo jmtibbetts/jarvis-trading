@@ -1,10 +1,22 @@
 """Refilling the wallet must not burn the books.
 
-MUTATING INTEGRATION TESTS: these exercise the real reset functions against
-the application database — running them RESETS THE LIVE PAPER BOOK. That is
-not hypothetical: the first run of this file soft-reset the live portfolio
-to $50k and closed 47 real open positions mid-experiment. They are gated
-behind RUN_DB_MUTATING_TESTS=1 and excluded from the default suite.
+These exercise the REAL reset functions, and they now run in the normal
+suite. That was not always safe: the first run of this file soft-reset the
+live portfolio to $50k and closed 47 real open positions mid-experiment,
+and the response at the time was an opt-in flag, RUN_DB_MUTATING_TESTS.
+
+The flag has since been guarding a danger that cannot happen. Protection
+became STRUCTURAL and layered: conftest.py sets JARVIS_UNDER_PYTEST before
+any app import, app.database._resolve_db_path then REFUSES to open the
+operator database outright, the session is redirected to a temp file, and
+pytest_configure asserts the resolved path is a test path. A test that
+forgets all of this still cannot reach real state.
+
+So the flag was no longer protecting anything — it was only withholding
+coverage of the reset contract, which is precisely the contract that
+incident was about. `assert_disposable_database()` below re-checks the
+resolved path at run time, so if the structural guard is ever weakened
+these tests refuse rather than proceed.
 
 Both original resets deleted every trade row — the learning data that
 outcomes, calibration and the failure postmortems read. A reset exists to
@@ -16,15 +28,26 @@ import os
 import unittest
 import uuid
 
-MUTATING_OK = os.getenv("RUN_DB_MUTATING_TESTS") == "1"
-
 from app.database import (AutoSimPortfolio, AutoSimPosition, AutoSimTrade,
                           PaperPortfolio, PaperTrade, get_db, new_id, now_iso)
 
 
-@unittest.skipUnless(MUTATING_OK, "mutates the live paper book — set RUN_DB_MUTATING_TESTS=1")
+def assert_disposable_database():
+    """Defence in depth. app.database refuses the operator DB under pytest;
+    this refuses anything that is not visibly a throwaway, so a future change
+    to that guard turns these tests red instead of destructive."""
+    from app.database import DB_PATH
+    resolved = str(DB_PATH)
+    if "jarvis-test-db-" not in resolved and os.getenv("JARVIS_ALLOW_OPERATOR_DB") != "1":
+        raise AssertionError(
+            f"refusing to run a mutating reset against {resolved} - "
+            "expected a temporary pytest database")
+    return resolved
+
+
 class PaperSoftResetTests(unittest.TestCase):
     def setUp(self):
+        assert_disposable_database()
         self.marker = f"RESET-TEST-{uuid.uuid4().hex[:8]}"
         with get_db() as db:
             db.add(PaperTrade(id=new_id(), symbol=self.marker, side="buy",
@@ -52,11 +75,11 @@ class PaperSoftResetTests(unittest.TestCase):
             self.assertEqual(p.total_trades, 0)
 
 
-@unittest.skipUnless(MUTATING_OK, "mutates the live auto-sim book — set RUN_DB_MUTATING_TESTS=1")
 class AutoSimSoftResetTests(unittest.TestCase):
     USER = "soft-reset-test-user"
 
     def setUp(self):
+        assert_disposable_database()
         with get_db() as db:
             db.add(AutoSimTrade(id=new_id(), user_id=self.USER, symbol="T/USD",
                                 direction="Long", side="buy", qty=1.0,

@@ -25,7 +25,7 @@ Last reconciled against `main` with 2,742 tests passing.
 |---|---|---|
 | `HARDENING_PLAN.md` | **PARTIAL** | The gate experiment, cost modelling and R-multiple provenance landed. Duplicate-evidence elimination and the selection-bias dashboard remain open. |
 | `UI_AUDIT.md` | **PARTIAL** | P0/P1 complete and accurate. Written before the Virtual CEX work, so its navigation model (Live / Paper / Auto Sim) is superseded — the tabs are now All books / Live / Virtual CEX / Shadow. Scanner column config and virtualization landed; the Command Center rework has not. |
-| `JARVIS_MASTER_UI_UX_HELIUS_WALLET_ALPHA_PROMPT.md` | **PARTIAL** | Wallet intelligence, token surge and the on-chain desk are done. The §130 Daily Brief command centre and §131 Crypto Desk IA remain open. |
+| `JARVIS_MASTER_UI_UX_HELIUS_WALLET_ALPHA_PROMPT.md` | **PARTIAL** | Wallet intelligence, token surge and the on-chain desk are done. §130's command centre landed as the attention-first operations room; §131 Crypto Desk IA remains open. |
 | `JARVIS_CLAUDE_IMPLEMENTATION_PLAN*.md` | **SUPERSEDED** | Live-first sequencing. Routing by `paper_mode`, "shorts and leverage go to paper", live execution as the default destination — all replaced. |
 | `UPGRADE_PLAN.md` | **PARTIAL** | Cost-aware filtering and `min_viable_stop_pct` landed and were then corrected (FX was priced as equity; unknown futures fell back to an equity multiplier). |
 | `tradingupgradep1.md` / `p2` | **SUPERSEDED** | Pre-dates the canonical instrument model and the execution boundary. |

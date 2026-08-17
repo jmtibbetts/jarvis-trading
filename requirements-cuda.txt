@@ -1,0 +1,38 @@
+# OPTIONAL GPU training. Never installed by bootstrap, never installed by
+# CI, and never required to run JARVIS.
+#
+# READ THIS BEFORE INSTALLING IT.
+#
+# JARVIS does not need CUDA. The RTX 5090 is reached through LM Studio's
+# OpenAI-compatible HTTP API, which is a network hop, not a Python
+# dependency — nothing in the trading process needs torch.cuda to use a
+# GPU-backed LLM. Everything else (TA, risk, sizing, execution simulation,
+# DEX economics, accounting, calibration, expectancy, attribution,
+# walk-forward, OpenVINO predictive inference) is CPU by design.
+#
+# THE ONE MODEL THIS EVER TRAINED WAS REJECTED. ml/evaluation/
+# PATH_MODEL_FINDINGS.md records the result: negative R-squared on every
+# regression variant, beaten by a constant baseline, "not wired into
+# anything". The CUDA MLP is in that table as a loser, not a dependency.
+#
+# So this file exists for one narrow case: a future experiment genuinely
+# too large for CPU. If you are installing it for any other reason,
+# requirements-research.txt is the file you want.
+#
+# Install (note --extra-index-url, NOT --index-url: the CUDA index is a
+# PARTIAL index and does not carry numpy, scipy or scikit-learn, so
+# replacing PyPI with it makes everything else unresolvable):
+#
+#     pip install -r requirements-cuda.txt \
+#         --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# CUDA 12.8 specifically: the RTX 5090 is Blackwell (sm_120) and the
+# default wheels do not carry that architecture — torch imports fine and
+# then reports no usable device, which reads like a driver problem rather
+# than a wheel problem.
+
+-r requirements-research.txt
+
+# Overrides the CPU wheel above. PEP 440 treats 2.11.0+cu128 as satisfying
+# ==2.11.0, so the two files compose in either order rather than conflicting.
+torch==2.11.0+cu128

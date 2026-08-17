@@ -47,8 +47,8 @@ class TradingPathDoesNotImportTheMlStackTests(unittest.TestCase):
                 offenders.append(f"{rel} imports {sorted(bad)}")
         self.assertEqual(offenders, [], "; ".join(offenders))
 
-    def test_the_ml_requirements_are_a_separate_file(self):
-        self.assertTrue((ROOT / "requirements-ml.txt").exists())
+    def test_the_research_requirements_are_a_separate_file(self):
+        self.assertTrue((ROOT / "requirements-research.txt").exists())
 
     def test_the_runtime_requirements_do_not_pull_the_ml_stack(self):
         req = (ROOT / "requirements.txt").read_text(encoding="utf-8", errors="replace").lower()
@@ -67,7 +67,7 @@ class TradingPathDoesNotImportTheMlStackTests(unittest.TestCase):
         the prose about it has cost this project time four separate times.
 
         Includes are followed. The numpy pin used to sit in
-        requirements-ml.txt and now sits in requirements-inference.txt,
+        the training file and now sits in the core file,
         which that file includes. Reading one file would call the pin
         missing while it is still enforced — and would go green again the
         day somebody moved it without the include."""
@@ -86,25 +86,62 @@ class TradingPathDoesNotImportTheMlStackTests(unittest.TestCase):
                 lines.append(line)
         return "\n".join(lines)
 
-    def test_numpy_is_pinned_in_the_ml_requirements(self):
+    def test_numpy_is_pinned_exactly_once(self):
         """Installing scipy unpinned upgraded numpy 1.26.4 -> 2.5.2, silently
-        replacing the numerical foundation under fee and P&L arithmetic."""
-        self.assertIn("numpy==1.26.4", self.reachable_from("requirements-ml.txt"))
+        replacing the numerical foundation under fee and P&L arithmetic.
 
-    def test_the_pin_holds_for_an_inference_only_install_too(self):
-        """CI installs the inference half alone. A pin that lived only in
-        the training file would leave the gate running on a different numpy
-        from the desk — the exact substitution this pin exists to stop."""
-        self.assertIn("numpy==1.26.4", self.reachable_from("requirements-inference.txt"))
+        Pinned ONCE, in the core file. A second pin site is somewhere for
+        the two to drift apart, and the drift is invisible until the day
+        two environments disagree about scalar promotion."""
+        sites = [f for f in ("requirements.txt", "requirements-inference.txt",
+                             "requirements-research.txt", "requirements-cuda.txt")
+                 if "numpy==" in (ROOT / f).read_text(encoding="utf-8", errors="replace")]
+        self.assertEqual(sites, ["requirements.txt"], f"numpy pinned in {sites}")
 
-    def test_the_inference_half_needs_no_gpu_wheel_index(self):
-        """torch==2.11.0+cu128 resolves only from the PyTorch CUDA index, so
-        anything reachable from the inference file has to come from PyPI.
-        When it did not, the ML extras silently failed to install in CI and
-        11 predictive tests skipped inside a green check."""
-        reachable = self.reachable_from("requirements-inference.txt")
-        self.assertNotIn("torch", reachable)
-        self.assertNotIn("+cu", reachable)
+    def test_every_install_path_still_reaches_the_pin(self):
+        """One pin site only helps if every entry point includes it.
+        openvino alone constrains numpy to <2.6.0, so an inference install
+        that missed the pin would resolve numpy 2.x quite happily."""
+        for f in ("requirements.txt", "requirements-inference.txt",
+                  "requirements-research.txt", "requirements-cuda.txt"):
+            with self.subTest(requirements=f):
+                self.assertIn("numpy==1.26.4", self.reachable_from(f))
+
+    def test_no_normal_install_path_can_pull_cuda(self):
+        """THE POINT OF THE SPLIT. JARVIS does not need CUDA: the RTX 5090
+        is reached through LM Studio's HTTP API, not through this process.
+        Only the file whose name says CUDA may mention a CUDA wheel."""
+        for f in ("requirements.txt", "requirements-inference.txt",
+                  "requirements-research.txt"):
+            with self.subTest(requirements=f):
+                reachable = self.reachable_from(f)
+                self.assertNotIn("+cu", reachable, f"{f} reaches a CUDA wheel")
+                self.assertNotIn("nvidia", reachable.lower())
+
+    def test_the_runtime_never_needs_torch_at_all(self):
+        """Neither CPU nor CUDA. Established by tracing imports: nothing
+        under app/, jobs/ or lib/ imports torch, so it belongs to research
+        and must not appear in the runtime or inference sets."""
+        for f in ("requirements.txt", "requirements-inference.txt"):
+            with self.subTest(requirements=f):
+                self.assertNotIn("torch", self.reachable_from(f))
+
+    def test_cpu_learning_needs_nothing_beyond_the_core_runtime(self):
+        """The claim this whole split rests on: JARVIS learns from its
+        trades with neither research nor CUDA installed. Asserted against
+        the modules themselves rather than against a requirements file."""
+        learning = ["lib/calibration.py", "lib/expectancy.py",
+                    "lib/learning_engine.py", "lib/strategy_lifecycle.py",
+                    "lib/venue_expectancy.py", "lib/wallet_lifecycle.py"]
+        offenders = []
+        for rel in learning:
+            p = ROOT / rel
+            if not p.exists():
+                continue
+            bad = top_level_imports(p) & ML_ONLY
+            if bad:
+                offenders.append(f"{rel} imports {sorted(bad)}")
+        self.assertEqual(offenders, [], "; ".join(offenders))
 
     def test_the_installed_numpy_matches_the_pin(self):
         import numpy

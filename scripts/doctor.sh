@@ -99,6 +99,35 @@ else
   note "node" "$(node --version) at $node_bin"
 fi
 
+step "Compute"
+# THE SUPPORTED COMPUTE MODEL, stated so a reader does not have to infer it
+# from what is missing.
+#
+#   CPU          everything JARVIS calculates: TA, risk, sizing, execution
+#                simulation, DEX economics, accounting, calibration,
+#                expectancy, attribution, walk-forward, and OpenVINO
+#                predictive inference
+#   RTX 5090     LLM inference ONLY, reached through LM Studio's HTTP API
+#   CUDA Python  not a runtime requirement at all
+#
+# An absent CUDA stack is therefore reported as a FACT, never as a warning
+# or a degraded state. It is only needed for optional offline GPU training,
+# and the one model ever trained that way was rejected on its own numbers.
+note "deterministic compute" "CPU (authoritative baseline)"
+note "LLM acceleration" "external - Windows RTX 5090 via LM Studio HTTP API"
+if [[ -x "$PY" ]]; then
+  if "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('torch') else 1)" 2>/dev/null; then
+    torch_ver="$("$PY" -c "import torch; print(torch.__version__)" 2>/dev/null || echo '?')"
+    if [[ "$torch_ver" == *"+cu"* ]]; then
+      note "CUDA Python runtime" "installed ($torch_ver) - optional GPU training extras present"
+    else
+      note "CUDA Python runtime" "not installed; CPU torch $torch_ver present (optional research extras)"
+    fi
+  else
+    note "CUDA Python runtime" "not installed (optional; JARVIS does not need it)"
+  fi
+fi
+
 step "Predictive runtime"
 # The whole point of this section: CPU is the baseline and must work. The
 # NPU is a bonus and its absence is a fact, not a finding.

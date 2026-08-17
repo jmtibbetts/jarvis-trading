@@ -1,0 +1,44 @@
+# Offline model research. NOT part of the JARVIS runtime, and not needed to
+# start, trade, or learn.
+#
+# WHAT ACTUALLY USES THIS, established by tracing imports rather than by
+# reading the old file name: exactly one module,
+# ml/training/train_path_model.py, invoked deliberately as
+#
+#     python -m ml.training.train_path_model --parts <dir>
+#
+# Nothing under app/, jobs/ or lib/ imports scipy, scikit-learn or torch.
+# The learning pipeline — calibration, expectancy, strategy lifecycle,
+# venue and wallet learning, attribution — is stdlib and SQLAlchemy. The
+# predictive runtime is numpy and OpenVINO. JARVIS learns from its trades
+# with none of this installed.
+#
+# CPU TORCH, NOT CUDA TORCH. The harness selects its device at runtime
+# (`"cuda" if torch.cuda.is_available() else "cpu"`), and the model it
+# trains is 33->64->32->1 over ~5,500 rows. A GPU changes the wall clock
+# and nothing else, so the supported install is the plain PyPI wheel. See
+# requirements-cuda.txt if a genuinely GPU-sized experiment turns up.
+#
+# Install:
+#     pip install -r requirements-research.txt
+#
+# Includes the core runtime, for one reason: the numpy pin. This harness
+# imports numpy directly and reads the same parquet datasets the trading
+# system builds, so it runs in the JARVIS environment anyway — and
+# installing it standalone would resolve numpy freely, which is precisely
+# the drift the pin exists to prevent.
+-r requirements.txt
+
+# The harness's non-neural baselines, which is the point of it — a model
+# that cannot beat HistGradientBoosting or a constant has learned nothing.
+scipy<1.15
+scikit-learn<1.6
+
+# Pinned to the last releases that support numpy 1.26.4. scipy >= 1.15
+# requires numpy >= 2.0 and would drag the whole numerical foundation with
+# it as a side effect of installing a research dependency. All 1,341 tests
+# happened to pass on numpy 2.5.2 when that was discovered, but tests do
+# not cover every path, and that is not a risk worth taking for something
+# the trading system never imports.
+
+torch==2.11.0

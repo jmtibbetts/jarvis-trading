@@ -1,9 +1,20 @@
 # ml/ — offline training and evaluation
 
-Nothing here is imported by the trading system. `requirements-ml.txt` is a
-separate install, and `tests/test_ml_env_isolation.py` asserts by AST that
-no module on the trading path imports torch, scikit-learn or openvino at
-top level. JARVIS must start and trade with none of this present.
+Nothing here is imported by the trading system. `requirements-research.txt`
+is a separate install, and `tests/test_ml_env_isolation.py` asserts by AST
+that no module on the trading path imports torch, scikit-learn or openvino
+at top level. JARVIS must start, trade AND LEARN with none of this present:
+calibration, expectancy, strategy lifecycle, venue and wallet learning and
+attribution are stdlib and SQLAlchemy, and the predictive runtime is numpy
+and OpenVINO on CPU.
+
+**This directory is the only thing in the repository that imports torch**,
+and the supported install is the CPU wheel. The device line reads
+`"cuda" if torch.cuda.is_available() else "cpu"`, the model is
+33 -> 64 -> 32 -> 1 over ~5,500 rows, and a GPU changes the wall clock and
+nothing else. CUDA is an optional extra (`requirements-cuda.txt`), never a
+prerequisite — the RTX 5090 reaches JARVIS through LM Studio's HTTP API,
+which is a network hop, not a Python dependency.
 
 ```
 datasets/   leakage-safe dataset builders
@@ -32,7 +43,15 @@ was built, trained on CUDA, evaluated, and rejected.
 ## Reproduce
 
 ```bash
-pip install -r requirements-ml.txt --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements-research.txt      # CPU only, plain PyPI
 python ml/datasets/build_path_dataset.py      # ~20 min
 python ml/training/train_path_model.py        # ~5 min
+```
+
+Only if an experiment is genuinely too large for CPU — note
+`--extra-index-url`, not `--index-url`; the CUDA index is partial and does
+not carry numpy, scipy or scikit-learn:
+
+```bash
+pip install -r requirements-cuda.txt --extra-index-url https://download.pytorch.org/whl/cu128
 ```

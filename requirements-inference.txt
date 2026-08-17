@@ -1,25 +1,21 @@
-# Inference-only predictive stack: CPU (and an Intel NPU where one exists).
+# CPU predictive inference. Part of the SUPPORTED runtime.
 #
-# SPLIT OUT OF requirements-ml.txt BECAUSE CI COULD NOT INSTALL THAT FILE.
-# requirements-ml.txt pins torch==2.11.0+cu128, which exists only on the
-# PyTorch CUDA index, so a plain `pip install -r requirements-ml.txt` fails
-# to resolve it — and the ML extras therefore never installed in CI, which
-# meant 11 predictive-runtime tests SKIPPED inside a green check.
+# OpenVINO on CPU is the required baseline for the predictive layer. The NPU
+# is optional hardware and measured SLOWER for this workload (CPU 0.121 ms
+# vs NPU 0.376 ms) — it is spare capacity, not acceleration. No CUDA is
+# involved at any point: the RTX 5090 is reached through LM Studio's HTTP
+# API, not through this process.
 #
-# Everything here resolves from PyPI, needs no GPU, and is what actually
-# gates those tests. Training lives next door and stays there: it is a
-# batch activity on the RTX 5090 and must never become a runtime dependency
-# of the trading system. JARVIS has to start and trade with none of it.
+# Install:
+#     pip install -r requirements-inference.txt
+#
+# NUMPY IS DELIBERATELY NOT PINNED AGAIN HERE. It is pinned once, in
+# requirements.txt, and a second pin site is somewhere for the two to drift
+# apart. But openvino only constrains numpy to <2.6.0, so installing this
+# file ALONE would happily resolve numpy 2.x and silently replace the
+# numerical foundation the trading system is tested against — which is the
+# exact accident the pin exists to prevent. Hence the include: inference
+# runs inside JARVIS, so it never wants the runtime absent anyway.
+-r requirements.txt
 
-# numpy IS PINNED, and the pin matters more than it looks.
-# Installing scikit-learn/scipy unpinned pulled numpy 1.26.4 -> 2.5.2,
-# because scipy >= 1.15 requires numpy >= 2.0. That silently replaced the
-# numerical foundation the entire trading system has been tested against,
-# as a side effect of adding an ML library. numpy 2 changes scalar
-# promotion, default integer width, and copy semantics — none of which
-# should move underneath fee, P&L or position-sizing arithmetic without a
-# deliberate decision.
-numpy==1.26.4
-
-# openvino also constrains numpy to <2.6.0, which the pin above satisfies.
 openvino==2026.3.0

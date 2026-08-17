@@ -5,6 +5,7 @@
 #
 #     ./scripts/bootstrap_ubuntu.sh
 #     ./scripts/bootstrap_ubuntu.sh --skip-frontend
+#     ./scripts/bootstrap_ubuntu.sh --with-gpu-training   (OPTIONAL, ~2GB CUDA)
 #
 # MACHINE PROVISIONING ONLY. This never copies, opens or migrates an
 # operator database — see scripts/snapshot_operator_db.py for that. It is
@@ -27,7 +28,14 @@ REPO_DIR="${JARVIS_REPO_DIR:-$HOME/jarvis-trading}"
 VENV="$REPO_DIR/.venv"
 NODE_MAJOR="${JARVIS_NODE_MAJOR:-20}"
 SKIP_FRONTEND=0
-[[ "${1:-}" == "--skip-frontend" ]] && SKIP_FRONTEND=1
+WITH_GPU_TRAINING=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-frontend)     SKIP_FRONTEND=1 ;;
+    --with-gpu-training) WITH_GPU_TRAINING=1 ;;
+    *) printf 'unknown argument: %s\n' "$arg" >&2; exit 64 ;;
+  esac
+done
 
 step()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()    { printf '    \033[0;32mok\033[0m  %s\n' "$*"; }
@@ -122,15 +130,35 @@ step "Project requirements"
 # NO WINDOWS PATCH HERE. order_book builds from source under Linux with
 # build-essential present; the MSVC patch is Windows-only and applying it
 # on Linux would be an unreviewed edit to source that compiles fine.
-"$VENV/bin/python" -m pip install --quiet -r requirements.txt
+#
+# THE SUPPORTED RUNTIME IS CORE + CPU INFERENCE, AND NOTHING ELSE.
+# requirements-inference.txt includes requirements.txt and adds OpenVINO,
+# which is the required predictive baseline. NO CUDA: the RTX 5090 is
+# reached through LM Studio's HTTP API, so nothing in this process needs
+# torch, let alone a CUDA build of it. A normal bootstrap must never
+# download 2 GB of GPU wheels onto a machine that will not use them.
+"$VENV/bin/python" -m pip install --quiet -r requirements-inference.txt
 "$VENV/bin/python" -m pip check
 ok "pip check clean"
+ok "core runtime + OpenVINO CPU inference (no CUDA)"
+
+if ((WITH_GPU_TRAINING)); then
+  step "OPTIONAL GPU training extras"
+  warn "downloading the CUDA wheel set — this is ~2 GB and JARVIS does not need it to run"
+  # --extra-index-url, NOT --index-url: the CUDA index is partial and does
+  # not carry numpy, scipy or scikit-learn.
+  "$VENV/bin/python" -m pip install --quiet -r requirements-cuda.txt \
+      --extra-index-url https://download.pytorch.org/whl/cu128
+  "$VENV/bin/python" -m pip check
+  ok "optional GPU training stack installed"
+fi
 
 step "Smoke imports"
 "$VENV/bin/python" - <<'PY'
 import importlib, sys
 mods = ["sqlalchemy", "fastapi", "uvicorn", "pydantic",
-        "order_book", "cryptofeed", "httpx", "apscheduler"]
+        "order_book", "cryptofeed", "httpx", "apscheduler",
+        "numpy", "pandas", "openvino"]
 bad = []
 for m in mods:
     try:
@@ -141,6 +169,22 @@ for m in mods:
         print(f"    FAIL {m}: {e}")
 if bad:
     sys.exit("critical modules failed to import: " + "; ".join(bad))
+PY
+
+step "Predictive device"
+# CPU is the required baseline and is asserted, not hoped for. The NPU is
+# optional hardware and its absence is reported as a fact.
+"$VENV/bin/python" - <<'PY'
+import sys
+import openvino as ov
+devices = ov.Core().available_devices
+print(f"    openvino {ov.__version__}")
+print(f"    devices  {devices}")
+if "CPU" not in devices:
+    sys.exit("OpenVINO enumerates no CPU device - that IS a broken runtime")
+print("    ok  CPU predictive baseline present")
+print("    " + ("ok  NPU present (optional bonus)" if "NPU" in devices
+                else "--  NPU absent, which is expected and not a problem"))
 PY
 
 # ── 3. Node ──────────────────────────────────────────────────────────────

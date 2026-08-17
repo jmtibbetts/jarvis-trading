@@ -146,9 +146,19 @@ def main() -> int:
     ap.add_argument("--with-test", action="store_true",
                     help="also install the test runner")
     ap.add_argument("--with-inference", action="store_true",
-                    help="also install requirements-inference.txt (numpy + openvino; no GPU needed)")
+                    help="CPU predictive inference (OpenVINO). Part of the supported runtime.")
+    ap.add_argument("--with-research", action="store_true",
+                    help="offline model research (scipy, scikit-learn, CPU torch). No GPU.")
+    ap.add_argument("--with-cuda-training", action="store_true",
+                    help="OPTIONAL GPU training. Downloads ~2 GB of CUDA wheels. Not needed to run JARVIS.")
+    # DEPRECATED. "ML" is the wrong axis: JARVIS already does machine
+    # learning — calibration, expectancy, feature attribution, OpenVINO
+    # inference — with no CUDA anywhere. This flag used to mean "install the
+    # CUDA training stack", so a name that sounds like a normal capability
+    # pulled 2 GB of GPU wheels onto machines that had no GPU.
     ap.add_argument("--with-ml", action="store_true",
-                    help="also install requirements-ml.txt — TRAINING, needs the CUDA wheel index")
+                    help="DEPRECATED alias for --with-inference --with-research (CPU only). "
+                         "For GPU training use --with-cuda-training.")
     ap.add_argument("--check-only", action="store_true",
                     help="verify the current environment without installing")
     args = ap.parse_args()
@@ -173,30 +183,43 @@ def main() -> int:
         pip("install", "-r", str(REPO / "requirements.txt"),
             what="install project requirements")
 
-        # INFERENCE AND TRAINING ARE DIFFERENT INSTALLS.
+        # THREE SEPARATE THINGS, PREVIOUSLY ONE FLAG.
         #
-        # Without openvino, 11 predictive-runtime tests SKIP rather than
-        # run — and they cover abstention semantics (schema mismatch, stale
-        # features, a device that raises), which is exactly the "UNKNOWN
-        # stays UNKNOWN" behaviour this system depends on. Coverage that
-        # silently disappears is not coverage.
+        #   inference  CPU predictive runtime (OpenVINO). Supported runtime.
+        #   research   offline harness only (scipy, scikit-learn, CPU torch).
+        #   cuda       optional GPU training. Nothing needs it to run.
         #
-        # But those tests need numpy and openvino, not torch. --with-ml
-        # used to be the only way to get them, and it cannot resolve on a
-        # machine without the CUDA wheel index, so switching it on in CI
-        # failed the whole bootstrap. --with-inference is the flag CI wants.
+        # Established by tracing imports, not by reading file names: nothing
+        # under app/, jobs/ or lib/ imports scipy, scikit-learn or torch.
+        # The learning pipeline is stdlib and SQLAlchemy; the predictive
+        # runtime is numpy and OpenVINO. JARVIS learns from its trades with
+        # neither research nor CUDA installed.
+        if args.with_ml:
+            print("\n  NOTE: --with-ml is deprecated and now means "
+                  "--with-inference --with-research (CPU only).\n"
+                  "        It used to install the CUDA training stack. If that "
+                  "is genuinely what you want,\n"
+                  "        pass --with-cuda-training explicitly.\n")
+
+        # Without OpenVINO, 11 predictive-runtime tests SKIP rather than run,
+        # and they cover abstention semantics — schema mismatch, stale
+        # features, a device that raises. Coverage that silently disappears
+        # is not coverage.
         if args.with_inference or args.with_ml:
             pip("install", "-r", str(REPO / "requirements-inference.txt"),
-                what="install inference extras")
+                what="install CPU inference extras (OpenVINO)")
 
-        if args.with_ml:
-            # torch==2.11.0+cu128 lives ONLY on the PyTorch CUDA index.
-            # --extra-index-url rather than --index-url: that index is
-            # partial and does not carry numpy or openvino, so replacing
-            # PyPI with it makes the rest of the file unresolvable.
-            pip("install", "-r", str(REPO / "requirements-ml.txt"),
+        if args.with_research or args.with_ml:
+            pip("install", "-r", str(REPO / "requirements-research.txt"),
+                what="install offline research extras (CPU)")
+
+        if args.with_cuda_training:
+            # --extra-index-url, NOT --index-url: the CUDA index is partial
+            # and carries no numpy, scipy or scikit-learn, so replacing PyPI
+            # with it makes everything else unresolvable.
+            pip("install", "-r", str(REPO / "requirements-cuda.txt"),
                 "--extra-index-url", "https://download.pytorch.org/whl/cu128",
-                what="install ML training extras (CUDA wheels)")
+                what="install OPTIONAL GPU training extras (CUDA wheels)")
 
         if args.with_test:
             pip("install", "pytest", what="install test runner")

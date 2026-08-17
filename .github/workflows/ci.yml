@@ -20,19 +20,19 @@
 # exactly; "latest" silently becomes 26.04 one morning and the gate stops
 # describing the machine it is supposed to be protecting.
 #
-# THE INFERENCE EXTRAS ARE INSTALLED. Without openvino, 11
-# predictive-runtime tests SKIP rather than run, and what they cover is
-# abstention semantics — schema mismatch, stale features, a device that
-# raises. That is the "UNKNOWN stays UNKNOWN" behaviour the risk layer
-# leans on. Coverage that silently disappears is not coverage, and a skip
-# is invisible inside a green check.
+# CPU INFERENCE IS INSTALLED; CUDA IS NOT, AND MUST NOT BE. Without
+# openvino, 11 predictive-runtime tests SKIP rather than run, and what they
+# cover is abstention semantics — schema mismatch, stale features, a device
+# that raises. That is the "UNKNOWN stays UNKNOWN" behaviour the risk layer
+# leans on, and a skip is invisible inside a green check.
 #
-# --with-inference, NOT --with-ml. The first attempt used --with-ml and
-# failed the whole bootstrap: requirements-ml.txt pins torch==2.11.0+cu128,
-# which exists only on the PyTorch CUDA index, and the runner has no GPU
-# and no reason to download 2 GB of CUDA wheels. The inference half is now
-# its own file — numpy and openvino, both from PyPI — which is what
-# actually gates those tests.
+# But JARVIS does not need CUDA at all. An import audit found torch in
+# exactly one module — ml/training/train_path_model.py, an offline research
+# harness nothing imports — and the model it trained was REJECTED for
+# negative out-of-sample R-squared. The RTX 5090 reaches JARVIS through LM
+# Studio's HTTP API, which is a network hop, not a Python dependency. A
+# runner with no NVIDIA GPU has no business downloading 2 GB of CUDA
+# wheels to test a trading engine.
 #
 # The frontend is a RELEASE GATE. This repository serves a built Svelte
 # application; a green backend check while the UI fails to compile is a
@@ -104,6 +104,31 @@ jobs:
       # non-zero, on every shell.
       - name: Install dependencies (fail-closed)
         run: .venv/bin/python scripts/install_dependencies.py --with-test --with-inference
+
+      # THE GATE ASSERTS ITS OWN SHAPE. A suite that passes because a
+      # dependency quietly failed to install is the exact failure this
+      # section exists to prevent — 11 predictive tests once skipped inside
+      # a green check for precisely that reason.
+      - name: Verify the supported CPU runtime, and that CUDA is absent
+        shell: bash
+        run: |
+          .venv/bin/python - <<'PY'
+          import importlib.util, sys
+          import openvino as ov
+          devices = ov.Core().available_devices
+          print(f"openvino {ov.__version__}  devices={devices}")
+          if "CPU" not in devices:
+              sys.exit("OpenVINO enumerates no CPU device")
+          print("ok  CPU predictive baseline present")
+          print("ok  NPU present" if "NPU" in devices else
+                "--  NPU absent (expected on a runner; optional hardware)")
+          # torch must NOT be here. Its presence would mean a normal install
+          # pulled the research or CUDA set, which is the regression.
+          if importlib.util.find_spec("torch") is not None:
+              sys.exit("torch is installed in the normal CI environment - a "
+                       "normal JARVIS install must not pull it")
+          print("ok  torch absent, as the supported runtime requires")
+          PY
 
       - name: Run suite
         env:

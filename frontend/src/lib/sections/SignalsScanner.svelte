@@ -1,6 +1,8 @@
 <script lang="ts">
   import Panel from "../components/Panel.svelte";
   import Pill from "../components/Pill.svelte";
+  import ColumnChooser from "../components/ColumnChooser.svelte";
+  import VirtualList from "../components/VirtualList.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
   import StateNote from "../components/StateNote.svelte";
@@ -239,23 +241,125 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     return `${Math.floor(sec / 86400)}d`;
   };
 
-  // ── saved filter presets (localStorage — this is view state, not data the
+  // ── table view: the column registry ─────────────────────────────────
+  // Cards show everything about few signals; the table shows a chosen few
+  // things about many. They answer different questions — "what is this
+  // setup" against "which of these forty is worth opening" — so both stay.
+  //
+  // `value` is what the cell renders AND what it sorts on, so a column can
+  // never sort by one thing while displaying another.
+  type Col = {
+    key: string; label: string; width: string;
+    align?: "r"; locked?: boolean;
+    value: (s: Signal) => string | number | null | undefined;
+  };
+  const SIGNAL_COLUMNS: Col[] = [
+    { key: "symbol", label: "Symbol", width: "104px", locked: true, value: (s) => s.asset_symbol },
+    { key: "direction", label: "Direction", width: "92px", value: (s) => s.direction },
+    { key: "gate", label: "Gate", width: "92px", value: (s) => s.gate_decision ?? "UNMEASURED" },
+    { key: "net_r", label: "Net R", width: "72px", align: "r", value: (s) => s.gate_net_r },
+    { key: "status", label: "Status", width: "104px", value: (s) => s.status },
+    { key: "class", label: "Class", width: "76px", value: (s) => s.asset_class },
+    { key: "timeframe", label: "TF", width: "56px", value: (s) => s.timeframe },
+    { key: "entry", label: "Entry", width: "88px", align: "r", value: (s) => s.entry_price },
+    { key: "stop", label: "Stop", width: "88px", align: "r", value: (s) => s.stop_loss },
+    { key: "target", label: "Target", width: "88px", align: "r", value: (s) => s.target_price },
+    { key: "rr", label: "R:R", width: "62px", align: "r", value: (s) => s.rr_ratio },
+    // Named exactly (P0/14.4): the composite is an evidence diagnostic,
+    // measured INVERTED against outcomes, and is not a probability.
+    { key: "evidence", label: "Evid", width: "58px", align: "r", value: (s) => s.composite_score },
+    { key: "llm", label: "LLM %", width: "62px", align: "r", value: (s) => s.confidence },
+    { key: "strategy", label: "Source", width: "112px", value: (s) => s.signal_source },
+    { key: "horizon", label: "Hold", width: "88px", value: (s) => s.hold_estimate ?? s.horizon },
+    { key: "age", label: "Age", width: "56px", align: "r", value: (s) => fmtAge(s.generated_at) },
+  ];
+  // Uniform by construction — the windowed list needs a height it can
+  // multiply rather than measure.
+  const ROW_H = 30;
+
+  const COLS_DEFAULT_HIDDEN = ["class", "target", "llm", "horizon"];
+  const VIEW_KEY = "jarvis.signalTableView";
+  type TableView = { mode: "cards" | "table"; order: string[]; hidden: string[] };
+
+  function loadView(): TableView {
+    try {
+      const raw = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+      if (raw && typeof raw === "object") {
+        return {
+          mode: raw.mode === "table" ? "table" : "cards",
+          order: Array.isArray(raw.order) ? raw.order : SIGNAL_COLUMNS.map((c) => c.key),
+          hidden: Array.isArray(raw.hidden) ? raw.hidden : COLS_DEFAULT_HIDDEN,
+        };
+      }
+    } catch {
+      /* corrupt view state must not take the page down with it */
+    }
+    return { mode: "cards", order: SIGNAL_COLUMNS.map((c) => c.key), hidden: COLS_DEFAULT_HIDDEN };
+  }
+
+  let view = $state<TableView>(loadView());
+  $effect(() => localStorage.setItem(VIEW_KEY, JSON.stringify(view)));
+
+  // A column added since the view was saved appends rather than vanishing:
+  // a stored preference must not hide a column the operator has never seen.
+  const visibleCols = $derived.by(() => {
+    const known = new Map(SIGNAL_COLUMNS.map((c) => [c.key, c]));
+    const out: Col[] = [];
+    for (const k of view.order) {
+      const c = known.get(k);
+      if (c && !view.hidden.includes(k)) out.push(c);
+    }
+    for (const c of SIGNAL_COLUMNS)
+      if (!view.order.includes(c.key) && !view.hidden.includes(c.key)) out.push(c);
+    return out;
+  });
+  const gridTemplate = $derived(visibleCols.map((c) => c.width).join(" "));
+
+  function resetColumns() {
+    view = { ...view, order: SIGNAL_COLUMNS.map((c) => c.key), hidden: COLS_DEFAULT_HIDDEN };
+  }
+
+  const cellText = (c: Col, s: Signal) => {
+    const v = c.value(s);
+    if (v == null || v === "") return "—";
+    return typeof v === "number" ? String(Number(v.toFixed(4))) : v;
+  };
+
+  // ── saved views (localStorage — this is view state, not data the
   // backend needs to know about) ──────────────────────────────────────────
-  type FilterPreset = { name: string; status: string; klass: string };
+  // Originally filters only. A saved view that restored the filters and
+  // left the columns as whatever was last used was not the view that was
+  // saved, so columns and layout travel with it. Presets written before
+  // that carry no column fields; they keep the current layout rather than
+  // resetting one the operator did not ask to change.
+  type FilterPreset = {
+    name: string; status: string; klass: string;
+    sort?: SortKey; mode?: "cards" | "table";
+    order?: string[]; hidden?: string[];
+  };
   const PRESETS_KEY = "jarvis.signalFilterPresets";
   let presets = $state<FilterPreset[]>(JSON.parse(localStorage.getItem(PRESETS_KEY) || "[]"));
 
   function savePreset() {
-    const name = window.prompt("Name this filter preset:", `${statusFilter || "All"} / ${classFilter || "All"}`);
+    const name = window.prompt("Name this view:", `${statusFilter || "All"} / ${classFilter || "All"}`);
     if (!name) return;
-    presets = [...presets.filter((p) => p.name !== name), { name, status: statusFilter, klass: classFilter }];
+    presets = [...presets.filter((p) => p.name !== name), {
+      name, status: statusFilter, klass: classFilter,
+      sort: sortBy, mode: view.mode, order: view.order, hidden: view.hidden,
+    }];
     localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
-    toastStore.ok(`Preset "${name}" saved`);
+    toastStore.ok(`View "${name}" saved`);
   }
 
   function applyPreset(p: FilterPreset) {
     statusFilter = p.status;
     classFilter = p.klass;
+    if (p.sort) sortBy = p.sort;
+    view = {
+      mode: p.mode ?? view.mode,
+      order: p.order ?? view.order,
+      hidden: p.hidden ?? view.hidden,
+    };
   }
 
   function deletePreset(name: string) {
@@ -640,8 +744,25 @@ The original signal will be superseded. Levels are recomputed server-side at sub
               <option value={key}>{label}</option>
             {/each}
           </select>
+          <div class="viewseg" role="group" aria-label="List layout">
+            <!-- Cards show everything about few signals; the table shows a
+                 chosen few things about many. Different questions. -->
+            <button class:on={view.mode === "cards"}
+                    onclick={() => (view = { ...view, mode: "cards" })}>cards</button>
+            <button class:on={view.mode === "table"}
+                    onclick={() => (view = { ...view, mode: "table" })}>table</button>
+          </div>
+          {#if view.mode === "table"}
+            <ColumnChooser
+              columns={SIGNAL_COLUMNS.map((c) => ({ key: c.key, label: c.label, locked: c.locked }))}
+              order={view.order}
+              hidden={view.hidden}
+              onchange={(next) => (view = { ...view, ...next })}
+              onreset={resetColumns}
+            />
+          {/if}
           <button class="btn small outline" onclick={clearExpired}>Clear Expired</button>
-          <button class="btn small outline" onclick={savePreset}>Save Preset</button>
+          <button class="btn small outline" onclick={savePreset}>Save View</button>
           <button class="btn small outline" onclick={exportSignalsCsv}>Export CSV</button>
           {#if linkStore.symbol}
             <span class="link-chip" title="Linked symbol filter — set by clicking a symbol in any window">
@@ -673,6 +794,62 @@ The original signal will be superseded. Levels are recomputed server-side at sub
           </div>
         {/if}
 
+        {#if view.mode === "table"}
+          <!--
+            Windowed: only the rows in view exist in the DOM, so 40 signals
+            and 4,000 cost the browser the same. Row height is fixed
+            (ROW_H) because windowing has to know where row N sits without
+            having measured the rows above it.
+          -->
+          <div class="tbl">
+            <div class="thead" style="grid-template-columns: {gridTemplate}">
+              {#each visibleCols as c (c.key)}
+                <div class="th" class:r={c.align === "r"}>{c.label}</div>
+              {/each}
+            </div>
+            <VirtualList items={filteredSignals} rowHeight={ROW_H}>
+              {#snippet row(sig)}
+                <div
+                  class="trow"
+                  style="grid-template-columns: {gridTemplate}"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => (analysisSignalId = sig.id)}
+                  onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
+                >
+                  {#each visibleCols as c (c.key)}
+                    <div class="td" class:r={c.align === "r"}>
+                      {#if c.key === "symbol"}
+                        <button
+                          class="tsym"
+                          title="Link {sig.asset_symbol} across windows"
+                          onclick={(e) => { e.stopPropagation(); linkStore.link(sig.asset_symbol); }}
+                        >{sig.asset_symbol}</button>
+                      {:else if c.key === "direction"}
+                        <span class:down={sig.direction.toLowerCase().includes("short")}
+                              class:up={!sig.direction.toLowerCase().includes("short")}>
+                          {sig.direction}
+                        </span>
+                      {:else if c.key === "gate"}
+                        <span class="gcell gate-{(sig.gate_decision ?? 'unknown').toLowerCase()}"
+                              title={sig.gate_decision
+                                ? (sig.gate_reason ?? "")
+                                : "No gate verdict is joined to this signal — its candidate row was never linked, so the experiment never judged it. Not a verdict of 'no edge'."}>
+                          {sig.gate_decision === "TENTATIVE" ? "WATCH" : (sig.gate_decision ?? "UNMEASURED")}
+                        </span>
+                      {:else}
+                        {cellText(c, sig)}
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/snippet}
+              {#snippet empty()}
+                <div class="empty">No signals match these filters</div>
+              {/snippet}
+            </VirtualList>
+          </div>
+        {:else}
         <div class="sig-cards">
           {#each filteredSignals as sig (sig.id)}
             <div
@@ -826,6 +1003,7 @@ The original signal will be superseded. Levels are recomputed server-side at sub
             <div class="empty">No signals match these filters</div>
           {/each}
         </div>
+        {/if}
       {/snippet}
     </Panel>
   </div>
@@ -1385,9 +1563,117 @@ The original signal will be superseded. Levels are recomputed server-side at sub
     display: flex;
     gap: 10px;
     margin-bottom: 12px;
+    flex-wrap: wrap;
+    align-items: center;
   }
   .filters select {
     width: auto;
+  }
+
+  /* ── table view ───────────────────────────────────────────────────── */
+  .viewseg {
+    display: flex;
+    gap: 2px;
+  }
+  .viewseg button {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--ink-faint);
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: var(--mono);
+  }
+  .viewseg button.on {
+    color: var(--accent);
+    border-color: var(--line-bright);
+    background: var(--surface-raised);
+  }
+  .tbl {
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    overflow: hidden;
+    min-width: 0;
+  }
+  /* The header and the rows share one grid template, so a column that
+     moves in the chooser moves in both — they cannot drift apart. */
+  .thead,
+  .trow {
+    display: grid;
+    align-items: center;
+    gap: 0;
+    min-width: max-content;
+  }
+  .thead {
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-raised);
+  }
+  .th {
+    padding: 6px 9px;
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-faint);
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  .trow {
+    height: 100%;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    font-size: 11.5px;
+  }
+  .trow:hover {
+    background: var(--surface-raised);
+  }
+  .td {
+    padding: 0 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .th.r,
+  .td.r {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .tsym {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .tsym:hover {
+    text-decoration: underline;
+  }
+  .td .up {
+    color: var(--good);
+  }
+  .td .down {
+    color: var(--bad);
+  }
+  .gcell {
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+  }
+  .gcell.gate-trade {
+    color: var(--good);
+  }
+  .gcell.gate-tentative {
+    color: var(--warm, #d9a441);
+  }
+  .gcell.gate-no_trade {
+    color: var(--bad);
+  }
+  .gcell.gate-unknown {
+    color: var(--ink-faint);
   }
 
   .presets {

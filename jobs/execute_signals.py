@@ -567,10 +567,10 @@ def run():
                              order_type="market", qty=float(qty), entry=entry,
                              initial_stop=stop, target=target,
                              notional=float(qty) * entry)
-            if not plan.within(approved):
+            gate = plan.check(approved)
+            if not gate.ok:
                 logger.error(f"[Execute] INVARIANT VIOLATION blocked for {sym}: "
-                             f"plan qty={plan.qty:g}/notional=${plan.notional:,.0f} "
-                             f"exceeds approved ${approved.notional:,.0f} — skipping")
+                             f"{gate.reason} — skipping")
                 continue
 
             try:

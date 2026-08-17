@@ -252,11 +252,19 @@ def submit(plan, *, venue_family: str, risk=None, product: str | None = None,
     # LAST, immediately before submission, because everything between
     # sizing and here is an opportunity for a plan to drift. Refused rather
     # than clamped: a silent clamp hides the defect that produced it.
-    if risk is not None and hasattr(plan, "within") and not plan.within(risk):
-        return VenueSubmission(
-            False, fam, REFUSED_RISK,
-            f"plan qty {plan.qty:g} exceeds the {risk.qty:g} that risk "
-            f"authorised — execution may shrink an order, never enlarge one")
+    if risk is not None and hasattr(plan, "check"):
+        verdict = plan.check(risk)
+        if not verdict.ok:
+            # The verdict names the ceiling that was breached. "The order
+            # was rejected" is the least actionable sentence a risk system
+            # can produce, and the gate now checks far more than quantity:
+            # a refused decision, a non-finite size, an unparseable side, an
+            # instrument with no verified units, leverage, and the money at
+            # risk once the stop is priced through the contract multiplier.
+            return VenueSubmission(
+                False, fam, REFUSED_RISK,
+                f"{verdict.reason} — execution may shrink an order, "
+                f"never enlarge one")
 
     return adapter.submit(plan, risk=risk, **kw)
 

@@ -20,6 +20,7 @@ v6.2: Global threading lock — only one LLM call at a time (local model can't p
       Graceful shutdown: _shutdown_event breaks blocking LLM calls on SIGINT/SIGTERM.
 """
 import os, json, re, logging, threading, time
+from collections import namedtuple
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 import httpx
@@ -93,27 +94,41 @@ LM_STUDIO_DEFAULT_PORT = 1234
 
 PROV_OPERATOR  = "OPERATOR_OVERRIDE"   # api_url in the DB, explicitly marked
 PROV_ENV       = "ENV_OVERRIDE"        # LM_STUDIO_URL
-PROV_LOCALHOST = "LOCALHOST"           # loopback, probed
-PROV_WSL       = "WSL_DISCOVERED"      # WSL default gateway, probed
-PROV_NONE      = "UNAVAILABLE"         # nothing answered
+PROV_LOCALHOST = "LOCALHOST"           # loopback, an automatic candidate
+PROV_WSL       = "WSL_DISCOVERED"      # WSL default gateway, automatic
+PROV_NONE      = "UNAVAILABLE"         # no endpoint selected
+
+# An override is a statement of intent. An automatic candidate is a guess the
+# resolver is allowed to abandon. Only the second kind may be walked past.
+EXPLICIT_PROVENANCE = frozenset({PROV_ENV, PROV_OPERATOR})
 
 # The whole point of the provenance mark: everything else is runtime state.
 PERSISTABLE_PROVENANCE = frozenset({PROV_OPERATOR})
 
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+# ── What a probe found ────────────────────────────────────────────────────────
+# "Down" and "up with nothing loaded" are different problems with different
+# fixes, and collapsing them sends the operator to check the network when the
+# answer is to load a model. Kept distinct all the way out to /api/llm/health.
+ST_AVAILABLE   = "AVAILABLE"
+ST_NO_MODELS   = "API_REACHABLE_NO_MODELS"
+ST_INVALID     = "API_INVALID_RESPONSE"
+ST_UNREACHABLE = "NETWORK_UNREACHABLE"
 
-# A failed resolution is re-probed after this long. Successes hold for the
-# life of the process — that is the "rediscover after restart" rule, not a
+# How far a candidate got. Used to report the most informative failure rather
+# than the last one tried.
+_STATUS_RANK = {ST_UNREACHABLE: 0, ST_INVALID: 1, ST_NO_MODELS: 2, ST_AVAILABLE: 3}
+
+ProbeResult = namedtuple("ProbeResult", "status models detail")
+Candidate   = namedtuple("Candidate", "url provenance status models detail")
+Resolution  = namedtuple("Resolution", "url provenance status candidates")
+
+# A non-AVAILABLE resolution is re-probed after this long. Successes hold for
+# the life of the process — that is the "rediscover after restart" rule, not a
 # cache tuning knob.
 ENDPOINT_RETRY_S = 30.0
 
-_endpoint_cache: dict = {}   # (env_url, db_url, db_provenance) → (url, provenance, at)
+_endpoint_cache: dict = {}   # (env_url, db_url, db_provenance) → (Resolution, at)
 _endpoint_lock = threading.Lock()
-
-
-def _is_loopback(url: str) -> bool:
-    host = (urlsplit(url).hostname or "").lower()
-    return host in _LOOPBACK_HOSTS or host.startswith("127.")
 
 
 def _port_of(value: str) -> int | None:
@@ -130,101 +145,149 @@ def _port_of(value: str) -> int | None:
         return None
 
 
-def _probe_openai_compat(base_url: str, api_key: str = "", timeout: float = 3.0) -> bool:
-    """True only when `base_url` answers /models like an OpenAI-compatible server.
+def _probe_endpoint(base_url: str, api_key: str = "", timeout: float = 3.0) -> ProbeResult:
+    """How far `base_url` got towards being a usable LLM server.
 
     A 200 is not enough. Reaching *an* endpoint is not reaching *the*
     endpoint: a router's admin page, a proxy, or an unrelated service on a
     recycled address all answer 200, and the mistake then surfaces hours
-    later as unparseable model output rather than as a bad address. The
-    response has to be JSON, shaped like a model list, and non-empty.
+    later as unparseable model output rather than as a bad address.
+
+    But "answered correctly with nothing loaded" is not a network problem
+    and must not be reported as one — the fix is to load a model, and an
+    operator sent to check cables will not find it.
     """
     try:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         r = httpx.get(f"{base_url}/models", headers=headers, timeout=timeout)
-        if r.status_code != 200:
-            return False
+    except Exception as e:
+        return ProbeResult(ST_UNREACHABLE, (), f"{type(e).__name__}: {e}")
+
+    if r.status_code != 200:
+        return ProbeResult(ST_INVALID, (), f"HTTP {r.status_code} from /v1/models")
+    try:
         data = r.json()
     except Exception:
-        return False
-    if not isinstance(data, dict):
-        return False
-    models = data.get("data")
-    return (isinstance(models, list) and bool(models)
-            and isinstance(models[0], dict) and bool(models[0].get("id")))
+        return ProbeResult(ST_INVALID, (), "/v1/models did not return JSON")
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        return ProbeResult(ST_INVALID, (), "/v1/models returned no model list")
+
+    entries = data["data"]
+    if not entries:
+        return ProbeResult(ST_NO_MODELS, (), "server is up with no model loaded")
+    ids = tuple(str(m["id"]) for m in entries
+                if isinstance(m, dict) and m.get("id"))
+    if not ids:
+        return ProbeResult(ST_INVALID, (), "model list entries carry no id")
+    return ProbeResult(ST_AVAILABLE, ids, None)
 
 
-def _discover_endpoint(db_url: str, db_provenance: str,
-                       api_key: str) -> tuple[str | None, str]:
+def _candidate(url: str, prov: str, probe: ProbeResult) -> Candidate:
+    return Candidate(url, prov, probe.status, probe.models, probe.detail)
+
+
+def _discover_endpoint(db_url: str, db_provenance: str, api_key: str) -> Resolution:
     """Resolve the LM Studio base URL. Never writes anything, anywhere."""
     env_url  = (os.getenv("LM_STUDIO_URL") or "").strip().rstrip("/")
     db_url   = (db_url or "").strip().rstrip("/")
     operator_url = db_url if (db_provenance or "").strip().upper() == PROV_OPERATOR else ""
 
-    # An address the operator typed is honoured exactly and without a probe:
-    # it states an intent, and a resolver that "helpfully" substituted a
-    # different server on a failed probe would be answering from a machine
-    # nobody chose. Loopback is the one exception — it is the shipped
-    # default rather than a deliberate remote address, so it falls through
-    # to the probed rule below instead of being honoured into a guaranteed
-    # failure under WSL2 NAT.
-    for candidate, prov in ((env_url, PROV_ENV), (operator_url, PROV_OPERATOR)):
-        if candidate and not _is_loopback(candidate):
-            return candidate, prov
+    # An address the operator typed is authoritative, INCLUDING when it is
+    # loopback and including when it is broken. It is still probed — the
+    # health check has to be able to say which way it is broken — but a
+    # failure is reported against that endpoint, never used as licence to go
+    # looking for a different machine. Substituting a working server for a
+    # chosen one is how you end up inferring against something nobody picked.
+    for url, prov in ((env_url, PROV_ENV), (operator_url, PROV_OPERATOR)):
+        if not url:
+            continue
+        probe = _probe_endpoint(url, api_key)
+        if probe.status != ST_AVAILABLE:
+            logger.warning("[LLM] The configured LM Studio endpoint %s (%s) is "
+                           "%s — %s. Nothing was substituted for it.",
+                           url, prov, probe.status, probe.detail)
+        return Resolution(url, prov, probe.status, (_candidate(url, prov, probe),))
 
+    # No override. Everything below is an automatic candidate: a guess, held
+    # only until a better-informed one turns up.
+    #
     # The port is the one part of an unmarked DB row that is real
-    # configuration — nothing assigns it — so it is still worth reading
-    # even when its host has been discarded as stale.
-    port = (_port_of(env_url) or _port_of(operator_url)
-            or _port_of(os.getenv("LM_STUDIO_PORT") or "") or _port_of(db_url)
+    # configuration — nothing assigns it — so it is still worth reading even
+    # when its host has been discarded as stale.
+    port = (_port_of(os.getenv("LM_STUDIO_PORT") or "") or _port_of(db_url)
             or LM_STUDIO_DEFAULT_PORT)
 
-    # Right on a native host and under WSL mirrored networking; reaches
-    # nothing under WSL2 NAT — which is why it is probed, not assumed.
-    local = f"http://127.0.0.1:{port}/v1"
-    if _probe_openai_compat(local, api_key):
-        return local, PROV_LOCALHOST
-
+    # Loopback is right on a native host and under WSL mirrored networking,
+    # and reaches nothing under WSL2 NAT. The shipped default is a candidate,
+    # not a choice, so it is probed rather than assumed.
+    attempts = [(f"http://127.0.0.1:{port}/v1", PROV_LOCALHOST)]
     host = _wsl_windows_host()
     if host:
-        discovered = f"http://{host}:{port}/v1"
-        if _probe_openai_compat(discovered, api_key):
-            logger.info("[LLM] LM Studio found at %s via the WSL gateway. This "
-                        "address is per-boot runtime state and is deliberately "
-                        "not stored.", discovered)
-            return discovered, PROV_WSL
-        logger.warning("[LLM] The WSL gateway %s did not answer /v1/models on "
-                       "port %s.", host, port)
+        attempts.append((f"http://{host}:{port}/v1", PROV_WSL))
 
-    return None, PROV_NONE
+    candidates = []
+    for url, prov in attempts:
+        probe = _probe_endpoint(url, api_key)
+        candidates.append(_candidate(url, prov, probe))
+        if probe.status == ST_AVAILABLE:
+            if prov == PROV_WSL:
+                logger.info("[LLM] LM Studio found at %s via the WSL gateway. "
+                            "This address is per-boot runtime state and is "
+                            "deliberately not stored.", url)
+            return Resolution(url, prov, ST_AVAILABLE, tuple(candidates))
+        logger.warning("[LLM] Candidate %s (%s): %s — %s",
+                       url, prov, probe.status, probe.detail)
+
+    # Report the furthest any candidate got. "One of them was up with no
+    # model loaded" is a materially different message from "nothing
+    # answered", and it is the one that names the actual fix.
+    status = max((c.status for c in candidates),
+                 key=lambda s: _STATUS_RANK[s], default=ST_UNREACHABLE)
+    return Resolution(None, PROV_NONE, status, tuple(candidates))
 
 
 def resolve_endpoint(db_url: str = "", db_provenance: str = "",
-                     api_key: str = "", force: bool = False) -> tuple[str | None, str]:
-    """(base_url, provenance) for LM Studio, cached for this process only."""
+                     api_key: str = "", force: bool = False) -> Resolution:
+    """The LM Studio endpoint for this process, probed and cached here only."""
     key = ((os.getenv("LM_STUDIO_URL") or ""), db_url or "", db_provenance or "")
     if not force:
         with _endpoint_lock:
             hit = _endpoint_cache.get(key)
         if hit:
-            url, prov, at = hit
-            if prov != PROV_NONE or (time.monotonic() - at) < ENDPOINT_RETRY_S:
-                return url, prov
+            resolution, at = hit
+            if resolution.status == ST_AVAILABLE or (time.monotonic() - at) < ENDPOINT_RETRY_S:
+                return resolution
 
-    url, prov = _discover_endpoint(db_url, db_provenance, api_key)
+    resolution = _discover_endpoint(db_url, db_provenance, api_key)
     with _endpoint_lock:
-        _endpoint_cache[key] = (url, prov, time.monotonic())
-    return url, prov
+        _endpoint_cache[key] = (resolution, time.monotonic())
+    return resolution
 
 
-def _unavailable_message() -> str:
-    tried = [f"loopback:{LM_STUDIO_DEFAULT_PORT}"]
-    host = _wsl_windows_host()
-    if host:
-        tried.append(f"WSL gateway {host}")
-    return ("LM Studio is UNAVAILABLE — nothing answered /v1/models with a "
-            f"model list (tried {', '.join(tried)}). Start LM Studio with its "
-            "server enabled, or set LM_STUDIO_URL to an explicit address.")
+_STATUS_FIX = {
+    ST_NO_MODELS:   "Load a model in LM Studio — the address is not the problem.",
+    ST_INVALID:     "Something answered, but not an OpenAI-compatible server. "
+                    "Check the port and that LM Studio's server is enabled.",
+    ST_UNREACHABLE: "Start LM Studio with its server enabled, or set "
+                    "LM_STUDIO_URL to an explicit address.",
+}
+
+
+def endpoint_problem(res: Resolution) -> str:
+    """Why `res` is not usable, phrased so the reader knows what to go fix."""
+    fix = _STATUS_FIX.get(res.status, "")
+    if res.provenance in EXPLICIT_PROVENANCE:
+        # Named, not diagnosed away: the operator chose this address, so the
+        # message is about that address and no other.
+        detail = res.candidates[0].detail if res.candidates else ""
+        return (f"The configured LM Studio endpoint {res.url} "
+                f"({res.provenance}) is {res.status}"
+                + (f" — {detail}" if detail else "")
+                + f". It is configured explicitly, so no other endpoint was "
+                  f"tried. {fix}")
+    tried = ", ".join(f"{c.url} [{c.provenance}] → {c.status}"
+                      for c in res.candidates) or "nothing (no candidates)"
+    return (f"LM Studio is not usable — {res.status}. Tried: {tried}. {fix}")
 
 
 def reset_endpoint_cache() -> None:
@@ -423,36 +486,52 @@ def get_llm_config() -> dict:
                     # A hosted provider's api_url is configuration; LM Studio's
                     # is an assigned address, so it is resolved rather than
                     # trusted. An unmarked row loses to a live probe.
-                    url, provenance = resolve_endpoint(
+                    res = resolve_endpoint(
                         db_url=db_url,
                         db_provenance=cfg.extra_field_3 or '',
                         api_key=api_key)
-                    url = url or db_url or DEFAULT_URL
+                    resolved = _config_from_resolution(res, db_url)
                 else:
-                    url, provenance = (db_url or DEFAULT_URL), PROV_OPERATOR
+                    resolved = {'url': db_url or DEFAULT_URL,
+                                'provenance': PROV_OPERATOR,
+                                'endpoint_status': ST_AVAILABLE,
+                                'endpoint_candidates': ()}
                 return {
-                    'url':        url,
                     'model':      cfg.extra_field_1 or DEFAULT_MODEL,
                     'api_key':    api_key,
                     'max_tokens': db_max,
                     'platform':   platform,
                     'provider':   'anthropic' if platform == 'anthropic' else 'openai_compat',
-                    'provenance': provenance,
+                    **resolved,
                 }
     except Exception as e:
         logger.debug(f"[LLM] DB config lookup failed: {e}")
 
     # Fallback to env
     api_key = os.getenv('OPENAI_API_KEY', '')
-    url, provenance = resolve_endpoint(api_key=api_key)
+    res = resolve_endpoint(api_key=api_key)
     return {
-        'url':        url or DEFAULT_URL,
         'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':    api_key,
         'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 16384)),
         'platform':   'lmstudio',
         'provider':   'openai_compat',
-        'provenance': provenance,
+        **_config_from_resolution(res, ''),
+    }
+
+
+def _config_from_resolution(res: Resolution, db_url: str) -> dict:
+    """The endpoint half of a config dict.
+
+    `url` stays populated even when the endpoint is unusable — every log
+    line and error message downstream reads better naming the address that
+    failed than naming a placeholder.
+    """
+    return {
+        'url':                 res.url or db_url or DEFAULT_URL,
+        'provenance':          res.provenance,
+        'endpoint_status':     res.status,
+        'endpoint_candidates': res.candidates,
     }
 
 
@@ -463,9 +542,21 @@ def check_health() -> dict:
     reset_endpoint_cache()
     cfg = get_llm_config()
     provenance = cfg.get('provenance')
-    if provenance == PROV_NONE:
-        return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
-                'provenance': PROV_NONE, 'error': _unavailable_message()}
+    status = cfg.get('endpoint_status')
+    # Every candidate the resolver touched, with how far each one got. The
+    # point of carrying this: "localhost was up with no model loaded" must
+    # survive to the operator, not be flattened into "unreachable".
+    tried = [{'url': c.url, 'provenance': c.provenance, 'status': c.status,
+              'model_count': len(c.models), 'detail': c.detail}
+             for c in cfg.get('endpoint_candidates') or ()]
+    base = {'platform': cfg['platform'], 'url': cfg['url'],
+            'provenance': provenance, 'status': status, 'tried': tried}
+
+    if status and status != ST_AVAILABLE:
+        res = Resolution(cfg['url'], provenance, status,
+                         tuple(cfg.get('endpoint_candidates') or ()))
+        return {**base, 'ok': False, 'error': endpoint_problem(res)}
+
     # Invalidate cache so health check always probes live
     with _model_cache_lock:
         _resolved_model_cache.pop(cfg.get('url', DEFAULT_URL), None)
@@ -476,18 +567,16 @@ def check_health() -> dict:
                           headers=({'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {}))
             if r.status_code == 200:
                 models = r.json().get('data', [])
-                return {'ok': True, 'platform': cfg['platform'], 'model': resolved,
-                        'url': cfg['url'], 'provenance': provenance,
+                return {**base, 'ok': bool(models), 'model': resolved,
+                        'status': ST_AVAILABLE if models else ST_NO_MODELS,
                         'model_count': len(models),
                         'models': [m.get('id') for m in models[:5]]}
-            return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
-                    'provenance': provenance, 'status_code': r.status_code}
+            return {**base, 'ok': False, 'status': ST_INVALID,
+                    'status_code': r.status_code}
         elif cfg['provider'] == 'anthropic':
-            return {'ok': True, 'platform': 'anthropic', 'model': cfg['model'],
-                    'provenance': provenance}
+            return {**base, 'ok': True, 'model': cfg['model']}
     except Exception as e:
-        return {'ok': False, 'platform': cfg['platform'], 'url': cfg['url'],
-                'provenance': provenance, 'error': str(e)}
+        return {**base, 'ok': False, 'status': ST_UNREACHABLE, 'error': str(e)}
     return {'ok': False, 'error': 'Unknown provider'}
 
 
@@ -518,10 +607,13 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
         raise RuntimeError(f"Local LLM cooling down for {cooldown:.1f}s after a provider failure")
 
     cfg = get_llm_config()
-    if cfg.get('provenance') == PROV_NONE:
-        # Say it plainly here rather than letting a placeholder URL produce a
+    status = cfg.get('endpoint_status')
+    if status is not None and status != ST_AVAILABLE:
+        # Say which way it is broken here, rather than letting it surface as a
         # connect error that reads like LM Studio crashed mid-run.
-        raise RuntimeError(_unavailable_message())
+        raise RuntimeError(endpoint_problem(Resolution(
+            cfg['url'], cfg.get('provenance'), status,
+            tuple(cfg.get('endpoint_candidates') or ()))))
     # Auto-resolve placeholder model names (e.g. "local-model") to the real loaded model ID
     cfg['model'] = _resolve_model(cfg)
     effective_max = max_tokens or cfg['max_tokens']

@@ -6,9 +6,16 @@ reserved outranked a routing table that knew the right answer. It worked
 until the lease moved, and then every LLM call failed with a connect error
 that read like LM Studio being down.
 
-These tests pin the rule that replaced it: an address is authoritative only
-when someone chose it. Everything else is probed, used for one process, and
-never written back.
+Two rules replaced it, and these tests pin both.
+
+An address is authoritative only when someone chose it. A chosen address is
+then honoured all the way through failure: it is probed for the truth, and a
+broken one is REPORTED broken, never quietly swapped for a working machine
+nobody picked. Only automatic candidates — the shipped loopback default and
+the WSL gateway — may be walked past.
+
+And "down" is not "up with nothing loaded". Collapsing the two sends the
+operator to check the network when the fix is to load a model.
 """
 import unittest
 from contextlib import contextmanager
@@ -19,6 +26,11 @@ from lib import lmstudio as L
 
 GATEWAY = "172.31.48.1"
 STALE_DHCP = "http://192.168.0.229:1234/v1"
+
+UP = L.ProbeResult(L.ST_AVAILABLE, ("qwen/qwen3-32b",), None)
+NO_MODELS = L.ProbeResult(L.ST_NO_MODELS, (), "server is up with no model loaded")
+INVALID = L.ProbeResult(L.ST_INVALID, (), "/v1/models did not return JSON")
+DOWN = L.ProbeResult(L.ST_UNREACHABLE, (), "ConnectError: refused")
 
 
 class _Row:
@@ -50,11 +62,12 @@ class EndpointTestCase(unittest.TestCase):
             os.environ.pop(var, None)
         self.addCleanup(L.reset_endpoint_cache)
 
-    def reachable(self, *urls):
-        """Patch the probe so only `urls` answer like an LLM server."""
-        allowed = set(urls)
-        probe = MagicMock(side_effect=lambda url, api_key="", timeout=3.0: url in allowed)
-        p = patch.object(L, "_probe_openai_compat", probe)
+    def world(self, **by_url):
+        """Patch the probe so each URL reports the ProbeResult given for it.
+        Anything unnamed is unreachable."""
+        probe = MagicMock(side_effect=lambda url, api_key="", timeout=3.0:
+                          by_url.get(url, DOWN))
+        p = patch.object(L, "_probe_endpoint", probe)
         p.start()
         self.addCleanup(p.stop)
         return probe
@@ -74,103 +87,236 @@ class EndpointTestCase(unittest.TestCase):
         self.addCleanup(p.stop)
         return db
 
+    def in_wsl(self, gateway=GATEWAY):
+        p = patch.object(L, "_wsl_windows_host", return_value=gateway)
+        p.start()
+        self.addCleanup(p.stop)
 
-class PrecedenceTests(EndpointTestCase):
 
-    def test_an_explicit_env_address_is_honoured_exactly(self):
-        """No probe, no rewrite. LM_STUDIO_URL is a statement of intent, and
-        a resolver that substituted a reachable server for an unreachable
-        chosen one would be answering from a machine nobody picked."""
+class ExplicitOverridesAreObeyedTests(EndpointTestCase):
+    """An override is a statement of intent, not a hint."""
+
+    def test_an_explicit_env_address_is_used(self):
         import os
         os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:9999/v1"
-        probe = self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
-        self.assertEqual(url, "http://10.0.0.5:9999/v1")
-        self.assertEqual(prov, L.PROV_ENV)
-        probe.assert_not_called()
+        self.world(**{"http://10.0.0.5:9999/v1": UP,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://10.0.0.5:9999/v1")
+        self.assertEqual(res.provenance, L.PROV_ENV)
+        self.assertEqual(res.status, L.ST_AVAILABLE)
 
-    def test_a_marked_operator_row_is_honoured_exactly(self):
-        probe = self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint(db_url="http://10.0.0.7:1234/v1",
-                                           db_provenance=L.PROV_OPERATOR)
-        self.assertEqual(url, "http://10.0.0.7:1234/v1")
-        self.assertEqual(prov, L.PROV_OPERATOR)
-        probe.assert_not_called()
+    def test_a_marked_operator_row_is_used(self):
+        self.world(**{"http://10.0.0.7:1234/v1": UP,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint(db_url="http://10.0.0.7:1234/v1",
+                                 db_provenance=L.PROV_OPERATOR)
+        self.assertEqual(res.url, "http://10.0.0.7:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_OPERATOR)
 
-    def test_localhost_wins_when_it_actually_answers(self):
-        """Mirrored networking and native hosts both land here."""
-        self.reachable("http://127.0.0.1:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
-        self.assertEqual(url, "http://127.0.0.1:1234/v1")
-        self.assertEqual(prov, L.PROV_LOCALHOST)
-
-    def test_discovery_runs_when_loopback_is_dead(self):
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
-        self.assertEqual(url, f"http://{GATEWAY}:1234/v1")
-        self.assertEqual(prov, L.PROV_WSL)
-
-    def test_nothing_reachable_is_reported_as_unavailable(self):
-        self.reachable()
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
-        self.assertIsNone(url)
-        self.assertEqual(prov, L.PROV_NONE)
-
-    def test_an_explicit_loopback_url_still_falls_through_to_discovery(self):
-        """localhost is the shipped default, not a chosen remote address —
-        honouring it "exactly" under WSL2 NAT would honour it into failure."""
+    def test_an_explicit_localhost_is_an_override_not_a_default(self):
+        """The regression this replaced: loopback used to fall through on the
+        theory that nobody means localhost. Someone who typed it does."""
         import os
-        os.environ["LM_STUDIO_URL"] = "http://localhost:1234/v1"
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
-        self.assertEqual(prov, L.PROV_WSL)
+        os.environ["LM_STUDIO_URL"] = "http://127.0.0.1:1234/v1"
+        self.world(**{"http://127.0.0.1:1234/v1": UP,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://127.0.0.1:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_ENV)
+
+
+class ExplicitFailuresAreReportedNotRoutedAroundTests(EndpointTestCase):
+    """A working machine nobody chose is the wrong answer to a broken one
+    somebody did."""
+
+    def test_a_dead_env_localhost_does_not_fall_through_to_the_gateway(self):
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://127.0.0.1:1234/v1"
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})     # gateway is fine
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://127.0.0.1:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_ENV)
+        self.assertEqual(res.status, L.ST_UNREACHABLE)
+        self.assertNotIn(GATEWAY, str(res.candidates))
+
+    def test_a_dead_env_remote_does_not_fall_through_either(self):
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:9999/v1"
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP,
+                      "http://127.0.0.1:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://10.0.0.5:9999/v1")
+        self.assertEqual(res.status, L.ST_UNREACHABLE)
+
+    def test_a_dead_marked_db_override_does_not_fall_through(self):
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint(db_url="http://10.0.0.7:1234/v1",
+                                 db_provenance=L.PROV_OPERATOR)
+        self.assertEqual(res.url, "http://10.0.0.7:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_OPERATOR)
+        self.assertEqual(res.status, L.ST_UNREACHABLE)
+
+    def test_an_override_with_no_model_loaded_says_so(self):
+        """Not unreachable. The address is right and the fix is elsewhere."""
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:1234/v1"
+        self.world(**{"http://10.0.0.5:1234/v1": NO_MODELS,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://10.0.0.5:1234/v1")
+        self.assertEqual(res.status, L.ST_NO_MODELS)
+        problem = L.endpoint_problem(res)
+        self.assertIn("10.0.0.5", problem)
+        self.assertIn("Load a model", problem)
+        self.assertNotIn(GATEWAY, problem)
+
+    def test_the_override_is_probed_exactly_once_and_nothing_else_is(self):
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:1234/v1"
+        probe = self.world()
+        self.in_wsl()
+        L.resolve_endpoint()
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(probe.call_args[0][0], "http://10.0.0.5:1234/v1")
+
+    def test_the_env_override_wins_and_the_db_override_is_not_a_backup(self):
+        """Two explicit addresses is a configuration mistake, not a failover
+        pair. Substituting the second is the same silent swap."""
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:1234/v1"
+        self.world(**{"http://10.0.0.7:1234/v1": UP})
+        res = L.resolve_endpoint(db_url="http://10.0.0.7:1234/v1",
+                                 db_provenance=L.PROV_OPERATOR)
+        self.assertEqual(res.url, "http://10.0.0.5:1234/v1")
+        self.assertEqual(res.status, L.ST_UNREACHABLE)
+
+
+class AutomaticCandidatesMayBeWalkedPastTests(EndpointTestCase):
+    """With no override, everything is a guess held only until a better one."""
+
+    def test_loopback_wins_when_it_actually_answers(self):
+        self.world(**{"http://127.0.0.1:1234/v1": UP,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, "http://127.0.0.1:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_LOCALHOST)
+
+    def test_a_dead_loopback_falls_through_to_the_gateway(self):
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.url, f"http://{GATEWAY}:1234/v1")
+        self.assertEqual(res.provenance, L.PROV_WSL)
+        self.assertEqual(res.status, L.ST_AVAILABLE)
+
+    def test_a_loopback_with_no_models_also_falls_through(self):
+        """The 5-model desk instance versus the 26-model server, generalised:
+        an endpoint with nothing loaded cannot serve inference, so automatic
+        discovery keeps looking."""
+        self.world(**{"http://127.0.0.1:1234/v1": NO_MODELS,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual(res.provenance, L.PROV_WSL)
+
+    def test_but_the_skipped_candidate_keeps_its_real_status(self):
+        """Walked past is not the same as unreachable, and the diagnostics
+        have to still say which."""
+        self.world(**{"http://127.0.0.1:1234/v1": NO_MODELS,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        skipped = [c for c in res.candidates if c.provenance == L.PROV_LOCALHOST]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0].status, L.ST_NO_MODELS)
+
+    def test_nothing_usable_reports_the_furthest_any_candidate_got(self):
+        """If one was up with no model loaded, that is the headline — it names
+        the fix. "Nothing answered" would not."""
+        self.world(**{"http://127.0.0.1:1234/v1": NO_MODELS})
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertIsNone(res.url)
+        self.assertEqual(res.provenance, L.PROV_NONE)
+        self.assertEqual(res.status, L.ST_NO_MODELS)
+        self.assertIn("Load a model", L.endpoint_problem(res))
+
+    def test_nothing_answering_at_all_is_unreachable(self):
+        self.world()
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertIsNone(res.url)
+        self.assertEqual(res.status, L.ST_UNREACHABLE)
+
+    def test_a_junk_responder_ranks_above_silence_but_below_no_models(self):
+        self.world(**{"http://127.0.0.1:1234/v1": INVALID})
+        self.in_wsl()
+        self.assertEqual(L.resolve_endpoint().status, L.ST_INVALID)
+
+    def test_both_candidates_are_recorded_even_when_neither_works(self):
+        self.world()
+        self.in_wsl()
+        res = L.resolve_endpoint()
+        self.assertEqual([c.provenance for c in res.candidates],
+                         [L.PROV_LOCALHOST, L.PROV_WSL])
+
+    def test_off_wsl_only_loopback_is_a_candidate(self):
+        self.world()
+        self.in_wsl(gateway=None)
+        res = L.resolve_endpoint()
+        self.assertEqual([c.provenance for c in res.candidates], [L.PROV_LOCALHOST])
 
 
 class TheStaleRowLosesTests(EndpointTestCase):
 
     def test_an_unmarked_dhcp_address_does_not_outrank_discovery(self):
-        """The bug, stated as a test: this row used to win outright."""
-        row = _Row(api_url=STALE_DHCP, extra_field_3=None)
-        self.db_returns(row)
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            cfg = L.get_llm_config()
-        self.assertEqual(cfg["model"], "db-model", "the DB branch must be the one under test")
+        """The original bug, stated as a test: this row used to win outright."""
+        self.db_returns(_Row(api_url=STALE_DHCP, extra_field_3=None))
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        cfg = L.get_llm_config()
+        self.assertEqual(cfg["model"], "db-model", "the DB branch must be under test")
         self.assertEqual(cfg["url"], f"http://{GATEWAY}:1234/v1")
         self.assertEqual(cfg["provenance"], L.PROV_WSL)
+
+    def test_an_unmarked_row_is_not_even_probed(self):
+        """It is not a weak candidate. It is not a candidate."""
+        self.db_returns(_Row(api_url=STALE_DHCP))
+        probe = self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        L.get_llm_config()
+        self.assertNotIn("192.168.0.229", str(probe.call_args_list))
 
     def test_the_port_survives_even_though_the_host_does_not(self):
         """Nothing assigns a port. It is the one real piece of configuration
         left in a row whose host has gone stale."""
-        row = _Row(api_url="http://192.168.0.229:4321/v1")
-        self.db_returns(row)
-        self.reachable(f"http://{GATEWAY}:4321/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            cfg = L.get_llm_config()
-        self.assertEqual(cfg["url"], f"http://{GATEWAY}:4321/v1")
+        self.db_returns(_Row(api_url="http://192.168.0.229:4321/v1"))
+        self.world(**{f"http://{GATEWAY}:4321/v1": UP})
+        self.in_wsl()
+        self.assertEqual(L.get_llm_config()["url"], f"http://{GATEWAY}:4321/v1")
 
     def test_a_marked_row_still_wins_because_someone_chose_it(self):
-        row = _Row(api_url="http://192.168.0.229:1234/v1",
-                   extra_field_3=L.PROV_OPERATOR)
-        self.db_returns(row)
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            cfg = L.get_llm_config()
-        self.assertEqual(cfg["url"], "http://192.168.0.229:1234/v1")
+        self.db_returns(_Row(api_url=STALE_DHCP, extra_field_3=L.PROV_OPERATOR))
+        self.world(**{STALE_DHCP: UP, f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        cfg = L.get_llm_config()
+        self.assertEqual(cfg["url"], STALE_DHCP)
         self.assertEqual(cfg["provenance"], L.PROV_OPERATOR)
 
     def test_a_hosted_provider_url_is_never_probed_away(self):
         """Only LM Studio's address is assigned. An OpenAI or Anthropic
         api_url is configuration and must pass through untouched."""
-        row = _Row(platform="anthropic", api_url="https://api.anthropic.com")
-        self.db_returns(row)
-        probe = self.reachable()
+        self.db_returns(_Row(platform="anthropic", api_url="https://api.anthropic.com"))
+        probe = self.world()
         cfg = L.get_llm_config()
         self.assertEqual(cfg["url"], "https://api.anthropic.com")
         self.assertEqual(cfg["provenance"], L.PROV_OPERATOR)
@@ -182,9 +328,9 @@ class NothingDiscoveredIsWrittenBackTests(EndpointTestCase):
     def test_resolution_never_writes_to_the_database(self):
         row = _Row(api_url=STALE_DHCP)
         db = self.db_returns(row)
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            L.get_llm_config()
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        L.get_llm_config()
         self.assertEqual(row.api_url, STALE_DHCP, "the row was mutated in place")
         db.commit.assert_not_called()
         db.add.assert_not_called()
@@ -195,30 +341,29 @@ class NothingDiscoveredIsWrittenBackTests(EndpointTestCase):
     def test_the_next_process_rediscovers_rather_than_remembering(self):
         """The cache is per-process by construction: a gateway is assigned
         per boot, so carrying one across a restart is carrying a stale fact."""
-        probe = self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            L.resolve_endpoint()
-            first = probe.call_count
-            L.resolve_endpoint()
-            self.assertEqual(probe.call_count, first, "cached within the process")
+        probe = self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        L.resolve_endpoint()
+        first = probe.call_count
+        L.resolve_endpoint()
+        self.assertEqual(probe.call_count, first, "cached within the process")
 
-            L.reset_endpoint_cache()          # stands in for a fresh process
-            L.resolve_endpoint()
+        L.reset_endpoint_cache()          # stands in for a fresh process
+        L.resolve_endpoint()
         self.assertGreater(probe.call_count, first)
 
-    def test_an_unavailable_result_is_retried_rather_than_cached_forever(self):
-        self.reachable()
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY), \
-             patch.object(L, "ENDPOINT_RETRY_S", 0.0):
-            self.assertEqual(L.resolve_endpoint()[1], L.PROV_NONE)
-            probe = self.reachable(f"http://{GATEWAY}:1234/v1")
-            url, prov = L.resolve_endpoint()
-        self.assertEqual(prov, L.PROV_WSL)
-        self.assertTrue(probe.called)
+    def test_an_unusable_result_is_retried_rather_than_cached_forever(self):
+        self.world()
+        self.in_wsl()
+        with patch.object(L, "ENDPOINT_RETRY_S", 0.0):
+            self.assertEqual(L.resolve_endpoint().status, L.ST_UNREACHABLE)
+            self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+            self.assertEqual(L.resolve_endpoint().status, L.ST_AVAILABLE)
 
 
-class TheProbeDecidesTests(EndpointTestCase):
-    """Reaching *an* endpoint is not reaching *the* endpoint."""
+class TheProbeGradesRatherThanJudgesTests(EndpointTestCase):
+    """Reaching *an* endpoint is not reaching *the* endpoint — but the
+    grades in between have to survive."""
 
     def _response(self, status=200, payload=None, bad_json=False):
         r = MagicMock()
@@ -229,38 +374,58 @@ class TheProbeDecidesTests(EndpointTestCase):
             r.json.return_value = payload
         return r
 
-    def test_a_real_model_list_is_accepted(self):
-        with patch.object(L.httpx, "get", return_value=self._response(
-                payload={"data": [{"id": "qwen/qwen3-32b"}]})):
-            self.assertTrue(L._probe_openai_compat("http://h:1234/v1"))
+    def _probe(self, **kw):
+        with patch.object(L.httpx, "get", **kw):
+            return L._probe_endpoint("http://h:1234/v1")
 
-    def test_a_200_that_is_not_json_is_rejected(self):
+    def test_a_real_model_list_is_available(self):
+        got = self._probe(return_value=self._response(
+            payload={"data": [{"id": "qwen/qwen3-32b"}, {"id": "gemma"}]}))
+        self.assertEqual(got.status, L.ST_AVAILABLE)
+        self.assertEqual(got.models, ("qwen/qwen3-32b", "gemma"))
+
+    def test_an_empty_model_list_is_reachable_with_no_models(self):
+        """Up, correct, and nothing loaded. Not a network fault."""
+        got = self._probe(return_value=self._response(payload={"data": []}))
+        self.assertEqual(got.status, L.ST_NO_MODELS)
+
+    def test_a_200_that_is_not_json_is_invalid(self):
         """A router admin page answers 200 all day."""
-        with patch.object(L.httpx, "get", return_value=self._response(bad_json=True)):
-            self.assertFalse(L._probe_openai_compat("http://h:1234/v1"))
+        self.assertEqual(self._probe(return_value=self._response(bad_json=True)).status,
+                         L.ST_INVALID)
 
-    def test_a_200_with_no_models_loaded_is_rejected(self):
-        with patch.object(L.httpx, "get", return_value=self._response(payload={"data": []})):
-            self.assertFalse(L._probe_openai_compat("http://h:1234/v1"))
+    def test_a_bare_200_with_no_model_list_is_invalid(self):
+        self.assertEqual(self._probe(return_value=self._response(payload={"ok": True})).status,
+                         L.ST_INVALID)
 
-    def test_a_json_list_without_ids_is_rejected(self):
-        with patch.object(L.httpx, "get", return_value=self._response(
-                payload={"data": [{"object": "model"}]})):
-            self.assertFalse(L._probe_openai_compat("http://h:1234/v1"))
+    def test_entries_without_ids_are_invalid_not_merely_empty(self):
+        """Bogus entries are a wrong server, not an idle one."""
+        self.assertEqual(self._probe(return_value=self._response(
+            payload={"data": [{"object": "model"}]})).status, L.ST_INVALID)
 
-    def test_a_connection_error_is_not_an_exception_to_the_caller(self):
+    def test_a_non_200_is_invalid(self):
+        self.assertEqual(self._probe(return_value=self._response(status=404)).status,
+                         L.ST_INVALID)
+
+    def test_a_refused_connection_is_unreachable(self):
         import httpx as _httpx
-        with patch.object(L.httpx, "get", side_effect=_httpx.ConnectError("refused")):
-            self.assertFalse(L._probe_openai_compat("http://h:1234/v1"))
+        got = self._probe(side_effect=_httpx.ConnectError("refused"))
+        self.assertEqual(got.status, L.ST_UNREACHABLE)
+        self.assertIn("ConnectError", got.detail)
+
+    def test_a_timeout_is_unreachable_rather_than_an_exception(self):
+        import httpx as _httpx
+        self.assertEqual(self._probe(side_effect=_httpx.ReadTimeout("slow")).status,
+                         L.ST_UNREACHABLE)
 
     def test_the_discovered_address_is_probed_before_it_is_believed(self):
         """Under mirrored networking the default route is the LAN router,
         not the Windows host. Without this, that router becomes the LLM."""
-        probe = self.reachable()          # nothing answers
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY):
-            url, prov = L.resolve_endpoint()
+        probe = self.world()          # nothing answers
+        self.in_wsl()
+        res = L.resolve_endpoint()
         probe.assert_any_call(f"http://{GATEWAY}:1234/v1", "")
-        self.assertIsNone(url)
+        self.assertIsNone(res.url)
 
 
 class GatewayReadingTests(EndpointTestCase):
@@ -317,21 +482,49 @@ class GatewayReadingTests(EndpointTestCase):
             self.assertIsNone(L._wsl_windows_host())
 
 
-class UnavailableIsSaidOutLoudTests(EndpointTestCase):
+class TheFailureIsSaidOutLoudTests(EndpointTestCase):
+
+    def _cfg(self, status, provenance=L.PROV_NONE, url=None, candidates=()):
+        return {"url": url or L.DEFAULT_URL, "model": "m", "api_key": "",
+                "max_tokens": 10, "platform": "lmstudio",
+                "provider": "openai_compat", "provenance": provenance,
+                "endpoint_status": status, "endpoint_candidates": candidates}
 
     def test_a_call_fails_with_the_reason_not_a_connect_error(self):
-        with patch.object(L, "get_llm_config", return_value={
-                "url": L.DEFAULT_URL, "model": "m", "api_key": "", "max_tokens": 10,
-                "platform": "lmstudio", "provider": "openai_compat",
-                "provenance": L.PROV_NONE}):
+        with patch.object(L, "get_llm_config",
+                          return_value=self._cfg(L.ST_UNREACHABLE)):
             with self.assertRaises(RuntimeError) as ctx:
                 L.call_lm_studio("hello")
-        self.assertIn("UNAVAILABLE", str(ctx.exception))
+        self.assertIn(L.ST_UNREACHABLE, str(ctx.exception))
 
-    def test_the_health_check_reports_provenance(self):
-        self.reachable(f"http://{GATEWAY}:1234/v1")
-        with patch.object(L, "_wsl_windows_host", return_value=GATEWAY), \
-             patch.object(L, "get_db", side_effect=RuntimeError("no db")), \
+    def test_a_call_against_an_idle_server_says_load_a_model(self):
+        with patch.object(L, "get_llm_config",
+                          return_value=self._cfg(L.ST_NO_MODELS)):
+            with self.assertRaises(RuntimeError) as ctx:
+                L.call_lm_studio("hello")
+        self.assertIn("Load a model", str(ctx.exception))
+
+    def test_a_config_without_endpoint_status_is_left_alone(self):
+        """Hosted providers and older call sites never went through the
+        resolver and must not start failing because of it."""
+        captured = {}
+
+        def fake_compat(prompt, system, max_tokens, temperature, cfg, **kw):
+            captured["called"] = True
+            return "ok"
+
+        cfg = {"url": "http://x", "model": "m", "api_key": "", "max_tokens": 10,
+               "platform": "lmstudio", "provider": "openai_compat"}
+        with patch.object(L, "get_llm_config", return_value=cfg), \
+             patch.object(L, "_resolve_model", lambda c: "m"), \
+             patch.object(L, "_call_openai_compat", fake_compat):
+            L.call_lm_studio("hello", thinking=False)
+        self.assertTrue(captured.get("called"))
+
+    def test_the_health_check_reports_provenance_and_status(self):
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        with patch.object(L, "get_db", side_effect=RuntimeError("no db")), \
              patch.object(L, "_resolve_model", lambda cfg: "qwen/qwen3-32b"), \
              patch.object(L.httpx, "get") as get:
             get.return_value.status_code = 200
@@ -339,14 +532,43 @@ class UnavailableIsSaidOutLoudTests(EndpointTestCase):
             health = L.check_health()
         self.assertTrue(health["ok"])
         self.assertEqual(health["provenance"], L.PROV_WSL)
+        self.assertEqual(health["status"], L.ST_AVAILABLE)
 
-    def test_the_health_check_says_unavailable_rather_than_ok_on_nothing(self):
-        self.reachable()
-        with patch.object(L, "_wsl_windows_host", return_value=None), \
-             patch.object(L, "get_db", side_effect=RuntimeError("no db")):
+    def test_the_health_check_keeps_a_skipped_candidates_real_status(self):
+        """localhost was up with nothing loaded. The operator must be able to
+        see that, not a flat "unreachable"."""
+        self.world(**{"http://127.0.0.1:1234/v1": NO_MODELS,
+                      f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        with patch.object(L, "get_db", side_effect=RuntimeError("no db")), \
+             patch.object(L, "_resolve_model", lambda cfg: "qwen/qwen3-32b"), \
+             patch.object(L.httpx, "get") as get:
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {"data": [{"id": "qwen/qwen3-32b"}]}
+            health = L.check_health()
+        local = [t for t in health["tried"] if t["provenance"] == L.PROV_LOCALHOST]
+        self.assertEqual(local[0]["status"], L.ST_NO_MODELS)
+
+    def test_the_health_check_distinguishes_idle_from_down(self):
+        self.world(**{"http://127.0.0.1:1234/v1": NO_MODELS})
+        self.in_wsl(gateway=None)
+        with patch.object(L, "get_db", side_effect=RuntimeError("no db")):
             health = L.check_health()
         self.assertFalse(health["ok"])
-        self.assertEqual(health["provenance"], L.PROV_NONE)
+        self.assertEqual(health["status"], L.ST_NO_MODELS)
+        self.assertIn("Load a model", health["error"])
+
+    def test_the_health_check_names_an_explicit_endpoint_that_failed(self):
+        import os
+        os.environ["LM_STUDIO_URL"] = "http://10.0.0.5:1234/v1"
+        self.world(**{f"http://{GATEWAY}:1234/v1": UP})
+        self.in_wsl()
+        with patch.object(L, "get_db", side_effect=RuntimeError("no db")):
+            health = L.check_health()
+        self.assertFalse(health["ok"])
+        self.assertEqual(health["url"], "http://10.0.0.5:1234/v1")
+        self.assertEqual(health["provenance"], L.PROV_ENV)
+        self.assertIn("no other endpoint was tried", health["error"])
 
 
 if __name__ == "__main__":

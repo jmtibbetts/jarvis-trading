@@ -31,6 +31,33 @@ def platform_mode_status():
     return mode_status()
 
 
+@router.get("/platform/integrity")
+def platform_integrity():
+    """Every training-data invariant, run against live rows.
+
+    Each defect this programme found was CONFIDENT and WRONG, and nothing
+    in the interface distinguished that from confident and right. These
+    checks are the remedy made continuous, so the next one is visible
+    before it has poisoned a season of training rather than after.
+    """
+    from lib.integrity_panel import run_all
+    return run_all()
+
+
+@router.get("/platform/venues")
+def platform_venues():
+    """What can actually be executed, and what is merely visible.
+
+    UI availability is not API availability — Kraken Pro shows a human
+    11,000 US equities while the API Center documents no stock trading
+    contract, and the difference belongs on screen rather than in a
+    developer's memory.
+    """
+    from lib.execution_venue import registry
+    from lib.venue_capabilities import snapshot
+    return {**snapshot(), "adapters": registry()["adapters"]}
+
+
 @router.get("/mcp/status")
 def get_mcp_status():
     """Connectivity/auth status of the configured MCP servers — the same

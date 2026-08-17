@@ -201,8 +201,24 @@ class NothingOutsideTheRepositoryTests(unittest.TestCase):
 class TheRuntimeIsTheRepositorysOwnTests(unittest.TestCase):
 
     def test_the_interpreter_is_the_repo_venv(self):
-        r = run_snippet('printf "%s" "$(jarvis_python)"')
-        self.assertEqual(r.stdout, str(REPO / ".venv" / "bin" / "python"))
+        """Both directions, because a checkout without a venv is a real
+        state — it is what a fresh clone and a CI runner both start from —
+        and the guard's job there is to say so rather than fall through to
+        whatever `python3` happens to mean."""
+        venv_python = REPO / ".venv" / "bin" / "python"
+        # ASSIGNMENT FORM, which is what the scripts use. `die` inside a
+        # command substitution exits only the SUBSHELL, so
+        # `printf "%s" "$(jarvis_python)"` prints nothing and then succeeds.
+        # `PY="$(jarvis_python)"` takes the substitution's exit status as
+        # its own, which is what lets set -e stop the script.
+        r = run_snippet('PY="$(jarvis_python)"\nprintf "%s" "$PY"')
+        if venv_python.exists():
+            self.assertEqual(r.stdout, str(venv_python))
+        else:
+            self.assertNotEqual(r.returncode, 0,
+                                "a missing venv must stop the script, not blank a variable")
+            self.assertIn("bootstrap_ubuntu.sh", r.stderr,
+                          "the failure must name the fix")
 
     def test_the_repository_is_not_on_a_windows_mount(self):
         """9p/drvfs does not honour the POSIX locking SQLite's WAL expects,

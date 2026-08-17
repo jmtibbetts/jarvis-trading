@@ -42,6 +42,16 @@ LINUX_ONLY = unittest.skipUnless(
     os.path.isdir("/proc") and shutil.which("bash"),
     "process identity is read from /proc, which needs Linux and bash")
 
+# The deployment shape includes <repo>/.venv — process identity is DEFINED
+# in terms of it, and start_jarvis.sh refuses to run without it. A checkout
+# that has not been bootstrapped cannot exercise either, so those tests say
+# so out loud rather than failing or, worse, quietly asserting less. CI
+# builds a venv precisely so this skip does not fire there; if it ever does,
+# the gate has stopped testing the scripts.
+NEEDS_VENV = unittest.skipUnless(
+    VENV_PY.exists(),
+    f"no repository virtualenv at {VENV_PY} — run scripts/bootstrap_ubuntu.sh")
+
 
 def matched_pids():
     """Whatever scripts/_common.sh currently considers a JARVIS server."""
@@ -81,6 +91,7 @@ class Decoy:
 
 
 @LINUX_ONLY
+@NEEDS_VENV
 class NearMissesAreLeftAloneTests(unittest.TestCase):
     """Each decoy is two-thirds of a JARVIS process. None may be matched."""
 
@@ -126,6 +137,7 @@ class NearMissesAreLeftAloneTests(unittest.TestCase):
 
 
 @LINUX_ONLY
+@NEEDS_VENV
 class AGenuineMatchIsFoundTests(unittest.TestCase):
     """A predicate that never matches anything would pass every test above
     and be useless. This is the other half."""
@@ -168,6 +180,7 @@ class TheStopScriptCannotBeTalkedIntoAPatternMatchTests(unittest.TestCase):
 
 
 @LINUX_ONLY
+@NEEDS_VENV
 class TheSchedulerIsNeverImplicitTests(unittest.TestCase):
     """Asserted through the script's own dry run, not by reading its source."""
 
@@ -207,6 +220,7 @@ class TheSchedulerIsNeverImplicitTests(unittest.TestCase):
 
 
 @LINUX_ONLY
+@NEEDS_VENV
 class TheDoctorOnlyLooksTests(unittest.TestCase):
 
     def test_it_reports_without_failing(self):

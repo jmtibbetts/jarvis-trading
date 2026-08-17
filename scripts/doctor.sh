@@ -103,10 +103,14 @@ step "Predictive runtime"
 # The whole point of this section: CPU is the baseline and must work. The
 # NPU is a bonus and its absence is a fact, not a finding.
 if [[ -x "$PY" ]]; then
-  "$PY" - <<'PY' 2>/dev/null || note "openvino" "not installed (optional)"
+  # Captured, then branched on. A `|| { ... }` written between a heredoc's
+  # opening line and its body does not do what it looks like: the body
+  # starts at the next line, so the fallback becomes heredoc content and
+  # the block is never closed.
+  ov_report="$("$PY" - <<'PY' 2>/dev/null
 try:
     import openvino as ov
-except Exception as e:
+except Exception:
     raise SystemExit(1)
 core = ov.Core()
 devices = core.available_devices
@@ -115,11 +119,23 @@ print(f"    {'devices':<22} {devices}")
 if "CPU" in devices:
     print(f"    {'cpu baseline':<22} present (required)")
 else:
-    print(f"    {'cpu baseline':<22} MISSING — this one IS a problem")
+    print(f"    {'cpu baseline':<22} MISSING - this one IS a problem")
 print(f"    {'npu':<22} "
       + ("present (optional bonus)" if "NPU" in devices
-         else "absent — expected on WSL2, not a problem"))
+         else "absent - expected on WSL2, not a problem"))
 PY
+  )" || ov_report=""
+
+  if [[ -n "$ov_report" ]]; then
+    printf '%s\n' "$ov_report"
+  else
+    # Still says something about the NPU. A section that goes silent leaves
+    # the reader unable to tell "no NPU" from "did not look", and those two
+    # want different responses.
+    note "openvino" "not installed (optional; the predictive layer abstains without it)"
+    note "cpu baseline" "not checked - openvino absent"
+    note "npu" "not checked - openvino absent; still not a problem"
+  fi
 fi
 
 step "Databases"

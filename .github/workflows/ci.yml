@@ -80,6 +80,18 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # THE REPO VENV IS PART OF THE DEPLOYMENT SHAPE, SO CI BUILDS ONE.
+      #
+      # This file has always claimed "one bootstrap, identical locally and
+      # here". It was not identical: the desk runs out of <repo>/.venv and
+      # CI installed into the hosted interpreter, so anything that reasons
+      # about the venv — scripts/_common.sh identifying a JARVIS process by
+      # its argv[0], start_jarvis.sh resolving an interpreter — behaved
+      # differently in the one place nobody can attach a debugger. Eight
+      # tests failed here and passed on the desk for exactly that reason.
+      - name: Create the repository virtualenv
+        run: python -m venv .venv
+
       # ONE FAIL-CLOSED BOOTSTRAP, IDENTICAL LOCALLY AND HERE.
       #
       # This was three bare pip lines, and on the old windows-latest job
@@ -91,7 +103,7 @@ jobs:
       # lesson is not: every step is checked and the first failure exits
       # non-zero, on every shell.
       - name: Install dependencies (fail-closed)
-        run: python scripts/install_dependencies.py --with-test --with-inference
+        run: .venv/bin/python scripts/install_dependencies.py --with-test --with-inference
 
       - name: Run suite
         env:
@@ -102,7 +114,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          pytest -q 2>&1 | tee pytest.log
+          .venv/bin/python -m pytest -q 2>&1 | tee pytest.log
 
       # Forensics WITHOUT publishing raw output. The full log is an
       # artifact readable by anyone with repository access; the job summary

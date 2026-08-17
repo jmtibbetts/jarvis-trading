@@ -11,6 +11,18 @@
     signals: '<path d="M3 12l4-7 5 14 3-9 2 5h4"/>',
     instrument:
       '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 9v11"/><path d="M12 13h6M12 16h4"/>',
+    // An order-book ladder: bids stacked left, asks right.
+    virtualcex:
+      '<path d="M4 6h7M4 10h5M4 14h6M4 18h4"/><path d="M20 6h-4M20 10h-6M20 14h-3M20 18h-5"/>',
+    // A swap — the pool's two directions.
+    virtualdex:
+      '<path d="M4 9h13l-3.5-3.5"/><path d="M20 15H7l3.5 3.5"/>',
+    // A beaker: the control arm is an experiment, not a third book.
+    shadowlab:
+      '<path d="M9 3v6.2L4.2 18A2 2 0 0 0 6 21h12a2 2 0 0 0 1.8-3L15 9.2V3"/><path d="M8 3h8M7.5 15h9"/>',
+    // Two blocks, linked.
+    onchain:
+      '<rect x="2.5" y="9" width="6.5" height="6.5" rx="1.5"/><rect x="15" y="9" width="6.5" height="6.5" rx="1.5"/><path d="M9 12.25h6"/>',
     positions:
       '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
     intelligence: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/>',
@@ -22,6 +34,11 @@
     performance: '<path d="M4 20V10M12 20V4M20 20v-7"/>',
     ops: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/>',
   };
+
+  // Drawn when a section has no icon of its own — a dashed placeholder that
+  // reads as "unfinished", which is what it is.
+  const FALLBACK_ICON =
+    '<rect x="4" y="4" width="16" height="16" rx="3" stroke-dasharray="3 3"/>';
 
   // The desk's three concerns. Sections not named here (future additions)
   // fall into the last group rather than vanishing from the rail.
@@ -66,8 +83,17 @@
                 if (section.ready) sectionStore.go(section.id);
               }}
             >
+              <!--
+                A section with no icon used to render an EMPTY 40px button:
+                `{@html undefined}` writes nothing, and nothing about the
+                markup or the typechecker complains. Four sections shipped
+                that way (the three Virtual Trading surfaces and the
+                On-Chain desk) — clickable, correctly linked, invisible.
+                The fallback makes the next one look wrong instead of
+                looking absent.
+              -->
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-                {@html icons[section.id]}
+                {@html icons[section.id] ?? FALLBACK_ICON}
               </svg>
             </a>
             <button

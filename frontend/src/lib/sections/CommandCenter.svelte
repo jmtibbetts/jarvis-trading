@@ -4,6 +4,7 @@
   import AttentionQueue from "../components/AttentionQueue.svelte";
   import AtRiskPositions from "../components/AtRiskPositions.svelte";
   import SystemIntegrity from "../components/SystemIntegrity.svelte";
+  import ResizableSlot from "../components/ResizableSlot.svelte";
   import EquityChart from "../components/EquityChart.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
@@ -348,85 +349,87 @@
 
   <!-- ROW 1 — the lead. Everything above the fold answers "do I need to
        do something", and nothing else on the page outranks it. -->
-  <div class="span-7 lead-row">
-    <AttentionQueue />
-  </div>
-  <div class="span-5 lead-row">
-    <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked" status={feeds.status("opportunities")}>
-      <div class="sig-list cap-h">
-        {#each opportunities as opp (opp.signal_id)}
-          <div
-            class="sig opp"
-            onclick={() => (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
-            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
-            role="button"
-            tabindex="0"
-          >
-            <RadialScore score={Math.round(opp.opportunity_score)} />
-            <div>
-              <div class="sig-sym">
-                {opp.symbol}
-                <Pill label={opp.direction} tone={opp.direction.toLowerCase().includes("short") ? "bad" : "good"} />
-                {#if opp.smart_money?.alignment_score != null}
-                  <Pill
-                    label="smart money {opp.smart_money.agreement}"
-                    tone={opp.smart_money.alignment_score > 55 ? "good" : opp.smart_money.alignment_score < 45 ? "bad" : "neutral"}
-                  />
-                {/if}
-                {#if opp.anomaly?.flags.length}
-                  <Pill label="{opp.anomaly.flags.length} anomaly" tone="warm" />
-                {/if}
-              </div>
-              <div class="sig-meta num">
-                base {opp.base_composite_score.toFixed(0)} &middot; {opp.timeframe ?? "—"}
-                {#if opp.opportunity_breakdown.smart_money_adjustment !== 0}
-                  &middot; smart money {opp.opportunity_breakdown.smart_money_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.smart_money_adjustment.toFixed(1)}
-                {/if}
-                {#if opp.opportunity_breakdown.historical_adjustment !== 0}
-                  &middot; history {opp.opportunity_breakdown.historical_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.historical_adjustment.toFixed(1)}
-                {/if}
-              </div>
-              <div class="opp-why dim">
-                {opp.opportunity_breakdown.smart_money_note}{opp.historical ? ` · ${opp.opportunity_breakdown.historical_note}` : ""}
-              </div>
-              {#if expandedOpp === opp.signal_id}
-                <div class="opp-detail">
-                  <div>{opp.opportunity_breakdown.smart_money_note}</div>
-                  <div>{opp.opportunity_breakdown.historical_note}</div>
-                  {#if opp.crypto_context}
-                    <div>
-                      Funding {opp.crypto_context.funding_rate != null ? `${(opp.crypto_context.funding_rate * 100).toFixed(3)}%` : "—"}
-                      &middot; L/S ratio {opp.crypto_context.long_short_ratio?.toFixed(2) ?? "—"}
-                    </div>
+  <ResizableSlot id="cc.attention" span={7} minSpan={5}>
+    <div class="lead-row"><AttentionQueue /></div>
+  </ResizableSlot>
+  <ResizableSlot id="cc.opportunities" span={5} minSpan={4}>
+    <div class="lead-row">
+      <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked" status={feeds.status("opportunities")}>
+        <div class="sig-list cap-h">
+          {#each opportunities as opp (opp.signal_id)}
+            <div
+              class="sig opp"
+              onclick={() => (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
+              onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (expandedOpp = expandedOpp === opp.signal_id ? null : opp.signal_id)}
+              role="button"
+              tabindex="0"
+            >
+              <RadialScore score={Math.round(opp.opportunity_score)} />
+              <div>
+                <div class="sig-sym">
+                  {opp.symbol}
+                  <Pill label={opp.direction} tone={opp.direction.toLowerCase().includes("short") ? "bad" : "good"} />
+                  {#if opp.smart_money?.alignment_score != null}
+                    <Pill
+                      label="smart money {opp.smart_money.agreement}"
+                      tone={opp.smart_money.alignment_score > 55 ? "good" : opp.smart_money.alignment_score < 45 ? "bad" : "neutral"}
+                    />
                   {/if}
-                  {#each opp.anomaly?.flags ?? [] as f (f.flag)}
-                    <div class="anomaly-line">⚠ {f.detail}</div>
-                  {/each}
-                  <div class="opp-actions">
-                    <button
-                      class="btn tiny"
-                      onclick={(e) => { e.stopPropagation(); analysisSignalId = opp.signal_id; }}
-                    >Full Analysis</button>
-                    <button
-                      class="btn tiny outline"
-                      title="Open on the Signals tab — approve, execute, verify, or paper-trade it there"
-                      onclick={(e) => { e.stopPropagation(); linkStore.link(opp.symbol); sectionStore.go("signals"); }}
-                    >Trade →</button>
-                  </div>
+                  {#if opp.anomaly?.flags.length}
+                    <Pill label="{opp.anomaly.flags.length} anomaly" tone="warm" />
+                  {/if}
                 </div>
-              {/if}
+                <div class="sig-meta num">
+                  base {opp.base_composite_score.toFixed(0)} &middot; {opp.timeframe ?? "—"}
+                  {#if opp.opportunity_breakdown.smart_money_adjustment !== 0}
+                    &middot; smart money {opp.opportunity_breakdown.smart_money_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.smart_money_adjustment.toFixed(1)}
+                  {/if}
+                  {#if opp.opportunity_breakdown.historical_adjustment !== 0}
+                    &middot; history {opp.opportunity_breakdown.historical_adjustment > 0 ? "+" : ""}{opp.opportunity_breakdown.historical_adjustment.toFixed(1)}
+                  {/if}
+                </div>
+                <div class="opp-why dim">
+                  {opp.opportunity_breakdown.smart_money_note}{opp.historical ? ` · ${opp.opportunity_breakdown.historical_note}` : ""}
+                </div>
+                {#if expandedOpp === opp.signal_id}
+                  <div class="opp-detail">
+                    <div>{opp.opportunity_breakdown.smart_money_note}</div>
+                    <div>{opp.opportunity_breakdown.historical_note}</div>
+                    {#if opp.crypto_context}
+                      <div>
+                        Funding {opp.crypto_context.funding_rate != null ? `${(opp.crypto_context.funding_rate * 100).toFixed(3)}%` : "—"}
+                        &middot; L/S ratio {opp.crypto_context.long_short_ratio?.toFixed(2) ?? "—"}
+                      </div>
+                    {/if}
+                    {#each opp.anomaly?.flags ?? [] as f (f.flag)}
+                      <div class="anomaly-line">⚠ {f.detail}</div>
+                    {/each}
+                    <div class="opp-actions">
+                      <button
+                        class="btn tiny"
+                        onclick={(e) => { e.stopPropagation(); analysisSignalId = opp.signal_id; }}
+                      >Full Analysis</button>
+                      <button
+                        class="btn tiny outline"
+                        title="Open on the Signals tab — approve, execute, verify, or paper-trade it there"
+                        onclick={(e) => { e.stopPropagation(); linkStore.link(opp.symbol); sectionStore.go("signals"); }}
+                      >Trade →</button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+              <div class="sig-rr">
+                <div class="lbl">Opportunity <span class="caret">{expandedOpp === opp.signal_id ? "▾" : "▸"}</span></div>
+                <span class="num">{opp.opportunity_score.toFixed(1)}</span>
+              </div>
             </div>
-            <div class="sig-rr">
-              <div class="lbl">Opportunity <span class="caret">{expandedOpp === opp.signal_id ? "▾" : "▸"}</span></div>
-              <span class="num">{opp.opportunity_score.toFixed(1)}</span>
-            </div>
-          </div>
-        {:else}
-          <StateNote status={feeds.status("opportunities")} noun="opportunities" emptyText="No ranked opportunities right now" />
-        {/each}
-      </div>
-    </Panel>
-  </div>
+          {:else}
+            <StateNote status={feeds.status("opportunities")} noun="opportunities" emptyText="No ranked opportunities right now" />
+          {/each}
+        </div>
+      </Panel>
+    </div>
+  </ResizableSlot>
 
 
 
@@ -441,10 +444,10 @@
   <!-- ROW 2 — the risk the queue ranked, on its own, plus what the machine
        is doing about it. Both read state that already exists; neither
        re-measures anything. -->
-  <div class="span-7">
+  <ResizableSlot id="cc.atrisk" span={7} minSpan={4}>
     <AtRiskPositions />
-  </div>
-  <div class="span-5">
+  </ResizableSlot>
+  <ResizableSlot id="cc.activity" span={5} minSpan={3}>
     <Panel title="JARVIS Activity" meta="{jobEntries.length} jobs" status={feeds.status("jobs")}>
       {#if jobEntries.length}
         <div class="acts">
@@ -466,10 +469,10 @@
         <StateNote status={feeds.status("jobs")} noun="job status" />
       {/if}
     </Panel>
-  </div>
+  </ResizableSlot>
 
   <!-- ROW 3 — the desk's own universe, and what is dated. -->
-  <div class="span-8">
+  <ResizableSlot id="cc.focus" span={8} minSpan={5}>
     <Panel
       title="Coins to Watch"
       dotColor="var(--warm)"
@@ -560,8 +563,8 @@
         </div>
       {/if}
     </Panel>
-  </div>
-  <div class="span-4">
+  </ResizableSlot>
+  <ResizableSlot id="cc.catalysts" span={4} minSpan={3}>
     <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : ""} status={feeds.status("catalysts")}>
       {#if catalysts && catalysts.events.length}
         <div class="cat-list">
@@ -583,8 +586,8 @@
         <StateNote status={feeds.status("catalysts")} noun="catalysts" emptyText="No upcoming catalysts assembled" />
       {/if}
     </Panel>
-  </div>
-  <div class="span-8">
+  </ResizableSlot>
+  <ResizableSlot id="cc.watchlist" span={8} minSpan={5}>
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : ""} status={feeds.status("watchlist")}>
       <form
         class="wl-add"
@@ -647,11 +650,11 @@
         <StateNote status={feeds.status("watchlist")} noun="watchlist" emptyText="No symbols on the watchlist" />
       {/if}
     </Panel>
-  </div>
+  </ResizableSlot>
 
   <!-- ROW 4 — ambient market state and the book's own line. Context, not
        a call to action, so it sits below everything that is. -->
-  <div class="span-8">
+  <ResizableSlot id="cc.movers" span={8} minSpan={4}>
     <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : ""} status={feeds.status("cryptoMarkets")}>
       <div class="movers">
         <div class="mv-col">
@@ -684,18 +687,18 @@
         </div>
       </div>
     </Panel>
-  </div>
-  <div class="span-4">
+  </ResizableSlot>
+  <ResizableSlot id="cc.equity" span={4} minSpan={3}>
     <Panel title="Equity Curve" meta="{equity.length} snapshots" status={feeds.status("equity")}>
       <EquityChart points={equity} rangeHours={equityHours} onRange={setEquityRange} />
     </Panel>
-  </div>
+  </ResizableSlot>
 
   <!-- ROW 5 — "is anything stopping it working", then the analyst. -->
-  <div class="span-5">
+  <ResizableSlot id="cc.system" span={5} minSpan={4}>
     <SystemIntegrity troubledFeeds={troubled} />
-  </div>
-  <div class="span-7">
+  </ResizableSlot>
+  <ResizableSlot id="cc.ask" span={7} minSpan={4}>
     <Panel title="Ask JARVIS" meta="analyst over system data · cites its sources">
       <form
         class="ask-row"
@@ -729,7 +732,7 @@
         </div>
       {/if}
     </Panel>
-  </div>
+  </ResizableSlot>
 
   <div class="ticker">
     <div class="lbl">WIRE</div>
@@ -867,18 +870,6 @@
     top: 0;
     background: var(--surface);
     z-index: 1;
-  }
-  .span-7 {
-    grid-column: span 7;
-  }
-  .span-8 {
-    grid-column: span 8;
-  }
-  .span-5 {
-    grid-column: span 5;
-  }
-  .span-4 {
-    grid-column: span 4;
   }
 
 
@@ -1335,15 +1326,11 @@
     }
   }
 
+  /* The narrow-screen collapse now lives in ResizableSlot, which owns
+     grid-column for every cell on this page — a rule here would fight it. */
   @media (max-width: 1180px) {
     .kpis {
       grid-template-columns: repeat(3, 1fr);
-    }
-    .span-8,
-    .span-7,
-    .span-5,
-    .span-4 {
-      grid-column: span 12;
     }
   }
 </style>

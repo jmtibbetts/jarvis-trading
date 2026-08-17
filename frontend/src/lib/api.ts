@@ -1727,6 +1727,51 @@ export type VenueCapabilities = {
   adapters: Record<string, { family: string; is_live: boolean; implemented: boolean }>;
 };
 
+// ── The edge–cost matrix ──────────────────────────────────────────────────
+// A losing cell loses money two ways, and they call for opposite responses:
+// EDGE means the setup does not work and cheaper routing would not save it;
+// COST means it does work and the round trip eats it, which is a ROUTING
+// result rather than a verdict on the setup.
+export type EdgeCostCell = {
+  strategy: string; product: string; timeframe: string; venue: string;
+  n: number; n_live: number; n_replay: number; n_priced: number;
+  /** LIVE | MIXED | REPLAY_ONLY — a big n of replays is not big evidence. */
+  evidence: string;
+  gross_r: number | null;
+  cost_r_median: number | null;
+  cost_r_p90: number | null;
+  net_r: number | null;
+  edge_cost_ratio: number | null;
+  /** TRADEABLE | UNTRADEABLE | UNKNOWN */
+  verdict: string;
+  /** COST | EDGE | EVIDENCE | NONE */
+  limiting: string;
+  /** ESTIMATED | REALIZED | MIXED — an estimate is not a measurement. */
+  cost_basis: string | null;
+  unpriced: number;
+};
+export type EdgeCostMatrix = {
+  days: number; generated_at: string;
+  min_cell_sample: number; min_net_r: number;
+  rows_considered: number; cells_total: number;
+  cells: EdgeCostCell[];
+  truncated: number;
+  by_limiting_factor: Record<string, number>;
+  venues: {
+    verdicts: Record<string, Record<string, unknown>>;
+    best_venue: string | null;
+    lesson: string; detail: string;
+    edge_cost_ratio: Record<string, number | null>;
+    /** False when one arm is on file — a comparison needs two. */
+    comparable: boolean;
+    venues_with_outcomes: string[];
+    not_comparable_reason?: string;
+  };
+  axes: { strategy: string[]; product: string[]; timeframe: string[]; venue: string[] };
+  errors: string[];
+  note: string;
+};
+
 // ── The instrument workspace ──────────────────────────────────────────────
 // One instrument, everything known about it. The REFUSAL is a first-class
 // field rather than an error: an instrument the desk cannot size is a
@@ -2237,6 +2282,8 @@ export const api = {
   // (the duplicate `calibration:` key that used to sit here is gone — in an
   // object literal the last one silently wins, so one of the two was dead)
   expectancy: () => get<Expectancy>(`/expectancy`),
+  edgeCostMatrix: (days = 180) =>
+    get<EdgeCostMatrix>(`/learning/edge-cost-matrix?days=${days}`),
   llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),
   llmHealth: () => get<LlmHealth>(`/llm/health`),
   cacheStats: () => get<CacheStats>(`/cache/stats`),

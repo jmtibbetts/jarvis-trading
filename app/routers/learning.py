@@ -577,6 +577,24 @@ def expectancy_summary():
         return {"error": str(e), "buckets": []}
 
 
+@router.get("/learning/edge-cost-matrix")
+def edge_cost_matrix(days: int = 180):
+    """Where the edge is, where the cost eats it, and which is the fault.
+
+    Expectancy measured gross edge and transaction_costs priced a round
+    trip, and nothing put them in one table — so a losing bucket could not
+    be told apart from a working thesis on the wrong venue. Those call for
+    opposite responses, and only one of them is "retire the strategy".
+
+    Snapshot-served: the inputs change when trades CLOSE, not when a page
+    refreshes, and a full pass replays every closed outcome in the epoch.
+    """
+    from lib.snapshot_cache import cached
+    from lib.edge_cost_matrix import matrix
+    d = max(7, min(int(days), 1095))
+    return cached(f"edgecost:{d}", 900, lambda: matrix(days=d))
+
+
 @router.get("/strategies/lifecycle")
 def strategy_lifecycle():
     """Which strategies may trade, judged on data the ranking never saw.

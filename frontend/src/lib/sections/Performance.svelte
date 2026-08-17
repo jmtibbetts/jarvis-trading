@@ -4,6 +4,7 @@
   import Pill from "../components/Pill.svelte";
   import LearningPanel from "../components/LearningPanel.svelte";
   import CalibrationPanel from "../components/CalibrationPanel.svelte";
+  import EdgeCostMatrix from "../components/EdgeCostMatrix.svelte";
   import StateNote from "../components/StateNote.svelte";
   import { api, type PerformanceAnalytics, type Decision, type BacktestRun, type RMultipleSummary } from "../api";
   import { FeedTracker } from "../dataState.svelte";
@@ -161,6 +162,15 @@
 </div>
 
 <div class="grid">
+  <!--
+    The training question comes first. Everything below this measures what
+    happened; this one says whether a losing bucket is a bad setup or a
+    working setup on the wrong venue — and those call for opposite actions.
+  -->
+  <div class="span-12">
+    <EdgeCostMatrix />
+  </div>
+
   <div class="span-8">
     <Panel title="AI Decision Log" meta="{filteredDecisions.length} of {decisions.length}" status={feeds.status("decisions")}>
       {#snippet children()}

@@ -1,16 +1,31 @@
-# The suite is the desk's immune system — 2,687 tests pinning risk
+# The suite is the desk's immune system — 2,932 tests pinning risk
 # invariants, gate semantics, instrument units, execution realism and
 # point-in-time honesty. Tests are hermetic by construction (conftest.py
 # redirects both databases to temp files and refuses the operator DB), so
 # no secrets are configured here: a test that needs a real key is a test
 # that is wrong.
 #
-# WHAT CHANGED AND WHY.
+# THE GATE RUNS ON THE PLATFORM THE DESK RUNS ON, AND ONLY THAT ONE.
 #
-# Windows is now a first-class job. The operator's deployment IS Windows,
-# and a suite that only ever ran on Ubuntu could not see a path separator,
-# an encoding default or a file-locking difference until it reached the
-# one machine that matters.
+# This file used to say "Windows is now a first-class job — the operator's
+# deployment IS Windows". That stopped being true. The runtime moved to
+# WSL2 / Ubuntu 24.04 because order_book's C extension does not build under
+# MSVC without a vendored patch, and that patch no longer applies to the
+# upstream sdist. Native Windows Python is not a deployment target any
+# more, so gating on it would mean a permanently-red required check — and
+# this same file argues, correctly, that a permanently-red check is a check
+# nobody reads.
+#
+# ubuntu-24.04 is PINNED rather than ubuntu-latest. The desk runs 24.04
+# exactly; "latest" silently becomes 26.04 one morning and the gate stops
+# describing the machine it is supposed to be protecting.
+#
+# ML EXTRAS ARE INSTALLED. Without openvino, the predictive-runtime tests
+# SKIP rather than run, and what they cover is abstention semantics —
+# schema mismatch, stale features, a device that raises. That is the
+# "UNKNOWN stays UNKNOWN" behaviour the risk layer leans on. Coverage that
+# silently disappears is not coverage, and a skip is invisible in a green
+# check.
 #
 # The frontend is a RELEASE GATE. This repository serves a built Svelte
 # application; a green backend check while the UI fails to compile is a
@@ -40,15 +55,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Backend, on both operating systems ─────────────────────────────────
+  # ── Backend, on the supported runtime ──────────────────────────────────
   pytest:
-    name: pytest (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false          # a Windows-only failure must not hide a Linux one
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: pytest (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45         # ML extras add install time; the suite is ~30s
     steps:
       # NOTE ON SUPPLY CHAIN: these are major-version tags, which are
       # mutable. Pinning to verified commit SHAs is the correct hardening
@@ -64,25 +75,16 @@ jobs:
 
       # ONE FAIL-CLOSED BOOTSTRAP, IDENTICAL LOCALLY AND HERE.
       #
-      # This was three bare pip lines. On windows-latest that block runs
-      # under pwsh, where a failing NATIVE command does not stop the
-      # script — only the LAST command's exit code decides the step. So:
-      #
-      #   pip install -r requirements.txt   FAILED (order_book needs the
-      #                                     MSVC patch; vendor/patches)
-      #   pip install pytest                SUCCEEDED
-      #   -> step reported SUCCESS
-      #
-      # and pytest ran against a half-installed environment. The gate was
-      # reporting on a machine that had never finished being built.
-      #
-      # The fix is NOT dropping cryptofeed from the Windows matrix. Windows
-      # is the deployment platform, and a gate that skips the platform it
-      # ships on is not a gate. The script performs the documented patch
-      # procedure, checks every step, and exits non-zero on the first
-      # failure. Python propagates that exit code on every shell.
+      # This was three bare pip lines, and on the old windows-latest job
+      # that block ran under pwsh, where a failing NATIVE command does not
+      # stop the script — only the LAST command's exit code decides the
+      # step. So a failed `pip install -r requirements.txt` followed by a
+      # successful `pip install pytest` reported SUCCESS, and pytest ran
+      # against a half-installed environment. That job is gone now, but the
+      # lesson is not: every step is checked and the first failure exits
+      # non-zero, on every shell.
       - name: Install dependencies (fail-closed)
-        run: python scripts/install_dependencies.py --with-test
+        run: python scripts/install_dependencies.py --with-test --with-ml
 
       - name: Run suite
         env:
@@ -103,7 +105,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### pytest failed on ${{ matrix.os }}"
+            echo "### pytest failed on ubuntu-24.04"
             echo ""
             echo "Failing tests:"
             echo '```'
@@ -121,14 +123,14 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ matrix.os }}
+          name: pytest-log
           path: pytest.log
           retention-days: 7
 
   # ── The frontend is part of the product ────────────────────────────────
   frontend:
     name: frontend typecheck + build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -155,7 +157,7 @@ jobs:
   # ── The schema must come up from nothing ───────────────────────────────
   bootstrap:
     name: migration / bootstrap
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -186,7 +188,7 @@ jobs:
   # ── Supply chain and secrets ───────────────────────────────────────────
   security:
     name: dependency + secret scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Advisory: a new upstream CVE should not block an unrelated commit,
     # but it must be visible rather than silent.

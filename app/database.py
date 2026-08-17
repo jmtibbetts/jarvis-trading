@@ -2051,6 +2051,15 @@ def _migrate_columns():
             ("evidence_class", "TEXT"),
             ("alpha_eligible", "INTEGER DEFAULT 0"),
         ],
+        "paper_positions": [
+            # CANONICAL EXECUTION PROVENANCE, as one JSON document rather than
+            # a dozen columns. A position opened by the venue-book executor
+            # must be able to say which simulator produced it: the legacy one
+            # filled at the MARK, and pooling its economics with venue-book
+            # fills would compare two different machines. NULL here means
+            # LEGACY — never inferred, never backfilled.
+            ("execution_provenance", "TEXT"),
+        ],
         "token_surge_state": [
             # WHEN the surge began, not merely when the row was created.
             # Pre-surge wallet discovery asks "who entered before T0", and
@@ -2286,6 +2295,9 @@ class PaperPosition(Base):
     margin_used   = Column(Float)           # cash reserved = notional / leverage
     fees          = Column(Float, default=0.0)   # venue round trip, reserved at open
     fee_basis     = Column(String)
+    # Canonical execution provenance (JSON) — see lib/canonical_entry.py.
+    # NULL means the position was opened by the LEGACY direct-mark executor.
+    execution_provenance = Column(Text)
     unrealized_pnl= Column(Float, default=0.0)
     unrealized_pct= Column(Float, default=0.0)
     signal_id     = Column(String)          # FK to trading_signals.id (optional)

@@ -1029,8 +1029,47 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
     return {"ok": True, "position": pos_data}
 
 
+
+# ── Development-checkpoint guard: canonical positions have no exit yet ────
+#
+# Pass A wired canonical ENTRY. Canonical EXIT is Pass B. Until it exists, a
+# position opened by the venue-book executor must not fall through the close
+# arithmetic below, which settles at whatever price it is handed — the exact
+# mark-as-fill behaviour canonical entry was built to remove. Half-honest
+# economics are worse than uniformly optimistic ones, because they stop being
+# diagnosable.
+#
+# Fails CLOSED: refuse and mutate nothing.
+CANONICAL_REQUIRES_EXECUTION_SETTLEMENT = "CANONICAL_POSITION_REQUIRES_EXECUTION_SETTLEMENT"
+
+
+def _refuse_legacy_close(pos) -> dict | None:
+    """A refusal dict when `pos` is canonical, else None."""
+    try:
+        from lib.canonical_entry import is_canonical
+    except Exception:
+        return None
+    if not is_canonical(pos):
+        return None
+    return {
+        "error": CANONICAL_REQUIRES_EXECUTION_SETTLEMENT,
+        "detail": ("this position was opened by the venue-book executor and "
+                   "must be closed through canonical execution settlement; "
+                   "the legacy path would settle it at the price handed in, "
+                   "which is the mark-as-fill behaviour canonical entry "
+                   "exists to remove"),
+        "ok": False,
+    }
+
 def close_paper_position(pos_id: str, close_price: float, reason: str = "manual") -> dict:
     """Close a paper position and record the trade."""
+    with get_db() as _db:
+        _pos = _db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()
+        _refusal = _refuse_legacy_close(_pos) if _pos is not None else None
+    if _refusal:
+        logger.warning("[Paper] refusing legacy close of canonical position %s", pos_id)
+        return _refusal
+
     result = {}
     log_symbol = ""
     log_direction = ""
@@ -1181,6 +1220,13 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
     qty/notional/margin are reduced proportionally; the position stays Open."""
     if not (0 < close_fraction < 1):
         return {"error": "close_fraction must be between 0 and 1 (exclusive)"}
+
+    with get_db() as _db:
+        _pos = _db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()
+        _refusal = _refuse_legacy_close(_pos) if _pos is not None else None
+    if _refusal:
+        logger.warning("[Paper] refusing legacy partial close of canonical position %s", pos_id)
+        return _refusal
 
     with get_db() as db:
         pos = db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()

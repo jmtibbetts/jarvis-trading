@@ -1002,7 +1002,8 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
 
 def run():
     logger.info("[PaperTrading] v5.0 Starting paper trading job...")
-    from lib.paper_engine import mark_to_market, open_paper_position, get_paper_summary
+    from lib.canonical_entry import open_canonical_position
+    from lib.paper_engine import mark_to_market, get_paper_summary
 
     # ── Step 1: Mark-to-market ────────────────────────────────────────────────
     prices = _get_all_prices()
@@ -1055,6 +1056,7 @@ def run():
     executed = 0
     skipped_no_price = 0
     skipped_ai = 0
+    skipped_no_execution = 0
 
     for sig in sig_list:
         sym = sig["asset_symbol"]
@@ -1079,9 +1081,27 @@ def run():
             f"score={eval_result['score']:.0f} @ ${price:.4f} | {eval_result['reasoning']}"
         )
         log_decision('paper', 'APPROVED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
-        result = open_paper_position(sig, current_price=price)
+        # THE VENUE BOOK IS THE FILL AUTHORITY, NOT THE MARK.
+        #
+        # This used to be open_paper_position(sig, current_price=price),
+        # where `price` came from _get_current_price() — Alpaca last, a
+        # MarketAsset row, or a yfinance cache. All marks. Handing one over
+        # made it the entry fill, so every position opened here filled at a
+        # price no order could have executed at: mid at best, better than
+        # mid whenever the spread was wide.
+        #
+        # `price` survives as decision_price, which is what makes the
+        # slippage measurable.
+        result = open_canonical_position(sig, decision_price=price)
         if result.get("ok"):
             executed += 1
+        elif result.get("venue_failure"):
+            # A VENUE failure, not a verdict on the thesis. A stale Kraken
+            # quote is not a losing BTC thesis, so this is not counted as a
+            # rejection and the signal stays eligible until its own expiry.
+            logger.info(f"[PaperTrading] {sym} not executable: "
+                        f"{result.get('error')} — signal remains eligible")
+            skipped_no_execution += 1
         elif "already open" in (result.get("error") or ""):
             logger.debug(f"[PaperTrading] {sym} already open — skipping")
         else:
@@ -1092,6 +1112,7 @@ def run():
     port = summary["portfolio"]
     logger.info(
         f"[PaperTrading] Done — new={executed} | ai_rejected={skipped_ai} | no_price={skipped_no_price} | "
+        f"no_execution_data={skipped_no_execution} | "
         f"mgmt_closed={mgmt['closed']} | mgmt_adjusted={mgmt.get('adjusted', 0)} | open={len(summary['positions'])} | "
         f"Equity=${port['equity']:.0f} | Cash=${port['cash']:.0f} | "
         f"Realized=${port['realized_pnl']:.2f} | Win%={port['win_rate']}% | Total={port['total_trades']}"

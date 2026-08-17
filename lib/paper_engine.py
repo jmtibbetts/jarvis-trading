@@ -1008,7 +1008,7 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
         sizing=sizing)}
 
 
-def settle_entry(auth: EntryAuthorization, *, fill_price: float,
+def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                  execution_provenance: dict | None = None,
                  canonical_entry_fee_usd: float | None = None) -> dict:
     """SETTLE — ONE transaction: revalidate the book, create, debit, commit.
@@ -1206,7 +1206,7 @@ def open_paper_position(signal: dict, current_price: float = None,
     prep = prepare_entry(signal, reference_price=current_price)
     if "authorization" not in prep:
         return prep                       # an error dict, unchanged in shape
-    return settle_entry(prep["authorization"],
+    return settle_position_entry(prep["authorization"],
                         fill_price=prep["authorization"].reference_price,
                         execution_provenance=execution_provenance,
                         canonical_entry_fee_usd=canonical_entry_fee_usd)
@@ -1226,12 +1226,24 @@ CANONICAL_REQUIRES_EXECUTION_SETTLEMENT = "CANONICAL_POSITION_REQUIRES_EXECUTION
 
 
 def _refuse_legacy_close(pos) -> dict | None:
-    """A refusal dict when `pos` is canonical, else None."""
+    """A refusal dict when `pos` was filled by the venue book, else None.
+
+    KEYED ON THE WIDER CONDITION, DELIBERATELY. `is_canonical` was tightened
+    in A2 to require per-leg costs, a canonical epoch and an entry execution
+    id in addition to the venue-book fill — the right test for CLASSIFYING a
+    position, and the wrong one for this guard. What makes the legacy path
+    unsafe is that it settles at whatever price it is handed, so everything
+    with a venue-book fill must be refused, including a hybrid that has one
+    without the rest. Narrowing this to track the classifier would have
+    silently reopened the exact hole the guard exists to close.
+
+    A guard fails CLOSED by refusing MORE, never less.
+    """
     try:
-        from lib.canonical_entry import is_canonical
+        from lib.canonical_entry import has_canonical_fill
     except Exception:
         return None
-    if not is_canonical(pos):
+    if not has_canonical_fill(pos):
         return None
     return {
         "error": CANONICAL_REQUIRES_EXECUTION_SETTLEMENT,

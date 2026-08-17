@@ -151,12 +151,15 @@ class AProductIsNotAnAssetClassTests(unittest.TestCase):
         ready = P.ExecutionReadiness(True, "kraken", "CRYPTO_PERP",
                                      asset_class="crypto",
                                      instrument="PF_XBTUSD", snapshot=snap)
+        from lib import fee_authority as FA
         order = VO.VirtualOrder(symbol="BTC/USD", side="long", quantity=3.0,
                                 order_type=VO.MARKET)
         ex = VO.execute_market(order, VO.Quote(bid=99.9, ask=100.1))
+        fee = FA.leg_fee("BTC/USD", notional=300.0, price=100.0,
+                         product="CRYPTO_PERP", venue="kraken")
         doc = CE.build_provenance(signal={"id": "s1"}, ready=ready, snap=snap,
                                   execution=ex, decision_price=100.0,
-                                  authorized_qty=3.0)
+                                  authorized_qty=3.0, fee_quote=fee)
         self.assertEqual(doc["asset_class"], "crypto")
         self.assertEqual(doc["product"], "CRYPTO_PERP")
         self.assertEqual(doc["instrument"], "PF_XBTUSD")

@@ -56,11 +56,11 @@ class TheRealReturnContractTests(unittest.TestCase):
     def test_settlement_returns_position_not_position_id(self):
         """The success contract is built by SETTLE — the half that actually
         creates the row. open_paper_position is now the composition of
-        prepare_entry and settle_entry, so the shape is asserted where it is
+        prepare_entry and settle_position_entry, so the shape is asserted where it is
         constructed rather than where it is returned from."""
         import ast
         fn = next(n for n in ast.walk(self._paper_engine_tree())
-                  if isinstance(n, ast.FunctionDef) and n.name == "settle_entry")
+                  if isinstance(n, ast.FunctionDef) and n.name == "settle_position_entry")
         keys = set()
         for node in ast.walk(fn):
             if isinstance(node, ast.Dict):
@@ -168,18 +168,58 @@ class CanonicalEntryAgainstARealDatabaseTests(unittest.TestCase):
         self.assertGreaterEqual(entry, ASK)
         self.assertNotEqual(entry, 100.00)
 
-    def test_cash_fell_by_the_margin_that_was_actually_committed(self):
+    def test_cash_fell_by_the_committed_margin_plus_the_entry_fee(self):
+        """A2. Free cash pays for BOTH: the margin it commits and the fee it
+        actually spends. Only the second is a cost."""
+        from app.database import PaperPosition, get_db
         before, _ = self._portfolio_cash()
         res = self._open()
         after, _ = self._portfolio_cash()
+
         margin = float(res["position"]["margin_required"])
-        self.assertAlmostEqual(before - after, margin, places=4)
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            fee = json.loads(pos.execution_provenance)["entry_fee_usd"]
+
+        self.assertGreater(fee, 0.0, "the entry leg was settled free")
+        self.assertAlmostEqual(before - after, margin + fee, places=4)
+
+    def test_committed_margin_is_not_a_loss(self):
+        """THE ACCOUNTING FACT. Margin MOVED, it did not vanish:
+
+            equity = free_cash + committed_margin + unrealized_pnl
+
+        so opening a position reduces equity by the FEE alone. Treating the
+        margin as spent would report a $1,000 commitment as a $1,000 loss the
+        instant the trade opened.
+        """
+        from app.database import PaperPosition, get_db
+        before_cash, _ = self._portfolio_cash()
+        res = self._open()
+        after_cash, _ = self._portfolio_cash()
+
+        margin = float(res["position"]["margin_required"])
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            fee = json.loads(pos.execution_provenance)["entry_fee_usd"]
+            committed = float(pos.margin_used or 0.0)
+
+        self.assertAlmostEqual(committed, margin, places=4)
+        equity_before = before_cash
+        equity_after = after_cash + committed          # cash + committed margin
+        self.assertAlmostEqual(equity_before - equity_after, fee, places=4,
+                               msg="equity fell by more than the fee — margin "
+                                   "is being treated as vanished capital")
+        self.assertLess(fee, margin,
+                        "a fee the size of the margin is a units error")
 
     def test_the_provenance_states_the_cost_model_that_actually_settled(self):
-        """FALSE PROVENANCE IS WORSE THAN NONE. The fill genuinely came from
-        the venue book, so execution_model is canonical — but the ledger
-        still ran legacy round-trip fee accounting, so cost_model must say
-        so until per-leg settlement exists."""
+        """FALSE PROVENANCE IS WORSE THAN NONE — which is why this asserted
+        COST_MODEL_LEGACY until A2. The label moved only when the behaviour
+        did: the entry leg is now priced at the executed size and DEBITED at
+        settlement, so `fees` stays 0 and the exit cannot charge it again."""
         from app.database import PaperPosition, get_db
         from lib.paper_settlement import (COST_MODEL_CANONICAL,
                                           COST_MODEL_LEGACY,
@@ -190,13 +230,31 @@ class CanonicalEntryAgainstARealDatabaseTests(unittest.TestCase):
                 PaperPosition.id == res["position"]["id"]).first()
             doc = json.loads(pos.execution_provenance)
             stored_fee = float(pos.fees or 0.0)
+            fee_basis = pos.fee_basis
 
         self.assertEqual(doc["execution_model"], EXECUTION_MODEL_CANONICAL)
-        self.assertEqual(doc["cost_model"], COST_MODEL_LEGACY)
-        self.assertNotEqual(doc["cost_model"], COST_MODEL_CANONICAL)
-        # And the evidence for that claim: a legacy round-trip fee is present.
-        self.assertGreater(stored_fee, 0.0,
-                           "legacy round-trip fee is still what settled")
+        self.assertEqual(doc["cost_model"], COST_MODEL_CANONICAL)
+        self.assertNotEqual(doc["cost_model"], COST_MODEL_LEGACY)
+        # THE EVIDENCE FOR THE CLAIM. A deferred round-trip estimate left on
+        # the row would be billed again at close — the double charge the
+        # per-leg model exists to remove.
+        self.assertEqual(stored_fee, 0.0,
+                         "a legacy deferred round-trip fee is still on the row")
+        self.assertEqual(fee_basis, "per_leg_v2_entry")
+        self.assertGreater(doc["entry_fee_usd"], 0.0)
+
+    def test_the_persisted_position_satisfies_the_tightened_classifier(self):
+        """is_canonical now requires all four claims, and a position this
+        path produces must satisfy every one of them."""
+        from app.database import PaperPosition, get_db
+        from lib.canonical_entry import is_canonical
+        res = self._open()
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            doc = json.loads(pos.execution_provenance)
+            self.assertTrue(is_canonical(pos))
+        self.assertTrue(str(doc["entry_execution_id"]).strip())
 
     def test_a_venue_refusal_opens_nothing_and_moves_no_cash(self):
         from lib.canonical_entry import open_canonical_position

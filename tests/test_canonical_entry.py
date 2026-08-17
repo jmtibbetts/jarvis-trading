@@ -41,7 +41,7 @@ SIGNAL = {"asset_symbol": "BTC/USD", "asset_class": "Crypto",
 
 
 def _fake_settlement(captured):
-    """A double for `paper_engine.settle_entry` that matches the REAL
+    """A double for `paper_engine.settle_position_entry` that matches the REAL
     signature and the REAL return shape.
 
     A1 was hidden for exactly as long as the doubles here invented their own
@@ -67,7 +67,7 @@ class TheVenueBookIsTheFillAuthorityTests(unittest.TestCase):
     def _open(self, signal=None, bid=99.90, ask=100.10, decision=100.00):
         captured = {}
         with _kraken(bid, ask), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(signal or SIGNAL,
                                              decision_price=decision)
         return res, captured
@@ -118,7 +118,7 @@ class TheExecutedOrderIsTheAuthorizedOrderTests(unittest.TestCase):
     def _open(self, signal=None, bid=99.90, ask=100.10):
         captured = {}
         with _kraken(bid, ask), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(signal or SIGNAL,
                                              decision_price=100.00)
         return res, captured
@@ -209,7 +209,7 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
         captured = {}
         with patch("lib.kraken_stream.latest_quote", return_value=quote), \
              patch("lib.kraken_stream.trade_flow", return_value=None), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
         return res, ("fill" in captured)
 
@@ -246,7 +246,7 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
     def test_futures_are_refused_before_any_quote_is_sought(self):
         fut = dict(SIGNAL, asset_symbol="ES=F", asset_class="Futures")
         captured = {}
-        with patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+        with patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(fut, decision_price=5432.25)
         self.assertNotIn("fill", captured)
         self.assertEqual(res["error"], POL.UNSUPPORTED_VIRTUAL_VENUE)
@@ -266,20 +266,27 @@ class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
     a real database in test_canonical_entry_integration.py, because that is
     where the atomicity actually lives."""
 
-    def _doc(self):
+    def _doc(self, fee_quote=None):
         from lib import execution_snapshot as ES
+        from lib import fee_authority as FA
+        from lib import product_router as PR
         from lib import virtual_orders as VO
         snap = ES.ExecutionMarketSnapshot(
-            venue="kraken", symbol="BTC/USD", product="crypto",
+            venue="kraken", symbol="BTC/USD", product=PR.CRYPTO_PERP,
             bid=99.90, ask=100.10, source="kraken_stream.latest_quote",
             venue_event_at="2026-08-17T00:00:00+00:00", age_ms=200.0,
             status=ES.AVAILABLE)
-        ready = POL.ExecutionReadiness(True, "kraken", "crypto", snapshot=snap)
+        ready = POL.ExecutionReadiness(True, "kraken", PR.CRYPTO_PERP,
+                                       asset_class="crypto", snapshot=snap)
         order = VO.VirtualOrder(symbol="BTC/USD", side="long", quantity=10.0,
                                 order_type=VO.MARKET)
         execution = VO.execute_market(order, VO.Quote(bid=99.90, ask=100.10))
+        fee = fee_quote or FA.leg_fee(
+            "BTC/USD", notional=1_000.0, price=100.0,
+            product=PR.CRYPTO_PERP, venue="kraken")
         return CE.build_provenance(signal=SIGNAL, ready=ready, snap=snap,
-                                   execution=execution, decision_price=100.0)
+                                   execution=execution, decision_price=100.0,
+                                   authorized_qty=10.0, fee_quote=fee)
 
     def test_it_records_the_models_epoch_and_venue(self):
         doc = self._doc()
@@ -313,6 +320,154 @@ class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
     def test_unparseable_provenance_is_not_canonical(self):
         broken = type("P", (), {"execution_provenance": "{not json"})()
         self.assertFalse(CE.is_canonical(broken))
+
+    def test_the_cost_model_is_per_leg_and_the_fee_is_recorded(self):
+        """A2. This said legacy_round_trip_v1 until settlement genuinely
+        changed, because false provenance is worse than none."""
+        doc = self._doc()
+        self.assertEqual(doc["cost_model"], COST_MODEL_CANONICAL)
+        self.assertGreater(doc["entry_fee_usd"], 0.0)
+        self.assertIsNotNone(doc["entry_fee_basis"])
+        self.assertIsNotNone(doc["entry_fee_source"])
+
+    def test_the_fee_quality_travels_with_the_number(self):
+        """A labelled estimate must never be pooled as a measurement."""
+        doc = self._doc()
+        self.assertIn("cost_model_fee_quality", doc)
+        self.assertIn("cost_model_fee_is_measured", doc)
+
+    def test_provenance_cannot_be_built_without_a_priced_entry_leg(self):
+        """Stamping per_leg_v2 while charging nothing would be a free trade
+        wearing the label of an accurately-costed one. The fee is checked
+        before anything else is read, so this refuses outright."""
+        from lib import fee_authority as FA
+        for bad in (None, FA.FeeQuote(ok=False, reason="nope")):
+            with self.subTest(fee_quote=bad):
+                with self.assertRaises(ValueError):
+                    CE.build_provenance(signal=SIGNAL, ready=None, snap=None,
+                                        execution=None, decision_price=100.0,
+                                        fee_quote=bad)
+
+
+class TheEntryLegIsPricedBeforeItSettlesTests(unittest.TestCase):
+    """A2. Settlement wrote sizing["round_trip_fees"] — a DEFERRED round-trip
+    estimate computed before the order existed and charged at close."""
+
+    def _open(self, **env):
+        import os
+        captured = {}
+        with patch.dict(os.environ, env), _kraken(99.90, 100.10), \
+             patch("lib.paper_engine.settle_position_entry",
+                   _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+        return res, captured
+
+    def test_the_entry_fee_is_computed_and_handed_to_settlement(self):
+        res, cap = self._open()
+        self.assertTrue(res.get("ok"), res)
+        self.assertIsNotNone(cap["entry_fee"])
+        self.assertGreater(cap["entry_fee"], 0.0)
+
+    def test_the_fee_is_priced_on_the_executed_size_not_the_authorized_one(self):
+        """The order shrank after the fill; the fee must follow the position
+        that actually exists."""
+        res, cap = self._open()
+        auth = cap["auth"]
+        self.assertLess(auth.qty, res["execution"]["authorized_quantity"])
+        expected = cap["provenance"]["entry_fee_usd"]
+        self.assertAlmostEqual(cap["entry_fee"], expected, places=9)
+
+    def test_a_taker_rate_is_used_because_a_market_order_crosses(self):
+        res, cap = self._open()
+        self.assertFalse(cap["provenance"].get("maker", False))
+        self.assertEqual(cap["provenance"]["cost_model"], COST_MODEL_CANONICAL)
+
+    def test_no_fee_authority_means_no_position(self):
+        """Settling anyway would debit nothing while stamping the position
+        per_leg_v2 — a free trade wearing an accurate label."""
+        from lib import fee_authority as FA
+        captured = {}
+        unavailable = FA.FeeQuote(ok=False, reason=FA.FEE_AUTHORITY_UNAVAILABLE,
+                                  detail="no schedule")
+        with _kraken(99.90, 100.10), \
+             patch("lib.fee_authority.leg_fee", return_value=unavailable), \
+             patch("lib.paper_engine.settle_position_entry",
+                   _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+        self.assertNotIn("fill", captured, "an unpriced entry still settled")
+        self.assertEqual(res["error"], FA.FEE_AUTHORITY_UNAVAILABLE)
+        self.assertFalse(res["venue_failure"])
+
+    def test_a_catastrophic_product_is_refused_before_it_opens(self):
+        """A per-contract cost does not dilute with size, so an instrument
+        whose round trip eats an unacceptable share of its own notional can
+        never pay for itself. The fixture prices BTC at $100, where a
+        $0.15/contract fee on a 0.01 BTC contract is 30% of notional.
+        """
+        res, cap = self._open(VENUE_REGION="us", PAPER_VENUE="kraken")
+        self.assertNotIn("fill", cap, "a catastrophic product still opened")
+        self.assertEqual(res["error"], CE.FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL)
+        self.assertFalse(res["venue_failure"],
+                         "an uneconomic instrument is not a venue outage")
+
+    def test_the_gate_uses_notional_on_both_sides_of_the_comparison(self):
+        """It must not compare a fee against MARGIN, or against an
+        unleveraged move in the underlying — mixing denominators kills
+        trades that are comfortably viable, and rejecting a profitable trade
+        is simulator error too."""
+        import inspect
+        src = inspect.getsource(CE.open_canonical_position)
+        gate = src[src.index("CATASTROPHIC-PRODUCT GATE"):
+                   src.index("FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,")]
+        self.assertIn("final.notional", gate)
+        self.assertNotIn("final.margin", gate)
+        self.assertNotIn("loss_at_stop", gate)
+
+
+class IsCanonicalRequiresAllFourClaimsTests(unittest.TestCase):
+    """A hybrid — venue-book fill, legacy costs — is a real state this
+    codebase produced between A5 and A2. Testing only `execution_model`
+    accepted it as canonical."""
+
+    def _pos(self, **overrides):
+        doc = {"execution_model": EXECUTION_MODEL_CANONICAL,
+               "cost_model": COST_MODEL_CANONICAL,
+               "engine_epoch": CE.CANONICAL_ENGINE_EPOCH,
+               "entry_execution_id": "exec-1"}
+        doc.update(overrides)
+        return type("P", (), {"execution_provenance": json.dumps(doc)})()
+
+    def test_all_four_present_is_canonical(self):
+        self.assertTrue(CE.is_canonical(self._pos()))
+
+    def test_a_legacy_cost_model_is_not_canonical(self):
+        self.assertFalse(CE.is_canonical(self._pos(cost_model=COST_MODEL_LEGACY)))
+
+    def test_a_foreign_epoch_is_not_canonical(self):
+        self.assertFalse(CE.is_canonical(self._pos(engine_epoch="2020-01-01-old")))
+
+    def test_a_missing_execution_id_is_not_canonical(self):
+        self.assertFalse(CE.is_canonical(self._pos(entry_execution_id="")))
+        self.assertFalse(CE.is_canonical(self._pos(entry_execution_id=None)))
+
+    def test_the_hybrid_is_still_refused_by_the_fail_closed_exit_guard(self):
+        """THE POINT. Tightening the classifier must not narrow the guard —
+        a guard fails closed by refusing MORE, never less."""
+        from lib.paper_engine import _refuse_legacy_close
+        hybrid = self._pos(cost_model=COST_MODEL_LEGACY)
+        self.assertFalse(CE.is_canonical(hybrid))
+        self.assertTrue(CE.has_canonical_fill(hybrid))
+        refusal = _refuse_legacy_close(hybrid)
+        self.assertIsNotNone(refusal, "the legacy close path accepted a "
+                                      "venue-book fill again")
+        self.assertEqual(refusal["error"],
+                         "CANONICAL_POSITION_REQUIRES_EXECUTION_SETTLEMENT")
+
+    def test_a_genuinely_legacy_position_still_passes_the_guard(self):
+        from lib.paper_engine import _refuse_legacy_close
+        legacy = type("P", (), {"execution_provenance": None})()
+        self.assertFalse(CE.has_canonical_fill(legacy))
+        self.assertIsNone(_refuse_legacy_close(legacy))
 
 
 class CanonicalPositionsCannotUseLegacyCloseArithmeticTests(unittest.TestCase):
@@ -409,7 +564,7 @@ class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
 
         with _kraken(99.90, 100.10), \
              patch("lib.execution_venue.submit", spy), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         self.assertTrue(res.get("ok"), res)
@@ -435,7 +590,7 @@ class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
 
         with _kraken(99.90, 100.10), \
              patch("lib.execution_venue.submit", spy), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         self.assertIn(seen["plan"].product, PR.ALL_PRODUCTS)
@@ -464,7 +619,7 @@ class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
 
         with _kraken(99.90, 100.10), \
              patch("lib.execution_venue.submit", spy), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         from lib.decision_types import RiskDecision
@@ -484,7 +639,7 @@ class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
 
         with _kraken(99.90, 100.10), \
              patch("lib.execution_venue.submit", refuse), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         self.assertNotIn("fill", captured, "a refused order still settled")
@@ -501,7 +656,7 @@ class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
 
         with _kraken(99.90, 100.10), \
              patch("lib.execution_venue.submit", hollow), \
-             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+             patch("lib.paper_engine.settle_position_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         self.assertNotIn("fill", captured)

@@ -84,7 +84,7 @@ class NoFlatFallbackTests(unittest.TestCase):
     def _open_path_src(self):
         import lib.paper_engine as pe
         return "\n".join(inspect.getsource(f) for f in
-                         (pe.prepare_entry, pe.settle_entry,
+                         (pe.prepare_entry, pe.settle_position_entry,
                           pe.open_paper_position))
 
     def test_the_flat_margin_fallback_is_gone_from_the_open_path(self):

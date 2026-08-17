@@ -18,7 +18,7 @@ WHAT REPLACES IT.
     execution_market_snapshot() that venue's own bid/ask, graded and aged
     prepare_entry()            the AUTHORIZED quantity, before any order
     execution_venue.submit()   OrderPlan -> VirtualCexAdapter -> fill
-    settle_entry(fill_price=<ACTUAL FILL>)
+    settle_position_entry(fill_price=<ACTUAL FILL>)
 
 EXECUTION GOES THROUGH THE BOUNDARY, NOT AROUND IT. This called
 `virtual_orders.execute_market()` directly, which skipped all three gates
@@ -66,6 +66,9 @@ CANONICAL_ENGINE_EPOCH = "2026-08-17-venue-book"
 # Canonical refusal reasons that are ABOUT THE ORDER rather than the venue.
 UNFILLED = "UNFILLED"
 REJECTED_BY_EXECUTION = "REJECTED_BY_EXECUTION"
+# The instrument costs more to trade than it can plausibly return, at any
+# size. A property of the PRODUCT, not a verdict on the thesis.
+FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL = "FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL"
 
 
 def _now() -> str:
@@ -90,9 +93,11 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     """
     from lib import execution_policy as POL
     from lib import execution_venue as EV
+    from lib import fee_authority as FA
+    from lib import venues as V
     from lib import virtual_orders as VO
     from lib.decision_types import OrderPlan
-    from lib.paper_engine import prepare_entry, settle_entry
+    from lib.paper_engine import prepare_entry, settle_position_entry
     from lib.trade_side import SHORT, parse_side_strict
 
     symbol = (signal.get("asset_symbol") or "").upper().strip()
@@ -246,7 +251,59 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "venue": ready.venue, "product": ready.product,
                 "venue_failure": False, "opened": False}
 
-    # ── 5. SETTLE the actual fill. ───────────────────────────────────────
+    # ── 5. PRICE THE ENTRY LEG. One leg, at the executed size and price. ──
+    # A2. Settlement previously wrote sizing["round_trip_fees"] — a DEFERRED
+    # round-trip ESTIMATE, computed before the order existed and charged at
+    # close. Under the per-leg model the entry leg is priced from what
+    # actually filled and debited now, so `fees` stays 0 and the close path
+    # cannot bill the same economics twice.
+    fee_quote = FA.leg_fee(symbol, notional=float(final.notional),
+                           price=fill, product=ready.product,
+                           venue=ready.venue, side=venue_side,
+                           # A market order crosses the book; it is a TAKER.
+                           maker=False)
+    if not fee_quote.ok or fee_quote.fee_usd is None:
+        # FAIL CLOSED. Settling anyway would debit nothing and stamp a
+        # position as per_leg_v2 while charging it nothing at all — a free
+        # trade wearing the label of an accurately-costed one.
+        logger.warning("[CanonicalEntry] %s has no entry fee authority: %s",
+                       symbol, fee_quote.detail)
+        return {"error": fee_quote.reason or FA.FEE_AUTHORITY_UNAVAILABLE,
+                "detail": fee_quote.detail,
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
+
+    # THE CATASTROPHIC-PRODUCT GATE. Some instruments cost an unacceptable
+    # share of their own notional to trade at ANY size — a flat per-contract
+    # fee does not dilute, so buying more contracts buys more fees rather
+    # than cheaper ones. This is the same constant and the same denominator
+    # `us_perp_viability` uses: fee as a percentage of NOTIONAL, on both
+    # sides of the comparison.
+    #
+    # It is deliberately NOT a profitability judgement and must not become
+    # one. Comparing a fee against margin, or against an unleveraged move in
+    # the underlying, mixes denominators and kills trades that are
+    # comfortably viable — rejecting a profitable trade is simulator error
+    # too. This only catches the instrument that could never pay for itself.
+    round_trip_pct = (2.0 * float(fee_quote.fee_usd)
+                      / abs(float(final.notional))) * 100.0
+    if round_trip_pct > V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL:
+        logger.warning("[CanonicalEntry] %s refused: round trip is %.2f%% of "
+                       "notional (limit %.2f%%)", symbol, round_trip_pct,
+                       V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL)
+        return {"error": FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
+                "detail": (f"${fee_quote.fee_usd:,.2f} per side on "
+                           f"${abs(final.notional):,.2f} of notional is a "
+                           f"{round_trip_pct:.2f}% round trip, above the "
+                           f"{V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL:g}% ceiling; a "
+                           f"per-contract cost does not dilute with size, so "
+                           f"this instrument cannot pay for itself at any"),
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
+
+    # ── 6. SETTLE the actual fill. ───────────────────────────────────────
     # The mark is kept as decision_price so slippage stays measurable.
     #
     # Provenance is built FIRST and handed to settlement, so position, cash
@@ -257,9 +314,11 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     provenance = build_provenance(signal=signal, ready=ready, snap=snap,
                                   execution=execution,
                                   decision_price=decision_price,
-                                  authorized_qty=authorized.qty)
-    result = settle_entry(final, fill_price=fill,
-                          execution_provenance=provenance)
+                                  authorized_qty=authorized.qty,
+                                  fee_quote=fee_quote)
+    result = settle_position_entry(
+        final, fill_price=fill, execution_provenance=provenance,
+        canonical_entry_fee_usd=float(fee_quote.fee_usd))
     if not result.get("ok"):
         return result
 
@@ -285,7 +344,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
 
 def build_provenance(*, signal, ready, snap, execution,
-                     decision_price, authorized_qty=None) -> dict:
+                     decision_price, authorized_qty=None,
+                     fee_quote=None) -> dict:
     """How this position came to exist. Persisted by settlement, atomically.
 
     One JSON document rather than a dozen columns. NULL provenance means
@@ -293,23 +353,44 @@ def build_provenance(*, signal, ready, snap, execution,
     crypto symbol so it was probably Kraken" is a guess, and a guess in the
     execution ledger is indistinguishable from a measurement.
     """
-    # TWO DIFFERENT CLAIMS, RECORDED SEPARATELY AND HONESTLY.
+    # TWO DIFFERENT CLAIMS, AND BOTH ARE NOW TRUE.
     #
-    # The EXECUTION model really is the venue book: this fill crossed a real
-    # bid/ask. The COST model is NOT yet per_leg_v2 — open_paper_position
-    # still writes sizing["round_trip_fees"] into PaperPosition.fees, which
-    # is the legacy DEFERRED round-trip charge. Stamping per_leg_v2 here
-    # would be FALSE PROVENANCE, and a position that lies about its own
-    # accounting is worse than one that says nothing: the first corrupts
-    # calibration silently, the second merely withholds it.
+    # The EXECUTION model is the venue book: this fill crossed a real
+    # bid/ask. The COST model is per_leg_v2 as of A2 — the entry leg is
+    # priced by the fee authority from the quantity that actually filled and
+    # DEBITED at settlement, so `fees` stays 0 and the close path cannot
+    # bill the same economics a second time.
     #
-    # Pass A.2 replaces the cost half; until then this records what actually
-    # happened.
+    # This said COST_MODEL_LEGACY until settlement genuinely changed,
+    # because false provenance is worse than none: a position that lies
+    # about its own accounting corrupts calibration silently, where one that
+    # says nothing merely withholds it. The label moved only when the
+    # behaviour did, and `cost_model_fee_quality` carries how much the
+    # number can be trusted — a labelled ESTIMATED_PERP rate is not a
+    # measurement and must never be pooled as one.
+    fee = fee_quote
+    if fee is None or not getattr(fee, "ok", False):
+        raise ValueError(
+            "build_provenance requires a priced entry leg — a canonical "
+            "position must not be stamped per_leg_v2 while being charged "
+            "nothing")
     payload = {
-        "cost_model": COST_MODEL_LEGACY,
+        "cost_model": COST_MODEL_CANONICAL,
         "cost_model_note": (
-            "entry settled through legacy round-trip fee accounting; "
-            "per_leg_v2 is NOT yet in force for this position"),
+            "entry leg priced at the executed size and debited at "
+            "settlement; PaperPosition.fees stays 0 so the exit cannot "
+            "charge the same economics again"),
+        "entry_fee_usd": fee.fee_usd,
+        "entry_fee_basis": fee.fee_basis,
+        "entry_fee_rate": fee.rate,
+        "entry_fee_contract_count": fee.contract_count,
+        "entry_fee_source": fee.source,
+        "cost_model_fee_quality": fee.quality,
+        "cost_model_fee_is_measured": fee.is_measured,
+        # THE ENTRY EXECUTION IDENTITY. is_canonical() requires it, so a
+        # position cannot claim the canonical model without naming the
+        # execution that produced it.
+        "entry_execution_id": _execution_id(),
         "execution_model": EXECUTION_MODEL_CANONICAL,
         "engine_epoch": CANONICAL_ENGINE_EPOCH,
         "source": "VIRTUAL_CEX_AGENT",
@@ -348,16 +429,54 @@ def build_provenance(*, signal, ready, snap, execution,
     return payload
 
 
+def _execution_id() -> str:
+    """A fresh identity for one entry execution.
+
+    `new_id` is a uuid4 generator, not a session — importing it here does
+    not give this module a database handle, and the AST guard that forbids
+    `get_db` in this file still holds.
+    """
+    from app.database import new_id
+    return str(new_id())
+
+
 def is_canonical(position) -> bool:
-    """True when this position was opened by the venue-book executor."""
-    raw = getattr(position, "execution_provenance", None)
-    if not raw:
+    """True when this position was opened by the venue-book executor AND
+    settled under per-leg costs AND belongs to this engine epoch AND names
+    the execution that produced it.
+
+    ALL FOUR, because each alone admits a hybrid. Testing only
+    `execution_model` accepted a position whose fill came from the venue
+    book but whose costs were still the legacy deferred round-trip estimate
+    — a real state this codebase produced between A5 and A2, and the exact
+    kind of half-honest economics that is worse than uniformly optimistic
+    ones: uniformly wrong is diagnosable, selectively wrong is not.
+
+    After this pass no new hybrid may be produced. Anything that needs to
+    recognise "canonical fill, legacy cost" must ask for it by a DIFFERENT
+    name — see `has_canonical_fill`.
+    """
+    doc = provenance_of(position)
+    if not doc:
         return False
-    try:
-        doc = json.loads(raw) if isinstance(raw, str) else dict(raw)
-    except Exception:
-        return False
-    return doc.get("execution_model") == EXECUTION_MODEL_CANONICAL
+    return bool(
+        doc.get("execution_model") == EXECUTION_MODEL_CANONICAL
+        and doc.get("cost_model") == COST_MODEL_CANONICAL
+        and doc.get("engine_epoch") == CANONICAL_ENGINE_EPOCH
+        and str(doc.get("entry_execution_id") or "").strip())
+
+
+def has_canonical_fill(position) -> bool:
+    """The WEAKER claim, under its own name: the fill crossed a venue book,
+    whatever the cost model says.
+
+    This exists so nothing is tempted to loosen `is_canonical` to cover the
+    hybrid case. It is also what the FAIL-CLOSED exit guard keys on: a guard
+    must refuse everything the legacy close path could mis-settle, which is
+    wider than what the classifier calls fully canonical.
+    """
+    doc = provenance_of(position)
+    return bool(doc and doc.get("execution_model") == EXECUTION_MODEL_CANONICAL)
 
 
 def provenance_of(position) -> dict | None:

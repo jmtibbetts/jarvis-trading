@@ -5,6 +5,7 @@
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import Brief from "./lib/sections/Brief.svelte";
   import Charts from "./lib/sections/Charts.svelte";
+  import InstrumentWorkspace from "./lib/sections/InstrumentWorkspace.svelte";
   import CommandCenter from "./lib/sections/CommandCenter.svelte";
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
@@ -61,6 +62,8 @@
       <PositionsPaper />
     {:else if sectionStore.current === "charts"}
       <Charts />
+    {:else if sectionStore.current === "instrument"}
+      <InstrumentWorkspace />
     {:else if sectionStore.current === "intelligence"}
       <Intelligence view="world" />
     {:else if sectionStore.current === "smartmoney"}

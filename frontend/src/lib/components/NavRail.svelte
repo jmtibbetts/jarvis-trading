@@ -9,6 +9,8 @@
     command:
       '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
     signals: '<path d="M3 12l4-7 5 14 3-9 2 5h4"/>',
+    instrument:
+      '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 9v11"/><path d="M12 13h6M12 16h4"/>',
     positions:
       '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
     intelligence: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/>',
@@ -24,7 +26,7 @@
   // The desk's three concerns. Sections not named here (future additions)
   // fall into the last group rather than vanishing from the rail.
   const NAMED_GROUPS: { label: string; ids: string[] }[] = [
-    { label: "Trade", ids: ["brief", "command", "signals", "charts"] },
+    { label: "Trade", ids: ["brief", "command", "signals", "charts", "instrument"] },
     // The virtual exchanges are where training actually happens, so they
     // get their own group rather than living inside a positions tab.
     { label: "Virtual Trading", ids: ["virtualcex", "virtualdex", "shadowlab", "positions"] },

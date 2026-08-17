@@ -1727,6 +1727,77 @@ export type VenueCapabilities = {
   adapters: Record<string, { family: string; is_live: boolean; implemented: boolean }>;
 };
 
+// ── The instrument workspace ──────────────────────────────────────────────
+// One instrument, everything known about it. The REFUSAL is a first-class
+// field rather than an error: an instrument the desk cannot size is a
+// legitimate thing to open, and it is the case where the operator most
+// needs to see why and what is blocked behind it.
+export type InstrumentIdentity = {
+  instrument_id: string; canonical_symbol: string; display_symbol: string;
+  asset_class: string; product: string; quantity_unit: string;
+  base_asset: string | null; quote_asset: string | null;
+  account_currency: string; venue_family: string | null;
+  multiplier: number;
+  tick_size: number | null; tick_value: number | null;
+  quantity_step: number | null; minimum_quantity: number | null;
+  contract_size: number | null;
+  pip_size: number | null; pip_value_rule: string | null;
+  initial_margin: number | null; maintenance_margin: number | null;
+  expiry: string | null;
+  research_symbol: string | null; executable_symbol: string | null;
+  status: string; reason: string | null; provenance: string;
+  executable: boolean;
+};
+export type InstrumentCost = {
+  available: boolean;
+  reason?: string;
+  /** The tightest stop that can still pay for itself, as % of entry. */
+  min_viable_stop_pct?: number;
+  max_cost_r?: number;
+  note?: string;
+  reference?: Record<string, number | string | boolean | null> | null;
+  reference_entry?: number;
+  reference_stop?: number;
+  reference_reason?: string;
+};
+export type InstrumentActivity = {
+  unavailable?: boolean; reason?: string;
+  signals_total?: number; signals_active?: number;
+  candidates_considered?: number; outcomes_closed?: number;
+  win_rate_pct?: number | null; win_rate_reason?: string | null;
+  avg_pnl_pct?: number | null;
+  recent_signals?: Array<{
+    id: string; direction: string | null; timeframe: string | null;
+    status: string | null; strategy: string | null;
+    entry_price: number | null; stop_loss: number | null;
+    target_price: number | null; composite_score: number | null;
+    generated_at: string | null;
+  }>;
+};
+export type InstrumentWorkspace = {
+  symbol: string; canonical_symbol: string;
+  identity: InstrumentIdentity;
+  executable: boolean;
+  refusal: {
+    status: string; reason: string;
+    /** Recorded and ACTIVE are separate: a historical total presented as a
+     *  live backlog overstates the urgency. */
+    signals_recorded: number | null;
+    signals_active: number | null;
+    detail: string;
+  } | null;
+  spellings: string[];
+  venues: VenueCapabilityRow[];
+  cost: InstrumentCost;
+  activity: InstrumentActivity;
+  exposure: Array<{
+    book: string; symbol: string; direction: string | null;
+    qty: number | null; entry_price: number | null;
+    stop_loss: number | null; initial_stop_loss: number | null;
+    opened_at: string | null;
+  }>;
+};
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1838,6 +1909,17 @@ export const api = {
   platformMode: () => get<PlatformMode>("/platform/mode"),
   integrity: () => get<IntegrityPanel>("/platform/integrity"),
   venueCapabilities: () => get<VenueCapabilities>("/platform/venues"),
+  /** `entry` is supplied by the caller — the chart already holds the last
+   *  close, and a workspace on a second monitor must not spend a quote on
+   *  every poll. Symbols carry slashes, so the path is encoded. */
+  instrument: (symbol: string, entry?: number | null) => {
+    const p = new URLSearchParams();
+    if (entry != null && entry > 0) p.set("entry", String(entry));
+    const q = p.toString();
+    return get<InstrumentWorkspace>(
+      `/instrument/${symbol.split("/").map(encodeURIComponent).join("/")}${q ? `?${q}` : ""}`,
+    );
+  },
   kaminoSweep: (limit = 40, minDebt?: number) => get<KaminoSweep>(
     `/onchain/sweep?limit=${limit}`
     + (minDebt !== undefined ? `&min_debt=${minDebt}` : "")),

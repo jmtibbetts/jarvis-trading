@@ -11,6 +11,7 @@ export type SectionId =
   | "shadowlab"
   | "positions"
   | "charts"
+  | "instrument"
   | "intelligence"
   | "smartmoney"
   | "macro"
@@ -31,6 +32,9 @@ export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
   { id: "shadowlab", label: "Shadow Lab", ready: true },
   { id: "positions", label: "Accounts & Exposure", ready: true },
   { id: "charts", label: "Charts", ready: true },
+  // ONE instrument, everything known about it — including the instruments
+  // the desk refuses to size, which is where it earns its keep.
+  { id: "instrument", label: "Instrument", ready: true },
   { id: "intelligence", label: "Intelligence", ready: true },
   { id: "smartmoney", label: "Smart Money", ready: true },
   { id: "macro", label: "Macro Desk", ready: true },

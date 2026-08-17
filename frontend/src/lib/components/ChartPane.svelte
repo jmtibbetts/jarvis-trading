@@ -36,8 +36,10 @@
     available = [],
     height = "100%",
     showSignals = true,
+    symbolOverride = undefined,
     onPayload = undefined,
     onChart = undefined,
+    onSymbol = undefined,
   }: {
     paneId: string;
     defaultSymbol?: string;
@@ -45,10 +47,20 @@
     available?: { symbol: string; timeframes: string[] }[];
     height?: string;
     showSignals?: boolean;
+    /**
+     * Makes the pane CONTROLLED by its parent. `defaultSymbol` is a seed the
+     * pane owns from then on (and persists), which is right for the charts
+     * grid and wrong for the instrument workspace, where the page's symbol
+     * IS the pane's symbol. Setting this drives the pane; `onSymbol` closes
+     * the loop when the operator uses the pane's own box instead.
+     */
+    symbolOverride?: string;
     /** Lets the page draw its own panels from this pane's data. */
     onPayload?: (p: ChartPayload | null) => void;
     /** Exposes the chart handle so the page can pan it (analog jump). */
     onChart?: (c: IChartApi | null) => void;
+    /** Fired whenever this pane's symbol changes, for whatever reason. */
+    onSymbol?: (s: string) => void;
   } = $props();
 
   const feeds = new FeedTracker();
@@ -170,7 +182,15 @@
     localStorage.setItem(KEY("tf"), timeframe);
     render();
     onPayload?.(payload);
+    onSymbol?.(symbol);
   }
+
+  // Controlled mode. Guarded on inequality so the parent echoing the pane's
+  // own change back (via onSymbol) settles instead of looping.
+  $effect(() => {
+    const s = symbolOverride;
+    if (s && s !== untrack(() => symbol)) symbol = s;
+  });
 
   $effect(() => {
     symbol;

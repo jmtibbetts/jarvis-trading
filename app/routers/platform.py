@@ -107,6 +107,25 @@ def platform_size(symbol: str, entry: float, stop: float,
     }
 
 
+@router.get("/instrument/{symbol:path}")
+def instrument_workspace(symbol: str, product: str | None = None,
+                         entry: float | None = None):
+    """One instrument, everything known about it, with every gap named.
+
+    An instrument's facts lived on four surfaces that each answered a
+    different question, and nothing said whether they agreed. The refusal
+    case is the one that most needed a home: `6J=F` resolves UNSUPPORTED
+    with signals sitting behind it, and an empty panel reads as a bug
+    while a stated refusal with a count reads as a work item.
+
+    `entry` is supplied by the caller (the chart already has the last
+    close) rather than fetched here — a workspace open on a second monitor
+    must not spend a quote on every poll.
+    """
+    from lib.instrument_workspace import workspace
+    return workspace(symbol, product=product, entry=entry)
+
+
 @router.get("/platform/integrity")
 def platform_integrity():
     """Every training-data invariant, run against live rows.

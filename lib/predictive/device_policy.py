@@ -52,9 +52,28 @@ LATENCY_CRITICAL = "latency_critical"   # on the path to a trade decision
 BACKGROUND = "background"               # sustained, nobody is waiting
 ROLES = (LATENCY_CRITICAL, BACKGROUND)
 
+# CPU IS THE REQUIRED BASELINE, NOT MERELY THE FALLBACK.
+#
+# The supported JARVIS runtime is WSL2 / Ubuntu 24.04, where OpenVINO
+# enumerates ['CPU'] and no Intel NPU is passed through. Mapping BACKGROUND
+# to NPU by default made the supported runtime take the fallback path on
+# every background model — working, but reaching its normal placement by
+# way of a warning, which is not a default anyone should have to read logs
+# to understand.
+#
+# The NPU remains REACHABLE and is still the right device for sustained
+# background work on hardware that has one (measured: it absorbs that work
+# at no cost to the cores the trading loop needs). It is now reached by an
+# explicit operator override rather than by default:
+#
+#     PREDICTIVE_DEVICE_<model>=NPU
+#
+# A DEVICE IS NOT A MODEL. Changing placement must never change schema,
+# feature semantics, abstention, probability interpretation or trading
+# logic — only where the arithmetic happens.
 ROLE_DEVICE = {
     LATENCY_CRITICAL: CPU,
-    BACKGROUND: NPU,
+    BACKGROUND: CPU,
 }
 
 # Per-model overrides, so the policy can be argued with in one place rather

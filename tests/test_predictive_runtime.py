@@ -167,10 +167,25 @@ class DevicePlacementTests(unittest.TestCase):
         self.model = tiny_model(dimension())
 
     def test_both_devices_produce_the_same_answer(self):
-        """Parity, per the guide's checklist. NPU runs fp16 internally, so
-        exact equality is not expected — a material divergence is."""
+        """HARDWARE-ONLY. Not required runtime coverage.
+
+        Its sole purpose is cross-device PARITY — it compares NPU output
+        against CPU output and therefore cannot run without two physical
+        devices. On the supported runtime (WSL2 / Ubuntu 24.04) OpenVINO
+        enumerates ['CPU'] only, so this skips by construction.
+
+        That is not a coverage gap: every behaviour that governs a trading
+        decision — abstention, schema mismatch, stale features, missing
+        features, a device that raises — is exercised on CPU by the tests
+        above. This one asks a narrower question, about silicon.
+
+        NPU runs fp16 internally, so exact equality is not expected; a
+        material divergence is what would matter.
+        """
         if "NPU" not in self.rt.available_devices():
-            self.skipTest("no NPU on this host")
+            self.skipTest(
+                "hardware-only: no NPU on this host (CPU is the required "
+                "baseline; this test compares two devices and needs both)")
         self.rt.load("t", self.model, version="1", schema_hash=schema_hash(),
                      outputs=("y",), devices=("CPU", "NPU"))
         m = self.rt._models["t"]

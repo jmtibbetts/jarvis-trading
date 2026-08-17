@@ -50,50 +50,74 @@ def _f(v):
         return None
 
 
-def capture_microstructure(symbol: str, venue: str = "alpaca") -> dict:
-    """Book and tape as they stand right now.
+def capture_microstructure(symbol: str, venue: str = "alpaca",
+                           product: str | None = None) -> dict:
+    """Book and tape FOR THIS VENUE as they stand right now.
 
-    Every field is optional and absence is recorded as absence. A missing
-    spread must not become 0.0 — that would read as a perfectly tight
-    market, which is the opposite of what an unavailable quote implies.
+    THIS USED TO MIX VENUES, AND SILENTLY RECORD NOTHING.
+
+    It called `orderbook_stream.get_book_snapshot` and
+    `kraken_stream.get_tape_stats`. Neither function exists — the real ones
+    are `get_latest_snapshot(exchange, symbol)`, keyed by EXCHANGE, and
+    `trade_flow(symbol)`, which is Kraken-only. Both raised ImportError into
+    a swallowed except, so every microstructure capture had been empty.
+
+    Renaming them would have been worse than leaving them broken. `venue`
+    defaults to "alpaca", so the repaired calls would have stamped Kraken's
+    tape and Coinbase's book onto a row labelled Alpaca: correctly fetched,
+    wrongly attributed, and feeding the learning set as though one venue had
+    shown all of it. CROSS-VENUE EVIDENCE DOES NOT BECOME VENUE EXECUTION
+    TRUTH.
+
+    It now delegates to lib/execution_snapshot, which reads only the venue
+    it was asked about and states a reason when it cannot. Absence is still
+    recorded as absence: a missing spread must never become 0.0, which would
+    read as a perfectly tight market — the opposite of what an unavailable
+    quote implies.
     """
-    snap: dict = {"venue": venue, "captured_at": _now()}
-    try:
-        from lib.venues import measured_spread_pct
-        spread, src = measured_spread_pct(symbol, venue)
-        if spread is not None:
-            snap["spread_pct"] = round(float(spread), 8)
-            snap["spread_source"] = src
-    except Exception as e:
-        logger.debug(f"[ExecRec] spread unavailable for {symbol}: {e}")
+    from lib.execution_snapshot import AVAILABLE, execution_market_snapshot
 
-    try:
-        from lib.orderbook_stream import get_book_snapshot
-        book = get_book_snapshot(symbol)
-        if book:
-            bid_sz, ask_sz = _f(book.get("bid_size")), _f(book.get("ask_size"))
-            snap["bid"] = _f(book.get("bid"))
-            snap["ask"] = _f(book.get("ask"))
-            snap["bid_size"] = bid_sz
-            snap["ask_size"] = ask_sz
-            if bid_sz is not None and ask_sz is not None and (bid_sz + ask_sz) > 0:
-                # -1 all offer, +1 all bid.
-                snap["book_imbalance"] = round((bid_sz - ask_sz) / (bid_sz + ask_sz), 6)
-    except Exception as e:
-        logger.debug(f"[ExecRec] book unavailable for {symbol}: {e}")
+    ems = execution_market_snapshot(symbol, venue, product=product)
+    snap: dict = {
+        "venue": ems.venue,
+        "captured_at": ems.received_at or _now(),
+        "execution_status": ems.status,
+        "execution_source": ems.source,
+        "venue_event_at": ems.venue_event_at,
+        "age_ms": ems.age_ms,
+    }
+    if ems.reason:
+        snap["execution_reason"] = ems.reason
 
-    try:
-        from lib.kraken_stream import get_tape_stats
-        tape = get_tape_stats(symbol)
-        if tape:
-            snap["tape_buy_volume"] = _f(tape.get("buy_volume"))
-            snap["tape_sell_volume"] = _f(tape.get("sell_volume"))
-            snap["tape_trade_count"] = _f(tape.get("trade_count"))
-            b, s = snap.get("tape_buy_volume"), snap.get("tape_sell_volume")
-            if b is not None and s is not None and (b + s) > 0:
-                snap["tape_imbalance"] = round((b - s) / (b + s), 6)
-    except Exception as e:
-        logger.debug(f"[ExecRec] tape unavailable for {symbol}: {e}")
+    # Top of book. None stays None.
+    for key, val in (("bid", ems.bid), ("ask", ems.ask),
+                     ("bid_size", ems.bid_size), ("ask_size", ems.ask_size)):
+        if val is not None:
+            snap[key] = val
+    if ems.spread_pct is not None:
+        snap["spread_pct"] = round(ems.spread_pct, 8)
+        snap["spread_source"] = ems.source
+
+    # DEPTH IS A SEPARATE CLAIM. A venue can have a real quote and no depth
+    # feed at all, and "no depth feed" is not "no liquidity".
+    snap["depth_status"] = ems.depth_status
+    if ems.depth_status == AVAILABLE and ems.depth:
+        snap["depth_source"] = ems.depth_source
+        snap["bid_depth"] = ems.depth.get("bid_depth")
+        snap["ask_depth"] = ems.depth.get("ask_depth")
+    if ems.imbalance is not None:
+        snap["book_imbalance"] = round(float(ems.imbalance), 6)
+
+    flow = ems.recent_trade_flow
+    if flow:
+        snap["tape_source"] = ems.trade_flow_source
+        snap["tape_buy_volume"] = _f(flow.get("buy_volume"))
+        snap["tape_sell_volume"] = _f(flow.get("sell_volume"))
+        snap["tape_trade_count"] = _f(flow.get("prints"))
+        imb = flow.get("flow_imbalance")
+        if imb is not None:
+            snap["tape_imbalance"] = round(float(imb), 6)
+
     return snap
 
 
@@ -112,7 +136,7 @@ def record_intent(*, signal_id: str | None, symbol: str, side: str,
         import json
 
         from app.database import ExecutionSample, get_db, new_id
-        snap = capture_microstructure(symbol, venue)
+        snap = capture_microstructure(symbol, venue, product=asset_class)
         row_id = new_id()
         with get_db() as db:
             db.add(ExecutionSample(

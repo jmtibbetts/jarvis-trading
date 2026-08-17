@@ -54,8 +54,16 @@ ok "repository path is Linux-native: $REPO_DIR"
 
 # ── 1. System packages ───────────────────────────────────────────────────
 step "System packages"
-sudo apt-get update -qq
 
+# WHAT IS MISSING IS COMPUTED BEFORE ROOT IS ASKED FOR.
+#
+# `sudo apt-get update` used to run unconditionally, at the top of this
+# section, before anything knew whether a single package was needed. That
+# made a re-run on an already-provisioned machine impossible without a
+# password — which is not idempotency, it is idempotency you cannot
+# exercise. On a machine where everything is present this script now needs
+# no root at all, and that is exactly the case a second run is.
+#
 # Discovered from what the project actually needs, not copied from a list:
 #   build-essential/gcc/make  order_book's C extension
 #   python3-dev               Python.h for any source build
@@ -77,9 +85,17 @@ for p in "${PKGS[@]}"; do
 done
 if ((${#MISSING[@]})); then
   echo "    installing: ${MISSING[*]}"
+  # Root is needed from here, and only from here. Say so before prompting,
+  # because a bare sudo password prompt inside a long script reads like a
+  # hang — and in a non-interactive session it IS one.
+  if ! sudo -n true 2>/dev/null; then
+    warn "root is required to install: ${MISSING[*]}"
+    warn "if this is running unattended, it will now block on a password prompt"
+  fi
+  sudo apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${MISSING[@]}"
 else
-  ok "all present"
+  ok "all present — no root required for this run"
 fi
 ok "sqlite3 $(sqlite3 --version | awk '{print $1}')"
 

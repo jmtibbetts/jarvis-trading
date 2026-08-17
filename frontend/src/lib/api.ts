@@ -1727,6 +1727,45 @@ export type VenueCapabilities = {
   adapters: Record<string, { family: string; is_live: boolean; implemented: boolean }>;
 };
 
+// ── The attention queue ───────────────────────────────────────────────────
+// The Command Center's input. A SUMMARY layer, never an authority: every
+// item deep-links to the page that owns the truth.
+export type AttentionItem = {
+  id: string;
+  /** CRITICAL | HIGH | MEDIUM | LOW */
+  priority: string;
+  rank: number;
+  /** POSITION_RISK | EXECUTION | OPPORTUNITY | CATALYST | DATA | SYSTEM |
+   *  LEARNING | WALLET | LIQUIDITY | APPROVAL */
+  category: string;
+  title: string;
+  reason: string;
+  source: string;
+  detected_at: string;
+  symbol: string | null;
+  product: string | null;
+  current_state: string | null;
+  suggested_action: string | null;
+  deep_link: string | null;
+  age_minutes: number | null;
+  meta: Record<string, unknown>;
+};
+export type AttentionQueue = {
+  generated_at: string;
+  items: AttentionItem[];
+  total: number;
+  truncated: number;
+  by_priority: Record<string, number>;
+  by_category: Record<string, number>;
+  /** Producers that could not run. An empty queue alongside a non-empty
+   *  `degraded` does NOT mean nothing needs attention. */
+  degraded: { producer: string; error: string; means: string }[];
+  complete: boolean;
+  producers_run: number;
+  producers_total: number;
+  note: string;
+};
+
 // ── The edge–cost matrix ──────────────────────────────────────────────────
 // A losing cell loses money two ways, and they call for opposite responses:
 // EDGE means the setup does not work and cheaper routing would not save it;
@@ -2282,6 +2321,7 @@ export const api = {
   // (the duplicate `calibration:` key that used to sit here is gone — in an
   // object literal the last one silently wins, so one of the two was dead)
   expectancy: () => get<Expectancy>(`/expectancy`),
+  attention: (limit = 60) => get<AttentionQueue>(`/attention?limit=${limit}`),
   edgeCostMatrix: (days = 180) =>
     get<EdgeCostMatrix>(`/learning/edge-cost-matrix?days=${days}`),
   llmRouting: (days = 30) => get<LlmRouting>(`/llm/routing?days=${days}`),

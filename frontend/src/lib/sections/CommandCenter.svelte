@@ -1,12 +1,15 @@
 <script lang="ts">
   import Panel from "../components/Panel.svelte";
   import KpiTile from "../components/KpiTile.svelte";
+  import AttentionQueue from "../components/AttentionQueue.svelte";
+  import AtRiskPositions from "../components/AtRiskPositions.svelte";
+  import SystemIntegrity from "../components/SystemIntegrity.svelte";
   import EquityChart from "../components/EquityChart.svelte";
   import RadialScore from "../components/RadialScore.svelte";
   import Pill from "../components/Pill.svelte";
   import SignalAnalysisModal from "../components/SignalAnalysisModal.svelte";
   import StateNote from "../components/StateNote.svelte";
-  import { api, type Signal, type Threat, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer, type PsychologyIndex } from "../api";
+  import { api, type Signal, type PositionsResponse, type EquityPoint, type JobStatusMap, type Regime, type RankedOpportunity, type CatalystCalendar, type EnrichedWatchlist, type AnalystAnswer, type PsychologyIndex } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import { wsStore } from "../stores/ws.svelte";
   import { linkStore } from "../stores/link.svelte";
@@ -166,7 +169,6 @@
     }
   }
   let expandedOpp = $state<string | null>(null);
-  let threats = $state<Threat[]>([]);
   let positionsResp = $state<PositionsResponse | null>(null);
   let equity = $state<EquityPoint[]>([]);
   let equityHours = $state(24 * 7);
@@ -178,24 +180,18 @@
   let jobs = $state<JobStatusMap>({});
   let regime = $state<Regime | null>(null);
   let winRate = $state<number | null>(null);
-  let profitFactor = $state<number | null>(null);
-  let sharpe = $state<number | null>(null);
-  let maxDrawdown = $state<number | null>(null);
   let news = $state<{ title: string; sentiment: string | null; source: string }[]>([]);
   let psychology = $state<PsychologyIndex | null>(null);
   let fxRates = $state<Awaited<ReturnType<typeof api.fxRates>> | null>(null);
   let cryptoMarkets = $state<Awaited<ReturnType<typeof api.cryptoMarkets>> | null>(null);
-  let webNews = $state<Awaited<ReturnType<typeof api.webNews>> | null>(null);
-  let postmortems = $state<{ window_days: number; total_failures: number; by_reason: Record<string, number> } | null>(null);
   // Human names for the feed keys, so the degraded-feeds banner reads like a
   // sentence rather than like variable names.
   const FEED_LABELS: Record<string, string> = {
-    signals: "Active signals", threats: "Threat intelligence", positions: "Open positions",
+    signals: "Active signals", positions: "Open positions",
     equity: "Equity curve", jobs: "Job status", regime: "Regime", performance: "Performance",
     signalPerf: "Signal performance", news: "News", opportunities: "Opportunities",
     catalysts: "Catalyst calendar", watchlist: "Watchlist", psychology: "Psychology index",
-    fx: "FX rates", cryptoMarkets: "Crypto markets", webNews: "Web pulse",
-    postmortems: "Learning loop", focus: "Focus list",
+    fx: "FX rates", cryptoMarkets: "Crypto markets", focus: "Focus list",
   };
   const troubled = $derived(feeds.troubled);
 
@@ -205,14 +201,12 @@
   // command centre behind one error string — while the nine `.catch(() =>
   // null)` calls beside them failed silently and rendered as "nothing here".
   async function loadAll() {
-    const [sigRes, threatRes, posRes, eqRes, jobRes, regimeRes, perfRes, sigPerfRes, newsRes, oppRes, catRes, wlRes, psyRes] = await Promise.all([
+    const [sigRes, posRes, eqRes, jobRes, regimeRes, sigPerfRes, newsRes, oppRes, catRes, wlRes, psyRes] = await Promise.all([
       feeds.load("signals", () => api.signals("Active", 8)),
-      feeds.load("threats", () => api.threats(8)),
       feeds.load("positions", () => api.positions()),
       feeds.load("equity", () => api.equity(equityHours)),
       feeds.load("jobs", () => api.jobStatus()),
       feeds.load("regime", () => api.regime()),
-      feeds.load("performance", () => api.performanceAnalytics(30)),
       feeds.load("signalPerf", () => api.raw<{ summary?: { hit_rate?: number; profit_factor?: number } }>("/signals/performance")),
       feeds.load("news", () => api.news(12)),
       feeds.load("opportunities", () => api.opportunitiesRanked(8)),
@@ -223,29 +217,21 @@
     Promise.all([
       feeds.load("fx", () => api.fxRates()),
       feeds.load("cryptoMarkets", () => api.cryptoMarkets()),
-      feeds.load("webNews", () => api.webNews()),
-      feeds.load("postmortems", () => api.raw<{ window_days: number; total_failures: number; by_reason: Record<string, number> }>("/learning/postmortems?days=30")),
       feeds.load("focus", () => api.focusList()),
-    ]).then(([fx, cg, wn, pm, fc]) => {
+    ]).then(([fx, cg, fc]) => {
       fxRates = fx;
       cryptoMarkets = cg;
-      webNews = wn;
-      postmortems = pm;
       focus = fc;
     });
     signals = (sigRes ?? []).slice().sort((a, b) => (b.composite_score ?? b.confidence ?? 0) - (a.composite_score ?? a.confidence ?? 0)).slice(0, 6);
     opportunities = oppRes ?? [];
     catalysts = catRes;
     watchlist = wlRes;
-    threats = threatRes ?? [];
     positionsResp = posRes;
     equity = eqRes ?? [];
     jobs = jobRes ?? {};
     regime = regimeRes;
-    sharpe = perfRes?.sharpe_ratio ?? null;
-    maxDrawdown = perfRes?.max_drawdown_pct ?? null;
     winRate = sigPerfRes?.summary?.hit_rate ?? null;
-    profitFactor = sigPerfRes?.summary?.profit_factor ?? null;
     news = newsRes ?? [];
     psychology = psyRes;
   }
@@ -284,10 +270,6 @@
       .slice(0, 6),
   );
   const fxMajors = $derived((fxRates?.pairs ?? []).slice(0, 5));
-  const failureReasons = $derived(
-    Object.entries(postmortems?.by_reason ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5),
-  );
-  const failureMax = $derived(failureReasons.length ? failureReasons[0][1] : 0);
   const fmtUsd = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const fmtPct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`);
   const fmtAgo = (iso: string | null) => {
@@ -304,12 +286,30 @@
   <SignalAnalysisModal signalId={analysisSignalId} onClose={() => (analysisSignalId = null)} />
 {/if}
 
+<!--
+  THE OPERATIONS ROOM.
+
+    Daily Brief      the briefing room — what happened, what matters today
+    Command Center   THIS — what needs me right now, what is JARVIS doing
+                     about it, and is anything stopping it working
+    Everything else  analyst desks — where you investigate WHY
+
+  It was thirteen research panels and no answer to the only question an
+  operations screen exists to answer. Three of them (Open Positions, Active
+  Signals, Threat Intelligence) had become summaries of pages that now own
+  those truths outright, and two more (Live Web Pulse, Learning Loop)
+  belonged to Intelligence and Performance & Learning. Repeating an
+  authority does not make a cockpit; it makes a junk drawer.
+
+  THE TEST: if the operator had twenty seconds before stepping away, could
+  this screen tell them whether anything requires intervention?
+-->
 <div class="page-head">
   <div>
     <h1>Command Center</h1>
     <div class="sub">
       {#if regime}<span>{regime.label} &middot;</span>{/if}
-      Live + paper &middot; last sync <span class="num">just now</span>
+      What needs attention right now &middot; deeper pages own the detail
     </div>
   </div>
 </div>
@@ -324,15 +324,11 @@
 {/if}
 
 <div class="grid">
+  <!-- ROW 0 — the compact status strip. Sharpe, max drawdown and profit
+       factor moved out: they are statistical evidence, they change on the
+       timescale of closed trades, and Performance & Learning is their
+       authority. What is left is state an operator acts on. -->
   <div class="kpis">
-    <KpiTile label="Win Rate" value={winRate != null ? `${winRate.toFixed(1)}%` : "—"} period="signals" />
-    <KpiTile label="Sharpe" value={sharpe != null && Math.abs(sharpe) <= 20 ? sharpe.toFixed(2) : "—"} />
-    <KpiTile
-      label="Max Drawdown"
-      value={maxDrawdown != null ? `${maxDrawdown.toFixed(1)}%` : "—"}
-      trend={maxDrawdown != null && maxDrawdown < 0 ? "down" : "neutral"}
-    />
-    <KpiTile label="Profit Factor" value={profitFactor != null ? profitFactor.toFixed(2) : "—"} />
     <KpiTile label="Open Positions" value={String(positionsResp?.positions.length ?? "—")} />
     <KpiTile
       label="Unrealized P&L"
@@ -341,11 +337,7 @@
     />
     <KpiTile label="Account Equity" value={positionsResp ? fmtUsd(positionsResp.account.equity) : "—"} />
     <KpiTile label="Buying Power" value={positionsResp ? fmtUsd(positionsResp.account.buying_power) : "—"} />
-    <KpiTile
-      label="Active Signals"
-      value={String(signals.length)}
-      period={threats.length ? `${threats.length} threats` : ""}
-    />
+    <KpiTile label="Win Rate" value={winRate != null ? `${winRate.toFixed(1)}%` : "—"} period="signals" />
     <KpiTile
       label="Market Psychology"
       value={psychology?.score != null ? `${Math.round(psychology.score)}` : "—"}
@@ -354,152 +346,12 @@
     />
   </div>
 
-  <div class="span-8">
-    <Panel title="Equity Curve" meta="{equity.length} snapshots" status={feeds.status("equity")}>
-      <EquityChart points={equity} rangeHours={equityHours} onRange={setEquityRange} />
-    </Panel>
+  <!-- ROW 1 — the lead. Everything above the fold answers "do I need to
+       do something", and nothing else on the page outranks it. -->
+  <div class="span-7 lead-row">
+    <AttentionQueue />
   </div>
-  <div class="span-4">
-    <Panel title="Open Positions" meta="{positionsResp?.positions.length ?? 0} open" status={feeds.status("positions")}>
-      {#if positionsResp && positionsResp.positions.length}
-        <div class="pos-scroll">
-          <table class="pos">
-            <thead>
-              <tr><th>Sym</th><th>Side</th><th>P&amp;L</th></tr>
-            </thead>
-            <tbody>
-              {#each positionsResp.positions as p (p.symbol)}
-                <tr>
-                  <td class="sym">{p.symbol}</td>
-                  <td>{p.side}</td>
-                  <td class={p.unrealized_plpc >= 0 ? "pl-up" : "pl-down"}>{fmtPct(p.unrealized_plpc)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {:else}
-        <StateNote status={feeds.status("positions")} noun="positions" emptyText="No open positions" />
-      {/if}
-    </Panel>
-  </div>
-  <div class="span-4">
-    <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : ""} status={feeds.status("cryptoMarkets")}>
-      <div class="movers">
-        <div class="mv-col">
-          <div class="mv-head">CRYPTO — BIGGEST 24H MOVES</div>
-          {#if cryptoMovers.length}
-            {#each cryptoMovers as c0 (c0.id)}
-              <div class="mv-row">
-                <span class="sym">{c0.symbol.toUpperCase()}</span>
-                <span class="num dim">${c0.price < 1 ? c0.price.toPrecision(3) : c0.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                <span class="num {c0.chg_24h! >= 0 ? 'pl-up' : 'pl-down'}">{c0.chg_24h! >= 0 ? "+" : ""}{c0.chg_24h!.toFixed(1)}%</span>
-              </div>
-            {/each}
-          {:else}
-            <div class="empty">no data yet</div>
-          {/if}
-        </div>
-        <div class="mv-col">
-          <div class="mv-head">FX MAJORS — LIVE INTERBANK</div>
-          {#if fxMajors.length}
-            {#each fxMajors as fp (fp.pair)}
-              <div class="mv-row">
-                <span class="sym">{fp.pair}</span>
-                <span class="num dim">{fp.rate ?? "—"}</span>
-                <span class="num {(fp.change_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fp.change_pct != null ? `${fp.change_pct >= 0 ? "+" : ""}${fp.change_pct.toFixed(2)}%` : "—"}</span>
-              </div>
-            {/each}
-          {:else}
-            <div class="empty">no data yet</div>
-          {/if}
-        </div>
-      </div>
-    </Panel>
-  </div>
-  <div class="span-4">
-    <Panel title="Live Web Pulse" meta={webNews?.as_of ? `refreshed ${new Date(webNews.as_of).toLocaleTimeString()}` : ""} status={feeds.status("webNews")}>
-      {#if webNews && webNews.items.length}
-        <div class="pulse">
-          {#each webNews.items.slice(0, 5) as it, i (i)}
-            <div class="pulse-row">
-              <div class="pulse-title">{it.title}</div>
-              {#if it.snippet}<div class="pulse-snippet dim">{it.snippet}</div>{/if}
-            </div>
-          {/each}
-        </div>
-        <div class="pulse-note dim">Unverified live web search — the same block injected into signal-generation prompts.</div>
-      {:else}
-        <div class="empty">Populates on the next signal-generation run</div>
-      {/if}
-    </Panel>
-  </div>
-  <div class="span-4">
-    <Panel title="Learning Loop" meta={postmortems ? `${postmortems.total_failures} failures analyzed · ${postmortems.window_days}d` : ""} status={feeds.status("postmortems")}>
-      {#if failureReasons.length}
-        {#each failureReasons as [reason, count] (reason)}
-          <div class="fail-row">
-            <span class="fail-label">{reason.replaceAll("_", " ").toLowerCase()}</span>
-            <span class="fail-bar"><span class="fail-fill" style={`width:${failureMax ? (count / failureMax) * 100 : 0}%`}></span></span>
-            <span class="num dim">{count}</span>
-          </div>
-        {/each}
-        <div class="pulse-note dim">Why signals died, classified deterministically — feeds the scoring penalty so repeated failure patterns get downranked.</div>
-      {:else}
-        <StateNote status={feeds.status("postmortems")} noun="postmortems" emptyText="No failures recorded in this window" />
-      {/if}
-    </Panel>
-  </div>
-  <div class="span-7">
-    <Panel title="Active Signals" meta="top {signals.length} by score" status={feeds.status("signals")}>
-      <div class="sig-list">
-        {#each signals as sig (sig.id)}
-          <div
-            class="sig"
-            onclick={() => (analysisSignalId = sig.id)}
-            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (analysisSignalId = sig.id)}
-            role="button"
-            tabindex="0"
-          >
-            <RadialScore score={Math.round(sig.composite_score ?? sig.confidence ?? 0)} />
-            <div>
-              <div class="sig-sym">
-                {sig.asset_symbol}
-                <Pill label={sig.direction} tone={sig.direction.toLowerCase().includes("short") ? "bad" : "good"} />
-              </div>
-              <div class="sig-meta num">entry {sig.entry_price ?? "—"} &middot; {sig.timeframe ?? "—"}</div>
-            </div>
-            <div class="sig-rr">
-              <div class="lbl">R:R</div>
-              <span class="num">{sig.rr_ratio != null ? `${sig.rr_ratio}:1` : "—"}</span>
-            </div>
-          </div>
-        {:else}
-          <StateNote status={feeds.status("signals")} noun="active signals" emptyText="No active signals right now" />
-        {/each}
-      </div>
-    </Panel>
-  </div>
-  <div class="span-5">
-    <Panel title="Threat Intelligence" dotColor="var(--critical)" meta="{threats.length} active · map on Intelligence tab" status={feeds.status("threats")}>
-      {#if threats.length}
-        <div class="threat-list">
-          {#each threats.slice(0, 6) as t (t.id)}
-            <div class="threat-row">
-              <Pill label={t.severity} tone={t.severity === "Critical" ? "critical" : t.severity === "High" ? "warm" : "neutral"} />
-              <div class="threat-main">
-                <div class="threat-title">{t.title}</div>
-                <div class="threat-meta dim">{t.country || t.region || "Global"} · {fmtAgo(t.published_at)}</div>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <StateNote status={feeds.status("threats")} noun="threats" emptyText="No active threats" />
-      {/if}
-    </Panel>
-  </div>
-  <div class="span-4">
+  <div class="span-5 lead-row">
     <Panel title="Top Opportunities" meta="JARVIS Opportunity Score &middot; {opportunities.length} ranked" status={feeds.status("opportunities")}>
       <div class="sig-list cap-h">
         {#each opportunities as opp (opp.signal_id)}
@@ -575,6 +427,48 @@
       </div>
     </Panel>
   </div>
+
+
+
+
+
+
+
+
+
+
+
+  <!-- ROW 2 — the risk the queue ranked, on its own, plus what the machine
+       is doing about it. Both read state that already exists; neither
+       re-measures anything. -->
+  <div class="span-7">
+    <AtRiskPositions />
+  </div>
+  <div class="span-5">
+    <Panel title="JARVIS Activity" meta="{jobEntries.length} jobs" status={feeds.status("jobs")}>
+      {#if jobEntries.length}
+        <div class="acts">
+          {#each jobEntries as [name, st] (name)}
+            <div class="act" class:err={!!st.error} class:run={st.status === "running"}>
+              <span class="adot"></span>
+              <span class="aname">{name.replaceAll("_", " ")}</span>
+              <span class="astate">{st.error ? "failed" : st.status}</span>
+              <span class="aago num">{fmtAgo(st.last)}</span>
+            </div>
+          {/each}
+        </div>
+        <p class="wl-note">
+          What the desk is doing on its own. A job wedged at "running"
+          blocks every later trigger for that job, silently — the Attention
+          Queue raises it; Ops is where it gets reset.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("jobs")} noun="job status" />
+      {/if}
+    </Panel>
+  </div>
+
+  <!-- ROW 3 — the desk's own universe, and what is dated. -->
   <div class="span-8">
     <Panel
       title="Coins to Watch"
@@ -667,6 +561,29 @@
       {/if}
     </Panel>
   </div>
+  <div class="span-4">
+    <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : ""} status={feeds.status("catalysts")}>
+      {#if catalysts && catalysts.events.length}
+        <div class="cat-list">
+          {#each catalysts.events.slice(0, 9) as e (e.type + e.date + (e.title ?? ""))}
+            <div class="cat-item">
+              <div class="cat-date num">{e.date.slice(5)}</div>
+              <div>
+                <div class="cat-title">{e.title}</div>
+                {#if e.tickers?.length}
+                  <div class="cat-meta dim">{e.tickers.slice(0, 8).join(", ")}{e.tickers.length > 8 ? "…" : ""}</div>
+                {:else if e.days_away != null}
+                  <div class="cat-meta dim">{e.days_away === 0 ? "this week" : `in ${e.days_away}d`}{e.approximation ? " · approx" : ""}</div>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <StateNote status={feeds.status("catalysts")} noun="catalysts" emptyText="No upcoming catalysts assembled" />
+      {/if}
+    </Panel>
+  </div>
   <div class="span-8">
     <Panel title="Watchlist 2.0" meta={watchlist ? `${watchlist.rows.length} symbols · fused intelligence` : ""} status={feeds.status("watchlist")}>
       <form
@@ -731,7 +648,54 @@
       {/if}
     </Panel>
   </div>
+
+  <!-- ROW 4 — ambient market state and the book's own line. Context, not
+       a call to action, so it sits below everything that is. -->
   <div class="span-8">
+    <Panel title="Market Movers" meta={cryptoMarkets || fxRates ? "crypto 24h · FX 30d" : ""} status={feeds.status("cryptoMarkets")}>
+      <div class="movers">
+        <div class="mv-col">
+          <div class="mv-head">CRYPTO — BIGGEST 24H MOVES</div>
+          {#if cryptoMovers.length}
+            {#each cryptoMovers as c0 (c0.id)}
+              <div class="mv-row">
+                <span class="sym">{c0.symbol.toUpperCase()}</span>
+                <span class="num dim">${c0.price < 1 ? c0.price.toPrecision(3) : c0.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                <span class="num {c0.chg_24h! >= 0 ? 'pl-up' : 'pl-down'}">{c0.chg_24h! >= 0 ? "+" : ""}{c0.chg_24h!.toFixed(1)}%</span>
+              </div>
+            {/each}
+          {:else}
+            <div class="empty">no data yet</div>
+          {/if}
+        </div>
+        <div class="mv-col">
+          <div class="mv-head">FX MAJORS — LIVE INTERBANK</div>
+          {#if fxMajors.length}
+            {#each fxMajors as fp (fp.pair)}
+              <div class="mv-row">
+                <span class="sym">{fp.pair}</span>
+                <span class="num dim">{fp.rate ?? "—"}</span>
+                <span class="num {(fp.change_pct ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fp.change_pct != null ? `${fp.change_pct >= 0 ? "+" : ""}${fp.change_pct.toFixed(2)}%` : "—"}</span>
+              </div>
+            {/each}
+          {:else}
+            <div class="empty">no data yet</div>
+          {/if}
+        </div>
+      </div>
+    </Panel>
+  </div>
+  <div class="span-4">
+    <Panel title="Equity Curve" meta="{equity.length} snapshots" status={feeds.status("equity")}>
+      <EquityChart points={equity} rangeHours={equityHours} onRange={setEquityRange} />
+    </Panel>
+  </div>
+
+  <!-- ROW 5 — "is anything stopping it working", then the analyst. -->
+  <div class="span-5">
+    <SystemIntegrity troubledFeeds={troubled} />
+  </div>
+  <div class="span-7">
     <Panel title="Ask JARVIS" meta="analyst over system data · cites its sources">
       <form
         class="ask-row"
@@ -766,38 +730,6 @@
       {/if}
     </Panel>
   </div>
-  <div class="span-4">
-    <Panel title="Catalyst Calendar" meta={catalysts ? `${catalysts.events.length} upcoming` : ""} status={feeds.status("catalysts")}>
-      {#if catalysts && catalysts.events.length}
-        <div class="cat-list">
-          {#each catalysts.events.slice(0, 9) as e (e.type + e.date + (e.title ?? ""))}
-            <div class="cat-item">
-              <div class="cat-date num">{e.date.slice(5)}</div>
-              <div>
-                <div class="cat-title">{e.title}</div>
-                {#if e.tickers?.length}
-                  <div class="cat-meta dim">{e.tickers.slice(0, 8).join(", ")}{e.tickers.length > 8 ? "…" : ""}</div>
-                {:else if e.days_away != null}
-                  <div class="cat-meta dim">{e.days_away === 0 ? "this week" : `in ${e.days_away}d`}{e.approximation ? " · approx" : ""}</div>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <StateNote status={feeds.status("catalysts")} noun="catalysts" emptyText="No upcoming catalysts assembled" />
-      {/if}
-    </Panel>
-  </div>
-
-
-
-
-
-
-
-
-
 
   <div class="ticker">
     <div class="lbl">WIRE</div>
@@ -855,9 +787,72 @@
   .kpis {
     grid-column: span 12;
     display: grid;
-    /* 10 tiles → two even rows of 5 */
-    grid-template-columns: repeat(5, 1fr);
+    /* Six operational tiles in one row. It was ten across two rows, four of
+       which were statistical evidence that belongs to Performance &
+       Learning — a status strip that takes two rows is not a strip. */
+    grid-template-columns: repeat(6, 1fr);
     gap: 14px;
+  }
+  @media (max-width: 1200px) {
+    .kpis { grid-template-columns: repeat(3, 1fr); }
+  }
+
+  /* HIERARCHY, not thirteen equal cards. The lead row is taller and the
+     rest of the page reads as subordinate to it, so "does anything need
+     me" is answered before anything else competes for the eye. */
+  .lead-row :global(.panel) {
+    min-height: 340px;
+  }
+  .lead-row :global(.panel-head) {
+    background: var(--surface-raised);
+  }
+
+  /* JARVIS activity — what the desk is doing on its own. */
+  .acts {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .act {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 3px 0;
+    font-size: 11.5px;
+  }
+  .adot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ink-faint);
+  }
+  .act.run .adot {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .act.err .adot {
+    background: var(--bad);
+    box-shadow: 0 0 6px var(--bad);
+  }
+  .aname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .astate {
+    font-size: 10px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+  }
+  .act.err .astate {
+    color: var(--bad);
+  }
+  .aago {
+    font-size: 10px;
+    color: var(--ink-faint);
+    min-width: 58px;
+    text-align: right;
   }
   .cap-h {
     /* Cap panel body height so tall lists scroll INSIDE their panel instead
@@ -1255,58 +1250,10 @@
     color: var(--ink-faint);
     font-size: 12px;
   }
-
-  .threat-row {
-    display: flex;
-    gap: 10px;
-    align-items: flex-start;
-    padding: 7px 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .threat-row:last-child {
-    border-bottom: none;
-  }
-  .threat-title {
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .threat-meta {
-    font-size: 10px;
-    margin-top: 2px;
-  }
   .movers {
     display: grid;
     grid-template-columns: 1fr;
     gap: 14px;
-  }
-  .fail-row {
-    display: grid;
-    grid-template-columns: minmax(110px, 1fr) 1fr auto;
-    gap: 10px;
-    align-items: center;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--line);
-    font-size: 11.5px;
-  }
-  .fail-row:last-of-type {
-    border-bottom: none;
-  }
-  .fail-label {
-    text-transform: capitalize;
-  }
-  .fail-bar {
-    height: 5px;
-    background: var(--surface-raised);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .fail-fill {
-    display: block;
-    height: 100%;
-    background: var(--bad);
-    opacity: 0.75;
-    border-radius: 3px;
   }
   .mv-head {
     font-size: 9px;
@@ -1325,74 +1272,6 @@
     align-items: baseline;
   }
   .mv-row:last-child {
-    border-bottom: none;
-  }
-  .pulse-row {
-    padding: 6px 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .pulse-row:last-child {
-    border-bottom: none;
-  }
-  .pulse-title {
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .pulse-snippet {
-    font-size: 10.5px;
-    line-height: 1.4;
-    margin-top: 2px;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .pulse-note {
-    font-size: 9.5px;
-    margin-top: 8px;
-  }
-  /* 40+ open positions made this table grow unbounded, stretching the whole
-     grid row and leaving a huge void under the equity chart — cap it to the
-     chart's height and scroll internally so the panels below flow up. */
-  .pos-scroll {
-    max-height: 372px;
-    overflow-y: auto;
-    margin: -14px;
-  }
-  .pos-scroll table.pos {
-    margin: 0;
-    width: 100%;
-  }
-  table.pos {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    margin: -14px;
-    width: calc(100% + 28px);
-  }
-  table.pos thead th {
-    position: sticky;
-    top: 0;
-    background: var(--surface);
-    z-index: 1;
-  }
-  table.pos th {
-    text-align: left;
-    font-size: 9.5px;
-    letter-spacing: 0.08em;
-    color: var(--ink-faint);
-    font-weight: 600;
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--line);
-  }
-  table.pos td {
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--line);
-    font-family: var(--mono);
-  }
-  table.pos tr:last-child td {
     border-bottom: none;
   }
   .sym {

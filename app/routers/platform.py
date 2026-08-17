@@ -107,6 +107,24 @@ def platform_size(symbol: str, entry: float, stop: float,
     }
 
 
+@router.get("/attention")
+def attention_queue(limit: int = 60):
+    """What requires the operator's attention right now, ranked.
+
+    The Command Center's input. Deliberately NOT snapshot-cached: a stale
+    attention queue is worse than a slow one, because the whole claim it
+    makes is about the present. Measured at ~0.9s over the live book, and
+    the one expensive input inside it (the earnings calendar, five Yahoo
+    requests cold) goes through the same 6h cache the earnings panel uses.
+
+    `complete` is false when any producer failed. An empty queue means
+    "nothing needs you", which is exactly what a silently-failing producer
+    would fabricate — so the failures are reported alongside.
+    """
+    from lib.attention import collect
+    return collect(limit=max(1, min(int(limit), 200)))
+
+
 @router.get("/instrument/{symbol:path}")
 def instrument_workspace(symbol: str, product: str | None = None,
                          entry: float | None = None):

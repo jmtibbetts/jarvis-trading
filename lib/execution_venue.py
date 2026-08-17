@@ -31,10 +31,13 @@ minimum, a rounded contract, a thinner book — and may never grow one.
 A plan that exceeds its RiskDecision is refused rather than clamped,
 because a silent clamp hides the defect that produced it.
 """
-from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:      # runtime import would be circular
+    from lib.virtual_orders import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +64,13 @@ class VenueSubmission:
     venue_family: str
     reason: str | None = None
     detail: str | None = None
-    execution = None                    # an ExecutionResult when accepted
+    # A REAL DATACLASS FIELD, not a class attribute.
+    #
+    # `execution = None` without an annotation is shared class state that
+    # dataclasses never sees: it is absent from fields(), never initialised
+    # per instance, and assigning it on one submission is invisible to the
+    # type checker and to anything reflecting over the contract. F13.
+    execution: "ExecutionResult | None" = None
     adapter_version: str = ADAPTER_VERSION
     provenance: dict = field(default_factory=dict)
 

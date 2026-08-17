@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 # Every position opened through here carries these, and legacy positions
 # carry NULL provenance. The pair is what stops two simulators' economics
 # being pooled as though one machine produced them.
-from lib.paper_settlement import (COST_MODEL_CANONICAL,  # noqa: E402
+from lib.paper_settlement import (COST_MODEL_CANONICAL,  # noqa: E402,F401
+                                  COST_MODEL_LEGACY,
                                   EXECUTION_MODEL_CANONICAL)
 
 # The learning epoch that begins with the venue-book executor. Outcomes from
@@ -128,7 +129,20 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     if not result.get("ok"):
         return result
 
-    _stamp_provenance(result.get("position_id"), signal=signal, ready=ready,
+    # THE REAL CONTRACT IS {"ok": True, "position": {"id": ...}}.
+    # This read result["position_id"], which does not exist, so it silently
+    # passed None and provenance was never stamped — every "canonical"
+    # position persisted with execution_provenance NULL, is_canonical()
+    # False, and the fail-closed exit guard blind to it. The tests passed
+    # because they mocked a shape this codebase never returns.
+    position_id = (result.get("position") or {}).get("id")
+    if not position_id:
+        raise RuntimeError(
+            "open_paper_position reported success without a position id; "
+            "refusing to leave an economically-open position with no "
+            f"canonical provenance (result keys: {sorted(result)})")
+
+    _stamp_provenance(position_id, signal=signal, ready=ready,
                       snap=snap, execution=execution,
                       decision_price=decision_price)
     result["execution"] = {
@@ -153,8 +167,23 @@ def _stamp_provenance(position_id, *, signal, ready, snap, execution,
     """
     if not position_id:
         return
+    # TWO DIFFERENT CLAIMS, RECORDED SEPARATELY AND HONESTLY.
+    #
+    # The EXECUTION model really is the venue book: this fill crossed a real
+    # bid/ask. The COST model is NOT yet per_leg_v2 — open_paper_position
+    # still writes sizing["round_trip_fees"] into PaperPosition.fees, which
+    # is the legacy DEFERRED round-trip charge. Stamping per_leg_v2 here
+    # would be FALSE PROVENANCE, and a position that lies about its own
+    # accounting is worse than one that says nothing: the first corrupts
+    # calibration silently, the second merely withholds it.
+    #
+    # Pass A.2 replaces the cost half; until then this records what actually
+    # happened.
     payload = {
-        "cost_model": COST_MODEL_CANONICAL,
+        "cost_model": COST_MODEL_LEGACY,
+        "cost_model_note": (
+            "entry settled through legacy round-trip fee accounting; "
+            "per_leg_v2 is NOT yet in force for this position"),
         "execution_model": EXECUTION_MODEL_CANONICAL,
         "engine_epoch": CANONICAL_ENGINE_EPOCH,
         "source": "VIRTUAL_CEX_AGENT",
@@ -185,10 +214,14 @@ def _stamp_provenance(position_id, *, signal, ready, snap, execution,
                 pos.execution_provenance = json.dumps(payload)
                 db.commit()
     except Exception as e:
-        # Provenance is not optional, so this is loud. It is still not
-        # allowed to unwind a settled position.
+        # PROVENANCE IS PART OF SETTLEMENT TRUTH, not metadata about it.
+        # An economically-open position with NULL provenance is invisible to
+        # is_canonical(), so the fail-closed exit guard would let it through
+        # the legacy close path — the exact hole this whole pass exists to
+        # shut. Raising propagates to the caller, which unwinds.
         logger.error("[CanonicalEntry] could not stamp provenance on %s: %s",
                      position_id, e)
+        raise
 
 
 def is_canonical(position) -> bool:

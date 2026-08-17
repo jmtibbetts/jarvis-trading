@@ -19,7 +19,8 @@ from unittest.mock import patch
 
 from lib import canonical_entry as CE
 from lib import execution_policy as POL
-from lib.paper_settlement import COST_MODEL_CANONICAL, EXECUTION_MODEL_CANONICAL
+from lib.paper_settlement import (COST_MODEL_CANONICAL, COST_MODEL_LEGACY,
+                                  EXECUTION_MODEL_CANONICAL)
 
 
 def _at(seconds_ago=0.0):
@@ -46,7 +47,7 @@ class TheVenueBookIsTheFillAuthorityTests(unittest.TestCase):
 
         def fake_open(sig, current_price=None):
             captured["fill"] = current_price
-            return {"ok": True, "position_id": None}
+            return {"ok": True, "position": {"id": "pos-test"}}
 
         with _kraken(bid, ask), \
              patch("lib.paper_engine.open_paper_position", fake_open):
@@ -95,7 +96,7 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
 
         def fake_open(sig, current_price=None):
             opened["called"] = True
-            return {"ok": True, "position_id": None}
+            return {"ok": True, "position": {"id": "pos-test"}}
 
         with patch("lib.kraken_stream.latest_quote", return_value=quote), \
              patch("lib.kraken_stream.trade_flow", return_value=None), \
@@ -167,7 +168,7 @@ class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
         pos = _Pos()
 
         def fake_open(sig, current_price=None):
-            return {"ok": True, "position_id": "pos-1"}
+            return {"ok": True, "position": {"id": "pos-1"}}
 
         from contextlib import contextmanager
 
@@ -190,7 +191,13 @@ class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
             CE.open_canonical_position(SIGNAL, decision_price=100.0)
 
         doc = json.loads(pos.execution_provenance)
-        self.assertEqual(doc["cost_model"], COST_MODEL_CANONICAL)
+        # FALSE PROVENANCE IS WORSE THAN NONE. The fill genuinely crossed the
+        # venue book, so execution_model is canonical. The ledger still ran
+        # legacy round-trip fee accounting, so cost_model says LEGACY until
+        # per-leg settlement exists. This test previously asserted per_leg_v2
+        # — a claim the accounting did not support.
+        self.assertEqual(doc["cost_model"], COST_MODEL_LEGACY)
+        self.assertNotEqual(doc["cost_model"], COST_MODEL_CANONICAL)
         self.assertEqual(doc["execution_model"], EXECUTION_MODEL_CANONICAL)
         self.assertEqual(doc["engine_epoch"], CE.CANONICAL_ENGINE_EPOCH)
         self.assertEqual(doc["source"], "VIRTUAL_CEX_AGENT")
@@ -216,7 +223,7 @@ class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
 
         with _kraken(99.9, 100.1), \
              patch("lib.paper_engine.open_paper_position",
-                   lambda s, current_price=None: {"ok": True, "position_id": "p"}), \
+                   lambda s, current_price=None: {"ok": True, "position": {"id": "p"}}), \
              patch("app.database.get_db", fake_db):
             CE.open_canonical_position(SIGNAL, decision_price=100.0)
         doc = json.loads(pos.execution_provenance)

@@ -1812,8 +1812,22 @@ def get_market_full():
 def get_earnings_watchlist():
     """Which currently-held or active-signal equity symbols report earnings
     within the next 5 days (Yahoo Finance calendar, no paid API)."""
+    # THE SLOWEST CALL ON THE PAGE, and it was uncached. Measured at
+    # 2,546 ms against a Yahoo calendar for data that changes ONCE A DAY —
+    # paid on every single page load, by every section that shows earnings
+    # risk. Even loaded in parallel with everything else it set the floor
+    # for how fast the page could possibly appear.
+    #
+    # serve_with_refresh returns the stored answer instantly and refreshes
+    # behind the request, so only a genuinely cold cache ever waits.
+    from lib.api_cache import serve_with_refresh
     from lib.earnings_calendar import get_earnings_this_week
-    reporting = get_earnings_this_week()
+
+    cached, _stale = serve_with_refresh(
+        "earnings:this_week", 6 * 3600,
+        lambda: {"symbols": sorted(get_earnings_this_week())})
+    reporting = set((cached or {}).get("symbols") or [])
+
     with get_db() as db:
         symbols = set()
         for row in db.query(TradingSignal.asset_symbol).filter(TradingSignal.status.in_(["Active", "PendingApproval", "Executed"])).all():

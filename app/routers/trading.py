@@ -779,11 +779,29 @@ def get_positions_with_signals():
         mv_total  = sum(float(p.market_value or 0) for p in positions)
         pl_total  = sum(float(p.unrealized_pl or 0) for p in positions)
 
-        # Build symbol → signal map — serialize to dicts INSIDE session
+        # SCOPED TO WHAT IS ACTUALLY HELD. This loaded and serialized every
+        # Executed/Active/CLOSED signal — 2,195 rows measured — to build a
+        # lookup for 25 positions. The map was then indexed by five symbol
+        # spellings each, so 99% of the work was for symbols nobody holds.
+        #
+        # Alpaca reports crypto as "BTCUSD" and the DB stores "BTC/USD", so
+        # the filter has to cover both spellings or the enrichment silently
+        # stops matching crypto — which is why the original just loaded
+        # everything.
+        held: set[str] = set()
+        for p in positions:
+            sym = str(p.symbol)
+            held.update({sym, sym.upper(), sym.replace("/", "")})
+            if len(sym) > 3 and sym.endswith("USD") and "/" not in sym:
+                held.add(sym[:-3] + "/USD")
+            held.add(sym.replace("/USD", ""))
+
         with get_db() as db:
-            db_sigs = db.query(TradingSignal).filter(
-                TradingSignal.status.in_(["Executed", "Active", "Closed"])
-            ).order_by(TradingSignal.generated_at.desc()).all()
+            q = db.query(TradingSignal).filter(
+                TradingSignal.status.in_(["Executed", "Active", "Closed"]))
+            if held:
+                q = q.filter(TradingSignal.asset_symbol.in_(held))
+            db_sigs = q.order_by(TradingSignal.generated_at.desc()).all()
             # Convert to plain dicts while session is still open
             sig_dicts = [_sig_dict(s) for s in db_sigs]
 

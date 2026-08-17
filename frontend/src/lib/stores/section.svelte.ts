@@ -2,6 +2,13 @@ export type SectionId =
   | "brief"
   | "command"
   | "signals"
+  // THE TRADING SURFACES. Previously one "positions" section with
+  // Live / Paper / Auto Sim tabs — a product hierarchy from a live-first
+  // phase this platform is no longer in. Routing is not decided by
+  // direction any more, so "the book Alpaca refused" is not a category.
+  | "virtualcex"
+  | "virtualdex"
+  | "shadowlab"
   | "positions"
   | "charts"
   | "intelligence"
@@ -16,7 +23,13 @@ export const SECTIONS: { id: SectionId; label: string; ready: boolean }[] = [
   { id: "brief", label: "Morning Brief", ready: true },
   { id: "command", label: "Command Center", ready: true },
   { id: "signals", label: "Signals & Scanner", ready: true },
-  { id: "positions", label: "Positions & Paper", ready: true },
+  // Virtual CEX and Virtual DEX are separate because their MECHANICS
+  // differ — a pool is not an order book — while both normalise into the
+  // same RealizedOutcome. Shadow Lab is the control arm, not a third book.
+  { id: "virtualcex", label: "Virtual CEX", ready: true },
+  { id: "virtualdex", label: "Virtual DEX", ready: true },
+  { id: "shadowlab", label: "Shadow Lab", ready: true },
+  { id: "positions", label: "Accounts & Exposure", ready: true },
   { id: "charts", label: "Charts", ready: true },
   { id: "intelligence", label: "Intelligence", ready: true },
   { id: "smartmoney", label: "Smart Money", ready: true },

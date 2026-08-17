@@ -8,6 +8,9 @@
   import CommandCenter from "./lib/sections/CommandCenter.svelte";
   import SignalsScanner from "./lib/sections/SignalsScanner.svelte";
   import PositionsPaper from "./lib/sections/PositionsPaper.svelte";
+  import VirtualCex from "./lib/sections/VirtualCex.svelte";
+  import VirtualDex from "./lib/sections/VirtualDex.svelte";
+  import ShadowLab from "./lib/sections/ShadowLab.svelte";
   import Intelligence from "./lib/sections/Intelligence.svelte";
   import OnChain from "./lib/sections/OnChain.svelte";
   import Performance from "./lib/sections/Performance.svelte";
@@ -48,6 +51,12 @@
       <CommandCenter />
     {:else if sectionStore.current === "signals"}
       <SignalsScanner />
+    {:else if sectionStore.current === "virtualcex"}
+      <VirtualCex />
+    {:else if sectionStore.current === "virtualdex"}
+      <VirtualDex />
+    {:else if sectionStore.current === "shadowlab"}
+      <ShadowLab />
     {:else if sectionStore.current === "positions"}
       <PositionsPaper />
     {:else if sectionStore.current === "charts"}

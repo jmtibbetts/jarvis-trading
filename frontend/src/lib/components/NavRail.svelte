@@ -24,7 +24,10 @@
   // The desk's three concerns. Sections not named here (future additions)
   // fall into the last group rather than vanishing from the rail.
   const NAMED_GROUPS: { label: string; ids: string[] }[] = [
-    { label: "Trade", ids: ["brief", "command", "signals", "positions", "charts"] },
+    { label: "Trade", ids: ["brief", "command", "signals", "charts"] },
+    // The virtual exchanges are where training actually happens, so they
+    // get their own group rather than living inside a positions tab.
+    { label: "Virtual Trading", ids: ["virtualcex", "virtualdex", "shadowlab", "positions"] },
     { label: "Intel", ids: ["intelligence", "smartmoney", "macro", "cryptodesk"] },
     { label: "System", ids: ["performance", "ops"] },
   ];

@@ -14,11 +14,19 @@ That is the shape of a simulator that makes money because it is wrong.
 
 WHAT REPLACES IT.
 
-    execution_readiness()    which venue, and may it be filled at all
-    execution_market_snapshot()  that venue's own bid/ask, graded and aged
-    virtual_orders.execute_market()  BUY lifts the ask, SELL hits the bid,
-                                     then adverse slippage
-    open_paper_position(current_price=<ACTUAL FILL>)
+    execution_readiness()      which venue and product, and may it be filled
+    execution_market_snapshot() that venue's own bid/ask, graded and aged
+    prepare_entry()            the AUTHORIZED quantity, before any order
+    execution_venue.submit()   OrderPlan -> VirtualCexAdapter -> fill
+    settle_entry(fill_price=<ACTUAL FILL>)
+
+EXECUTION GOES THROUGH THE BOUNDARY, NOT AROUND IT. This called
+`virtual_orders.execute_market()` directly, which skipped all three gates
+the boundary exists to apply — platform mode, venue capability, and the
+last risk check before submission — and coupled the strategy layer to a
+fill model instead of to a venue. `virtual_orders` lives BELOW the adapter.
+The only thing that crosses the boundary is an OrderPlan, which is what
+makes a live venue a change to one adapter rather than a rewrite.
 
 The last line is deliberate. All of the authorization that already exists —
 side parsing, stop and target validation, horizon clamps, sizing, leverage,
@@ -81,7 +89,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     `venue_failure=True` when the venue could not price a fill.
     """
     from lib import execution_policy as POL
+    from lib import execution_venue as EV
     from lib import virtual_orders as VO
+    from lib.decision_types import OrderPlan
     from lib.paper_engine import prepare_entry, settle_entry
     from lib.trade_side import SHORT, parse_side_strict
 
@@ -114,12 +124,40 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                      source=snap.source)
     venue_side = "short" if side == SHORT else "long"
 
-    def _execute(qty: float):
-        order = VO.VirtualOrder(
-            symbol=symbol, side=venue_side, quantity=float(qty),
-            order_type=VO.MARKET,
-            signal_id=signal.get("id") or signal.get("signal_id"))
-        return VO.execute_market(order, quote)
+    def _submit(auth):
+        """Offer an authorization to the venue THROUGH THE BOUNDARY.
+
+        This used to call `virtual_orders.execute_market()` directly, which
+        skipped every gate the boundary exists to apply — platform mode,
+        venue capability, and the last risk check before submission — and
+        made the strategy layer depend on a fill model instead of on a
+        venue. `virtual_orders` belongs BELOW the adapter; the only thing
+        above it is a plan.
+
+        The plan carries the product from A9, so the capability gate is
+        asking about a real product rather than an asset class.
+        """
+        plan = OrderPlan(
+            symbol=symbol, venue=ready.venue, side=venue_side,
+            order_type="market", qty=float(auth.qty),
+            entry=float(auth.reference_price), initial_stop=float(auth.stop),
+            target=float(auth.target), notional=float(auth.notional),
+            leverage=float(auth.leverage), product=ready.product)
+        return EV.submit(plan, venue_family=EV.VIRTUAL_CEX,
+                         risk=auth.risk_decision(), product=ready.product,
+                         venue=ready.venue, quote=quote)
+
+    def _refuse_submission(sub):
+        """A venue refusal is a RESULT, and it is about the order, not the
+        market data — so it must not be excused as a venue outage."""
+        logger.info("[CanonicalEntry] %s refused by %s: %s (%s)",
+                    symbol, sub.venue_family, sub.reason, sub.detail)
+        return {"error": sub.reason or REJECTED_BY_EXECUTION,
+                "detail": sub.detail,
+                "execution_state": getattr(sub.execution, "state", None),
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
 
     # ── 2. PREPARE. Authorize a real size, against the venue's own mid ───
     # The mid is a REFERENCE, never a fill — it is the screen price a desk
@@ -133,15 +171,16 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
     # ── 3. EXECUTE THE AUTHORIZED QUANTITY. BUY lifts the ask, SELL hits
     #      the bid, and the result describes THIS order. ──────────────────
-    execution = _execute(authorized.qty)
-    if not execution.filled or not execution.fill_price:
-        logger.info("[CanonicalEntry] %s produced no fill: state=%s reason=%s",
-                    symbol, execution.state, execution.reject_reason)
-        return {"error": execution.reject_reason or UNFILLED,
-                "execution_state": execution.state,
-                "venue": ready.venue, "product": ready.product,
-                # An unfilled order is an execution fact, not a venue outage.
-                "venue_failure": False, "opened": False}
+    submission = _submit(authorized)
+    if not submission.accepted:
+        return _refuse_submission(submission)
+
+    execution = submission.execution
+    if execution is None or not execution.filled or not execution.fill_price:
+        # An accepted submission with no usable execution is a broken
+        # adapter contract, not a fill. A6 made `execution` a real typed
+        # field precisely so this could be asserted rather than assumed.
+        return _refuse_submission(submission)
 
     fill = float(execution.fill_price)
 
@@ -168,13 +207,30 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         logger.info("[CanonicalEntry] %s re-submitting %.8g -> %.8g units "
                     "after the fill at %.8g repriced the risk",
                     symbol, authorized.qty, final.qty, fill)
-        execution = _execute(final.qty)
-        if not execution.filled or not execution.fill_price:
-            return {"error": execution.reject_reason or UNFILLED,
-                    "execution_state": execution.state,
-                    "venue": ready.venue, "product": ready.product,
-                    "venue_failure": False, "opened": False}
+        submission = _submit(final)
+        if not submission.accepted:
+            return _refuse_submission(submission)
+        execution = submission.execution
+        if execution is None or not execution.filled or not execution.fill_price:
+            return _refuse_submission(submission)
         fill = float(execution.fill_price)
+
+    # THE AUTHORIZATION THAT SURVIVES IS THE FIRST ONE. Re-pricing at the
+    # fill re-ran the risk engine, and a second engine run must not become a
+    # second, larger approval — so the money at risk is checked back against
+    # what was approved BEFORE the order went out.
+    if final.loss_at_stop > authorized.loss_at_stop * (1 + 1e-6):
+        logger.error("[CanonicalEntry] %s refusing to settle: repriced risk "
+                     "$%.2f exceeds the authorized $%.2f",
+                     symbol, final.loss_at_stop, authorized.loss_at_stop)
+        return {"error": REJECTED_BY_EXECUTION,
+                "detail": (f"repricing at the fill raised money-at-stop from "
+                           f"${authorized.loss_at_stop:,.2f} to "
+                           f"${final.loss_at_stop:,.2f}; execution may shrink "
+                           f"an order, never enlarge one"),
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
 
     # FAIL CLOSED. The position about to be written must be the order that
     # was actually simulated — if those two ever disagree, the attribution

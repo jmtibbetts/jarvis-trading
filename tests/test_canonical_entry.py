@@ -352,6 +352,162 @@ class CanonicalPositionsCannotUseLegacyCloseArithmeticTests(unittest.TestCase):
                 self.assertIn("_refuse_legacy_close", calls)
 
 
+class ExecutionGoesThroughTheVenueBoundaryTests(unittest.TestCase):
+    """A5. `canonical_entry` called `virtual_orders.execute_market()`
+    directly, which walked straight past the three gates the boundary exists
+    to apply — platform mode, venue capability, and the last risk check
+    before submission — and coupled strategy to a fill model rather than to
+    a venue. `virtual_orders` lives BELOW the adapter.
+    """
+
+    def _calls_in(self, relpath):
+        """Every bare function name called in a module, by AST.
+
+        Prose explaining that the boundary is respected must not be able to
+        satisfy the test that checks it — that mistake has cost six cycles
+        on this codebase already.
+        """
+        import ast
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent / relpath).read_text(
+            encoding="utf-8")
+        out = set()
+        for c in ast.walk(ast.parse(src)):
+            if isinstance(c, ast.Call):
+                if isinstance(c.func, ast.Name):
+                    out.add(c.func.id)
+                elif isinstance(c.func, ast.Attribute):
+                    out.add(c.func.attr)
+        return out
+
+    def test_canonical_entry_does_not_execute_orders_itself(self):
+        calls = self._calls_in("lib/canonical_entry.py")
+        self.assertNotIn("execute_market", calls,
+                         "entry reached past the venue boundary again")
+        self.assertNotIn("execute_limit", calls)
+        self.assertIn("submit", calls, "entry no longer routes through a venue")
+
+    def test_the_autonomous_job_does_not_execute_orders_itself(self):
+        calls = self._calls_in("jobs/paper_trading.py")
+        self.assertNotIn("execute_market", calls)
+        self.assertNotIn("execute_limit", calls)
+
+    def test_the_fill_arrives_as_a_typed_venue_submission(self):
+        """A6 made `execution` a real dataclass field so the adapter's
+        contract could be asserted rather than assumed."""
+        import dataclasses
+
+        from lib import execution_venue as EV
+        from lib.execution_venue import VenueSubmission
+        seen, captured = {}, {}
+        original = EV.submit
+
+        def spy(plan, **kw):
+            sub = original(plan, **kw)
+            seen["submission"] = sub
+            return sub
+
+        with _kraken(99.90, 100.10), \
+             patch("lib.execution_venue.submit", spy), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        self.assertTrue(res.get("ok"), res)
+        sub = seen["submission"]
+        self.assertIsInstance(sub, VenueSubmission)
+        self.assertTrue(sub.accepted)
+        self.assertIn("execution", [f.name for f in dataclasses.fields(sub)])
+        self.assertIsNotNone(sub.execution)
+
+    def test_the_plan_that_crosses_the_boundary_carries_the_real_product(self):
+        """Gate 2 asks the adapter whether it can execute this PRODUCT. Handed
+        an asset class it would refuse — or worse, be given a permissive
+        default."""
+        from lib import product_router as PR
+        seen, captured = {}, {}
+        from lib import execution_venue as EV
+        original = EV.submit
+
+        def spy(plan, **kw):
+            seen["plan"] = plan
+            seen["kw"] = kw
+            return original(plan, **kw)
+
+        with _kraken(99.90, 100.10), \
+             patch("lib.execution_venue.submit", spy), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        self.assertIn(seen["plan"].product, PR.ALL_PRODUCTS)
+        self.assertEqual(seen["kw"]["product"], seen["plan"].product)
+
+    def test_the_adapter_can_actually_execute_that_product(self):
+        from lib.execution_venue import VirtualCexAdapter
+        from lib import product_router as PR
+        adapter = VirtualCexAdapter()
+        for product in (PR.CRYPTO_SPOT, PR.CRYPTO_PERP, PR.EQUITY_SPOT):
+            with self.subTest(product=product):
+                self.assertTrue(adapter.supports(product))
+        self.assertFalse(adapter.supports("crypto"),
+                         "an asset class must not pass as a product")
+
+    def test_the_risk_gate_is_offered_the_decision_not_bypassed(self):
+        """Gate 3 runs immediately before submission. Passing risk=None
+        would make it decorative."""
+        seen, captured = {}, {}
+        from lib import execution_venue as EV
+        original = EV.submit
+
+        def spy(plan, **kw):
+            seen["risk"] = kw.get("risk")
+            return original(plan, **kw)
+
+        with _kraken(99.90, 100.10), \
+             patch("lib.execution_venue.submit", spy), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        from lib.decision_types import RiskDecision
+        self.assertIsInstance(seen["risk"], RiskDecision)
+        self.assertFalse(seen["risk"].rejected)
+        self.assertGreater(seen["risk"].qty, 0)
+
+    def test_a_venue_refusal_opens_nothing_and_is_not_a_venue_outage(self):
+        """A refusal is a RESULT. It is about the order, so it must not be
+        laundered into `venue_failure` and excused from the record."""
+        from lib.execution_venue import REFUSED_RISK, VenueSubmission
+        captured = {}
+
+        def refuse(plan, **kw):
+            return VenueSubmission(False, "VIRTUAL_CEX", REFUSED_RISK,
+                                   "quantity exceeds approved")
+
+        with _kraken(99.90, 100.10), \
+             patch("lib.execution_venue.submit", refuse), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        self.assertNotIn("fill", captured, "a refused order still settled")
+        self.assertEqual(res["error"], REFUSED_RISK)
+        self.assertFalse(res["venue_failure"])
+
+    def test_an_accepted_submission_with_no_execution_settles_nothing(self):
+        """A broken adapter contract is not a fill."""
+        from lib.execution_venue import VenueSubmission
+        captured = {}
+
+        def hollow(plan, **kw):
+            return VenueSubmission(True, "VIRTUAL_CEX")   # execution stays None
+
+        with _kraken(99.90, 100.10), \
+             patch("lib.execution_venue.submit", hollow), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        self.assertNotIn("fill", captured)
+        self.assertFalse(res.get("ok"))
+
+
 class TheAutonomousEntrySiteNoLongerFillsAtTheMarkTests(unittest.TestCase):
 
     def test_paper_trading_calls_the_canonical_entry(self):

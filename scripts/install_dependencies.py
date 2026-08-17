@@ -145,6 +145,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--with-test", action="store_true",
                     help="also install the test runner")
+    ap.add_argument("--with-ml", action="store_true",
+                    help="also install requirements-ml.txt (openvino et al)")
     ap.add_argument("--check-only", action="store_true",
                     help="verify the current environment without installing")
     args = ap.parse_args()
@@ -168,6 +170,16 @@ def main() -> int:
 
         pip("install", "-r", str(REPO / "requirements.txt"),
             what="install project requirements")
+
+        if args.with_ml:
+            # Without openvino, 11 predictive-runtime tests SKIP rather
+            # than run — and they cover abstention semantics (schema
+            # mismatch, stale features, a device that raises), which is
+            # exactly the "UNKNOWN stays UNKNOWN" behaviour this system
+            # depends on. Coverage that silently disappears is not
+            # coverage.
+            pip("install", "-r", str(REPO / "requirements-ml.txt"),
+                what="install ML extras")
 
         if args.with_test:
             pip("install", "pytest", what="install test runner")

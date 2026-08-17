@@ -125,7 +125,17 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
     # ── 3. Settle the ACTUAL fill through the existing authorization. ────
     # The mark is kept as decision_price so slippage stays measurable.
-    result = open_paper_position(signal, current_price=fill)
+    #
+    # Provenance is built FIRST and handed to settlement, so position, cash
+    # and provenance commit in ONE transaction. Stamping it afterwards ran a
+    # second transaction: when that failed, the first had already committed
+    # and left an economically-open position with NULL provenance — invisible
+    # to is_canonical(), and therefore invisible to the exit guard.
+    provenance = build_provenance(signal=signal, ready=ready, snap=snap,
+                                  execution=execution,
+                                  decision_price=decision_price)
+    result = open_paper_position(signal, current_price=fill,
+                                 execution_provenance=provenance)
     if not result.get("ok"):
         return result
 
@@ -135,16 +145,6 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # position persisted with execution_provenance NULL, is_canonical()
     # False, and the fail-closed exit guard blind to it. The tests passed
     # because they mocked a shape this codebase never returns.
-    position_id = (result.get("position") or {}).get("id")
-    if not position_id:
-        raise RuntimeError(
-            "open_paper_position reported success without a position id; "
-            "refusing to leave an economically-open position with no "
-            f"canonical provenance (result keys: {sorted(result)})")
-
-    _stamp_provenance(position_id, signal=signal, ready=ready,
-                      snap=snap, execution=execution,
-                      decision_price=decision_price)
     result["execution"] = {
         "venue": ready.venue, "product": ready.product,
         "decision_price": decision_price, "fill_price": fill,
@@ -156,17 +156,15 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     return result
 
 
-def _stamp_provenance(position_id, *, signal, ready, snap, execution,
-                      decision_price) -> None:
-    """Record how this position came to exist, immutably.
+def build_provenance(*, signal, ready, snap, execution,
+                     decision_price) -> dict:
+    """How this position came to exist. Persisted by settlement, atomically.
 
     One JSON document rather than a dozen columns. NULL provenance means
     LEGACY — it is never inferred and never backfilled, because "this is a
     crypto symbol so it was probably Kraken" is a guess, and a guess in the
     execution ledger is indistinguishable from a measurement.
     """
-    if not position_id:
-        return
     # TWO DIFFERENT CLAIMS, RECORDED SEPARATELY AND HONESTLY.
     #
     # The EXECUTION model really is the venue book: this fill crossed a real
@@ -205,23 +203,7 @@ def _stamp_provenance(position_id, *, signal, ready, snap, execution,
         "snapshot_status": snap.status,
         "settled_at": _now(),
     }
-    try:
-        from app.database import PaperPosition, get_db
-        with get_db() as db:
-            pos = db.query(PaperPosition).filter(
-                PaperPosition.id == position_id).first()
-            if pos is not None:
-                pos.execution_provenance = json.dumps(payload)
-                db.commit()
-    except Exception as e:
-        # PROVENANCE IS PART OF SETTLEMENT TRUTH, not metadata about it.
-        # An economically-open position with NULL provenance is invisible to
-        # is_canonical(), so the fail-closed exit guard would let it through
-        # the legacy close path — the exact hole this whole pass exists to
-        # shut. Raising propagates to the caller, which unwinds.
-        logger.error("[CanonicalEntry] could not stamp provenance on %s: %s",
-                     position_id, e)
-        raise
+    return payload
 
 
 def is_canonical(position) -> bool:

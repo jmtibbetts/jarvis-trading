@@ -64,14 +64,18 @@ class TheRealReturnContractTests(unittest.TestCase):
         self.assertNotIn("position_id", keys,
                          "no top-level position_id exists; mocks must not invent one")
 
-    def test_canonical_entry_reads_the_real_path(self):
-        """It must consume result["position"]["id"], not a flat key."""
+    def test_canonical_entry_never_reads_the_invented_flat_key(self):
+        """The original defect, kept as a regression.
+
+        Provenance now travels INTO settlement, so the id is not read back
+        at all — but the key this codebase never returned must not reappear.
+        """
         import pathlib
         src = (pathlib.Path(__file__).parent.parent
                / "lib" / "canonical_entry.py").read_text(encoding="utf-8")
         code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
-        self.assertIn('result.get("position")', code)
         self.assertNotIn('result.get("position_id")', code)
+        self.assertNotIn('result["position_id"]', code)
 
 
 class CanonicalEntryAgainstARealDatabaseTests(unittest.TestCase):
@@ -201,6 +205,93 @@ class CanonicalEntryAgainstARealDatabaseTests(unittest.TestCase):
                 PaperPosition.symbol == "BTC/USD",
                 PaperPosition.status == "Open").count()
         self.assertEqual(n, 1, "a duplicate entry opened a second position")
+
+
+class SettlementIsAtomicTests(unittest.TestCase):
+    """A7. The claim "re-raising unwinds it" was FALSE.
+
+    `get_db()` commits on context exit, so open_paper_position committed
+    position and cash, and provenance was persisted by a SECOND session.
+    When that failed the first was already committed. Measured on a
+    disposable book before the fix: $1,250.17 debited, one orphan position,
+    provenance NULL — and a NULL-provenance position is invisible to
+    is_canonical(), so the fail-closed exit guard would have let it through
+    the legacy close path. The exception unwound nothing.
+
+    Provenance is now built first and handed to settlement, so position,
+    cash and provenance commit together or not at all.
+    """
+
+    def _cash_and_count(self):
+        from app.database import PaperPortfolio, PaperPosition, get_db
+        with get_db() as db:
+            cash = float(db.query(PaperPortfolio).first().cash)
+            n = db.query(PaperPosition).filter(
+                PaperPosition.status == "Open").count()
+        return cash, n
+
+    def setUp(self):
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            db.query(PaperPosition).filter(
+                PaperPosition.symbol == "BTC/USD").delete()
+            db.commit()
+
+    def test_a_failure_during_settlement_rolls_back_cash_and_position(self):
+        import lib.paper_engine as PE
+        from lib.canonical_entry import open_canonical_position
+
+        before_cash, before_n = self._cash_and_count()
+        with _kraken_quote(), patch.object(PE, "json") as J:
+            J.dumps.side_effect = RuntimeError("injected provenance failure")
+            with self.assertRaises(RuntimeError):
+                open_canonical_position(SIGNAL, decision_price=100.0)
+        after_cash, after_n = self._cash_and_count()
+
+        self.assertEqual(after_cash, before_cash, "cash was debited by a failed entry")
+        self.assertEqual(after_n, before_n, "a failed entry left a position behind")
+
+    def test_no_orphan_position_with_null_provenance_can_exist(self):
+        """The specific state the guard cannot see."""
+        import lib.paper_engine as PE
+        from app.database import PaperPosition, get_db
+        from lib.canonical_entry import open_canonical_position
+
+        with _kraken_quote(), patch.object(PE, "json") as J:
+            J.dumps.side_effect = RuntimeError("injected provenance failure")
+            with self.assertRaises(RuntimeError):
+                open_canonical_position(SIGNAL, decision_price=100.0)
+
+        with get_db() as db:
+            orphans = db.query(PaperPosition).filter(
+                PaperPosition.symbol == "BTC/USD",
+                PaperPosition.status == "Open",
+                PaperPosition.execution_provenance.is_(None)).count()
+        self.assertEqual(orphans, 0)
+
+    def test_the_happy_path_still_persists_provenance_in_one_transaction(self):
+        from app.database import PaperPosition, get_db
+        from lib.canonical_entry import is_canonical, open_canonical_position
+        with _kraken_quote():
+            res = open_canonical_position(SIGNAL, decision_price=100.0)
+        self.assertTrue(res.get("ok"))
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            self.assertIsNotNone(pos.execution_provenance)
+            self.assertTrue(is_canonical(pos))
+
+    def test_provenance_is_not_stamped_after_the_commit(self):
+        """By AST: no separate get_db session may persist provenance."""
+        import ast
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent
+               / "lib" / "canonical_entry.py").read_text(encoding="utf-8")
+        called = {c.func.id for c in ast.walk(ast.parse(src))
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        self.assertNotIn("get_db", called,
+                         "canonical entry must not open its own session; "
+                         "settlement owns the transaction")
 
 
 class VenueSubmissionIsProperlyTypedTests(unittest.TestCase):

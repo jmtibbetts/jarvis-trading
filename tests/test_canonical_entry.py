@@ -45,7 +45,8 @@ class TheVenueBookIsTheFillAuthorityTests(unittest.TestCase):
     def _open(self, signal=None, bid=99.90, ask=100.10, decision=100.00):
         captured = {}
 
-        def fake_open(sig, current_price=None):
+        def fake_open(sig, current_price=None, execution_provenance=None,
+                      canonical_entry_fee_usd=None):
             captured["fill"] = current_price
             return {"ok": True, "position": {"id": "pos-test"}}
 
@@ -94,7 +95,8 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
     def _attempt(self, quote):
         opened = {"called": False}
 
-        def fake_open(sig, current_price=None):
+        def fake_open(sig, current_price=None, execution_provenance=None,
+                      canonical_entry_fee_usd=None):
             opened["called"] = True
             return {"ok": True, "position": {"id": "pos-test"}}
 
@@ -138,7 +140,8 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
         fut = dict(SIGNAL, asset_symbol="ES=F", asset_class="Futures")
         opened = {"called": False}
 
-        def fake_open(sig, current_price=None):
+        def fake_open(sig, current_price=None, execution_provenance=None,
+                      canonical_entry_fee_usd=None):
             opened["called"] = True
             return {"ok": True}
 
@@ -158,77 +161,45 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
 
 
 class ProvenanceSaysWhichSimulatorProducedItTests(unittest.TestCase):
+    """build_provenance is a pure function now; PERSISTENCE is proven against
+    a real database in test_canonical_entry_integration.py, because that is
+    where the atomicity actually lives."""
 
-    def test_a_canonical_position_records_its_models_and_epoch(self):
-        stamped = {}
+    def _doc(self):
+        from lib import execution_snapshot as ES
+        from lib import virtual_orders as VO
+        snap = ES.ExecutionMarketSnapshot(
+            venue="kraken", symbol="BTC/USD", product="crypto",
+            bid=99.90, ask=100.10, source="kraken_stream.latest_quote",
+            venue_event_at="2026-08-17T00:00:00+00:00", age_ms=200.0,
+            status=ES.AVAILABLE)
+        ready = POL.ExecutionReadiness(True, "kraken", "crypto", snapshot=snap)
+        order = VO.VirtualOrder(symbol="BTC/USD", side="long", quantity=10.0,
+                                order_type=VO.MARKET)
+        execution = VO.execute_market(order, VO.Quote(bid=99.90, ask=100.10))
+        return CE.build_provenance(signal=SIGNAL, ready=ready, snap=snap,
+                                   execution=execution, decision_price=100.0)
 
-        class _Pos:
-            execution_provenance = None
-
-        pos = _Pos()
-
-        def fake_open(sig, current_price=None):
-            return {"ok": True, "position": {"id": "pos-1"}}
-
-        from contextlib import contextmanager
-
-        @contextmanager
-        def fake_db():
-            class _DB:
-                def query(self, *a):
-                    return self
-                def filter(self, *a):
-                    return self
-                def first(self):
-                    return pos
-                def commit(self):
-                    stamped["done"] = True
-            yield _DB()
-
-        with _kraken(99.90, 100.10), \
-             patch("lib.paper_engine.open_paper_position", fake_open), \
-             patch("app.database.get_db", fake_db):
-            CE.open_canonical_position(SIGNAL, decision_price=100.0)
-
-        doc = json.loads(pos.execution_provenance)
-        # FALSE PROVENANCE IS WORSE THAN NONE. The fill genuinely crossed the
-        # venue book, so execution_model is canonical. The ledger still ran
-        # legacy round-trip fee accounting, so cost_model says LEGACY until
-        # per-leg settlement exists. This test previously asserted per_leg_v2
-        # — a claim the accounting did not support.
-        self.assertEqual(doc["cost_model"], COST_MODEL_LEGACY)
-        self.assertNotEqual(doc["cost_model"], COST_MODEL_CANONICAL)
+    def test_it_records_the_models_epoch_and_venue(self):
+        doc = self._doc()
         self.assertEqual(doc["execution_model"], EXECUTION_MODEL_CANONICAL)
         self.assertEqual(doc["engine_epoch"], CE.CANONICAL_ENGINE_EPOCH)
-        self.assertEqual(doc["source"], "VIRTUAL_CEX_AGENT")
         self.assertEqual(doc["venue"], "kraken")
         self.assertEqual(doc["bid_at_submit"], 99.90)
         self.assertEqual(doc["ask_at_submit"], 100.10)
         self.assertIsNotNone(doc["actual_entry_fill"])
 
-    def test_new_outcomes_never_use_the_ambiguous_legacy_source(self):
+    def test_it_never_uses_the_ambiguous_legacy_source(self):
         """9,370 historical rows say outcome_source="live" and mean
-        forward-observed VIRTUAL. New data must not add to that confusion."""
-        pos = type("P", (), {"execution_provenance": None})()
-        from contextlib import contextmanager
-
-        @contextmanager
-        def fake_db():
-            class _DB:
-                def query(self, *a): return self
-                def filter(self, *a): return self
-                def first(self): return pos
-                def commit(self): pass
-            yield _DB()
-
-        with _kraken(99.9, 100.1), \
-             patch("lib.paper_engine.open_paper_position",
-                   lambda s, current_price=None: {"ok": True, "position": {"id": "p"}}), \
-             patch("app.database.get_db", fake_db):
-            CE.open_canonical_position(SIGNAL, decision_price=100.0)
-        doc = json.loads(pos.execution_provenance)
+        forward-observed VIRTUAL. New data must not add to that."""
+        doc = self._doc()
+        self.assertEqual(doc["source"], "VIRTUAL_CEX_AGENT")
         self.assertNotEqual(doc["source"], "live")
-        self.assertNotIn("LIVE_CEX", doc["source"])
+
+    def test_it_is_json_serialisable(self):
+        """Settlement persists it inside the transaction, so a value that
+        cannot serialise would roll the whole entry back."""
+        json.dumps(self._doc())
 
     def test_a_legacy_position_is_not_guessed_into_canonical(self):
         """NULL provenance means legacy. "It is crypto so it was probably

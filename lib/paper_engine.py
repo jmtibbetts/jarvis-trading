@@ -12,6 +12,7 @@ v2.0 Fixes:
 - mark_to_market: added missing margin_used fallback to prevent $0 margin positions
 - DEFAULT_POSITION_SIZE raised to $3,000 for better trade visibility
 """
+import json
 import logging
 from datetime import datetime, timezone
 from sqlalchemy import func
@@ -713,10 +714,31 @@ def _bound_loss_to_margin(raw_pnl: float, margin: float, symbol: str,
     return -margin
 
 
-def open_paper_position(signal: dict, current_price: float = None) -> dict:
+def open_paper_position(signal: dict, current_price: float = None,
+                        execution_provenance: dict | None = None,
+                        canonical_entry_fee_usd: float | None = None) -> dict:
     """
     Open a new paper position from a trading signal.
     direction can be: Long, Bounce, Long_Leveraged, Short, Short_Leveraged
+
+    PROVENANCE IS SETTLED HERE, NOT STAMPED AFTERWARDS.
+
+    `get_db()` commits on context exit, so a caller that opened the position
+    and then persisted provenance in a SECOND session was running two
+    transactions. When the second failed, the first had already committed:
+    the position existed, cash was debited, provenance was NULL — and a NULL
+    provenance position is invisible to `is_canonical()`, so the fail-closed
+    exit guard would let it straight through the legacy close path. Measured
+    on a disposable book: $1,250.17 debited, one orphan position, and an
+    exception that unwound nothing.
+
+    Passing the document in means position, cash and provenance share one
+    transaction and roll back together.
+
+    `canonical_entry_fee_usd`, when given, switches this position to the
+    per-leg cost model: the fee is DEBITED NOW from actual executed exposure,
+    and `fees` is left at 0 rather than carrying the legacy deferred
+    round-trip estimate that the close path would later charge again.
     """
     sym = signal.get("asset_symbol", "").upper().strip()
     if not sym:
@@ -995,8 +1017,16 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 # immediately shows what unwinding it costs. size_position
                 # already computed this; it was only ever displayed, never
                 # charged — `cash -= margin` alone let the book trade free.
-                fees          = round(float(sizing.get("round_trip_fees") or 0.0), 6),
-                fee_basis     = sizing.get("fee_basis"),
+                # LEGACY: a deferred round-trip ESTIMATE, charged at close.
+                # CANONICAL (per_leg_v2): the entry leg is charged now, so
+                # this stays 0 — leaving the estimate here would let the
+                # close path bill the same economics a second time.
+                fees          = (0.0 if canonical_entry_fee_usd is not None
+                                 else round(float(sizing.get("round_trip_fees") or 0.0), 6)),
+                fee_basis     = ("per_leg_v2_entry" if canonical_entry_fee_usd is not None
+                                 else sizing.get("fee_basis")),
+                execution_provenance = (json.dumps(execution_provenance)
+                                        if execution_provenance else None),
                 unrealized_pnl= 0.0,
                 unrealized_pct= 0.0,
                 signal_id     = signal.get("id"),
@@ -1005,7 +1035,15 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 updated_at    = _now(),
             )
             db.add(pos)
-            portfolio.cash    -= margin
+            # ONE debit, inside ONE transaction. The canonical entry fee is
+            # charged here rather than deferred, which is the whole of the
+            # per-leg model at entry.
+            entry_fee = float(canonical_entry_fee_usd or 0.0)
+            if entry_fee and portfolio.cash < (margin + entry_fee):
+                raise ValueError(
+                    f"cash {portfolio.cash:.2f} cannot cover margin {margin:.2f} "
+                    f"plus entry fee {entry_fee:.2f} at settlement")
+            portfolio.cash    -= (margin + entry_fee)
             portfolio.updated_at = _now()
 
             pos_id   = pos.id
@@ -1014,6 +1052,7 @@ def open_paper_position(signal: dict, current_price: float = None) -> dict:
                 "side": "long" if side == 1 else "short", "leverage": leverage, "qty": qty,
                 "entry_price": entry, "target": target, "stop": stop,
                 "notional": notional, "margin_required": margin, "asset_class": asset_class,
+                "entry_fee_usd": float(canonical_entry_fee_usd or 0.0),
             }
     except IntegrityError:
         # Lost the race: another session committed an open position for this

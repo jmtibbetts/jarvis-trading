@@ -269,10 +269,44 @@ def _alerts_in_window(cutoff: str) -> dict:
     return {sev: n for sev, n in rows}
 
 
+def _training_state() -> dict:
+    """What the laboratory itself is doing, and whether it can be trusted.
+
+    JARVIS is a training platform before it is a trading one, so the brief
+    should open with the health of the training data — not only with what
+    the market did. An integrity violation discovered a week later has
+    already poisoned a week of evidence.
+    """
+    from lib.integrity_panel import run_all
+    from lib.platform_mode import status as mode_status
+
+    panel = run_all()
+    mode = mode_status()
+    failing = [c for c in panel["checks"] if c["status"] == "VIOLATION"]
+    return {
+        "mode": mode["mode"],
+        "live_execution_allowed": mode["live_execution_allowed"],
+        "mode_detail": mode["detail"],
+        "integrity_verdict": panel["verdict"],
+        "integrity_healthy": panel["healthy"],
+        "violations": panel["violations"],
+        "critical": panel["critical"],
+        # Named, so the brief says WHICH invariant broke rather than
+        # reporting a count nobody can act on.
+        "failing_checks": [
+            {"title": c["title"], "count": c["count"],
+             "severity": c["severity"], "detail": c["detail"]}
+            for c in failing[:5]],
+        # A check that could not RUN is not a check that passed.
+        "checks_unavailable": panel["unavailable"] + panel["errors"],
+    }
+
+
 def build_brief(window_hours: int = 24) -> dict:
     now = _now()
     cutoff_dt = now - timedelta(hours=window_hours)
     cutoff = cutoff_dt.isoformat()
+    from lib.brief_news import brief_news
     from lib.incubator import incubator_report
     from lib.threat_transmission import transmission_watch
 
@@ -302,6 +336,20 @@ def build_brief(window_hours: int = 24) -> dict:
         "book": _book_movement(cutoff),
         "platform": _platform_movement(cutoff_dt.timestamp()),
         "releases_today": _releases_today(),
+
+        # OVERNIGHT NEWS. `lib/brief_news` was written and wired into
+        # nothing — the brief has been reporting market internals every
+        # morning with no account of what actually HAPPENED while the desk
+        # slept. Bucketed and de-duplicated by the module itself, and
+        # symbols the book holds are flagged there rather than here.
+        "news": _safe(lambda: brief_news(hours=window_hours, per_bucket=6), {}),
+
+        # TRAINING STATE. The brief is the first screen of the day, so
+        # "are my own invariants holding?" belongs on it. A green desk
+        # running on corrupted evidence is worse than a red one, and the
+        # integrity verdict is the one number that says which.
+        "training_state": _safe(_training_state, {}),
+
         "note": ("assembled from the owning endpoints' own numbers; "
                  "nothing computed fresh here"),
     }

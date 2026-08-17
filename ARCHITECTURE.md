@@ -1,11 +1,41 @@
 # J.A.R.V.I.S. — Architecture
 
 FastAPI backend, Svelte 5 frontend, SQLite storage, APScheduler jobs.
-One operator, one machine, real venue connections (Alpaca paper account,
-Kraken read-only). This document maps the system's four planes and the
+One operator, one machine. This document maps the system's planes and the
 invariants that hold them together. File references are the source of
 truth; when this document and the code disagree, the code and its tests
 win, and this file has a bug.
+
+## Execution posture
+
+JARVIS runs as a **virtual training laboratory**. The platform mode is
+`VIRTUAL_ONLY` (`lib/platform_mode.py`) and real order submission raises at
+the boundary — `assert_may_increase_exposure` — rather than being avoided
+by convention. Market and account data still flow: reading a broker is not
+trading.
+
+One deliberate asymmetry: **opening exposure is gated, closing it is
+not.** If the mode is switched while real positions are open, refusing to
+close them would trap capital behind a training flag, so
+`close_position` / `partial_close_position` / `cancel_open_orders_for_symbol`
+carry no guard and log at WARNING instead. A test asserts they stay
+ungated.
+
+Execution reaches a venue through one boundary (`lib/execution_venue.py`)
+with three gates in a tested order: **platform mode**, then **venue
+capability**, then **plan-versus-risk** immediately before submission.
+Strategy produces an `OrderPlan`; only the adapter differs between
+`VirtualCEX`, `VirtualDEX` and a future `KrakenAdapter`. The Kraken adapter
+is declared and unimplemented on purpose — the boundary is real today so
+that enabling live execution later is not a rewrite.
+
+**Venue capability is discovered, never assumed**
+(`lib/venue_capabilities.py`). Kraken Pro offers a human 11,000+ US
+equities while its API Center documents no stock trading contract, so
+`kraken/EQUITY_SPOT` is `UI_ONLY`: observable, not executable. Entitlement
+is tracked separately from capability — trading futures does not imply
+Level II depth, and an unknown entitlement falls to the conservative fill
+model rather than assuming a book.
 
 The design temperament, in one line: **measure before believing, abstain
 before guessing, and record what was actually done rather than what was

@@ -1,12 +1,29 @@
-# The suite is the desk's immune system — 1,649 tests pinning risk
-# invariants, gate semantics, calendar rules and point-in-time honesty.
-# Until this file existed they only ran when a developer remembered.
+# The suite is the desk's immune system — 2,687 tests pinning risk
+# invariants, gate semantics, instrument units, execution realism and
+# point-in-time honesty. Tests are hermetic by construction (conftest.py
+# redirects both databases to temp files and refuses the operator DB), so
+# no secrets are configured here: a test that needs a real key is a test
+# that is wrong.
 #
-# Ubuntu on purpose: order_book (cryptofeed's C extension) compiles clean
-# under GCC; the MSVC story lives in vendor/patches/. Tests are hermetic
-# by construction (conftest.py redirects both databases to temp files and
-# refuses the operator DB), so no secrets are configured here — a test
-# that needs a real key is a test that's wrong.
+# WHAT CHANGED AND WHY.
+#
+# Windows is now a first-class job. The operator's deployment IS Windows,
+# and a suite that only ever ran on Ubuntu could not see a path separator,
+# an encoding default or a file-locking difference until it reached the
+# one machine that matters.
+#
+# The frontend is a RELEASE GATE. This repository serves a built Svelte
+# application; a green backend check while the UI fails to compile is a
+# green check on half the product.
+#
+# The failure tail no longer goes into a public commit comment. Test
+# output can carry provider responses, request context, filesystem paths
+# and environment fragments, and a public repository publishes all of it
+# to anyone. It is an artifact now, with only a sanitised summary surfaced.
+#
+# Permissions dropped to contents: read. The old file requested
+# contents: write purely to post that comment — write access to the
+# repository as the cost of a convenience.
 name: tests
 
 on:
@@ -14,13 +31,116 @@ on:
     branches: [main]
   pull_request:
 
+# LEAST PRIVILEGE. Nothing here needs to write to the repository.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # ── Backend, on both operating systems ─────────────────────────────────
   pytest:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false          # a Windows-only failure must not hide a Linux one
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      # NOTE ON SUPPLY CHAIN: these are major-version tags, which are
+      # mutable. Pinning to verified commit SHAs is the correct hardening
+      # step and is deliberately NOT done from memory here — a wrong digest
+      # breaks every build, and a guessed one is worse than an honest tag.
+      # See docs: resolve the digests from the Actions repository and pin
+      # them, with Dependabot configured to keep them current.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run suite
+        env:
+          JARVIS_DISABLE_SCHEDULER: "1"
+          # The platform boundary must hold in CI exactly as it does on the
+          # desk: no test may reach a live order path.
+          JARVIS_PLATFORM_MODE: "VIRTUAL_ONLY"
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest.log
+
+      # Forensics WITHOUT publishing raw output. The full log is an
+      # artifact readable by anyone with repository access; the job summary
+      # gets counts and test names only.
+      - name: Sanitised failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### pytest failed on ${{ matrix.os }}"
+            echo ""
+            echo "Failing tests:"
+            echo '```'
+            grep -E "^(FAILED|ERROR) " pytest.log | sed -E 's/ - .*$//' | head -40 || echo "(none parsed)"
+            echo '```'
+            echo ""
+            grep -E "[0-9]+ (passed|failed)" pytest.log | tail -1 || true
+            echo ""
+            echo "Full log is attached as an artifact — it is not printed here"
+            echo "because test output can contain provider responses, request"
+            echo "context, filesystem paths and environment fragments."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ matrix.os }}
+          path: pytest.log
+          retention-days: 7
+
+  # ── The frontend is part of the product ────────────────────────────────
+  frontend:
+    name: frontend typecheck + build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install (clean, lockfile-exact)
+        working-directory: frontend
+        run: npm ci
+
+      # A permanently-red check is a check nobody reads, so this must stay
+      # at zero rather than becoming a tolerated baseline.
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run check
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # ── The schema must come up from nothing ───────────────────────────────
+  bootstrap:
+    name: migration / bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,27 +151,43 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
-      - name: Run suite
+
+      # A fresh install is the case least often exercised by hand and the
+      # one a new deployment always hits. Running init_db twice also proves
+      # the idempotent ALTER path, which is how every column added this
+      # month reaches an existing database.
+      - name: Initialise schema from empty, twice
         env:
           JARVIS_DISABLE_SCHEDULER: "1"
         run: |
-          set -o pipefail
-          pytest -q 2>&1 | tee pytest.log
-      # Failure forensics without a login: the log tail lands as a commit
-      # comment, which is readable through the anonymous API on a public
-      # repo — job logs are not.
-      - name: Publish failure tail
-        if: failure()
-        uses: actions/github-script@v7
+          python -c "
+          from app.database import init_db
+          init_db(); print('first init ok')
+          init_db(); print('second init ok — migrations are idempotent')
+          "
+
+  # ── Supply chain and secrets ───────────────────────────────────────────
+  security:
+    name: dependency + secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: a new upstream CVE should not block an unrelated commit,
+    # but it must be visible rather than silent.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
         with:
-          script: |
-            const fs = require('fs');
-            let tail = '(no pytest.log produced)';
-            try { tail = fs.readFileSync('pytest.log', 'utf8').slice(-6000); } catch (e) {}
-            await github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: '### CI failure tail\n```\n' + tail + '\n```',
-            });
+          fetch-depth: 0        # gitleaks needs history to scan diffs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Known vulnerabilities in dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --desc || true
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

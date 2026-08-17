@@ -1,7 +1,44 @@
 # 🤖 Jarvis Trading AI v7.0
 
-> **Python Edition** — FastAPI + APScheduler + TA-Lib + Alpaca  
-> Autonomous trading across equities, crypto, and commodities with geopolitical threat intelligence, multi-factor signal scoring, AI position management, a parallel paper trading engine for shorts and leverage, and a live Real vs Paper performance comparison dashboard.
+> **Python Edition** — FastAPI + APScheduler + TA-Lib + Svelte 5
+> A **virtual trading and training laboratory**: an autonomous system that
+> discovers opportunities, forms theses, sizes them, executes them
+> realistically in simulation, manages and exits them, accounts for every
+> cost, and measures which part of its own decision process created or
+> destroyed alpha.
+
+## Current project phase — read this first
+
+**JARVIS IS NOT A LIVE-TRADING PLATFORM TODAY.** It runs in
+`JARVIS_PLATFORM_MODE=VIRTUAL_ONLY`, and real order submission is refused
+at the boundary rather than merely discouraged. That is the current
+platform *state*, not a fault or a missing feature.
+
+Two execution environments, both simulated:
+
+| | |
+|---|---|
+| **Virtual CEX** | equities, ETFs, futures, commodities, FX, crypto spot and perpetuals |
+| **Virtual DEX** | on-chain swaps, AMM pools, routed multi-hop trades |
+
+**Kraken Pro is the primary real-world target venue** — the economics
+JARVIS trains against are the ones it expects to meet. **Alpaca is a
+high-value market-data source** (SIP consolidated tape), not the primary
+execution destination. Live connectors are architected and dormant: the
+`KrakenAdapter` is declared and deliberately unimplemented, so enabling
+live execution later changes the adapter and nothing above it.
+
+The governing rule of the whole build:
+
+> **The bot must never make money because the simulator is wrong.**
+> If something cannot be modelled confidently, `UNKNOWN` / `UNAVAILABLE` /
+> `ESTIMATED` is the correct answer — never fabricated precision.
+
+Historical note: earlier versions of this README described a live-first
+system with "a parallel paper trading engine for shorts and leverage" and
+a "Real vs Paper" dashboard. That was a different project phase. Routing is
+no longer decided by a `paper_mode` boolean; see `lib/platform_mode.py`,
+`lib/execution_venue.py` and `docs/PLAN_STATUS.md`.
 
 ---
 

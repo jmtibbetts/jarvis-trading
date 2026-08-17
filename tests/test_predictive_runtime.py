@@ -223,9 +223,34 @@ class DevicePolicyTests(unittest.TestCase):
         self.assertEqual(policy.preferred_device("meta_filter"), policy.CPU)
         self.assertEqual(policy.preferred_device("execution"), policy.CPU)
 
-    def test_background_models_run_on_the_npu(self):
-        self.assertEqual(policy.preferred_device("path_intraday"), policy.NPU)
-        self.assertEqual(policy.preferred_device("state_encoder"), policy.NPU)
+    def test_background_models_default_to_cpu_like_everything_else(self):
+        """CPU IS THE REQUIRED BASELINE.
+
+        This asserted NPU. On the supported runtime (WSL2 / Ubuntu 24.04)
+        OpenVINO enumerates ['CPU'] only, so that default sent every
+        background model down the FALLBACK path and emitted a "device NPU
+        unavailable" warning to arrive at the placement it was always
+        going to use. Reaching the normal case through a warning is not a
+        default.
+        """
+        for m in ("path_intraday", "state_encoder", "outcome_15m"):
+            self.assertEqual(policy.preferred_device(m), policy.CPU, m)
+
+    def test_the_npu_is_still_reachable_by_explicit_override(self):
+        """Optional, not removed. On hardware that has one the NPU is
+        still the right device for sustained background work — it absorbs
+        that work at no cost to the cores the trading loop needs. It is
+        now opt-in rather than assumed."""
+        import os
+        key = "PREDICTIVE_DEVICE_PATH_INTRADAY"
+        prior = os.environ.get(key)
+        try:
+            os.environ[key] = "NPU"
+            self.assertEqual(policy.preferred_device("path_intraday"), policy.NPU)
+        finally:
+            os.environ.pop(key, None)
+            if prior is not None:
+                os.environ[key] = prior
 
     def test_the_fallback_is_always_cpu(self):
         for m in ("path_intraday", "meta_filter", "unknown_model"):

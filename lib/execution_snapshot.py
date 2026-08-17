@@ -241,6 +241,69 @@ def _from_orderbook_stream(exchange: str, symbol: str,
     return snap
 
 
+def _from_alpaca_equity(symbol: str,
+                        snap: ExecutionMarketSnapshot) -> ExecutionMarketSnapshot:
+    """US equities, from Alpaca's MARKET DATA client.
+
+    READ-ONLY BY CONSTRUCTION, not by promise. `StockHistoricalDataClient`
+    is a data client: it has no order surface at all. The order-capable
+    `TradingClient` is a different class in a different module and is
+    deliberately not imported here — "we promise not to call submit_order"
+    is not a safety property.
+
+    The API was confirmed against the INSTALLED SDK rather than from
+    memory: get_stock_latest_quote(StockLatestQuoteRequest) returns a Quote
+    carrying bid_price, ask_price, bid_size, ask_size and timestamp. That
+    is a genuine two-sided executable quote, which is what closes the
+    equity gap — the previous mark chain (Alpaca last, MarketAsset row,
+    yfinance) could only ever answer "what is it worth".
+
+    Depth: Alpaca's latest-quote endpoint carries top-of-book SIZES but no
+    book. Sizes are recorded; depth stays None.
+    """
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockLatestQuoteRequest
+
+    from lib.alpaca_client import get_alpaca_creds
+
+    key, secret, _paper = get_alpaca_creds()
+    if not key or not secret:
+        snap.reason = "no Alpaca credentials configured for market data"
+        return snap
+
+    client = StockHistoricalDataClient(key, secret)
+    quotes = client.get_stock_latest_quote(
+        StockLatestQuoteRequest(symbol_or_symbols=symbol))
+    q = (quotes or {}).get(symbol) or (quotes or {}).get(symbol.upper())
+    if q is None:
+        snap.reason = f"Alpaca returned no quote for {symbol}"
+        return snap
+
+    snap.bid = _f(getattr(q, "bid_price", None))
+    snap.ask = _f(getattr(q, "ask_price", None))
+    snap.bid_size = _f(getattr(q, "bid_size", None))
+    snap.ask_size = _f(getattr(q, "ask_size", None))
+    snap.source = "alpaca.get_stock_latest_quote"
+    ts = getattr(q, "timestamp", None)
+    if ts is not None:
+        try:
+            snap.venue_event_at = ts.isoformat()
+            snap.age_ms = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() * 1000.0)
+        except Exception:
+            pass
+
+    # Top-of-book sizes are not a book. Depth stays unavailable.
+    snap.depth = None
+    snap.depth_status = UNAVAILABLE
+    snap.provenance["depth_note"] = (
+        "Alpaca latest-quote carries top-of-book sizes only; no L2 book")
+    if snap.bid_size is not None and snap.ask_size is not None:
+        tot = snap.bid_size + snap.ask_size
+        if tot > 0:
+            snap.imbalance = round((snap.bid_size - snap.ask_size) / tot, 6)
+    return snap
+
+
 def _f(v):
     try:
         return None if v is None else float(v)
@@ -253,6 +316,7 @@ def _f(v):
 # an invitation to borrow another venue's.
 _READERS = {
     "kraken": lambda sym, snap: _from_kraken(sym, snap),
+    "alpaca": lambda sym, snap: _from_alpaca_equity(sym, snap),
     "binance": lambda sym, snap: _from_orderbook_stream("binance", sym, snap),
     "binanceus": lambda sym, snap: _from_orderbook_stream("binance", sym, snap),
     "coinbase": lambda sym, snap: _from_orderbook_stream("coinbase", sym, snap),

@@ -67,10 +67,11 @@ class VenueAuthorityIsNotShareableTests(unittest.TestCase):
         self.assertEqual((snap.bid, snap.ask), (99.9, 100.3))
 
     def test_an_unknown_venue_gets_a_refusal_not_someone_elses_book(self):
-        """Alpaca has no execution-data authority here. The old default."""
+        """A venue with no reader must not inherit one. Kraken is streaming
+        a perfectly good quote here and the answer is still a refusal."""
         with patch("lib.kraken_stream.latest_quote",
                    return_value={"bid": 100.0, "ask": 100.2, "at": _at(0.1)}):
-            snap = ES.execution_market_snapshot("BTC/USD", "alpaca")
+            snap = ES.execution_market_snapshot("BTC/USD", "bitfinex")
         self.assertEqual(snap.status, ES.UNAVAILABLE)
         self.assertIsNone(snap.bid)
         self.assertIsNone(snap.ask)

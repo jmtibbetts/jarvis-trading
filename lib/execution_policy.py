@@ -17,16 +17,22 @@ WHAT THE AUDIT FOUND, and why most of this file is refusals.
 
 The paper book is not crypto-only — 487 crypto, 94 equity and 86 futures
 positions are open right now. But `jobs/paper_trading._get_current_price()`
-resolves through Alpaca's last price, a MarketAsset row, then a yfinance
-futures cache. Every one of those is a MARK. None is a two-sided executable
-quote, and the repository contains no Alpaca equity bid/ask path at all
-(only an options-snapshot quote, which is a different product).
+resolved through Alpaca's last price, a MarketAsset row, then a yfinance
+futures cache. Every one of those is a MARK, and none can answer what an
+order would have filled at.
 
-So today exactly one product can be filled honestly:
+The equity gap has since been CLOSED from an already-configured provider:
+alpaca-py's StockHistoricalDataClient exposes get_stock_latest_quote, which
+returns bid_price/ask_price/sizes/timestamp. That API was confirmed by
+introspecting the INSTALLED SDK rather than recalled, and it lives on a data
+client with no order surface at all.
+
+Futures and forex remain mark-only — no configured provider here offers them
+a two-sided executable quote:
 
     PRODUCT   VENUE     MARK SOURCE            EXECUTABLE QUOTE      FILLABLE
     crypto    kraken    Alpaca/DB last         kraken_stream bid/ask  YES
-    equity    alpaca    Alpaca/DB last         none                   NO
+    equity    alpaca    Alpaca/DB last         alpaca latest_quote    YES
     futures   -         yfinance last          none                   NO
     forex     -         yfinance last          none                   NO
 
@@ -59,7 +65,7 @@ ONE_SIDED_BOOK            = "ONE_SIDED_BOOK"
 # Products whose execution venue has a real two-sided quote feed wired up.
 # Adding a member here is a claim that lib/execution_snapshot can produce an
 # AVAILABLE snapshot for it — nothing else belongs in this set.
-_FILLABLE_PRODUCTS = frozenset({"crypto"})
+_FILLABLE_PRODUCTS = frozenset({"crypto", "equity"})
 
 
 def classify_product(symbol: str, asset_class: str | None = None) -> str:

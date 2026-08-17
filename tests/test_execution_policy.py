@@ -2,13 +2,13 @@
 
 The paper book is not crypto-only: 487 crypto, 94 equity and 86 futures
 positions are open. But `_get_current_price()` resolves through Alpaca's last
-price, a MarketAsset row, then a yfinance futures cache — three MARKS, no
-executable quote anywhere, and the repository has no Alpaca equity bid/ask
-path at all.
+price, a MarketAsset row, then a yfinance futures cache — three MARKS, none
+of which can answer what an order would have filled at.
 
-So `PAPER_VENUE=kraken` must not become "route AAPL, ES=F and EURUSD=X
-through Kraken", and a last price must not become a fill for any of them.
-Refusing the entry is the correct outcome of that gap.
+Equities are now served by Alpaca's real two-sided latest-quote endpoint.
+Futures and forex are not, and `PAPER_VENUE=kraken` must never become "route
+AAPL, ES=F and EURUSD=X through Kraken". A last price must not become a fill
+for any of them; refusing the entry is the correct outcome of that gap.
 
 These tests pin the refusals, because the refusals are the safety property.
 """
@@ -68,14 +68,47 @@ class OnlyWhatCanBeFilledHonestlyIsFillableTests(unittest.TestCase):
         self.assertEqual(r.venue, "kraken")
         self.assertEqual(r.snapshot.status, ES.AVAILABLE)
 
-    def test_equities_are_refused_for_want_of_a_quote_not_of_a_venue(self):
-        """Alpaca is where an equity WOULD execute. It has no bid/ask feed
-        here, so the refusal names the missing quote, not a missing venue."""
-        r = P.execution_readiness("AAPL", "us_equity")
+    def test_equities_fill_from_alpacas_two_sided_quote(self):
+        """The gap CLOSED this pass. alpaca-py's data client exposes
+        get_stock_latest_quote, which carries bid_price/ask_price/timestamp
+        — a genuine executable quote, not the last price the mark chain had.
+        Confirmed against the INSTALLED SDK, not from memory."""
+        class _Q:
+            bid_price, ask_price = 190.10, 190.14
+            bid_size, ask_size = 300.0, 200.0
+            timestamp = _at(0.3)
+
+        with patch("lib.alpaca_client.get_alpaca_creds",
+                   return_value=("k", "s", True)),              patch("alpaca.data.historical.StockHistoricalDataClient") as C:
+            C.return_value.get_stock_latest_quote.return_value = {"AAPL": _Q()}
+            r = P.execution_readiness("AAPL", "us_equity")
+        self.assertTrue(r.ok, r.detail)
+        self.assertEqual(r.venue, "alpaca")
+        self.assertEqual((r.snapshot.bid, r.snapshot.ask), (190.10, 190.14))
+
+    def test_equities_without_credentials_refuse_rather_than_guess(self):
+        with patch("lib.alpaca_client.get_alpaca_creds", return_value=("", "", True)):
+            r = P.execution_readiness("AAPL", "us_equity")
         self.assertFalse(r.ok)
         self.assertEqual(r.venue, "alpaca")
-        self.assertEqual(r.reason, P.NO_EXECUTABLE_QUOTE)
-        self.assertIn("MARK AUTHORITY", r.detail)
+        self.assertEqual(r.reason, P.EXECUTION_DATA_UNAVAILABLE)
+
+    def test_the_equity_adapter_cannot_place_an_order(self):
+        """READ-ONLY BY CONSTRUCTION. The order-capable TradingClient is a
+        different class in a different module, and is not imported here —
+        "we promise not to call submit_order" is not a safety property."""
+        import ast
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent
+               / "lib" / "execution_snapshot.py").read_text(encoding="utf-8")
+        imported = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.ImportFrom):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+        self.assertNotIn("TradingClient", imported)
+        self.assertIn("StockHistoricalDataClient", imported)
 
     def test_futures_have_no_simulated_venue_at_all(self):
         r = P.execution_readiness("ES=F", "Futures")
@@ -141,16 +174,16 @@ class VenueFailuresAreNotThesisFailuresTests(unittest.TestCase):
 
 class TheFillableSetIsAClaimAboutWiringTests(unittest.TestCase):
 
-    def test_only_crypto_claims_a_quote_feed_today(self):
+    def test_the_fillable_set_is_exactly_what_has_a_quote_reader(self):
         """Adding a product here asserts execution_snapshot can produce an
-        AVAILABLE snapshot for it. Nothing else may be added silently."""
-        self.assertEqual(set(P._FILLABLE_PRODUCTS), {"crypto"})
+        AVAILABLE snapshot for it. Nothing may be added silently."""
+        self.assertEqual(set(P._FILLABLE_PRODUCTS), {"crypto", "equity"})
 
     def test_every_fillable_product_has_a_venue_reader(self):
         import os
         with patch.dict(os.environ, {"PAPER_VENUE": "kraken"}):
             for product in P._FILLABLE_PRODUCTS:
-                sym = {"crypto": "BTC/USD"}[product]
+                sym = {"crypto": "BTC/USD", "equity": "AAPL"}[product]
                 venue, _ = P.resolve_execution_venue(sym, product)
                 with self.subTest(product=product):
                     self.assertIn(venue, ES._READERS,

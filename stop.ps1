@@ -22,7 +22,25 @@ foreach ($processId in ($listeners.OwningProcess | Sort-Object -Unique)) {
 
     $commandLine = [string]$process.CommandLine
     $executable = [string]$process.ExecutablePath
-    $isJarvis = $commandLine -match '(^|\s|["''])main\.py(["'']|\s|$)' -and (
+
+    # THIS COULD NEVER MATCH A REAL COMMAND LINE.
+    #
+    # The old test was:
+    #
+    #     $commandLine -match '(^|\s|["''])main\.py(["'']|\s|$)'
+    #
+    # which requires main.py to be preceded by start-of-string, whitespace
+    # or a quote. The actual command line is
+    #
+    #     "...\python.exe" C:\jarvis-trading-ai-python\main.py
+    #
+    # where main.py is preceded by a BACKSLASH, so the pattern never
+    # matched and this script always reported "belongs to another
+    # application" and refused to stop JARVIS at all.
+    #
+    # A path separator is a legitimate boundary. Allow it, and keep the
+    # root check so nothing outside this repository is ever killed.
+    $isJarvis = $commandLine -match '(^|\s|["''\\/])main\.py(["'']|\s|$)' -and (
         $executable.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
         $commandLine.IndexOf($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
     )

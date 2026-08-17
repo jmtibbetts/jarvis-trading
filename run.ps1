@@ -89,6 +89,30 @@ function Start-Jarvis([bool]$Attached) {
         exit 1
     }
 
+    # REFUSE A SECOND JARVIS ON A DIFFERENT INTERPRETER.
+    #
+    # Observed on this machine: main.py running under the Microsoft Store
+    # Python (C:\Program Files\WindowsApps\PythonSoftwareFoundation...)
+    # alongside the venv one. A bare `python main.py` from any shell where
+    # `python` hits the Store shim starts a second server that binds the
+    # port and writes the SAME SQLite database as the first — which is how
+    # `database is locked` and half-written state happen.
+    #
+    # NOTE: native Windows Python is no longer the supported runtime. This
+    # guard exists so the Windows copy stays usable as an EMERGENCY
+    # ROLLBACK environment, not because it is being maintained.
+    $others = @(Get-CimInstance Win32_Process -Filter "Name like '%python%'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine.IndexOf('main.py', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $_.CommandLine.IndexOf($Root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+    if ($others.Count -gt 0) {
+        Write-Step "JARVIS is already running (PID $($others.ProcessId -join ', '))." 'Red'
+        Write-Step "Two servers on one SQLite database corrupt state. Use .\run.ps1 -Stop first." 'Yellow'
+        exit 1
+    }
+
     if ($Attached) {
         Write-Step "Starting attached - Ctrl+C to stop." 'Green'
         & $VenvPython (Join-Path $Root "main.py")

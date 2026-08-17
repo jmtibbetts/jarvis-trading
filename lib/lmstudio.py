@@ -375,8 +375,17 @@ class _EmptyThinkingResponse(RuntimeError):
 
 # ── Concurrency limiter — LM Studio supports N parallel inference slots ─────
 # BoundedSemaphore(4) allows 4 concurrent LLM calls, matching LM Studio's 4-slot config.
-# Increase LLM_MAX_PARALLEL env var to match your LM Studio "Parallel Requests" setting.
-_LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", "1"))
+# THE DEFAULT IS 4, MATCHING THE SUPPORTED PROFILE AND .env.example.
+#
+# It was 1, while the docstring at the top of this module advertised a
+# "4-slot parallel semaphore". The measured peak of 4 came entirely from the
+# operator's own .env, so the documented behaviour and the shipped
+# behaviour disagreed and only a local file reconciled them. A fresh
+# install got silent full serialisation and no error to explain it.
+#
+# Keep this equal to LM Studio's "Parallel Requests" setting.
+LLM_DEFAULT_MAX_PARALLEL = 4
+_LLM_MAX_PARALLEL = int(os.getenv("LLM_MAX_PARALLEL", str(LLM_DEFAULT_MAX_PARALLEL)))
 _llm_lock = threading.BoundedSemaphore(_LLM_MAX_PARALLEL)
 
 # ── Model auto-resolution cache ───────────────────────────────────────────────

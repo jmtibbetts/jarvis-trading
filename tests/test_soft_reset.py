@@ -38,7 +38,7 @@ def assert_disposable_database():
     to that guard turns these tests red instead of destructive."""
     from app.database import DB_PATH
     resolved = str(DB_PATH)
-    if "jarvis-test-db-" not in resolved and os.getenv("JARVIS_ALLOW_OPERATOR_DB") != "1":
+    if "jarvis-test-db-" not in resolved:
         raise AssertionError(
             f"refusing to run a mutating reset against {resolved} - "
             "expected a temporary pytest database")

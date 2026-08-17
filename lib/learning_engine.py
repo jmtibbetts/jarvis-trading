@@ -742,11 +742,22 @@ def record_trade_outcome(
         # class.
         if realized is not None:
             pnl_usd = float(getattr(realized, "net_pnl_usd", 0.0))
-            pnl_pct = float(getattr(realized, "net_r", 0.0) or 0.0) * 100.0
-            if not pnl_pct and entry_price:
-                notional = abs(float(entry_price) * float(qty or 0)
-                               * float(getattr(realized, "multiplier", 1.0) or 1.0))
-                pnl_pct = (pnl_usd / notional * 100.0) if notional else 0.0
+            # R IS NOT PERCENT.
+            #
+            # This read `net_r * 100` — a different unit wearing the same
+            # column. $50 of profit on $100 of initial risk is +0.5R;
+            # calling that "+50%" asserts a denominator nobody supplied.
+            # The fallback beneath it then guessed NOTIONAL, while the paper
+            # book's own contract is ROI on COMMITTED MARGIN. One field
+            # could therefore hold any of three incompatible numbers
+            # depending on which branch ran, with nothing downstream able to
+            # tell which — and every one of them fed pattern memory.
+            #
+            # The producer now states the percentage AND its basis. When it
+            # does not, this records NULL: an unknown percentage is not
+            # zero, and it is certainly not the R-multiple.
+            _pct = getattr(realized, "net_return_pct", None)
+            pnl_pct = float(_pct) if _pct is not None else None
             outcome = getattr(realized, "outcome", "BREAKEVEN")
         else:
             # LEGACY CALLERS ONLY. Same shape as before, but strict on side
@@ -804,7 +815,11 @@ def record_trade_outcome(
                 "id": row_id, "signal_id": signal_id, "symbol": symbol,
                 "asset_class": asset_class, "direction": direction, "timeframe": timeframe,
                 "entry_price": entry_price, "exit_price": exit_price, "qty": qty,
-                "pnl_usd": round(pnl_usd, 4), "pnl_pct": round(pnl_pct, 4),
+                "pnl_usd": round(pnl_usd, 4),
+                # NULL rather than 0.0 when the producer did not state a
+                # basis. A stored zero would read as "this trade returned
+                # nothing", which is a measurement, not an absence.
+                "pnl_pct": (round(pnl_pct, 4) if pnl_pct is not None else None),
                 "outcome": outcome, "exit_reason": exit_reason,
                 "hold_duration_m": round(hold_duration_m, 1) if hold_duration_m else None,
                 "signal_confidence": signal_confidence, "signal_score": signal_score,
@@ -823,7 +838,18 @@ def record_trade_outcome(
             if ta_profile:
                 try:
                     fp, desc = _fingerprint_ta(ta_profile, direction)
-                    _update_pattern_memory(fp, desc, asset_class, timeframe, outcome, pnl_pct, conn)
+                    # Pattern memory keeps a running AVERAGE of pnl_pct.
+                    # Feeding it a placeholder zero for an unknown return
+                    # would drag every pattern's average toward zero and
+                    # look like evidence of a flat edge. Skip instead: the
+                    # WIN/LOSS outcome is still recorded above.
+                    if pnl_pct is None:
+                        logger.debug(
+                            "[Learning] %s: no stated return basis, so pattern "
+                            "memory keeps its outcome but not a percentage", symbol)
+                    else:
+                        _update_pattern_memory(fp, desc, asset_class, timeframe,
+                                               outcome, pnl_pct, conn)
                 except Exception as e:
                     logger.warning(f"[Learning-T3] pattern update failed: {e}")
 

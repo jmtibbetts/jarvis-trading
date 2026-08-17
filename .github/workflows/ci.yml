@@ -229,27 +229,41 @@ jobs:
           init_db(); print('second init ok — migrations are idempotent')
           "
 
-  # ── Supply chain and secrets ───────────────────────────────────────────
-  security:
-    name: dependency + secret scan
+  # ── Supply chain: ADVISORY BY POLICY ───────────────────────────────────
+  # A new upstream CVE should not block an unrelated commit, but it must be
+  # visible rather than silent. This is the only job allowed to be soft.
+  dependency_audit:
+    name: dependency audit (advisory)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Advisory: a new upstream CVE should not block an unrelated commit,
-    # but it must be visible rather than silent.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0        # gitleaks needs history to scan diffs
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Known vulnerabilities in dependencies
         run: |
           pip install pip-audit
           pip-audit -r requirements.txt --desc || true
 
+  # ── Secrets: FAIL CLOSED ───────────────────────────────────────────────
+  # These were ONE job, and `continue-on-error: true` was written for the
+  # CVE audit — but a job-level flag does not distinguish between its steps,
+  # so it also neutralised the secret scan. A committed key made the job
+  # amber and the required check green, which is the precise shape of a
+  # control that reports without protecting.
+  #
+  # Split. The audit above may be advisory; a committed secret turns this
+  # check RED, and there is deliberately no continue-on-error here.
+  secret_scan:
+    name: secret scan (fail-closed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # gitleaks needs history to scan diffs
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:

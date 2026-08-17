@@ -35,7 +35,13 @@ if not os.getenv("JARVIS_DB_PATH", "").strip():
 # pins resolution to a port nothing listens on. Port 9 is DISCARD: the
 # connection is refused immediately rather than timing out. Tests that need
 # LLM behaviour patch it; tests that do not must never find one.
-os.environ.setdefault("LM_STUDIO_URL", "http://127.0.0.1:9/v1")
+# FORCED, not setdefault. setdefault leaves an INHERITED value in place, so
+# an operator shell that already exports LM_STUDIO_URL=<real LM Studio>
+# handed it straight to pytest and the "pin" pinned nothing. The whole point
+# is that no hermetic test can reach a real model, and that cannot depend on
+# what the invoking shell happens to contain. Tests that need endpoint
+# behaviour monkeypatch it AFTER this bootstrap.
+os.environ["LM_STUDIO_URL"] = "http://127.0.0.1:9/v1"
 
 # The raw-event store (Phase 3) is a separate file with the same rule: a
 # test run must never append to the operator's event log.
@@ -48,7 +54,7 @@ def pytest_configure(config):
     """Create the full schema once per session, exactly as the app would."""
     from app.database import DB_PATH, init_db
 
-    assert "jarvis-test-db-" in str(DB_PATH) or os.getenv("JARVIS_ALLOW_OPERATOR_DB") == "1", (
+    assert "jarvis-test-db-" in str(DB_PATH), (
         f"test session resolved to unexpected DB: {DB_PATH}"
     )
     init_db()

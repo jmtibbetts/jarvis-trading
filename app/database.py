@@ -27,19 +27,31 @@ def _resolve_db_path() -> Path:
       - JARVIS_DB_PATH overrides the location (tests point it at a temp
         dir; deployments may relocate the data directory).
       - Under pytest (JARVIS_UNDER_PYTEST, set by conftest.py before any
-        app import), resolving to the operator database is a hard error
-        unless JARVIS_ALLOW_OPERATOR_DB=1 is set EXPLICITLY — the
-        integration-test escape hatch, never a default.
+        app import), resolving to the operator database is a hard error.
+        FULL STOP. There is no escape hatch.
+
+    THE ESCAPE HATCH IS GONE. JARVIS_ALLOW_OPERATOR_DB=1 used to permit it
+    "for explicit integration runs". Given that a test has already reset the
+    live paper book, a probe has already deleted a dex_portfolios row, and
+    fixture rows have already leaked into live candidate tables, the
+    invariant is now unconditional: TESTS DO NOT TOUCH THE OPERATOR
+    DATABASE. Not "unless one environment variable says they may" — an
+    inherited variable is exactly how the previous incidents happened.
+
+    An integration test that needs production-shaped data takes a SQLite
+    backup copy (scripts/run_dev_copy.py). An operator who wants to inspect
+    production uses a read-only connection outside pytest.
     """
     override = os.getenv("JARVIS_DB_PATH", "").strip()
     path = Path(override) if override else _OPERATOR_DB
     under_pytest = os.getenv("JARVIS_UNDER_PYTEST") == "1"
-    allowed = os.getenv("JARVIS_ALLOW_OPERATOR_DB") == "1"
-    if under_pytest and not allowed and path.resolve() == _OPERATOR_DB.resolve():
+    if under_pytest and path.resolve() == _OPERATOR_DB.resolve():
         raise RuntimeError(
-            "Refusing to open the operator database under pytest. "
-            "conftest.py should have pointed JARVIS_DB_PATH at a temp dir; "
-            "set JARVIS_ALLOW_OPERATOR_DB=1 only for explicit integration runs."
+            "Refusing to open the operator database under pytest. This is "
+            "unconditional: JARVIS_ALLOW_OPERATOR_DB no longer grants an "
+            "exception, because an inherited environment variable is how the "
+            "previous incidents happened. Point JARVIS_DB_PATH at a temp dir "
+            "(conftest.py does), or take a copy with scripts/run_dev_copy.py."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     return path

@@ -1,5 +1,5 @@
 """
-Jarvis Trading AI — Python Edition v6.8
+Jarvis Trading AI — Python Edition (version: app/version.py)
 FastAPI + APScheduler + SQLAlchemy + TA-Lib
 Run: python main.py
 """
@@ -7,6 +7,7 @@ import asyncio, os, logging, sys, threading, time, signal, math
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextlib import asynccontextmanager
+from app.version import VERSION
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -193,7 +194,10 @@ async def lifespan(app_: FastAPI):
 
 app = FastAPI(
     title="Jarvis Trading AI",
-    version="6.7.0",
+    # ONE VERSION SOURCE. app/version.py said 8.0.0 while this said 6.7.0
+    # and the banner said 6.7 — three answers to "what is running", which
+    # is the question a frontend compatibility handshake has to rely on.
+    version=VERSION,
     lifespan=lifespan,
     default_response_class=SafeJSONResponse,
 )
@@ -331,7 +335,7 @@ async def no_cache_html(request, call_next):
 def print_banner():
     port = int(os.getenv('PORT', 3000))
     print("\n" + "═"*65)
-    print("  🤖  JARVIS TRADING AI  v6.7  (Python Edition)")
+    print(f"  🤖  JARVIS TRADING AI  v{VERSION}  (Python Edition)")
     print("═"*65)
     print(f"  Dashboard:  http://localhost:{port}")
     print(f"  API docs:   http://localhost:{port}/docs")

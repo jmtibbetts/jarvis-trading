@@ -106,8 +106,17 @@ def _r_of(entry, stop, exit_price, direction) -> float | None:
     risk = abs(entry - stop)
     if risk <= 0:
         return None
-    short = str(direction or "").lower().startswith("short")
-    move = (entry - exit_price) if short else (exit_price - entry)
+    # MISSING IS NOT LONG. `startswith("short")` turned a missing or
+    # unparseable direction into False, which is indistinguishable from a
+    # known long — so an outcome whose side nobody recorded was booked with
+    # the sign of a long, and a winning short entered the learning ledger as
+    # a loss. The strict parser returns None instead, and an R that cannot
+    # be computed is not computed.
+    from lib.trade_side import SHORT, parse_side_strict
+    side = parse_side_strict(direction)
+    if side is None:
+        return None
+    move = (entry - exit_price) if side == SHORT else (exit_price - entry)
     return move / risk
 
 
@@ -267,7 +276,17 @@ def evaluate(signal: dict, *, hold_hours: float | None = None,
     entry = _f(signal.get("entry_price"))
     stop = _f(signal.get("stop_loss"))
     direction = signal.get("direction")
-    is_short = str(direction or "").lower().startswith("short")
+    # The same rule on the pricing side. Costs are asymmetric between long
+    # and short (borrow, funding, the side of the spread crossed), so
+    # guessing "not short means long" prices an unknown position as a long
+    # and can only be right by luck. UNKNOWN STAYS UNKNOWN.
+    from lib.trade_side import SHORT, parse_side_strict
+    _side = parse_side_strict(direction)
+    if _side is None:
+        return {"verdict": "UNKNOWN", "expectancy": None, "costs": None, "net": None,
+                "reason": f"direction {direction!r} is unreadable — an unknown "
+                          f"side cannot be priced"}
+    is_short = _side == SHORT
 
     stats = lookup(signal.get("strategy"), signal.get("asset_class"),
                    direction, signal.get("timeframe"))

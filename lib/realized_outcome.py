@@ -124,6 +124,23 @@ class RealizedOutcome:
     gross_r: float | None = None
     net_r: float | None = None
 
+    # ── Percentage return, and WHAT IT IS A PERCENTAGE OF ────────────────
+    #
+    # R IS NOT PERCENT. Learning derived `pnl_pct` as `net_r * 100`, which
+    # is true only by coincidence: $50 of profit on $100 of initial risk is
+    # +0.5R, and calling that "+50%" asserts a denominator nobody stated.
+    # On a leveraged paper position the established contract is ROI on
+    # COMMITTED MARGIN (lib/paper_engine: raw_pnl / margin * 100) — a
+    # different number — and the fallback that guessed NOTIONAL produced a
+    # third. Three units, one field, no way to tell them apart afterwards.
+    #
+    # So the producer states the number AND its basis, or states neither. A
+    # percentage whose denominator is unknown is not a percentage, and
+    # MISSING IS NOT ZERO.
+    gross_return_pct: float | None = None
+    net_return_pct: float | None = None
+    return_pct_basis: str | None = None    # MARGIN | NOTIONAL | EQUITY
+
     outcome: str = BREAKEVEN
     exit_reason: str | None = None
 

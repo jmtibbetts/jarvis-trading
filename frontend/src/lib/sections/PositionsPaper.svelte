@@ -10,8 +10,26 @@
 
   const feeds = new FeedTracker();
 
-  type Account = "live" | "paper" | "autosim";
-  let account = $state<Account>("live");
+  /**
+   * The tabs were Live / Paper / Auto Sim — a LIVE-FIRST hierarchy from a
+   * phase this platform is no longer in. The labels now say what each book
+   * actually is, and "All books" leads because it is the question the page
+   * is named after: exposure is a property of the portfolio, not of
+   * whichever account happens to be selected.
+   *
+   * Each book is still here rather than moved, because closing a position
+   * must not require finding the right page first. TRADING them lives on
+   * the Virtual CEX and Shadow Lab surfaces; this page is where you look at
+   * what you are holding across all of them.
+   */
+  type Account = "all" | "live" | "paper" | "autosim";
+  let account = $state<Account>("all");
+
+  const BOOK_LABEL: Record<"live" | "cex" | "shadow", string> = {
+    live: "Live",
+    cex: "Virtual CEX",
+    shadow: "Shadow",
+  };
 
   let live = $state<{ positions: PositionWithSignal[]; account: { equity: number; cash: number; unrealized_pl: number } } | null>(null);
   let paper = $state<PaperSummary | null>(null);
@@ -90,19 +108,101 @@
       .finally(() => { sizerBusy = false; });
   });
 
+  /**
+   * EVERY OPEN POSITION, EVERY BOOK, ONE LIST.
+   *
+   * The page is called Accounts & Exposure and the tabs showed one account
+   * at a time, so "what am I actually holding" needed three clicks and a
+   * memory. This is the answer to the question the page is named after —
+   * and it is also what the exposure arithmetic below consumes, so the
+   * summary and the table cannot disagree about what is open.
+   */
+  type BookRow = {
+    book: "live" | "cex" | "shadow";
+    symbol: string;
+    asset_class: string;
+    direction: "long" | "short";
+    qty: number;
+    entry: number | null;
+    current: number | null;
+    stop: number | null;
+    value: number;
+    pnl: number | null;
+  };
+  const allPositions = $derived.by(() => {
+    const rows: BookRow[] = [];
+    if (live) for (const p of live.positions)
+      rows.push({
+        book: "live", symbol: p.symbol, asset_class: p.asset_class,
+        direction: p.side === "short" ? "short" : "long", qty: p.qty,
+        entry: p.avg_entry_price, current: p.current_price,
+        stop: p.signal?.stop_loss ?? null,
+        value: Math.abs(p.market_value), pnl: p.unrealized_pl,
+      });
+    if (paper) for (const p of paper.positions)
+      rows.push({
+        book: "cex", symbol: p.symbol, asset_class: p.asset_class,
+        direction: p.side === "short" ? "short" : "long", qty: p.qty,
+        entry: p.entry_price, current: p.current_price, stop: p.stop_loss,
+        value: Math.abs(p.qty * p.current_price), pnl: p.unrealized_pnl,
+      });
+    if (autosim) for (const p of autosim.positions)
+      rows.push({
+        book: "shadow", symbol: p.symbol,
+        asset_class: p.asset_class ?? "unknown",
+        direction: String(p.direction ?? "").toLowerCase().startsWith("short") ? "short" : "long",
+        qty: p.qty, entry: p.entry_price, current: p.current_price,
+        stop: p.stop_loss,
+        value: Math.abs(p.market_value ?? p.notional ?? (p.qty * (p.current_price ?? p.entry_price))),
+        pnl: p.unrealized_pnl,
+      });
+    return rows.sort((a, b) => b.value - a.value);
+  });
+
+  const bookEquity = $derived<Record<"live" | "cex" | "shadow", number>>({
+    live: live?.account.equity ?? 0,
+    cex: paper?.portfolio.equity ?? 0,
+    shadow: autosim?.summary.equity ?? 0,
+  });
+
+  /**
+   * CONCENTRATION IS MEASURED AGAINST THE BOOK THAT HOLDS THE POSITION.
+   *
+   * The Shadow book was missing from both sides of this — its positions
+   * absent from the numerator, its equity from the denominator — so a page
+   * titled Accounts & Exposure was measuring two accounts out of three.
+   *
+   * The obvious repair, adding shadow equity to one combined denominator,
+   * is worse than the bug. Shadow currently holds $100k of idle cash and
+   * no positions; pooling it would have made every real position read a
+   * third smaller than it is. That is the flattering direction, and
+   * understated exposure is the defect this page exists to catch — per
+   * position risk was correctly bounded while exposure was not.
+   *
+   * So each position is a percentage of ITS OWN book, which is the same
+   * model the concentration guard uses, and the combined figures below are
+   * labelled as sums rather than as a portfolio percentage.
+   */
   const exposure = $derived.by(() => {
-    type Row = { symbol: string; asset_class: string; direction: "long" | "short"; value: number; book: "live" | "paper" };
-    const rows: Row[] = [];
-    if (live) for (const p of live.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.market_value), book: "live" });
-    if (paper) for (const p of paper.positions) rows.push({ symbol: p.symbol, asset_class: p.asset_class, direction: p.side === "short" ? "short" : "long", value: Math.abs(p.qty * p.current_price), book: "paper" });
-    const totalEquity = (live?.account.equity ?? 0) + (paper?.portfolio.equity ?? 0);
+    const rows = allPositions;
+    const eq = bookEquity;
+    const totalEquity = eq.live + eq.cex + eq.shadow;
     const byClass = new Map<string, number>();
     let long = 0, short = 0;
     for (const r of rows) {
       byClass.set(r.asset_class, (byClass.get(r.asset_class) ?? 0) + r.value);
       if (r.direction === "short") short += r.value; else long += r.value;
     }
-    const topConcentration = rows.length ? rows.reduce((max, r) => (r.value > max.value ? r : max), rows[0]) : null;
+    // Ranked by share OF ITS OWN BOOK, not by dollar size. A $25k position
+    // in a $200k book and a $25k position in a $50k book are the same
+    // number and not the same risk.
+    const scored = rows.map((r) => ({
+      ...r,
+      pctOfBook: bookEquity[r.book] ? (r.value / bookEquity[r.book]) * 100 : 0,
+    }));
+    const topConcentration = scored.length
+      ? scored.reduce((max, r) => (r.pctOfBook > max.pctOfBook ? r : max), scored[0])
+      : null;
     return {
       totalEquity,
       byClass: [...byClass.entries()]
@@ -111,31 +211,31 @@
       long, short,
       longPct: totalEquity ? (long / totalEquity) * 100 : 0,
       shortPct: totalEquity ? (short / totalEquity) * 100 : 0,
-      topConcentration: topConcentration ? { symbol: topConcentration.symbol, book: topConcentration.book, pct: totalEquity ? (topConcentration.value / totalEquity) * 100 : 0 } : null,
+      topConcentration: topConcentration
+        ? { symbol: topConcentration.symbol, book: topConcentration.book,
+            pct: topConcentration.pctOfBook }
+        : null,
     };
   });
 
-  const atRiskPositions = $derived.by(() => {
-    type Row = { symbol: string; kind: "live" | "paper"; pctToStop: number };
-    const rows: Row[] = [];
-    if (live) for (const p of live.positions) {
-      const stop = p.signal?.stop_loss;
-      const entry = p.signal?.entry_price ?? p.avg_entry_price;
-      if (stop == null || entry == null || entry === stop) continue;
-      const totalDist = Math.abs(entry - stop);
-      const remaining = Math.abs(p.current_price - stop);
-      const pct = totalDist ? (remaining / totalDist) * 100 : 100;
-      if (pct <= 25) rows.push({ symbol: p.symbol, kind: "live", pctToStop: Math.max(0, Math.round(pct)) });
-    }
-    if (paper) for (const p of paper.positions) {
-      if (p.stop_loss == null || p.entry_price === p.stop_loss) continue;
-      const totalDist = Math.abs(p.entry_price - p.stop_loss);
-      const remaining = Math.abs(p.current_price - p.stop_loss);
-      const pct = totalDist ? (remaining / totalDist) * 100 : 100;
-      if (pct <= 25) rows.push({ symbol: p.symbol, kind: "paper", pctToStop: Math.max(0, Math.round(pct)) });
-    }
-    return rows.sort((a, b) => a.pctToStop - b.pctToStop);
-  });
+  // Same three books as the exposure summary, from the same list. The
+  // Shadow book used to be omitted here too, so a shadow position sitting
+  // one tick off its stop produced no warning at all.
+  const atRiskPositions = $derived.by(() =>
+    allPositions
+      .map((p) => {
+        if (p.stop == null || p.entry == null || p.current == null
+            || p.entry === p.stop) return null;
+        const totalDist = Math.abs(p.entry - p.stop);
+        const remaining = Math.abs(p.current - p.stop);
+        const pct = totalDist ? (remaining / totalDist) * 100 : 100;
+        return pct <= 25
+          ? { symbol: p.symbol, kind: BOOK_LABEL[p.book],
+              pctToStop: Math.max(0, Math.round(pct)) }
+          : null;
+      })
+      .filter((r) => r !== null)
+      .sort((a, b) => a.pctToStop - b.pctToStop));
 
   function setBusy(key: string, v: boolean) {
     const next = new Set(busy);
@@ -389,14 +489,30 @@ Type FLATTEN to confirm:`,
 </script>
 
 <div class="page-head">
-  <h1>Positions &amp; Paper</h1>
-  <div class="sub">Live Alpaca, virtual paper, and the auto-sim ledger — one workspace, three accounts</div>
+  <h1>Accounts &amp; Exposure</h1>
+  <div class="sub">
+    What is held, across every book, and what it adds up to. Trading happens
+    on the Virtual CEX, Virtual DEX and Shadow Lab surfaces; this is where
+    the books are read together.
+  </div>
 </div>
 
 <div class="tabs">
-  <button class="tab" class:on={account === "live"} onclick={() => (account = "live")}>Live</button>
-  <button class="tab" class:on={account === "paper"} onclick={() => (account = "paper")}>Paper</button>
-  <button class="tab" class:on={account === "autosim"} onclick={() => (account = "autosim")}>Auto Sim</button>
+  <button class="tab" class:on={account === "all"} onclick={() => (account = "all")}>
+    All books
+  </button>
+  <button class="tab" class:on={account === "live"} onclick={() => (account = "live")}
+          title="Alpaca. Opening is disabled in VIRTUAL_ONLY; closing is not — a mode flip must not strand real capital.">
+    Live
+  </button>
+  <button class="tab" class:on={account === "paper"} onclick={() => (account = "paper")}
+          title="The Virtual CEX book — the primary training exchange">
+    Virtual CEX
+  </button>
+  <button class="tab" class:on={account === "autosim"} onclick={() => (account = "autosim")}
+          title="The control arm: follows every eligible signal, so agent decisions have something to be measured against">
+    Shadow
+  </button>
 </div>
 
 {#if atRiskPositions.length}
@@ -433,7 +549,9 @@ Type FLATTEN to confirm:`,
             {/each}
           </div>
           {#if exposure.topConcentration && exposure.topConcentration.pct >= 20}
-            <p class="risk-warning">⚠ {exposure.topConcentration.symbol} <span class="dim">({exposure.topConcentration.book} book)</span> is {exposure.topConcentration.pct.toFixed(1)}% of combined live+paper equity — concentrated. Find it on the {exposure.topConcentration.book === "paper" ? "Paper" : "Live"} tab.</p>
+            <!-- "combined live+paper" was the old two-book denominator.
+                 All three books count now, so the sentence says so. -->
+            <p class="risk-warning">⚠ {exposure.topConcentration.symbol} <span class="dim">({BOOK_LABEL[exposure.topConcentration.book]} book)</span> is {exposure.topConcentration.pct.toFixed(1)}% of that book's equity — concentrated. It is on the All books tab.</p>
           {/if}
         {:else}
           <div class="empty">No open exposure</div>
@@ -567,7 +685,74 @@ Type FLATTEN to confirm:`,
   </div>
 </div>
 
-{#if account === "live"}
+{#if account === "all"}
+  <div class="kpis">
+    <KpiTile label="Combined equity" value={fmtUsd(exposure.totalEquity)} />
+    <KpiTile label="Open positions" value={String(allPositions.length)} />
+    <KpiTile
+      label="Gross exposure"
+      value={fmtUsd(exposure.long + exposure.short)}
+    />
+    <KpiTile
+      label="Most concentrated"
+      value={exposure.topConcentration
+        ? `${exposure.topConcentration.symbol} ${exposure.topConcentration.pct.toFixed(1)}%`
+        : "—"}
+    />
+  </div>
+  <div class="stack">
+    <Panel
+      title="All Open Positions"
+      meta="{allPositions.length} across every book"
+      status={feeds.status("live")}
+    >
+      {#if allPositions.length}
+        <table class="tbl">
+          <thead>
+            <tr><th>Book</th><th>Symbol</th><th>Side</th><th>Qty</th>
+                <th>Entry</th><th>Current</th><th>Stop</th>
+                <th>Value</th><th>% of its book</th><th>P&amp;L</th></tr>
+          </thead>
+          <tbody>
+            {#each allPositions as p (p.book + p.symbol + p.entry)}
+              <tr>
+                <td><Pill tone={p.book === "live" ? "warm" : p.book === "cex" ? "info" : "neutral"}
+                          label={BOOK_LABEL[p.book]} /></td>
+                <td class="sym">{p.symbol}</td>
+                <td><Pill label={p.direction} tone={p.direction === "short" ? "bad" : "good"} /></td>
+                <td class="num qty">{fmtQty(p.qty)}</td>
+                <td class="num">{fmtPrice(p.entry)}</td>
+                <td class="num">{fmtPrice(p.current)}</td>
+                <td class="num dim">{fmtPrice(p.stop)}</td>
+                <td class="num">{fmtUsd(p.value)}</td>
+                <td class="num dim" title="Share of the book that holds it — dividing by another book's idle cash would understate it">
+                  {bookEquity[p.book]
+                    ? `${((p.value / bookEquity[p.book]) * 100).toFixed(1)}%`
+                    : "—"}
+                </td>
+                <td class="num {(p.pnl ?? 0) >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(p.pnl ?? 0)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="note">
+          Sorted by position value; the percentage is against the book that
+          holds it, never a combined pool — one book's idle cash cannot be
+          allowed to make another book's position read smaller than it is.
+          Per-position RISK was correctly bounded while EXPOSURE was not: a
+          tight stop on a low-volatility instrument makes the quantity
+          enormous, and this is the column that shows it.
+        </p>
+      {:else}
+        <StateNote
+          status={feeds.status("live")}
+          noun="open positions"
+          emptyText="Flat — no open position on any book."
+        />
+      {/if}
+    </Panel>
+  </div>
+{:else if account === "live"}
   <div class="kpis">
     <KpiTile label="Equity" value={live ? fmtUsd(live.account.equity) : "—"} />
     <KpiTile label="Cash" value={live ? fmtUsd(live.account.cash) : "—"} />
@@ -778,6 +963,35 @@ Type FLATTEN to confirm:`,
       {/if}
     {/snippet}
   </Panel>
+
+  <!--
+    This panel used to render inside the Auto Sim branch, so the Virtual
+    CEX book's own closed trades were only reachable from the tab of a
+    DIFFERENT book. It reads `paper.trades`; it belongs here.
+  -->
+  <Panel title="Recent Virtual CEX Trades" meta="last {paper?.trades.length ?? 0}" status={feeds.status("paper")}>
+    {#if paper && paper.trades.length}
+      <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
+      <table class="tbl">
+        <thead><tr><th>Symbol</th><th>Direction</th><th>Qty</th><th>P&amp;L</th><th>Reason</th><th>Closed</th></tr></thead>
+        <tbody>
+          {#each paper.trades.slice(0, 15) as t (t.id)}
+            <tr>
+              <td class="sym">{t.symbol}</td>
+              <td>{t.direction}</td>
+              <td class="num qty">{fmtQty(t.qty)}</td>
+              <td class="num {t.realized_pnl >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(t.realized_pnl)} ({fmtPct(t.pnl_pct)})</td>
+              <td>{t.close_reason}</td>
+              <td class="num">{t.closed_at?.slice(0, 16).replace("T", " ")}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {:else}
+      <StateNote status={feeds.status("paper")} noun="closed trades"
+                 emptyText="No closed trades yet." />
+    {/if}
+  </Panel>
   </div>
 {:else if account === "autosim"}
   <div class="kpis">
@@ -839,38 +1053,16 @@ Type FLATTEN to confirm:`,
     </div>
   {/if}
   <div class="stack">
-  <div class="two-col">
-  <Panel title="Recent Paper Trades" meta="last {paper?.trades.length ?? 0}" status={feeds.status("paper")}>
-    {#if paper && paper.trades.length}
-      <button class="btn tiny outline export-btn" onclick={exportPaperTradesCsv}>Export CSV</button>
-      <table class="tbl">
-        <thead><tr><th>Symbol</th><th>Direction</th><th>Qty</th><th>P&amp;L</th><th>Reason</th><th>Closed</th></tr></thead>
-        <tbody>
-          {#each paper.trades.slice(0, 15) as t (t.id)}
-            <tr>
-              <td class="sym">{t.symbol}</td>
-              <td>{t.direction}</td>
-              <td class="num qty">{fmtQty(t.qty)}</td>
-              <td class="num {t.realized_pnl >= 0 ? 'pl-up' : 'pl-down'}">{fmtUsd(t.realized_pnl)} ({fmtPct(t.pnl_pct)})</td>
-              <td>{t.close_reason}</td>
-              <td class="num">{t.closed_at?.slice(0, 16).replace("T", " ")}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {:else}
-      <div class="empty">No closed trades yet</div>
-    {/if}
-  </Panel>
-  <Panel title="Auto Sim" meta="follows every eligible signal automatically — paper-only, no broker">
+  <Panel title="Shadow Book" meta="follows every eligible signal automatically — virtual only, no broker">
     <button class="btn small outline" style="margin-bottom:8px" onclick={resetAutoSim}>Reset Auto Sim</button>
     <p class="note">
-      Auto Sim is a separate always-on paper ledger that opens a $1,000-margin virtual position for every eligible
-      signal automatically, independent of manual paper trading above. {autosim?.summary.wins ?? 0} wins /
+      The CONTROL ARM. It opens a $1,000-margin virtual position for every
+      eligible signal, so the agent's own decisions have something to be
+      measured against — without it, "the book went up" cannot be told from
+      "the market went up". {autosim?.summary.wins ?? 0} wins /
       {autosim?.summary.losses ?? 0} losses.
     </p>
   </Panel>
-  </div>
   <div class="span-12">
     <Panel title="Auto Sim Positions" meta="{autosim?.positions.length ?? 0} open" status={feeds.status("autosim")}>
       {#if autosim && autosim.positions.length}
@@ -906,6 +1098,16 @@ Type FLATTEN to confirm:`,
       {/if}
     </Panel>
   </div>
+  </div>
+{/if}
+
+<!--
+  ALWAYS REACHABLE. The Danger Zone acts on every book — flatten live,
+  flatten paper and Auto Sim, reset all — and it used to render only inside
+  the Auto Sim branch, so the one control an operator reaches for in a hurry
+  sat behind the third tab of a book it is not specific to.
+-->
+<div class="stack" style="margin-top:14px">
   <div class="span-12">
     <Panel title="Danger Zone" dotColor="var(--bad)" meta="typed confirmation required for every action">
       <div class="dz-row">
@@ -969,8 +1171,7 @@ Type FLATTEN to confirm:`,
       </p>
     </Panel>
   </div>
-  </div>
-{/if}
+</div>
 
 <style>
   .pnl-row {

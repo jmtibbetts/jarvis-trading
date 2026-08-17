@@ -97,7 +97,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "venue_failure": False}
 
     # ── 1. May this be filled at all, and by whom? ───────────────────────
-    ready = POL.execution_readiness(symbol, asset_class,
+    ready = POL.execution_readiness(symbol, asset_class, signal=signal,
                                     **({} if max_age_s is None else
                                        {"max_age_s": max_age_s}))
     if not ready.ok:
@@ -105,6 +105,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                     symbol, ready.reason, ready.detail)
         return {"error": ready.reason, "detail": ready.detail,
                 "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
                 "venue_failure": POL.is_venue_data_failure(ready.reason),
                 "opened": False}
 
@@ -214,6 +215,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # because they mocked a shape this codebase never returns.
     result["execution"] = {
         "venue": ready.venue, "product": ready.product,
+        "asset_class": ready.asset_class, "instrument": ready.instrument,
         "decision_price": decision_price, "fill_price": fill,
         "bid_at_submit": snap.bid, "ask_at_submit": snap.ask,
         "authorized_quantity": authorized.qty,
@@ -255,8 +257,14 @@ def build_provenance(*, signal, ready, snap, execution,
         "execution_model": EXECUTION_MODEL_CANONICAL,
         "engine_epoch": CANONICAL_ENGINE_EPOCH,
         "source": "VIRTUAL_CEX_AGENT",
+        # FOUR IDENTITIES, RECORDED SEPARATELY. `product` used to hold
+        # "crypto" — an asset class — so nothing persisted could distinguish a
+        # perpetual from a spot pair after the fact, and a calibration set
+        # that pools the two is measuring a product that does not exist.
         "venue": ready.venue,
+        "asset_class": ready.asset_class,
         "product": ready.product,
+        "instrument": ready.instrument,
         "symbol": snap.symbol,
         "signal_id": signal.get("id") or signal.get("signal_id"),
         "decision_price": decision_price,

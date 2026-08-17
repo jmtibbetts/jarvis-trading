@@ -36,6 +36,43 @@ logger = logging.getLogger(__name__)
 
 ROUTER_VERSION = "product_router_v1"
 
+# ── THE PRODUCT VOCABULARY — one spelling, one home ──────────────────────
+# These strings already existed, spelled out inline in venue_capabilities,
+# execution_venue and instruments. Naming them here makes this module the
+# single naming authority rather than one of four places that happen to
+# agree, and gives everything downstream something to import instead of a
+# literal to retype.
+#
+# A PRODUCT IS NOT AN ASSET CLASS AND IT IS NOT LEVERAGE. "crypto" is an
+# asset class; CRYPTO_SPOT and CRYPTO_PERP are two different products
+# within it, with different fees, different carry and different liquidation
+# behaviour. A perpetual held at 1x is still CRYPTO_PERP, and spot bought
+# at 1x is still CRYPTO_SPOT — inferring the product from `leverage > 1`
+# is what once billed a perp book at spot rates, a 16x overcharge.
+CRYPTO_SPOT = "CRYPTO_SPOT"
+CRYPTO_PERP = "CRYPTO_PERP"
+EQUITY_SPOT = "EQUITY_SPOT"
+EQUITY_SHORT = "EQUITY_SHORT"
+ETF_SPOT = "ETF_SPOT"
+INDEX_FUTURE = "INDEX_FUTURE"
+COMMODITY_FUTURE = "COMMODITY_FUTURE"
+FX_SPOT = "FX_SPOT"
+DEX_SPOT = "DEX_SPOT"
+
+ALL_PRODUCTS = frozenset({
+    CRYPTO_SPOT, CRYPTO_PERP, EQUITY_SPOT, EQUITY_SHORT, ETF_SPOT,
+    INDEX_FUTURE, COMMODITY_FUTURE, FX_SPOT, DEX_SPOT})
+
+# Which asset class each product expresses. The mapping is one-way on
+# purpose: a product determines its asset class, an asset class does NOT
+# determine a product.
+ASSET_CLASS_OF = {
+    CRYPTO_SPOT: "crypto", CRYPTO_PERP: "crypto",
+    EQUITY_SPOT: "equity", EQUITY_SHORT: "equity", ETF_SPOT: "equity",
+    INDEX_FUTURE: "futures", COMMODITY_FUTURE: "futures",
+    FX_SPOT: "forex", DEX_SPOT: "crypto",
+}
+
 # Refusals, each a distinct lesson.
 NO_CAPABILITY = "NO_CAPABILITY"
 NO_INSTRUMENT = "NO_INSTRUMENT"

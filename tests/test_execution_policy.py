@@ -25,28 +25,28 @@ def _at(seconds_ago=0.0):
 
 
 class ProductRoutingTests(unittest.TestCase):
-    """One environment variable must not capture every product."""
+    """One environment variable must not capture every asset class."""
 
     def test_crypto_routes_to_the_configured_crypto_venue(self):
         import os
         with patch.dict(os.environ, {"PAPER_VENUE": "kraken"}):
-            venue, product = P.resolve_execution_venue("BTC/USD", "Crypto")
-        self.assertEqual((venue, product), ("kraken", "crypto"))
+            venue, ac = P.resolve_execution_venue("BTC/USD", "Crypto")
+        self.assertEqual((venue, ac), ("kraken", "crypto"))
 
     def test_paper_venue_does_not_capture_equities(self):
         """THE NONSENSE THIS PREVENTS: an equity priced against a crypto
         book because a crypto setting was read globally."""
         import os
         with patch.dict(os.environ, {"PAPER_VENUE": "kraken"}):
-            venue, product = P.resolve_execution_venue("AAPL", "us_equity")
-        self.assertEqual(product, "equity")
+            venue, ac = P.resolve_execution_venue("AAPL", "us_equity")
+        self.assertEqual(ac, "equity")
         self.assertNotEqual(venue, "kraken")
 
     def test_paper_venue_does_not_capture_futures(self):
         import os
         with patch.dict(os.environ, {"PAPER_VENUE": "kraken"}):
-            venue, product = P.resolve_execution_venue("ES=F", "Futures")
-        self.assertEqual(product, "futures")
+            venue, ac = P.resolve_execution_venue("ES=F", "Futures")
+        self.assertEqual(ac, "futures")
         self.assertNotEqual(venue, "kraken")
 
     def test_the_messy_stored_asset_class_vocabulary_still_classifies(self):
@@ -54,7 +54,113 @@ class ProductRoutingTests(unittest.TestCase):
         "Equity", "equity", "Commodity/Defense". The symbol is asked first."""
         for label in ("us_equity", "Equity", "equity", "Equity ETF"):
             with self.subTest(label=label):
-                self.assertEqual(P.classify_product("AAPL", label), "equity")
+                self.assertEqual(P.classify_asset_class("AAPL", label), "equity")
+
+
+class AProductIsNotAnAssetClassTests(unittest.TestCase):
+    """A9. `execution_policy` answered "which product?" with "crypto".
+
+    That is an asset class. It cannot distinguish a perpetual from a spot
+    pair, so every layer that takes the product as established fact — the
+    venue capability gate, the fee schedule, settlement, the learning row —
+    was working from an identity that does not name a tradable thing.
+    """
+
+    def _readiness(self, symbol="BTC/USD", asset_class="Crypto", **env):
+        import os
+        with patch.dict(os.environ, env), \
+             patch("lib.kraken_stream.latest_quote",
+                   return_value={"bid": 100.0, "ask": 100.2, "at": _at(0.2)}), \
+             patch("lib.kraken_stream.trade_flow", return_value=None):
+            return P.execution_readiness(symbol, asset_class)
+
+    def test_the_product_is_a_real_product_not_an_asset_class(self):
+        from lib import product_router as PR
+        r = self._readiness()
+        self.assertIn(r.product, PR.ALL_PRODUCTS)
+        self.assertNotEqual(r.product, "crypto")
+
+    def test_the_asset_class_survives_alongside_the_product(self):
+        """Both are needed. Collapsing them was the defect; replacing one
+        with the other would just move it."""
+        r = self._readiness()
+        self.assertEqual(r.asset_class, "crypto")
+        self.assertNotEqual(r.product, r.asset_class)
+
+    def test_the_vocabulary_comes_from_the_product_router(self):
+        """Not a second taxonomy — the router already owned these names."""
+        from lib import product_router as PR
+        self.assertEqual(PR.CRYPTO_PERP, "CRYPTO_PERP")
+        self.assertEqual(PR.ASSET_CLASS_OF[PR.CRYPTO_PERP], "crypto")
+        self.assertEqual(PR.ASSET_CLASS_OF[PR.CRYPTO_SPOT], "crypto")
+
+    def test_the_desk_setting_selects_spot_or_perp(self):
+        from lib import product_router as PR
+        self.assertEqual(
+            P.resolve_product("BTC/USD", "Crypto",
+                              signal={"product": PR.CRYPTO_SPOT}), PR.CRYPTO_SPOT)
+        import os
+        with patch.dict(os.environ, {"CRYPTO_PRODUCT": "spot"}):
+            self.assertEqual(P.resolve_product("BTC/USD", "Crypto"),
+                             PR.CRYPTO_SPOT)
+        with patch.dict(os.environ, {"CRYPTO_PRODUCT": "perp"}):
+            self.assertEqual(P.resolve_product("BTC/USD", "Crypto"),
+                             PR.CRYPTO_PERP)
+
+    def test_product_is_never_derived_from_leverage(self):
+        """PRODUCT IS NOT LEVERAGE. A perp at 1x is still a perp, and spot at
+        1x is still spot. Inferring it from `leverage > 1` once billed a perp
+        book at spot rates every time the conviction ladder bottomed out."""
+        from lib import product_router as PR
+        import os
+        with patch.dict(os.environ, {"CRYPTO_PRODUCT": "perp"}):
+            for direction in ("Long", "Long_20x", "Short", "Short_10x"):
+                with self.subTest(direction=direction):
+                    got = P.resolve_product(
+                        "BTC/USD", "Crypto",
+                        signal={"paper_direction": direction, "leverage": 1.0})
+                    self.assertEqual(got, PR.CRYPTO_PERP)
+
+    def test_an_explicit_expression_beats_the_desk_default(self):
+        """Product comes from the CHOSEN expression when there is one."""
+        from lib import product_router as PR
+        import os
+        with patch.dict(os.environ, {"CRYPTO_PRODUCT": "perp"}):
+            got = P.resolve_product("BTC/USD", "Crypto",
+                                    signal={"product": PR.CRYPTO_SPOT})
+        self.assertEqual(got, PR.CRYPTO_SPOT)
+
+    def test_equity_resolves_to_equity_spot(self):
+        from lib import product_router as PR
+        self.assertEqual(P.resolve_product("AAPL", "us_equity"), PR.EQUITY_SPOT)
+
+    def test_an_unestablished_product_is_refused_not_guessed(self):
+        """A guessed product is laundered into the ledger as a measurement."""
+        self.assertIsNone(P.resolve_product("ZZZZ=F", "Futures"))
+        self.assertTrue(P.is_venue_data_failure(P.UNKNOWN_PRODUCT))
+
+    def test_the_identities_reach_provenance_separately(self):
+        from lib import canonical_entry as CE
+        from lib import execution_snapshot as ES
+        from lib import virtual_orders as VO
+        snap = ES.ExecutionMarketSnapshot(
+            venue="kraken", symbol="BTC/USD", product="CRYPTO_PERP",
+            bid=99.9, ask=100.1, source="kraken_stream.latest_quote",
+            venue_event_at="2026-08-17T00:00:00+00:00", age_ms=200.0,
+            status=ES.AVAILABLE)
+        ready = P.ExecutionReadiness(True, "kraken", "CRYPTO_PERP",
+                                     asset_class="crypto",
+                                     instrument="PF_XBTUSD", snapshot=snap)
+        order = VO.VirtualOrder(symbol="BTC/USD", side="long", quantity=3.0,
+                                order_type=VO.MARKET)
+        ex = VO.execute_market(order, VO.Quote(bid=99.9, ask=100.1))
+        doc = CE.build_provenance(signal={"id": "s1"}, ready=ready, snap=snap,
+                                  execution=ex, decision_price=100.0,
+                                  authorized_qty=3.0)
+        self.assertEqual(doc["asset_class"], "crypto")
+        self.assertEqual(doc["product"], "CRYPTO_PERP")
+        self.assertEqual(doc["instrument"], "PF_XBTUSD")
+        self.assertEqual(doc["venue"], "kraken")
 
 
 class OnlyWhatCanBeFilledHonestlyIsFillableTests(unittest.TestCase):
@@ -175,19 +281,19 @@ class VenueFailuresAreNotThesisFailuresTests(unittest.TestCase):
 class TheFillableSetIsAClaimAboutWiringTests(unittest.TestCase):
 
     def test_the_fillable_set_is_exactly_what_has_a_quote_reader(self):
-        """Adding a product here asserts execution_snapshot can produce an
-        AVAILABLE snapshot for it. Nothing may be added silently."""
-        self.assertEqual(set(P._FILLABLE_PRODUCTS), {"crypto", "equity"})
+        """Adding an asset class here asserts execution_snapshot can produce
+        an AVAILABLE snapshot for it. Nothing may be added silently."""
+        self.assertEqual(set(P._FILLABLE_ASSET_CLASSES), {"crypto", "equity"})
 
-    def test_every_fillable_product_has_a_venue_reader(self):
+    def test_every_fillable_asset_class_has_a_venue_reader(self):
         import os
         with patch.dict(os.environ, {"PAPER_VENUE": "kraken"}):
-            for product in P._FILLABLE_PRODUCTS:
-                sym = {"crypto": "BTC/USD", "equity": "AAPL"}[product]
-                venue, _ = P.resolve_execution_venue(sym, product)
-                with self.subTest(product=product):
+            for ac in P._FILLABLE_ASSET_CLASSES:
+                sym = {"crypto": "BTC/USD", "equity": "AAPL"}[ac]
+                venue, _ = P.resolve_execution_venue(sym, ac)
+                with self.subTest(asset_class=ac):
                     self.assertIn(venue, ES._READERS,
-                                  f"{product} is claimed fillable but {venue} "
+                                  f"{ac} is claimed fillable but {venue} "
                                   f"has no execution-data reader")
 
 

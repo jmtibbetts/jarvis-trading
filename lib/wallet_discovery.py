@@ -397,7 +397,12 @@ def discover_from_tokens(max_tokens: int = 5, db=None,
     meets the same exchange recognises it instead of paying to classify it
     again — the exclusion list teaches itself.
     """
-    from app.database import get_db
+    # WalletRegistry is queried directly below to detect a REPEAT SIGHTING
+    # (an address already known, whose new appearance is still evidence).
+    # That query was added without its import, so every discovery pass has
+    # been dying on NameError at the first already-known wallet — which is
+    # the common case, so the job failed on essentially every run.
+    from app.database import WalletRegistry, get_db
     from lib.wallet_classify import classify
     from lib.wallet_registry import discovery_enabled, upsert_wallet
 

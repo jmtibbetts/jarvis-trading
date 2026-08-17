@@ -497,7 +497,13 @@ def _score_setup(sym: str, df_1h, df_4h, df_1d, meta: dict = None,
             "entry_price": entry_px, "stop_loss": stop_loss,
             "target_price": target_price, "order_type": "market",
         }
-        from lib.signal_levels import clamp_stop_to_atr
+        # LevelSource is referenced below and was never imported. It only
+        # evaluates when `stop_source` is falsy — i.e. when the stop was NOT
+        # clamped — so short-circuiting hid it on every clamped signal, and
+        # the enclosing `except` logged the NameError at DEBUG and returned
+        # None. The scanner therefore dropped those setups silently: no
+        # error surfaced, the pass just produced fewer signals.
+        from lib.signal_levels import LevelSource, clamp_stop_to_atr
         levelled, _clamped, _why = clamp_stop_to_atr(levelled, atr_pct)
         if levelled.get("untradeable_reason"):
             return None

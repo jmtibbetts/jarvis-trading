@@ -111,6 +111,10 @@ The original signal will be superseded. Levels are recomputed server-side at sub
       let res = await api.verifySignal(sig.id, false, deep);
       stop();
       verifyResults = { ...verifyResults, [sig.id]: res };
+      // Surface the result immediately. The card only ever shows a
+      // one-line verdict now, so without this a 30-90s deep verify would
+      // finish into what looks like nothing happening.
+      analysisSignalId = sig.id;
       if (res.verdict === "STALE_ENTRY" && res.suggested_update) {
         const u = res.suggested_update;
         const ok = confirm(
@@ -496,7 +500,14 @@ The original signal will be superseded. Levels are recomputed server-side at sub
 </div>
 
 {#if analysisSignalId}
-  <SignalAnalysisModal signalId={analysisSignalId} onClose={() => (analysisSignalId = null)} />
+  <SignalAnalysisModal
+    signalId={analysisSignalId}
+    verify={verifyResults[analysisSignalId] ?? null}
+    onFlip={verifyResults[analysisSignalId]?.reversal_proposal
+      ? () => { const s = signals.find((x) => x.id === analysisSignalId); if (s) doReverse(s); }
+      : null}
+    flipBusy={busyIds.has(analysisSignalId)}
+    onClose={() => (analysisSignalId = null)} />
 {/if}
 
 <div class="grid">
@@ -693,45 +704,25 @@ The original signal will be superseded. Levels are recomputed server-side at sub
               </div>
               {#if verifyResults[sig.id]}
                 {@const vr = verifyResults[sig.id]}
-                <div class="verify-box">
-                  <div class="vb-head">
-                    <b>{vr.verdict.replaceAll("_", " ")}</b>
-                    <span class="num dim">checked @ {vr.current_price ?? "—"} ({vr.price_asof ?? "?"}){vr.drift_pct != null ? ` · ${vr.drift_pct}% from entry` : ""}</span>
-                  </div>
-                  {#if vr.llm_assessment}
-                    {@const a = vr.llm_assessment}
-                    {#if a.assessment !== "UNAVAILABLE"}
-                      <div class="vb-ai {a.assessment === "AGREE" ? 'vb-good' : a.assessment === "DISAGREE" ? 'vb-bad' : ''}">
-                        AI second opinion: <b>{a.assessment}</b>{a.confidence != null ? ` (${a.confidence}%)` : ""}
-                      </div>
-                      {#if a.reasoning}<div class="vb-reason dim">{a.reasoning}</div>{/if}
-                      {#if a.key_change && a.key_change !== "nothing material"}<div class="vb-reason">Changed: {a.key_change}</div>{/if}
-                      {#if a.context_used}
-                        <div class="vb-ctx dim">
-                          context: {Object.entries(a.context_used).filter(([, v]) => v).map(([k]) => k.replaceAll("_", " ")).join(", ") || "none"}
-                        </div>
-                      {/if}
-                      {#if vr.reversal_proposal}
-                        {@const rp = vr.reversal_proposal}
-                        <div class="vb-rev">
-                          <div class="vb-rev-head">
-                            Suggested play: <b>{rp.direction}</b>
-                            <span class="num dim">entry {rp.entry_price} · stop {rp.stop_loss} · target {rp.target_price} · R:R {rp.rr_ratio}:1</span>
-                          </div>
-                          <div class="vb-reason dim">{rp.basis}</div>
-                          <div class="vb-reason vb-warn">{rp.warning}</div>
-                          <button
-                            class="btn tiny"
-                            disabled={busyIds.has(sig.id)}
-                            onclick={(e) => { e.stopPropagation(); doReverse(sig); }}
-                          >Flip to {rp.direction}</button>
-                        </div>
-                      {/if}
-                    {:else}
-                      <div class="vb-reason dim">{a.reasoning}</div>
-                    {/if}
+                <!--
+                  COMPACT. The full verify result renders in the analysis
+                  modal, not here. Inline it was ~40 lines of markup inside
+                  one cell of a CSS grid, which stretched that column while
+                  every sibling card stayed short — the row stayed broken
+                  until the card was collapsed again. One line cannot do
+                  that, and the modal has its own layout context.
+                -->
+                <button
+                  class="verify-summary {vr.verdict === 'CONFIRMED' ? 'vs-good' : vr.verdict === 'INVALIDATED' ? 'vs-bad' : ''}"
+                  onclick={(e) => { e.stopPropagation(); analysisSignalId = sig.id; }}
+                >
+                  <b>{vr.verdict.replaceAll("_", " ")}</b>
+                  {#if vr.llm_assessment && vr.llm_assessment.assessment !== "UNAVAILABLE"}
+                    <span class="dim">AI {vr.llm_assessment.assessment.toLowerCase()}</span>
                   {/if}
-                </div>
+                  {#if vr.reversal_proposal}<span class="vs-flag">flip available</span>{/if}
+                  <span class="vs-open">details →</span>
+                </button>
               {/if}
               <div class="sc-score">
                 {#if sig.gate_decision}
@@ -1466,4 +1457,27 @@ The original signal will be superseded. Levels are recomputed server-side at sub
   .gate-no_trade { background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.40); color: #f87171; }
   .gate-unknown { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.30); color: #94a3b8; }
   .sc-score-meta .diag { opacity: 0.55; }
+
+  /* One line, whatever the verdict contains. The full result lives in the
+     modal — see the comment at its render site. */
+  .verify-summary {
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    margin-top: 6px; padding: 5px 8px; border-radius: 4px;
+    background: var(--bg-elev, #11151c);
+    border: 1px solid var(--border, #222a35);
+    color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .verify-summary:hover { border-color: var(--accent); }
+  .verify-summary b {
+    font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .verify-summary .dim { font-size: 11px; color: var(--muted); }
+  .verify-summary.vs-good b { color: var(--good, #4ec9a0); }
+  .verify-summary.vs-bad b { color: var(--bad, #e06c75); }
+  .vs-flag {
+    font-size: 10px; padding: 1px 5px; border-radius: 2px;
+    background: color-mix(in srgb, var(--warn-text, #e0b070) 18%, transparent);
+    color: var(--warn-text, #e0b070);
+  }
+  .vs-open { margin-left: auto; font-size: 10.5px; color: var(--muted); }
 </style>

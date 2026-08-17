@@ -1,11 +1,24 @@
 <script lang="ts">
-  import { api, type SignalAnalysis, type TfAnalysis, type OptionsSummary } from "../api";
+  import { api, type SignalAnalysis, type TfAnalysis, type OptionsSummary,
+           type VerifyResult } from "../api";
   import { classify } from "../dataState.svelte";
   import Pill from "./Pill.svelte";
   import CandleChart from "./CandleChart.svelte";
   import { toastStore } from "../stores/toast.svelte";
 
-  let { signalId, onClose }: { signalId: string; onClose: () => void } = $props();
+  let { signalId, onClose, verify = null, onFlip = null, flipBusy = false }: {
+    signalId: string;
+    onClose: () => void;
+    /** Verify / deep-verify result for this signal, if one has been run.
+     *  It renders HERE rather than inside the signal card: the block is ~40
+     *  lines of markup, and putting that inside one cell of a CSS grid
+     *  stretched that column while every sibling stayed short — the row
+     *  "messed up" until the card was collapsed again. A modal has its own
+     *  layout context, so opening and closing it cannot disturb the grid. */
+    verify?: VerifyResult | null;
+    onFlip?: (() => void) | null;
+    flipBusy?: boolean;
+  } = $props();
 
   let data = $state<SignalAnalysis | null>(null);
   let loading = $state(true);
@@ -176,6 +189,48 @@
         target={s.target_price}
         stop={s.stop_loss}
       />
+
+      {#if verify}
+        <div class="verify-box">
+          <div class="vb-head">
+            <b>{verify.verdict.replaceAll("_", " ")}</b>
+            <span class="num dim">checked @ {verify.current_price ?? "—"} ({verify.price_asof ?? "?"}){verify.drift_pct != null ? ` · ${verify.drift_pct}% from entry` : ""}</span>
+          </div>
+          {#if verify.llm_assessment}
+            {@const a = verify.llm_assessment}
+            {#if a.assessment !== "UNAVAILABLE"}
+              <div class="vb-ai {a.assessment === 'AGREE' ? 'vb-good' : a.assessment === 'DISAGREE' ? 'vb-bad' : ''}">
+                AI second opinion: <b>{a.assessment}</b>{a.confidence != null ? ` (${a.confidence}%)` : ""}
+              </div>
+              {#if a.reasoning}<div class="vb-reason dim">{a.reasoning}</div>{/if}
+              {#if a.key_change && a.key_change !== "nothing material"}<div class="vb-reason">Changed: {a.key_change}</div>{/if}
+              {#if a.context_used}
+                <div class="vb-ctx dim">
+                  context: {Object.entries(a.context_used).filter(([, v]) => v).map(([k]) => k.replaceAll("_", " ")).join(", ") || "none"}
+                </div>
+              {/if}
+              {#if verify.reversal_proposal}
+                {@const rp = verify.reversal_proposal}
+                <div class="vb-rev">
+                  <div class="vb-rev-head">
+                    Suggested play: <b>{rp.direction}</b>
+                    <span class="num dim">entry {rp.entry_price} · stop {rp.stop_loss} · target {rp.target_price} · R:R {rp.rr_ratio}:1</span>
+                  </div>
+                  <div class="vb-reason dim">{rp.basis}</div>
+                  <div class="vb-reason vb-warn">{rp.warning}</div>
+                  {#if onFlip}
+                    <button class="btn tiny" disabled={flipBusy} onclick={onFlip}>
+                      Flip to {rp.direction}
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+            {:else}
+              <div class="vb-reason dim">{a.reasoning}</div>
+            {/if}
+          {/if}
+        </div>
+      {/if}
 
       {#if c.risk_flags.length}
         <div class="risk-flags">
@@ -728,5 +783,61 @@
     .context-grid {
       grid-template-columns: 1fr;
     }
+  }
+
+  /* Relocated from the signal card: 40 lines of markup inside one grid
+     cell stretched that column while its siblings stayed short. */
+  .vb-rev {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line-bright);
+  }
+  .vb-rev-head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+  .vb-warn {
+    color: var(--warm);
+  }
+  .vb-rev .btn {
+    margin-top: 6px;
+  }
+  .verify-box {
+    grid-column: 1 / -1;
+    border: 1px solid var(--line-bright);
+    border-radius: var(--radius-sm);
+    background: rgba(124, 154, 255, 0.05);
+    padding: 8px 10px;
+    margin-top: 8px;
+    font-size: 11px;
+  }
+  .vb-head {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .vb-ai {
+    margin-top: 4px;
+  }
+  .vb-good {
+    color: var(--good);
+  }
+  .vb-bad {
+    color: var(--bad);
+  }
+  .vb-reason {
+    margin-top: 3px;
+    line-height: 1.45;
+    font-size: 10.5px;
+  }
+  .vb-ctx {
+    margin-top: 4px;
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
   }
 </style>

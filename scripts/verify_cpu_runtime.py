@@ -187,13 +187,19 @@ def main() -> int:
     if not args.skip_llm:
         @check("LM Studio resolves and serves inference", required=args.require_llm)
         def _():
+            """THROUGH THE ROUTER, not around it. lib/llm_router.call is the
+            only sanctioned entry point — a direct call_lm_studio() takes
+            thinking mode by default and records nothing, and a guard test
+            rightly fails the build for it. This script is not exempt from
+            the rule it is verifying."""
+            from lib import llm_router as R
             from lib import lmstudio as L
             res = L.resolve_endpoint()
             if res.status != L.ST_AVAILABLE:
                 raise AssertionError(f"{res.status} at {res.url}")
-            out = L.call_lm_studio("Reply with exactly: PONG",
-                                   system="Answer in one word.",
-                                   thinking=False, max_tokens=16)
+            out = R.call("Reply with exactly: PONG",
+                         task="classification", mode=R.FAST,
+                         system="Answer in one word.", max_tokens=16)
             return (f"{res.url} [{res.provenance}] -> {out.strip()[:20]!r} "
                     f"(model {L.last_served_model()})")
 

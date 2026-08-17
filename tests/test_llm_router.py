@@ -6,6 +6,7 @@ ticker triage because nobody typed a parameter. These tests pin the two
 properties that matter: the decision is always explicit and deterministic,
 and the model is never the source of a number that arithmetic owns.
 """
+import ast
 import unittest
 
 from lib import llm_router as R
@@ -188,7 +189,33 @@ class NoOneBypassesTheRouterTests(unittest.TestCase):
     parameter still defaults to True, so an unrouted call silently buys
     chain-of-thought and records nothing."""
 
+    @staticmethod
+    def _direct_calls(tree) -> list[int]:
+        """Line numbers of real invocations. An ast.Call node is the actual
+        question; a substring match is a different, worse one."""
+        out = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.id if isinstance(fn, ast.Name)
+                    else fn.attr if isinstance(fn, ast.Attribute) else None)
+            if name == "call_lm_studio":
+                out.append(node.lineno)
+        return out
+
     def test_the_router_is_the_only_direct_caller(self):
+        """Found by AST, not by scanning text.
+
+        The text scan matched any line containing the name that did not
+        start with '#'. Prose therefore counted: a DOCSTRING explaining why
+        you must not call it directly was reported as an offender, and the
+        only ways out were to reword the explanation or delete it. Both make
+        the codebase worse in order to satisfy a checker.
+
+        This project has now lost time four separate times to a variant of
+        the same thing — searching source for a guard and matching the
+        comment that describes it."""
         import pathlib
         root = pathlib.Path(__file__).resolve().parent.parent
         offenders = []
@@ -198,10 +225,29 @@ class NoOneBypassesTheRouterTests(unittest.TestCase):
                 continue
             if p.name in ("lmstudio.py", "llm_router.py"):
                 continue
-            for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if "call_lm_studio(" in line and not line.strip().startswith("#"):
-                    offenders.append(f"{p.relative_to(root)}:{i}")
+            try:
+                tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            except SyntaxError:
+                continue
+            offenders += [f"{p.relative_to(root)}:{n}" for n in self._direct_calls(tree)]
         self.assertEqual(offenders, [], "route these through lib/llm_router.call()")
+
+    def test_the_guard_still_catches_a_real_bypass(self):
+        """A checker made more precise has to be shown still biting, or
+        "no offenders" means "found nothing" rather than "nothing there"."""
+        for kind, src in (("bare", "call_lm_studio('p')"),
+                          ("attribute", "lmstudio.call_lm_studio('p')"),
+                          ("nested", "x = [call_lm_studio('p') for _ in y]"),
+                          ("kwarg", "f(g=call_lm_studio('p'))")):
+            with self.subTest(shape=kind):
+                self.assertTrue(self._direct_calls(ast.parse(src)), kind)
+
+    def test_prose_about_the_rule_is_not_a_violation_of_it(self):
+        for src in ('"""never use call_lm_studio() directly"""\nx = 1\n',
+                    "# call_lm_studio() is forbidden here\ny = 2\n",
+                    "MSG = 'do not call_lm_studio() yourself'\n"):
+            with self.subTest(src=src[:32]):
+                self.assertEqual(self._direct_calls(ast.parse(src)), [])
 
 
 if __name__ == "__main__":

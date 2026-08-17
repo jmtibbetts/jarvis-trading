@@ -28,6 +28,69 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "http://localhost:1234/v1"
 DEFAULT_MODEL = "local-model"
+
+
+def _wsl_windows_host() -> str | None:
+    """The Windows host's address as seen from inside WSL2, or None.
+
+    WHY THIS EXISTS. LM Studio runs on Windows; JARVIS now runs in WSL2.
+    Under WSL2's default NAT networking `localhost` inside the VM is the
+    VM, not the host — so the documented default of
+    `http://localhost:1234/v1` reaches nothing, and every LLM call fails
+    with a connection error that looks like LM Studio being down.
+
+    The host is reachable at the default gateway, but that address is
+    ASSIGNED PER BOOT and changes whenever WSL restarts. Hard-coding
+    whatever it happens to be today produces a config that works until the
+    next reboot and then fails in a way nobody connects to the reboot — so
+    it is resolved at runtime instead.
+
+    Returns None when not under WSL, when the gateway cannot be read, or
+    when WSL is in mirrored-networking mode (where localhost already works
+    and no rewrite is wanted).
+    """
+    if not os.getenv("WSL_DISTRO_NAME"):
+        try:
+            with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+                if "microsoft" not in fh.read().lower():
+                    return None
+        except OSError:
+            return None
+    try:
+        with open("/proc/net/route", encoding="utf-8") as fh:
+            for line in fh.readlines()[1:]:
+                parts = line.split()
+                # Destination 00000000 is the default route; Gateway is
+                # little-endian hex.
+                if len(parts) > 2 and parts[1] == "00000000":
+                    gw = int(parts[2], 16)
+                    return ".".join(str((gw >> (8 * i)) & 0xFF) for i in range(4))
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _resolve_host(url: str) -> str:
+    """Rewrite a localhost LM Studio URL to the Windows host under WSL2.
+
+    Only touches loopback: an operator who has set an explicit address
+    means it, and a silent rewrite of a deliberate value would be worse
+    than the failure this avoids.
+    """
+    if not url:
+        return url
+    for loopback in ("//localhost:", "//127.0.0.1:"):
+        if loopback in url:
+            host = _wsl_windows_host()
+            if host:
+                rewritten = url.replace(loopback, f"//{host}:")
+                logger.info(
+                    "[LLM] WSL2 detected — LM Studio resolved from loopback to "
+                    "the Windows host at %s (gateway is per-boot, so this is "
+                    "resolved each start rather than stored)", host)
+                return rewritten
+            break
+    return url
 # One GPU serving 4 parallel slots means each individual request takes
 # materially longer than it would alone — the old 90s ceiling produced
 # "LLM timeout after 56/66/90s" failures that tripped the circuit breaker
@@ -226,7 +289,7 @@ def get_llm_config() -> dict:
 
     # Fallback to env
     return {
-        'url':        os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/'),
+        'url':        _resolve_host(os.getenv('LM_STUDIO_URL', DEFAULT_URL).rstrip('/')),
         'model':      os.getenv('LM_STUDIO_MODEL', DEFAULT_MODEL),
         'api_key':    os.getenv('OPENAI_API_KEY', ''),
         'max_tokens': int(os.getenv('LM_STUDIO_MAX_TOKENS', 16384)),

@@ -3,6 +3,7 @@
   import Pill from "../components/Pill.svelte";
   import StateNote from "../components/StateNote.svelte";
   import TelegramWizard from "../components/TelegramWizard.svelte";
+  import TrainingIntegrity from "../components/TrainingIntegrity.svelte";
   import { api, type JobStatusMap, type PlatformConfig, type ConfigCreate, type LlmHealth, type CacheStats, type ErrorRateSummary , type TradingPreference, type DataPlatformHealth, type ParityReport, type FeatureCorpus, type WalletActivityStatus, type HeliusHealth } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
@@ -301,6 +302,15 @@ Save anyway?`)) return;
   };
   const jobEntries = $derived(Object.entries(jobs));
 </script>
+
+<!--
+  Platform mode and training-data integrity come FIRST. What JARVIS is
+  permitted to do, and whether its own invariants are holding, outrank
+  every job status below: a green scheduler running on corrupted evidence
+  is worse than a red one.
+-->
+<TrainingIntegrity />
+
 
 <div class="page-head">
   <h1>Ops</h1>

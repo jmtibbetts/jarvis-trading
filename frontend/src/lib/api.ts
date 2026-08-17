@@ -1707,6 +1707,26 @@ export type IntegrityPanel = {
   healthy: boolean; verdict: string;
 };
 
+// THREE states, not two. UI_ONLY is observable-but-not-executable: Kraken
+// Pro shows a human 11,000 US equities while the API Center documents no
+// stock trading contract, and that difference belongs on screen.
+export type VenueCapabilityRow = {
+  venue: string; product: string;
+  /** DOCUMENTED | DISCOVERED | UI_ONLY | ASSUMED | UNSUPPORTED */
+  status: string;
+  api_surface: string | null;
+  /** LEVEL_1 | LEVEL_2 | NO_DEPTH | UNKNOWN — entitlement is not capability. */
+  data_entitlement: string;
+  fee_tier: string | null; spec_version: string | null;
+  checked_at: string | null; reason: string | null; source: string | null;
+  executable: boolean; research_only: boolean;
+};
+export type VenueCapabilities = {
+  version: string; note: string;
+  venues: Record<string, VenueCapabilityRow[]>;
+  adapters: Record<string, { family: string; is_live: boolean; implemented: boolean }>;
+};
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1817,6 +1837,7 @@ export const api = {
     + (p.leverage ? `&leverage=${p.leverage}` : "")),
   platformMode: () => get<PlatformMode>("/platform/mode"),
   integrity: () => get<IntegrityPanel>("/platform/integrity"),
+  venueCapabilities: () => get<VenueCapabilities>("/platform/venues"),
   kaminoSweep: (limit = 40, minDebt?: number) => get<KaminoSweep>(
     `/onchain/sweep?limit=${limit}`
     + (minDebt !== undefined ? `&min_debt=${minDebt}` : "")),

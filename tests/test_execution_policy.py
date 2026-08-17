@@ -20,6 +20,9 @@ from lib import execution_policy as P
 from lib import execution_snapshot as ES
 
 
+_SPOT = {"product": "CRYPTO_SPOT"}
+
+
 def _at(seconds_ago=0.0):
     return datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
 
@@ -172,7 +175,7 @@ class OnlyWhatCanBeFilledHonestlyIsFillableTests(unittest.TestCase):
         with patch("lib.kraken_stream.latest_quote",
                    return_value={"bid": 100.0, "ask": 100.2, "at": _at(0.2)}), \
              patch("lib.kraken_stream.trade_flow", return_value=None):
-            r = P.execution_readiness("BTC/USD", "Crypto")
+            r = P.execution_readiness("BTC/USD", "Crypto", signal=_SPOT)
         self.assertTrue(r.ok)
         self.assertEqual(r.venue, "kraken")
         self.assertEqual(r.snapshot.status, ES.AVAILABLE)
@@ -245,7 +248,8 @@ class VenueFailuresAreNotThesisFailuresTests(unittest.TestCase):
     def _crypto_with(self, quote):
         with patch("lib.kraken_stream.latest_quote", return_value=quote), \
              patch("lib.kraken_stream.trade_flow", return_value=None):
-            return P.execution_readiness("BTC/USD", "Crypto", max_age_s=10.0)
+            return P.execution_readiness("BTC/USD", "Crypto", max_age_s=10.0,
+                                        signal=_SPOT)
 
     def test_a_stale_quote_refuses_and_says_stale(self):
         r = self._crypto_with({"bid": 100.0, "ask": 100.2, "at": _at(45.0)})

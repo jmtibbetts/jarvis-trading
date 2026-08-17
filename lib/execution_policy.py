@@ -63,6 +63,10 @@ CROSSED_BOOK              = "CROSSED_BOOK"
 ONE_SIDED_BOOK            = "ONE_SIDED_BOOK"
 
 UNKNOWN_PRODUCT           = "UNKNOWN_PRODUCT"
+# The venue has a feed, but not for THIS product. A perpetual priced off the
+# spot book is not an approximation — it is a different instrument.
+NO_EXECUTABLE_PERP_QUOTE  = "NO_EXECUTABLE_PERP_QUOTE"
+NO_EXECUTABLE_PRODUCT_QUOTE = "NO_EXECUTABLE_PRODUCT_QUOTE"
 
 # ASSET CLASSES whose execution venue has a real two-sided quote feed wired
 # up. Adding a member here is a claim that lib/execution_snapshot can produce
@@ -278,6 +282,21 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
             f"schedule and venue capability both depend on knowing whether "
             f"this is spot or a derivative")
 
+    # A10. CAPABILITY BEFORE ECONOMICS — and before a quote is even sought.
+    # The venue having a feed does not mean it has a feed for THIS product:
+    # `kraken` is the SPOT WebSocket, and Kraken's perpetuals price behind a
+    # different endpoint. Refusing here, by name, keeps the reason legible
+    # rather than surfacing as a generic data outage.
+    if not ES.prices_product(venue, product):
+        from lib import product_router as PR
+        reason = (NO_EXECUTABLE_PERP_QUOTE if product == PR.CRYPTO_PERP
+                  else NO_EXECUTABLE_PRODUCT_QUOTE)
+        return _refuse(
+            reason,
+            f"{venue!r} has an executable feed for "
+            f"{sorted(ES.products_for(venue))} but not for {product!r}; a "
+            f"spot quote must never be labelled as perpetual execution truth")
+
     kwargs = {} if max_age_s is None else {"max_age_s": max_age_s}
     snap = ES.execution_market_snapshot(symbol, venue, product=product, **kwargs)
     if snap.status == ES.AVAILABLE:
@@ -322,4 +341,9 @@ def is_venue_data_failure(reason: str | None) -> bool:
         # An unestablished product is a gap in THIS system's instrument
         # knowledge, not a verdict on the thesis — the signal stays eligible.
         UNKNOWN_PRODUCT,
+        # Likewise a product this desk has no feed for. "We cannot price a
+        # perpetual" says nothing about whether the trade was a good idea,
+        # and recording it against the strategy would teach the learner that
+        # perp theses lose.
+        NO_EXECUTABLE_PERP_QUOTE, NO_EXECUTABLE_PRODUCT_QUOTE,
     }

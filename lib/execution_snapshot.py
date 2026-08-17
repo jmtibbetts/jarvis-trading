@@ -322,6 +322,64 @@ _READERS = {
     "coinbase": lambda sym, snap: _from_orderbook_stream("coinbase", sym, snap),
 }
 
+# WHICH PRODUCTS EACH READER ACTUALLY SPEAKS FOR. A10.
+#
+# A venue is not a book. `kraken` here means `wss://ws.kraken.com/v2` — the
+# SPOT WebSocket — and its ticker channel carries the spot book and nothing
+# else. Kraken's perpetuals trade behind a different endpoint at different
+# prices.
+#
+# Before this map existed the venue NAME alone authorised the fill, so a
+# CRYPTO_PERP order was priced against the spot book. That is not an
+# approximation: spot and perp diverge by basis and funding, they have
+# separate liquidity, and the perp is the instrument whose price actually
+# determines the P&L. Labelling a spot quote as perp execution truth is the
+# same class of error as labelling a mark as a fill — the error this whole
+# subsystem exists to remove.
+#
+# US perpetuals are a further step removed: they list on BITNOMIAL, a
+# separate CFTC-regulated exchange, under their own product codes (PBTCUC,
+# PETHUI). Kraken's own support documentation for US perpetual futures
+# describes no public read-only market-data endpoint for them, so this desk
+# cannot price one honestly and says so rather than substituting.
+#
+# THE DOCUMENTED PATH FOR INTERNATIONAL PERPS, recorded so nobody has to
+# rediscover it and nobody is tempted to invent one:
+#
+#     GET https://futures.kraken.com/derivatives/api/v3/tickers
+#     public, no authentication, returns bid/ask/bidSize/askSize/markPrice
+#     per contract  (Kraken API Center — Futures API)
+#
+# It is deliberately NOT wired up here. Doing so is a REAL_PROVIDER_READ_ONLY
+# expansion with its own symbol mapping and staleness grading, and it would
+# still not answer for the US/Bitnomial contracts. Until that work is done a
+# perpetual has no executable quote, and the entry is refused.
+_READER_PRODUCTS = {
+    "kraken": frozenset({"CRYPTO_SPOT"}),
+    "alpaca": frozenset({"EQUITY_SPOT", "ETF_SPOT", "CRYPTO_SPOT"}),
+    "binance": frozenset({"CRYPTO_SPOT"}),
+    "binanceus": frozenset({"CRYPTO_SPOT"}),
+    "coinbase": frozenset({"CRYPTO_SPOT"}),
+}
+
+
+def prices_product(venue: str, product: str | None) -> bool:
+    """Whether this venue's WIRED FEED speaks for this product.
+
+    An unstated product cannot be checked and is allowed through, for the
+    callers that predate product identity; `execution_policy` establishes
+    one before it reaches here.
+    """
+    if not product:
+        return True
+    allowed = _READER_PRODUCTS.get(str(venue or "").strip().lower())
+    return bool(allowed and str(product) in allowed)
+
+
+def products_for(venue: str) -> frozenset:
+    """What this venue's feed can honestly price."""
+    return _READER_PRODUCTS.get(str(venue or "").strip().lower(), frozenset())
+
 
 def execution_market_snapshot(symbol: str, venue: str, *,
                               product: str | None = None,
@@ -343,6 +401,19 @@ def execution_market_snapshot(symbol: str, venue: str, *,
                        f"another venue's book is evidence, not this venue's "
                        f"executable market")
         snap.provenance["known_venues"] = sorted(_READERS)
+        return snap
+
+    # THE VENUE IS NOT THE BOOK. A reader that speaks for the spot book must
+    # not be allowed to price a perpetual just because both are "kraken".
+    if not prices_product(v, product):
+        snap.status = UNAVAILABLE
+        snap.reason = (
+            f"{v!r} has an execution feed for {sorted(products_for(v))} but "
+            f"not for {product!r}; a spot quote is not a perpetual's price — "
+            f"they diverge by basis and funding and have separate liquidity, "
+            f"and the perpetual is the instrument that determines the P&L")
+        snap.provenance["feed_products"] = sorted(products_for(v))
+        snap.provenance["requested_product"] = product
         return snap
 
     try:

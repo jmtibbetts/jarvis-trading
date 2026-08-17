@@ -36,11 +36,13 @@ def _kraken_quote():
         trade_flow=lambda symbol, window=200: None)
 
 
+# Declares a SPOT expression: `kraken` is the spot WebSocket, and that is
+# the only crypto product this desk has an executable feed for.
 SIGNAL = {
     "asset_symbol": "BTC/USD", "asset_class": "Crypto",
     "paper_direction": "Long", "entry_price": 100.0,
     "stop_loss": 95.0, "target_price": 115.0,
-    "timeframe": "4H", "confidence": 75,
+    "timeframe": "4H", "confidence": 75, "product": "CRYPTO_SPOT",
 }
 
 

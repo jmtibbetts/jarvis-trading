@@ -34,10 +34,15 @@ def _kraken(bid, ask, age_s=0.2):
         trade_flow=lambda symbol, window=200: None)
 
 
+# THE SIGNAL DECLARES ITS EXPRESSION. Product comes from the chosen way of
+# holding the thesis (A9), and CRYPTO_SPOT is the one this desk has a wired
+# executable feed for — `kraken` here is the SPOT WebSocket. A perpetual has
+# no quote source, and that refusal is asserted explicitly in
+# PerpFillsNeedPerpQuotesTests rather than left to an environment default.
 SIGNAL = {"asset_symbol": "BTC/USD", "asset_class": "Crypto",
           "paper_direction": "Long", "entry_price": 100.0,
           "stop_loss": 95.0, "target_price": 115.0, "timeframe": "4H",
-          "id": "sig-1"}
+          "id": "sig-1", "product": "CRYPTO_SPOT"}
 
 
 def _fake_settlement(captured):
@@ -401,14 +406,36 @@ class TheEntryLegIsPricedBeforeItSettlesTests(unittest.TestCase):
     def test_a_catastrophic_product_is_refused_before_it_opens(self):
         """A per-contract cost does not dilute with size, so an instrument
         whose round trip eats an unacceptable share of its own notional can
-        never pay for itself. The fixture prices BTC at $100, where a
-        $0.15/contract fee on a 0.01 BTC contract is 30% of notional.
+        never pay for itself — SHIB's US contract is $0.45 and costs $0.30 to
+        trade, 67%, at any size.
+
+        The fee is injected rather than reached through a live schedule: the
+        products that can currently produce a catastrophic figure are the US
+        per-contract perpetuals, and those now refuse earlier still, at the
+        quote authority (A10). This asserts the backstop itself.
         """
-        res, cap = self._open(VENUE_REGION="us", PAPER_VENUE="kraken")
-        self.assertNotIn("fill", cap, "a catastrophic product still opened")
+        from lib import fee_authority as FA
+        captured = {}
+        ruinous = FA.FeeQuote(ok=True, fee_usd=5_000.0,
+                              fee_basis=FA.PER_CONTRACT, contract_count=1.0,
+                              quality=FA.EXCHANGE_SCHEDULE, source="test")
+        with _kraken(99.90, 100.10), \
+             patch("lib.fee_authority.leg_fee", return_value=ruinous), \
+             patch("lib.paper_engine.settle_position_entry",
+                   _fake_settlement(captured)):
+            res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
+
+        self.assertNotIn("fill", captured, "a catastrophic product still opened")
         self.assertEqual(res["error"], CE.FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL)
         self.assertFalse(res["venue_failure"],
                          "an uneconomic instrument is not a venue outage")
+
+    def test_an_ordinary_fee_passes_the_catastrophic_gate(self):
+        """The gate must catch only the instrument that could never pay for
+        itself. Rejecting a profitable trade is simulator error too."""
+        res, cap = self._open()
+        self.assertTrue(res.get("ok"), res)
+        self.assertIn("fill", cap)
 
     def test_the_gate_uses_notional_on_both_sides_of_the_comparison(self):
         """It must not compare a fee against MARGIN, or against an
@@ -422,6 +449,74 @@ class TheEntryLegIsPricedBeforeItSettlesTests(unittest.TestCase):
         self.assertIn("final.notional", gate)
         self.assertNotIn("final.margin", gate)
         self.assertNotIn("loss_at_stop", gate)
+
+
+class PerpFillsNeedPerpQuotesTests(unittest.TestCase):
+    """A10. The venue name alone used to authorise the fill.
+
+    `kraken` in the reader registry means `wss://ws.kraken.com/v2` — the SPOT
+    WebSocket. Its ticker channel carries the spot book and nothing else, yet
+    a CRYPTO_PERP order was priced against it. Spot and perp diverge by basis
+    and funding, have separate liquidity, and it is the PERP whose price
+    determines the P&L. Labelling a spot quote as perpetual execution truth
+    is the same class of error as labelling a mark as a fill.
+    """
+
+    PERP = dict(SIGNAL, product="CRYPTO_PERP")
+
+    def _attempt(self, signal):
+        captured = {}
+        with _kraken(99.90, 100.10), \
+             patch("lib.paper_engine.settle_position_entry",
+                   _fake_settlement(captured)):
+            res = CE.open_canonical_position(signal, decision_price=100.0)
+        return res, captured
+
+    def test_the_kraken_feed_is_spot_and_says_so(self):
+        from lib import execution_snapshot as ES
+        self.assertEqual(ES.products_for("kraken"), frozenset({"CRYPTO_SPOT"}))
+        self.assertTrue(ES.prices_product("kraken", "CRYPTO_SPOT"))
+        self.assertFalse(ES.prices_product("kraken", "CRYPTO_PERP"))
+
+    def test_a_perp_opens_nothing_against_a_spot_book(self):
+        res, cap = self._attempt(self.PERP)
+        self.assertNotIn("fill", cap, "a perp was filled off the spot book")
+        self.assertEqual(res["error"], POL.NO_EXECUTABLE_PERP_QUOTE)
+
+    def test_the_refusal_is_a_venue_gap_not_a_losing_thesis(self):
+        """Recording it against the strategy would teach the learner that
+        perpetual theses lose, when what is missing is a data feed."""
+        res, _ = self._attempt(self.PERP)
+        self.assertTrue(res["venue_failure"])
+        self.assertTrue(POL.is_venue_data_failure(res["error"]))
+
+    def test_spot_still_fills_because_the_spot_feed_speaks_for_it(self):
+        """The refusal must be about the PRODUCT, not a blanket outage."""
+        res, cap = self._attempt(SIGNAL)
+        self.assertTrue(res.get("ok"), res)
+        self.assertIn("fill", cap)
+
+    def test_the_snapshot_itself_refuses_rather_than_relying_on_the_caller(self):
+        """Defence in depth: a caller that forgets to check must still not
+        receive a spot quote labelled as a perpetual's."""
+        from lib import execution_snapshot as ES
+        with _kraken(99.90, 100.10):
+            snap = ES.execution_market_snapshot("BTC/USD", "kraken",
+                                                product="CRYPTO_PERP")
+        self.assertEqual(snap.status, ES.UNAVAILABLE)
+        self.assertNotEqual(snap.status, ES.AVAILABLE)
+        self.assertIsNone(snap.bid)
+        self.assertIsNone(snap.ask)
+
+    def test_no_reader_claims_a_perp_it_cannot_price(self):
+        """Adding a product to _READER_PRODUCTS is a claim that the feed
+        behind it actually carries that book."""
+        from lib import execution_snapshot as ES
+        for venue, products in ES._READER_PRODUCTS.items():
+            with self.subTest(venue=venue):
+                self.assertNotIn("CRYPTO_PERP", products,
+                                 f"{venue} claims to price perpetuals — wire "
+                                 f"the feed before making that claim")
 
 
 class IsCanonicalRequiresAllFourClaimsTests(unittest.TestCase):

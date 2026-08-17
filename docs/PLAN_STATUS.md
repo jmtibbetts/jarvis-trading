@@ -15,7 +15,7 @@ Status vocabulary:
 | **OPEN** | not started |
 | **SUPERSEDED** | the plan describes an architecture that has been replaced |
 
-Last reconciled against `main` with 2,687 tests passing.
+Last reconciled against `main` with 2,742 tests passing.
 
 ---
 
@@ -24,7 +24,7 @@ Last reconciled against `main` with 2,687 tests passing.
 | Document | Status | Notes |
 |---|---|---|
 | `HARDENING_PLAN.md` | **PARTIAL** | The gate experiment, cost modelling and R-multiple provenance landed. Duplicate-evidence elimination and the selection-bias dashboard remain open. |
-| `UI_AUDIT.md` | **PARTIAL** | P0/P1 complete and accurate. Written before the Virtual CEX work, so its navigation model (Live / Paper / Auto Sim) is superseded — see below. |
+| `UI_AUDIT.md` | **PARTIAL** | P0/P1 complete and accurate. Written before the Virtual CEX work, so its navigation model (Live / Paper / Auto Sim) is superseded — the tabs are now All books / Live / Virtual CEX / Shadow. Scanner column config and virtualization landed; the Command Center rework has not. |
 | `JARVIS_MASTER_UI_UX_HELIUS_WALLET_ALPHA_PROMPT.md` | **PARTIAL** | Wallet intelligence, token surge and the on-chain desk are done. The §130 Daily Brief command centre and §131 Crypto Desk IA remain open. |
 | `JARVIS_CLAUDE_IMPLEMENTATION_PLAN*.md` | **SUPERSEDED** | Live-first sequencing. Routing by `paper_mode`, "shorts and leverage go to paper", live execution as the default destination — all replaced. |
 | `UPGRADE_PLAN.md` | **PARTIAL** | Cost-aware filtering and `min_viable_stop_pct` landed and were then corrected (FX was priced as equity; unknown futures fell back to an equity multiplier). |
@@ -86,11 +86,54 @@ one: it is believed.
 
 ---
 
+## The edge–cost matrix, and what it measured
+
+`GET /learning/edge-cost-matrix` puts measured gross edge and priced
+transaction costs in one table, per strategy × product × timeframe × venue,
+and labels every cell with WHY it fails. That distinction is the point:
+
+| | |
+|---|---|
+| **EDGE** | no gross edge to protect — cheaper routing would not save it |
+| **COST** | real gross edge, consumed by the round trip — a ROUTING result |
+
+Retiring a strategy for the second reason discards a working thesis over a
+routing decision, and a blended P&L reports both as "this lost money".
+
+Measured over 11,865 closed outcomes in the current epoch (39 cells):
+**10 COST-limited, 8 EDGE-limited, 20 below the sample bar, and one that
+clears** — `EQUITY_SPOT @ 1D`, gross 0.539R against 0.113R of cost, 4.8×
+edge/cost. Every intraday timeframe carries NEGATIVE gross edge.
+
+Two things the numbers cannot say for themselves, and which the panel says
+in words:
+
+- Nearly every cell is `REPLAY_ONLY`. A replayed fill assumed perfect
+  execution, so 7,740 samples is not 7,740 observations — and the replay
+  weighting cannot express that, because in a cell where every row is a
+  replay the weight divides out of both sides.
+- CEX costs are **ESTIMATED**, DEX costs are **REALIZED**. An estimate and
+  a measurement are different claims about the same word, so no cell
+  averages them into one unlabelled column.
+
+`lib/venue_expectancy.py` has existed since Phase 20 and was wired to
+nothing; this is its first caller. With one venue on file it still returns
+`NO_EDGE_ANYWHERE` — "the cost model is not the problem here" — which
+contradicts the COST cells directly, so the block is marked
+`comparable: false` rather than shown as a finding. "Bad signal or bad
+venue" needs two arms.
+
+---
+
 ## Known open items carried forward
 
 - **`6J=F`** (CME Japanese Yen) has no verified contract spec and is
-  correctly refused by the instrument layer, behind 140 existing signals.
-  The spec must be verified against the exchange rather than inferred.
+  correctly refused by the instrument layer, behind **143** existing
+  signals (1 still active). The spec must be verified against the exchange
+  rather than inferred. It is now visible: the Instrument workspace
+  (`GET /instrument/{symbol}`) renders the refusal as the headline, with
+  the reason and the count, rather than as an empty panel that reads as a
+  broken feed.
 - **8,281 of 21,129 trade outcomes** predate signal linkage. They stay
   `LEGACY_UNATTRIBUTED` and must not be fuzzy-matched to strategies.
 - **GitHub Actions are pinned to mutable major-version tags.** Pinning to

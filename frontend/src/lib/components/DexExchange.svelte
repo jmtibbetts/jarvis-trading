@@ -292,26 +292,34 @@
           <thead>
             <tr>
               <th>Token</th><th>Entry</th><th>Exit</th><th>Notional</th>
-              <th>Gross</th><th>Fees</th><th>Net</th><th>%</th>
+              <th>Gross</th><th>Pool fee</th><th>Network</th><th>Impact</th>
+              <th>Total cost</th><th>Net</th><th>%</th>
               <th>Impact in / out</th><th>Reason</th>
             </tr>
           </thead>
           <tbody>
             {#each trades as t (t.id)}
               <tr>
-                <td><b>{t.symbol ?? t.mint.slice(0, 8)}</b></td>
+                <td><b>{t.symbol ?? t.mint?.slice(0, 8) ?? "—"}</b></td>
                 <td class="n">{money(t.entry_price_usd, 6)}</td>
                 <td class="n">{money(t.exit_price_usd, 6)}</td>
                 <td class="n">{money(t.notional_usd)}</td>
                 <td class="n">{money(t.gross_pnl_usd)}</td>
-                <td class="n">{money(t.total_fees_usd)}</td>
+                <!-- The three doors money leaves through, itemised. The old
+                     single "Fees" column summed a venue charge, a chain
+                     charge and price impact — three different problems with
+                     three different remedies. -->
+                <td class="n">{money(t.pool_fees_usd)}</td>
+                <td class="n">{money(t.network_fees_usd)}</td>
+                <td class="n">{money(t.impact_cost_usd)}</td>
+                <td class="n">{money(t.total_costs_usd)}</td>
                 <td class="n" class:up={(t.net_pnl_usd ?? 0) > 0}
                     class:down={(t.net_pnl_usd ?? 0) < 0}>{money(t.net_pnl_usd)}</td>
-                <td class="n">{pct(t.pnl_pct)}</td>
+                <td class="n">{pct(t.net_pnl_pct)}</td>
                 <!-- Impact stays separate from fees: it is a function of
                      your own size, and the remedy is trading smaller. -->
                 <td class="n">{pct(t.entry_impact_pct)} / {pct(t.exit_impact_pct)}</td>
-                <td class="dim">{t.exit_reason ?? "—"}</td>
+                <td class="dim">{t.reason ?? "—"}</td>
               </tr>
             {/each}
           </tbody>

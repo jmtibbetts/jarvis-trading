@@ -182,26 +182,16 @@ def dex_trades(limit: int = 50):
     unprofitable.
     """
     from app.database import DexTrade, get_db
+    from lib.dex_contracts import closed_trades_payload
 
     with get_db() as db:
         rows = (db.query(DexTrade)
                 .order_by(DexTrade.closed_at.desc())
                 .limit(max(1, min(limit, 500))).all())
-        return {"trades": [{
-            "id": t.id, "mint": t.mint, "symbol": t.symbol, "dex": t.dex,
-            "qty_tokens": t.qty_tokens,
-            "entry_price_usd": t.entry_price_usd,
-            "exit_price_usd": t.exit_price_usd,
-            "notional_usd": t.notional_usd,
-            "gross_pnl_usd": t.gross_pnl_usd,
-            "net_pnl_usd": t.net_pnl_usd,
-            "pnl_pct": t.pnl_pct,
-            "entry_impact_pct": t.entry_impact_pct,
-            "exit_impact_pct": t.exit_impact_pct,
-            "total_fees_usd": t.total_fees_usd,
-            "exit_reason": t.exit_reason,
-            "opened_at": t.opened_at, "closed_at": t.closed_at,
-        } for t in rows], "count": len(rows)}
+        # Serialized inside the session: these are ORM instances, and
+        # reading an attribute after the context manager closes raises
+        # DetachedInstanceError rather than returning None.
+        return closed_trades_payload(rows)
 
 
 @router.post("/onchain/dex/open")

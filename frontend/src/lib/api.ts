@@ -1564,18 +1564,36 @@ export type DexBook = {
   limits: DexLimits;
   positions: DexPosition[];
 };
+// Mirrors lib/dex_contracts.ClosedDexTrade — the ONE canonical contract.
+// Three names had drifted (`pnl_pct`, `total_fees_usd`, `exit_reason`) and
+// matched no column on DexTrade, so the route raised AttributeError for
+// every real closed row. Field names here must equal the dataclass's.
 export type DexTrade = {
-  id: string; mint: string; symbol: string | null; dex: string | null;
+  id: string; mint: string | null; symbol: string | null; dex: string | null;
+  position_id: string | null;
   qty_tokens: number | null;
-  entry_price_usd: number | null; exit_price_usd: number | null;
   notional_usd: number | null;
+  entry_price_usd: number | null; exit_price_usd: number | null;
   gross_pnl_usd: number | null; net_pnl_usd: number | null;
-  pnl_pct: number | null;
-  /** Kept apart from fees: impact is YOUR size against depth, not a charge. */
+  net_pnl_pct: number | null;
+  /** The three doors money leaves through, never collapsed into one. */
+  pool_fees_usd: number | null;
+  network_fees_usd: number | null;
+  total_costs_usd: number | null;
+  /** Impact is NOT a fee — it is your size against depth, so it is a
+   *  percentage per side rather than a charge with a rate. */
   entry_impact_pct: number | null; exit_impact_pct: number | null;
-  total_fees_usd: number | null;
-  exit_reason: string | null;
+  /** Derived: total_costs less the two explicit charges. */
+  impact_cost_usd: number | null;
+  reason: string | null;
   opened_at: string | null; closed_at: string | null;
+  hold_minutes: number | null;
+};
+export type DexTradesResponse = {
+  trades: DexTrade[];
+  count: number;
+  contract_version: number;
+  note: string;
 };
 export type DexQuote = {
   ok: boolean; reason?: string;
@@ -1965,7 +1983,7 @@ export const api = {
     get<DexDiscovery>(`/dex/discovery?confirm=${confirm}`),
   // ── DEX virtual exchange ──
   dexBook: () => get<DexBook>("/onchain/dex/book"),
-  dexTrades: (limit = 50) => get<{ trades: DexTrade[]; count: number }>(
+  dexTrades: (limit = 50) => get<DexTradesResponse>(
     `/onchain/dex/trades?limit=${limit}`),
   dexQuote: (amountUsd: number, reserveUsd: number, opts?: {
     dex?: string; solPriceUsd?: number; concentrated?: boolean;

@@ -1664,6 +1664,49 @@ export type ObligationStress = {
   provenance?: Record<string, string>;
 };
 
+// ── Canonical position sizing ─────────────────────────────────────────────
+// The UI renders this; it never derives it. A browser cannot know a
+// contract multiplier, a tick size, a margin requirement, or whether a
+// product may be held fractionally.
+export type SizeResult = {
+  ok: boolean;
+  symbol: string; side: string; entry: number; stop: number;
+  risk_budget_usd: number;
+  instrument_id?: string; asset_class?: string; product?: string;
+  quantity?: number;
+  /** SHARES | COINS | CONTRACTS | FX_UNITS | TOKEN_UNITS. "20" means
+   *  nothing without it. */
+  quantity_unit?: string;
+  multiplier?: number; tick_size?: number | null;
+  risk_per_unit_usd?: number; risk_usd?: number;
+  notional_usd?: number; margin_usd?: number;
+  notional_pct_of_equity?: number | null;
+  limiting_constraint?: string;
+  provenance?: string;
+  /** A refusal is an answer — UNSUPPORTED_INSTRUMENT, BELOW_MIN_SIZE… */
+  reason?: string; detail?: string;
+};
+
+// ── Platform state ────────────────────────────────────────────────────────
+export type PlatformMode = {
+  mode: string; virtual_only: boolean; live_execution_allowed: boolean;
+  market_data_allowed: boolean; account_data_allowed: boolean;
+  detail: string; modes_available: string[];
+};
+export type IntegrityCheck = {
+  key: string; title: string; status: string; severity: string;
+  count: number; scanned: number;
+  detail: string | null; why_it_matters: string | null;
+  examples: Array<Record<string, unknown>>;
+};
+export type IntegrityPanel = {
+  version: string; checks: IntegrityCheck[];
+  total: number; violations: number; critical: number;
+  unavailable: number; errors: number;
+  /** Only true when every check actually RAN. Unavailable blocks clean. */
+  healthy: boolean; verdict: string;
+};
+
 export const api = {
   /**
    * Escape hatch for endpoints that never got a typed wrapper. Several call
@@ -1760,6 +1803,20 @@ export const api = {
     `/onchain/dex/sizing?reserve_usd=${reserveUsd}`
     + (cashUsd !== undefined ? `&cash_usd=${cashUsd}` : "")),
   // Sweeps the whole Kamino program, so it is on-demand rather than polled.
+  sizePosition: (p: {
+    symbol: string; entry: number; stop: number;
+    equity?: number; risk_pct?: number; risk_usd?: number;
+    side?: string; product?: string; leverage?: number;
+  }) => get<SizeResult>(
+    `/platform/size?symbol=${encodeURIComponent(p.symbol)}`
+    + `&entry=${p.entry}&stop=${p.stop}`
+    + `&equity=${p.equity ?? 0}&risk_pct=${p.risk_pct ?? 1}`
+    + (p.risk_usd ? `&risk_usd=${p.risk_usd}` : "")
+    + (p.side ? `&side=${encodeURIComponent(p.side)}` : "")
+    + (p.product ? `&product=${encodeURIComponent(p.product)}` : "")
+    + (p.leverage ? `&leverage=${p.leverage}` : "")),
+  platformMode: () => get<PlatformMode>("/platform/mode"),
+  integrity: () => get<IntegrityPanel>("/platform/integrity"),
   kaminoSweep: (limit = 40, minDebt?: number) => get<KaminoSweep>(
     `/onchain/sweep?limit=${limit}`
     + (minDebt !== undefined ? `&min_debt=${minDebt}` : "")),

@@ -31,6 +31,82 @@ def platform_mode_status():
     return mode_status()
 
 
+@router.get("/platform/size")
+def platform_size(symbol: str, entry: float, stop: float,
+                  equity: float = 0.0, risk_pct: float = 1.0,
+                  risk_usd: float = 0.0, side: str = "Long",
+                  product: str | None = None, leverage: float = 1.0):
+    """THE canonical position sizer. The UI renders this; it never derives it.
+
+    The frontend calculator computed:
+
+        qty      = riskDollars / |entry - stop|
+        notional = qty * entry
+
+    That is share arithmetic. It is correct for equities and crypto and
+    wrong for every contract product: risk per unit is price distance TIMES
+    the multiplier, so a 10-point MES stop is $50 of risk rather than $10,
+    and a "1% risk" position was really 5% — on gold, 100%. Notional was
+    understated by the same factor, so the exposure the operator was shown
+    bore no relation to the exposure they had.
+
+    A browser cannot know a multiplier, a tick size, a margin requirement
+    or whether a contract may be fractional. This does, from the one
+    instrument authority, and returns the answer already computed.
+    """
+    from lib.instruments import UnsupportedInstrument, resolve
+
+    budget = float(risk_usd) if risk_usd else float(equity) * (float(risk_pct) / 100.0)
+    out = {"symbol": symbol, "side": side, "entry": entry, "stop": stop,
+           "risk_budget_usd": round(budget, 2), "ok": False}
+
+    try:
+        inst = resolve(symbol, product=product).require_executable()
+    except UnsupportedInstrument as e:
+        # A contract whose units are unknown cannot be sized. Refusing is
+        # the whole point — the old path would have returned a number.
+        return {**out, "reason": "UNSUPPORTED_INSTRUMENT", "detail": str(e)}
+
+    distance = abs(float(entry) - float(stop))
+    if distance <= 0 or float(entry) <= 0 or budget <= 0:
+        return {**out, "reason": "NO_RISK_DISTANCE",
+                "detail": "entry, stop and a risk budget are all required"}
+
+    mult = float(inst.multiplier or 1.0)
+    risk_per_unit = distance * mult
+    whole = inst.quantity_unit == "CONTRACTS"
+    qty = (float(int(budget // risk_per_unit)) if whole
+           else budget / risk_per_unit)
+
+    if whole and qty < 1:
+        return {**out, "reason": "BELOW_MIN_SIZE",
+                "quantity_unit": inst.quantity_unit,
+                "risk_per_contract_usd": round(risk_per_unit, 2),
+                "detail": (f"${budget:,.0f} is below the ${risk_per_unit:,.0f} "
+                           f"risk of one contract — rounding up would take "
+                           f"more risk than authorised")}
+
+    notional = qty * float(entry) * mult
+    margin = (qty * float(inst.initial_margin)) if inst.initial_margin else (
+        notional / max(1.0, float(leverage)))
+
+    return {
+        **out, "ok": True,
+        "instrument_id": inst.instrument_id,
+        "asset_class": inst.asset_class, "product": inst.product,
+        "quantity": qty, "quantity_unit": inst.quantity_unit,
+        "multiplier": mult, "tick_size": inst.tick_size,
+        "risk_per_unit_usd": round(risk_per_unit, 4),
+        "risk_usd": round(qty * risk_per_unit, 2),
+        "notional_usd": round(notional, 2),
+        "margin_usd": round(margin, 2),
+        "notional_pct_of_equity": (round(notional / float(equity) * 100.0, 2)
+                                   if equity else None),
+        "limiting_constraint": "whole_contracts" if whole else "risk_budget",
+        "provenance": "CALCULATED — canonical instrument multiplier and units",
+    }
+
+
 @router.get("/platform/integrity")
 def platform_integrity():
     """Every training-data invariant, run against live rows.

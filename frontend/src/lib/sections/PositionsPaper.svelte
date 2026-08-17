@@ -3,7 +3,7 @@
   import KpiTile from "../components/KpiTile.svelte";
   import Pill from "../components/Pill.svelte";
   import StateNote from "../components/StateNote.svelte";
-  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist, type ConcentrationStatus } from "../api";
+  import { api, type PositionWithSignal, type PaperSummary, type AutoSimSummary, type SlippageSummary, type EarningsWatchlist, type ConcentrationStatus, type SizeResult } from "../api";
   import { FeedTracker } from "../dataState.svelte";
   import { toastStore } from "../stores/toast.svelte";
   import { downloadCsv } from "../csv";
@@ -53,21 +53,41 @@
   let expandedLive = $state<Set<string>>(new Set());
   let showManualOpen = $state(false);
   let manualOpen = $state({ symbol: "", asset_class: "Equity", paper_direction: "Long", entry_price: "", target_price: "", stop_loss: "" });
-  let sizer = $state({ equity: "", riskPct: "1", entry: "", stop: "" });
+  let sizer = $state({ symbol: "", equity: "", riskPct: "1", entry: "", stop: "" });
+  let sizerResult = $state<SizeResult | null>(null);
+  let sizerBusy = $state(false);
 
   const earningsRisk = (symbol: string) => earnings?.at_risk_symbols.includes(symbol.replace("/USD", "").toUpperCase()) ?? false;
 
-  const sizerResult = $derived.by(() => {
+  // SIZING IS A BACKEND ANSWER, NOT A BROWSER DERIVATION.
+  //
+  // This used to compute qty = riskDollars / |entry - stop| and
+  // notional = qty * entry. That is share arithmetic: correct for
+  // equities and crypto, wrong for every contract product, because risk
+  // per unit is price distance TIMES the multiplier.
+  //
+  // The notional was accidentally right — the multiplier cancels between
+  // qty and notional — which is exactly why nobody noticed. The QUANTITY
+  // was not, and quantity is what goes on an order ticket. A $1,000 risk
+  // budget on gold showed "100", and 100 GC contracts risks $100,000.
+  //
+  // A browser cannot know a multiplier, a tick size, a margin requirement
+  // or whether a contract may be fractional. The backend does.
+  $effect(() => {
+    const symbol = sizer.symbol.trim();
     const equity = Number(sizer.equity) || 0;
     const riskPct = Number(sizer.riskPct) || 0;
     const entry = Number(sizer.entry) || 0;
     const stop = Number(sizer.stop) || 0;
-    if (!equity || !riskPct || !entry || !stop || entry === stop) return null;
-    const riskDollars = equity * (riskPct / 100);
-    const perUnitRisk = Math.abs(entry - stop);
-    const qty = riskDollars / perUnitRisk;
-    const notional = qty * entry;
-    return { riskDollars, qty, notional, notionalPctOfEquity: equity ? (notional / equity) * 100 : 0 };
+    if (!symbol || !equity || !riskPct || !entry || !stop || entry === stop) {
+      sizerResult = null;
+      return;
+    }
+    sizerBusy = true;
+    api.sizePosition({ symbol, entry, stop, equity, risk_pct: riskPct })
+      .then((r) => { sizerResult = r; })
+      .catch(() => { sizerResult = null; })
+      .finally(() => { sizerBusy = false; });
   });
 
   const exposure = $derived.by(() => {
@@ -508,20 +528,39 @@ Type FLATTEN to confirm:`,
     <Panel title="Position Sizing Calculator" meta="risk-based share count">
       {#snippet children()}
         <div class="sizer-form">
+          <label>Symbol<input placeholder="MES=F" bind:value={sizer.symbol} /></label>
           <label>Account equity<input placeholder="100000" bind:value={sizer.equity} /></label>
           <label>Risk %<input placeholder="1" bind:value={sizer.riskPct} /></label>
           <label>Entry price<input placeholder="0.00" bind:value={sizer.entry} /></label>
           <label>Stop price<input placeholder="0.00" bind:value={sizer.stop} /></label>
         </div>
-        {#if sizerResult}
+        {#if sizerBusy}
+          <div class="empty small">Sizing…</div>
+        {:else if sizerResult?.ok}
           <div class="sizer-result">
-            <div><span>Risk</span><b class="num">{fmtUsd(sizerResult.riskDollars)}</b></div>
-            <div><span>Size</span><b class="num">{sizerResult.qty.toFixed(4)}</b></div>
-            <div><span>Notional</span><b class="num">{fmtUsd(sizerResult.notional)}</b></div>
-            <div><span>% of equity</span><b class="num {sizerResult.notionalPctOfEquity > 50 ? 'pl-down' : ''}">{sizerResult.notionalPctOfEquity.toFixed(1)}%</b></div>
+            <div><span>Risk</span><b class="num">{fmtUsd(sizerResult.risk_usd ?? 0)}</b></div>
+            <!-- The UNIT is part of the answer. "20" means nothing without
+                 knowing whether it is shares or contracts. -->
+            <div><span>Size</span><b class="num">{sizerResult.quantity?.toFixed(sizerResult.quantity_unit === "CONTRACTS" ? 0 : 4)} <em>{sizerResult.quantity_unit?.toLowerCase()}</em></b></div>
+            <div><span>Notional</span><b class="num">{fmtUsd(sizerResult.notional_usd ?? 0)}</b></div>
+            <div><span>Margin</span><b class="num">{fmtUsd(sizerResult.margin_usd ?? 0)}</b></div>
+            {#if sizerResult.multiplier && sizerResult.multiplier !== 1}
+              <div><span>Multiplier</span><b class="num">{sizerResult.multiplier}x</b></div>
+            {/if}
+            {#if sizerResult.notional_pct_of_equity != null}
+              <div><span>% of equity</span><b class="num {sizerResult.notional_pct_of_equity > 50 ? 'pl-down' : ''}">{sizerResult.notional_pct_of_equity.toFixed(1)}%</b></div>
+            {/if}
+          </div>
+        {:else if sizerResult}
+          <!-- A refusal is an answer. An instrument whose units are unknown
+               cannot be sized, and showing a number anyway is what the old
+               calculator did. -->
+          <div class="sizer-refused">
+            <strong>{sizerResult.reason ?? "CANNOT_SIZE"}</strong>
+            <span>{sizerResult.detail ?? "this instrument cannot be sized"}</span>
           </div>
         {:else}
-          <div class="empty small">Enter equity, risk %, entry, and stop</div>
+          <div class="empty small">Enter symbol, equity, risk %, entry, and stop</div>
         {/if}
       {/snippet}
     </Panel>
@@ -1475,5 +1514,22 @@ Type FLATTEN to confirm:`,
     color: var(--ink-faint);
     flex: 1;
     min-width: 220px;
+  }
+
+  /* A refusal is an answer, and it must not look like a missing value. */
+  .sizer-refused {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 9px 11px; border-radius: 4px;
+    background: color-mix(in srgb, var(--bad, #e06c75) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--bad, #e06c75) 35%, transparent);
+  }
+  .sizer-refused strong {
+    font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--bad, #e06c75);
+  }
+  .sizer-refused span { font-size: 12px; color: var(--muted); }
+  .sizer-result em {
+    font-style: normal; font-size: 11px; color: var(--muted);
+    text-transform: lowercase;
   }
 </style>

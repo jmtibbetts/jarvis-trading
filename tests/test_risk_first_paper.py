@@ -76,17 +76,25 @@ class RiskFirstSizingTests(unittest.TestCase):
 
 
 class NoFlatFallbackTests(unittest.TestCase):
-    def test_the_flat_margin_fallback_is_gone_from_the_open_path(self):
+    """The open path is now PREPARE (authorize) then SETTLE (mutate), so the
+    sizing guarantees are asserted over both halves together. Reading only
+    the composed entry point would let the fallback reappear in whichever
+    half the test stopped looking at."""
+
+    def _open_path_src(self):
         import lib.paper_engine as pe
-        src = inspect.getsource(pe.open_paper_position)
+        return "\n".join(inspect.getsource(f) for f in
+                         (pe.prepare_entry, pe.settle_entry,
+                          pe.open_paper_position))
+
+    def test_the_flat_margin_fallback_is_gone_from_the_open_path(self):
+        src = self._open_path_src()
         self.assertNotIn("ASSET_CLASS_MARGIN.get", src,
                          "sizing rejection still falls back to a flat position")
         self.assertIn("paper sizing rejected", src)
 
     def test_conviction_leverage_is_out_of_the_open_path(self):
-        import lib.paper_engine as pe
-        src = inspect.getsource(pe.open_paper_position)
-        self.assertNotIn("score_leverage(", src)
+        self.assertNotIn("score_leverage(", self._open_path_src())
 
     def test_auto_sim_no_longer_scores_leverage(self):
         from lib import auto_simulator

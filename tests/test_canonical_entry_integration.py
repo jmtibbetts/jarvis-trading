@@ -47,20 +47,37 @@ SIGNAL = {
 class TheRealReturnContractTests(unittest.TestCase):
     """Pin the shape, so a future mock cannot drift from it unnoticed."""
 
-    def test_open_paper_position_returns_position_not_position_id(self):
+    def _paper_engine_tree(self):
         import ast
         import pathlib
-        src = (pathlib.Path(__file__).parent.parent
-               / "lib" / "paper_engine.py").read_text(encoding="utf-8")
-        fn = next(n for n in ast.walk(ast.parse(src))
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "open_paper_position")
+        return ast.parse((pathlib.Path(__file__).parent.parent
+                          / "lib" / "paper_engine.py").read_text(encoding="utf-8"))
+
+    def test_settlement_returns_position_not_position_id(self):
+        """The success contract is built by SETTLE — the half that actually
+        creates the row. open_paper_position is now the composition of
+        prepare_entry and settle_entry, so the shape is asserted where it is
+        constructed rather than where it is returned from."""
+        import ast
+        fn = next(n for n in ast.walk(self._paper_engine_tree())
+                  if isinstance(n, ast.FunctionDef) and n.name == "settle_entry")
         keys = set()
         for node in ast.walk(fn):
             if isinstance(node, ast.Dict):
                 keys.update(k.value for k in node.keys
                             if isinstance(k, ast.Constant))
         self.assertIn("position", keys)
+
+    def test_no_position_id_key_exists_anywhere_in_paper_engine(self):
+        """Strictly wider than the original check, which only read one
+        function: the key this codebase has never returned must not appear
+        in ANY of them, so a mock cannot find one to imitate."""
+        import ast
+        keys = set()
+        for node in ast.walk(self._paper_engine_tree()):
+            if isinstance(node, ast.Dict):
+                keys.update(k.value for k in node.keys
+                            if isinstance(k, ast.Constant))
         self.assertNotIn("position_id", keys,
                          "no top-level position_id exists; mocks must not invent one")
 

@@ -66,14 +66,23 @@ def _now() -> str:
 
 def open_canonical_position(signal: dict, *, decision_price: float | None = None,
                             max_age_s: float | None = None) -> dict:
-    """Authorize, execute against the venue book, then settle the ACTUAL fill.
+    """PREPARE, EXECUTE the authorized quantity, then SETTLE the actual fill.
 
-    Returns the `open_paper_position` result on success, or a refusal dict
-    carrying `venue_failure=True` when the venue could not price a fill.
+    THE ORDER OF THESE STEPS IS THE WHOLE POINT. This used to push a NOMINAL
+    one unit through the venue purely to discover a price, and size
+    afterwards. Two things were wrong with that. The order that was simulated
+    was not the order that settled, so `spread_cost_usd` and `slippage_usd`
+    described a single unit of a trade nobody placed — attribution that is
+    off by the position size, which on a 330-unit entry is off by 330x. And
+    sizing after execution means risk never saw the price it was actually
+    exposed at.
+
+    Returns the settlement result on success, or a refusal dict carrying
+    `venue_failure=True` when the venue could not price a fill.
     """
     from lib import execution_policy as POL
     from lib import virtual_orders as VO
-    from lib.paper_engine import open_paper_position
+    from lib.paper_engine import prepare_entry, settle_entry
     from lib.trade_side import SHORT, parse_side_strict
 
     symbol = (signal.get("asset_symbol") or "").upper().strip()
@@ -100,18 +109,30 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "opened": False}
 
     snap = ready.snapshot
-
-    # ── 2. Cross the book. BUY lifts the ask; SELL hits the bid. ─────────
-    # Quantity is nominal here: the authorization below decides real size.
-    # What this call establishes is the PRICE, which is the whole point.
     quote = VO.Quote(bid=snap.bid, ask=snap.ask, as_of=snap.venue_event_at,
                      source=snap.source)
-    order = VO.VirtualOrder(symbol=symbol, side=("short" if side == SHORT else "long"),
-                            quantity=float(signal.get("qty") or 1.0),
-                            order_type=VO.MARKET,
-                            signal_id=signal.get("id") or signal.get("signal_id"))
-    execution = VO.execute_market(order, quote)
+    venue_side = "short" if side == SHORT else "long"
 
+    def _execute(qty: float):
+        order = VO.VirtualOrder(
+            symbol=symbol, side=venue_side, quantity=float(qty),
+            order_type=VO.MARKET,
+            signal_id=signal.get("id") or signal.get("signal_id"))
+        return VO.execute_market(order, quote)
+
+    # ── 2. PREPARE. Authorize a real size, against the venue's own mid ───
+    # The mid is a REFERENCE, never a fill — it is the screen price a desk
+    # sizes on before it learns what it actually paid. The fill below will
+    # be worse than this by construction, and step 4 is what makes the
+    # position honest about that.
+    prep = prepare_entry(signal, reference_price=quote.mid)
+    if "authorization" not in prep:
+        return {**prep, "venue_failure": False, "opened": False}
+    authorized = prep["authorization"]
+
+    # ── 3. EXECUTE THE AUTHORIZED QUANTITY. BUY lifts the ask, SELL hits
+    #      the bid, and the result describes THIS order. ──────────────────
+    execution = _execute(authorized.qty)
     if not execution.filled or not execution.fill_price:
         logger.info("[CanonicalEntry] %s produced no fill: state=%s reason=%s",
                     symbol, execution.state, execution.reject_reason)
@@ -123,7 +144,52 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
     fill = float(execution.fill_price)
 
-    # ── 3. Settle the ACTUAL fill through the existing authorization. ────
+    # ── 4. POST-FILL REVALIDATION ────────────────────────────────────────
+    # Crossing the book moved the entry AGAINST us, so the same quantity now
+    # sits further from the same stop and risks more money than was approved.
+    # The fix is to re-authorize at the price actually paid — through the
+    # SAME risk engine, not a correction factor applied here — and keep
+    # whichever size is smaller. Execution may shrink an order; nothing may
+    # enlarge one.
+    repriced = prepare_entry(signal, reference_price=fill)
+    if "authorization" not in repriced:
+        return {**repriced, "venue_failure": False, "opened": False}
+    final = repriced["authorization"]
+    if final.qty > authorized.qty:
+        final = final.shrunk_to(authorized.qty)
+
+    if final.qty < authorized.qty - 1e-9:
+        # A SMALLER ORDER IS RE-SUBMITTED. The alternative — editing the
+        # filled ExecutionResult down to the new size — would fabricate an
+        # execution that never happened, which is the same class of lie as
+        # filling at the mark. The fill price is independent of size in this
+        # model (no depth), so this converges in exactly one resubmission.
+        logger.info("[CanonicalEntry] %s re-submitting %.8g -> %.8g units "
+                    "after the fill at %.8g repriced the risk",
+                    symbol, authorized.qty, final.qty, fill)
+        execution = _execute(final.qty)
+        if not execution.filled or not execution.fill_price:
+            return {"error": execution.reject_reason or UNFILLED,
+                    "execution_state": execution.state,
+                    "venue": ready.venue, "product": ready.product,
+                    "venue_failure": False, "opened": False}
+        fill = float(execution.fill_price)
+
+    # FAIL CLOSED. The position about to be written must be the order that
+    # was actually simulated — if those two ever disagree, the attribution
+    # is fiction and no position is worth writing.
+    if abs(float(execution.filled_quantity) - float(final.qty)) > 1e-9:
+        logger.error("[CanonicalEntry] %s refusing to settle: executed %s "
+                     "units but authorization holds %s",
+                     symbol, execution.filled_quantity, final.qty)
+        return {"error": REJECTED_BY_EXECUTION,
+                "detail": (f"executed {execution.filled_quantity} units against "
+                           f"an authorization of {final.qty} — settling would "
+                           f"record a position no simulated order produced"),
+                "venue": ready.venue, "product": ready.product,
+                "venue_failure": False, "opened": False}
+
+    # ── 5. SETTLE the actual fill. ───────────────────────────────────────
     # The mark is kept as decision_price so slippage stays measurable.
     #
     # Provenance is built FIRST and handed to settlement, so position, cash
@@ -133,9 +199,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # to is_canonical(), and therefore invisible to the exit guard.
     provenance = build_provenance(signal=signal, ready=ready, snap=snap,
                                   execution=execution,
-                                  decision_price=decision_price)
-    result = open_paper_position(signal, current_price=fill,
-                                 execution_provenance=provenance)
+                                  decision_price=decision_price,
+                                  authorized_qty=authorized.qty)
+    result = settle_entry(final, fill_price=fill,
+                          execution_provenance=provenance)
     if not result.get("ok"):
         return result
 
@@ -149,6 +216,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         "venue": ready.venue, "product": ready.product,
         "decision_price": decision_price, "fill_price": fill,
         "bid_at_submit": snap.bid, "ask_at_submit": snap.ask,
+        "authorized_quantity": authorized.qty,
+        "filled_quantity": execution.filled_quantity,
+        # These now describe the REAL order, not one nominal unit of it.
         "spread_attribution_usd": execution.spread_cost_usd,
         "slippage_attribution_usd": execution.slippage_usd,
         "execution_model_version": EXECUTION_MODEL_CANONICAL,
@@ -157,7 +227,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
 
 def build_provenance(*, signal, ready, snap, execution,
-                     decision_price) -> dict:
+                     decision_price, authorized_qty=None) -> dict:
     """How this position came to exist. Persisted by settlement, atomically.
 
     One JSON document rather than a dozen columns. NULL provenance means
@@ -193,6 +263,14 @@ def build_provenance(*, signal, ready, snap, execution,
         "actual_entry_fill": execution.fill_price,
         "bid_at_submit": snap.bid,
         "ask_at_submit": snap.ask,
+        # SIZE, so the attribution below can be checked rather than trusted.
+        # These were computed on a nominal single unit while the position
+        # settled at whatever sizing produced, and nothing recorded the
+        # discrepancy because nothing recorded the quantity.
+        "authorized_quantity": authorized_qty,
+        "filled_quantity": execution.filled_quantity,
+        "quantity_unit": execution.quantity_unit,
+        "multiplier": execution.multiplier,
         "spread_attribution_usd": execution.spread_cost_usd,
         "slippage_attribution_usd": execution.slippage_usd,
         "impact_attribution_usd": 0.0,

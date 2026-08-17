@@ -14,6 +14,7 @@ v2.0 Fixes:
 """
 import json
 import logging
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -714,31 +715,97 @@ def _bound_loss_to_margin(raw_pnl: float, margin: float, symbol: str,
     return -margin
 
 
-def open_paper_position(signal: dict, current_price: float = None,
-                        execution_provenance: dict | None = None,
-                        canonical_entry_fee_usd: float | None = None) -> dict:
+@dataclass(frozen=True)
+class EntryAuthorization:
+    """What risk approved, priced at a REFERENCE. Nothing has been mutated.
+
+    This is the output of PREPARE. It is deliberately a record rather than a
+    scratchpad: an authorization that can be edited in place is one that can
+    be quietly enlarged between the approval and the order, which is the
+    whole failure mode `OrderPlan.check` exists to catch.
+
+    `reference_price` is NOT a fill. It is the price the size was solved
+    against — the screen price a desk sizes on before it learns what it
+    actually paid. Settlement records the real fill.
     """
-    Open a new paper position from a trading signal.
-    direction can be: Long, Bounce, Long_Leveraged, Short, Short_Leveraged
+    signal: dict
+    symbol: str
+    asset_class: str
+    direction: str                 # a DIRECTION_LEVERAGE key
+    side: int                      # +1 long, -1 short
+    reference_price: float
+    target: float
+    stop: float
+    qty: float
+    margin: float
+    notional: float
+    leverage: float
+    loss_at_stop: float
+    equity: float
+    sizing: dict
 
-    PROVENANCE IS SETTLED HERE, NOT STAMPED AFTERWARDS.
+    @property
+    def stop_distance(self) -> float:
+        return abs(float(self.reference_price) - float(self.stop))
 
-    `get_db()` commits on context exit, so a caller that opened the position
-    and then persisted provenance in a SECOND session was running two
-    transactions. When the second failed, the first had already committed:
-    the position existed, cash was debited, provenance was NULL — and a NULL
-    provenance position is invisible to `is_canonical()`, so the fail-closed
-    exit guard would let it straight through the legacy close path. Measured
-    on a disposable book: $1,250.17 debited, one orphan position, and an
-    exception that unwound nothing.
+    def risk_decision(self):
+        """The approval, in the canonical type the risk gate understands."""
+        from lib.decision_types import RiskDecision
+        return RiskDecision(
+            allowed_risk_usd=float(self.loss_at_stop),
+            stop_distance=self.stop_distance,
+            qty=float(self.qty), notional=float(self.notional),
+            margin=float(self.margin), leverage=float(self.leverage),
+            limiting_constraint=("cash" if self.sizing.get("capped_by_cash")
+                                 else "risk"))
 
-    Passing the document in means position, cash and provenance share one
-    transaction and roll back together.
+    def shrunk_to(self, qty: float) -> "EntryAuthorization":
+        """A SMALLER authorization. Refuses to enlarge, by construction.
 
-    `canonical_entry_fee_usd`, when given, switches this position to the
-    per-leg cost model: the fee is DEBITED NOW from actual executed exposure,
-    and `fees` is left at 0 rather than carrying the legacy deferred
-    round-trip estimate that the close path would later charge again.
+        Execution may shrink an order — a venue minimum, a rounded contract,
+        an adverse fill that costs more risk per unit than the size was
+        solved against. It may never grow one, so this raises rather than
+        clamps: a silent enlargement is exactly the defect that would make
+        every downstream ceiling decorative.
+        """
+        q = float(qty)
+        if not (q > 0):
+            raise ValueError(f"cannot shrink {self.symbol} to {q!r} units")
+        if q > float(self.qty) + 1e-12:
+            raise ValueError(
+                f"shrunk_to({q}) would ENLARGE {self.symbol} beyond the "
+                f"authorized {self.qty} — execution may shrink an order, "
+                f"never enlarge one")
+        scale = q / float(self.qty)
+        return replace(self, qty=q,
+                       notional=float(self.notional) * scale,
+                       margin=float(self.margin) * scale,
+                       loss_at_stop=float(self.loss_at_stop) * scale)
+
+
+def prepare_entry(signal: dict, reference_price: float = None) -> dict:
+    """PREPARE — read, calculate, AUTHORIZE. No mutation, no cash moves.
+
+    Everything that decides whether and how large this trade may be: side
+    parsing, delivery risk, stop and target discipline, the horizon cap,
+    sizing, leverage, book concentration and headroom. It ends holding an
+    authorized quantity and touches nothing.
+
+    This exists because the order was backwards. `canonical_entry` used to
+    send a NOMINAL 1 unit through the venue purely to discover a price, and
+    only then size — so `ExecutionResult.spread_cost_usd` and `slippage_usd`
+    described one unit of an order nobody placed, while the position settled
+    at a different size entirely. The sequence has to be
+
+        signal -> risk/sizing -> AUTHORIZED QTY -> execute -> fill -> settle
+
+    and the attribution has to describe the order that was actually
+    simulated. Splitting the authorization out is what lets a caller size
+    first and execute second WITHOUT a second risk engine: there is still
+    exactly one, and it lives here.
+
+    Returns {"ok": True, "authorization": EntryAuthorization} or an error
+    dict — the same error dicts `open_paper_position` has always returned.
     """
     sym = signal.get("asset_symbol", "").upper().strip()
     if not sym:
@@ -773,7 +840,7 @@ def open_paper_position(signal: dict, current_price: float = None,
     except Exception as e:
         logger.debug(f"[Paper] delivery-risk check skipped for {sym}: {e}")
 
-    entry = float(current_price or signal.get("entry_price") or 0)
+    entry = float(reference_price or signal.get("entry_price") or 0)
     # Try futures price source if still no price
     if (not entry or entry <= 0):
         try:
@@ -785,7 +852,7 @@ def open_paper_position(signal: dict, current_price: float = None,
         except Exception:
             pass
     if not entry or entry <= 0:
-        return {"error": f"No valid entry price for {sym} (got: {current_price}, signal entry: {signal.get('entry_price')})"}
+        return {"error": f"No valid entry price for {sym} (got: {reference_price}, signal entry: {signal.get('entry_price')})"}
 
     # Auto-detect asset class (Equity | Crypto | Futures | Forex)
     asset_class_raw = (signal.get("asset_class") or "").lower()
@@ -933,6 +1000,58 @@ def open_paper_position(signal: dict, current_price: float = None,
         + (" [capped by free cash]" if sizing.get("capped_by_cash") else "")
     )
 
+    return {"ok": True, "authorization": EntryAuthorization(
+        signal=signal, symbol=sym, asset_class=asset_class, direction=dir_key,
+        side=side, reference_price=entry, target=target, stop=stop,
+        qty=qty, margin=margin, notional=notional, leverage=leverage,
+        loss_at_stop=float(sizing["loss_at_stop"]), equity=_equity,
+        sizing=sizing)}
+
+
+def settle_entry(auth: EntryAuthorization, *, fill_price: float,
+                 execution_provenance: dict | None = None,
+                 canonical_entry_fee_usd: float | None = None) -> dict:
+    """SETTLE — ONE transaction: revalidate the book, create, debit, commit.
+
+    The authorization arrives already decided; nothing here may enlarge it.
+    What this re-checks are the facts that can have changed since PREPARE
+    read them — a duplicate open, the slot count, the deployment cap, free
+    cash — because a book is shared state and an authorization is a snapshot.
+
+    PROVENANCE IS SETTLED HERE, NOT STAMPED AFTERWARDS.
+
+    `get_db()` commits on context exit, so a caller that opened the position
+    and then persisted provenance in a SECOND session was running two
+    transactions. When the second failed, the first had already committed:
+    the position existed, cash was debited, provenance was NULL — and a NULL
+    provenance position is invisible to `is_canonical()`, so the fail-closed
+    exit guard would let it straight through the legacy close path. Measured
+    on a disposable book: $1,250.17 debited, one orphan position, and an
+    exception that unwound nothing.
+
+    Passing the document in means position, cash and provenance share one
+    transaction and roll back together.
+
+    `canonical_entry_fee_usd`, when given, switches this position to the
+    per-leg cost model: the fee is DEBITED NOW from actual executed exposure,
+    and `fees` is left at 0 rather than carrying the legacy deferred
+    round-trip estimate that the close path would later charge again.
+
+    `fill_price` is what the position is RECORDED at. For the legacy path it
+    equals the reference the size was solved against; for the canonical path
+    it is the executed fill, and the two differ by exactly the spread and
+    slippage that crossing the book actually cost.
+    """
+    sym = auth.symbol
+    asset_class = auth.asset_class
+    dir_key = auth.direction
+    side = auth.side
+    entry = float(fill_price)
+    target, stop = auth.target, auth.stop
+    qty, margin = round(auth.qty, 6), round(auth.margin, 2)
+    notional, leverage = auth.notional, auth.leverage
+    sizing = auth.sizing
+
     # NOTE on the duplicate-open race: the "already open?" check below and the
     # INSERT further down happen in the same SQLAlchemy session/transaction,
     # but that only protects against races *within* this process — a second
@@ -1029,7 +1148,7 @@ def open_paper_position(signal: dict, current_price: float = None,
                                         if execution_provenance else None),
                 unrealized_pnl= 0.0,
                 unrealized_pct= 0.0,
-                signal_id     = signal.get("id"),
+                signal_id     = auth.signal.get("id"),
                 status        = "Open",
                 opened_at     = _now(),
                 updated_at    = _now(),
@@ -1067,6 +1186,30 @@ def open_paper_position(signal: dict, current_price: float = None,
     )
     return {"ok": True, "position": pos_data}
 
+
+def open_paper_position(signal: dict, current_price: float = None,
+                        execution_provenance: dict | None = None,
+                        canonical_entry_fee_usd: float | None = None) -> dict:
+    """Open a new paper position from a trading signal: PREPARE then SETTLE.
+
+    direction can be: Long, Bounce, Long_Leveraged, Short, Short_Leveraged
+
+    THE PRICE IS USED TWICE HERE, AND THAT IS THE LEGACY SHAPE. `current_price`
+    is both the reference the size is solved against and the price the
+    position is recorded at, because this path has no execution step between
+    the two — whatever it is handed becomes the fill. That is precisely the
+    mark-as-fill behaviour `lib/canonical_entry` exists to replace; it stays
+    intact for the manual and legacy callers that still price their own
+    entries (Telegram, the trading routes), and it is not what the autonomous
+    scheduler uses.
+    """
+    prep = prepare_entry(signal, reference_price=current_price)
+    if "authorization" not in prep:
+        return prep                       # an error dict, unchanged in shape
+    return settle_entry(prep["authorization"],
+                        fill_price=prep["authorization"].reference_price,
+                        execution_provenance=execution_provenance,
+                        canonical_entry_fee_usd=canonical_entry_fee_usd)
 
 
 # ── Development-checkpoint guard: canonical positions have no exit yet ────

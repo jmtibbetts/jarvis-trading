@@ -40,18 +40,34 @@ SIGNAL = {"asset_symbol": "BTC/USD", "asset_class": "Crypto",
           "id": "sig-1"}
 
 
+def _fake_settlement(captured):
+    """A double for `paper_engine.settle_entry` that matches the REAL
+    signature and the REAL return shape.
+
+    A1 was hidden for exactly as long as the doubles here invented their own
+    contract, so this one takes the authorization positionally and the fill
+    as a keyword, precisely as settlement does, and returns
+    {"ok": True, "position": {...}} — the only success shape this codebase
+    has ever produced. PREPARE is deliberately NOT mocked: sizing is the
+    thing under test.
+    """
+    def fake_settle(auth, *, fill_price, execution_provenance=None,
+                    canonical_entry_fee_usd=None):
+        captured["fill"] = fill_price
+        captured["qty"] = auth.qty
+        captured["auth"] = auth
+        captured["provenance"] = execution_provenance
+        captured["entry_fee"] = canonical_entry_fee_usd
+        return {"ok": True, "position": {"id": "pos-test"}}
+    return fake_settle
+
+
 class TheVenueBookIsTheFillAuthorityTests(unittest.TestCase):
 
     def _open(self, signal=None, bid=99.90, ask=100.10, decision=100.00):
         captured = {}
-
-        def fake_open(sig, current_price=None, execution_provenance=None,
-                      canonical_entry_fee_usd=None):
-            captured["fill"] = current_price
-            return {"ok": True, "position": {"id": "pos-test"}}
-
         with _kraken(bid, ask), \
-             patch("lib.paper_engine.open_paper_position", fake_open):
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(signal or SIGNAL,
                                              decision_price=decision)
         return res, captured
@@ -89,22 +105,113 @@ class TheVenueBookIsTheFillAuthorityTests(unittest.TestCase):
         self.assertGreater(wide["fill"], tight["fill"])
 
 
+class TheExecutedOrderIsTheAuthorizedOrderTests(unittest.TestCase):
+    """A3/A4. The venue used to be handed a NOMINAL one unit purely to
+    discover a price, and sizing happened afterwards.
+
+    Two separate defects fell out of that. The order that was simulated was
+    not the order that settled — so `spread_cost_usd` and `slippage_usd`
+    described one unit of a trade nobody placed, off by the entire position
+    size. And risk never priced the entry it was actually exposed at.
+    """
+
+    def _open(self, signal=None, bid=99.90, ask=100.10):
+        captured = {}
+        with _kraken(bid, ask), \
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
+            res = CE.open_canonical_position(signal or SIGNAL,
+                                             decision_price=100.00)
+        return res, captured
+
+    def test_the_venue_executes_the_sized_quantity_not_one_unit(self):
+        """THE DEFECT. `quantity = signal.get("qty") or 1.0`."""
+        res, cap = self._open()
+        self.assertTrue(res.get("ok"), res)
+        self.assertGreater(res["execution"]["filled_quantity"], 1.0,
+                           "the venue was handed a nominal single unit again")
+        self.assertAlmostEqual(res["execution"]["filled_quantity"],
+                               cap["qty"], places=9)
+
+    def test_a_nominal_qty_on_the_signal_cannot_size_the_order(self):
+        """Sizing is risk's job. A `qty` hint on the signal used to go
+        straight through to the venue."""
+        _, hinted = self._open(dict(SIGNAL, qty=1.0))
+        _, plain = self._open()
+        self.assertAlmostEqual(hinted["qty"], plain["qty"], places=9)
+        self.assertGreater(hinted["qty"], 1.0)
+
+    def test_attribution_describes_the_whole_position_not_one_unit(self):
+        """Spread cost scales with size. A one-unit figure on a 300-unit
+        position understates the cost of trading by ~300x."""
+        res, cap = self._open(bid=99.90, ask=100.10)
+        qty = cap["qty"]
+        spread_attr = res["execution"]["spread_attribution_usd"]
+        # half the 0.20 spread, on every unit
+        self.assertAlmostEqual(spread_attr, 0.10 * qty, places=6)
+        self.assertGreater(spread_attr, 0.10,
+                           "attribution is still priced on a single unit")
+
+    def test_attribution_is_not_a_scaled_up_one_unit_result(self):
+        """`ExecutionResult` must describe the true simulated order, so the
+        filled quantity it reports has to BE the position's quantity."""
+        res, cap = self._open()
+        self.assertEqual(res["execution"]["filled_quantity"], cap["qty"])
+        self.assertEqual(cap["provenance"]["filled_quantity"], cap["qty"])
+
+    def test_the_settled_size_never_exceeds_what_was_authorized(self):
+        res, cap = self._open()
+        self.assertLessEqual(cap["qty"],
+                             res["execution"]["authorized_quantity"] + 1e-9)
+
+    def test_the_adverse_fill_shrinks_the_position_rather_than_the_stop(self):
+        """Crossing the book moves ENTRY against us. The stop price does not
+        move, so the distance to it grows, so the same quantity would risk
+        more money than was approved. The SIZE gives way.
+
+        Widening the stop instead would keep the quantity and quietly raise
+        the loss the account is exposed to — the trade would look identical
+        and be bigger.
+        """
+        res, cap = self._open(bid=99.90, ask=100.10)
+        auth = cap["auth"]
+
+        self.assertGreater(cap["fill"], 100.00, "the fill was not adverse")
+        # The stop PRICE is exactly what the signal asked for — untouched.
+        self.assertEqual(auth.stop, SIGNAL["stop_loss"])
+        # The distance to it grew purely because the entry got worse.
+        self.assertGreater(auth.stop_distance, 100.00 - SIGNAL["stop_loss"])
+        # And the size absorbed it.
+        self.assertLess(cap["qty"], res["execution"]["authorized_quantity"])
+
+    def test_the_shrink_keeps_money_at_risk_inside_the_authorization(self):
+        """`filled <= authorized` is not the guarantee that matters — dollars
+        at the stop are. Quantity alone does not bound loss."""
+        res, cap = self._open(bid=99.00, ask=101.00)   # a wide, costly book
+        auth = cap["auth"]
+        risk_at_stop = auth.qty * auth.stop_distance
+        self.assertLessEqual(risk_at_stop, auth.loss_at_stop * (1 + 1e-6))
+        self.assertLessEqual(cap["qty"],
+                             res["execution"]["authorized_quantity"] + 1e-9)
+
+    def test_a_short_also_executes_its_authorized_size(self):
+        short = dict(SIGNAL, paper_direction="Short", stop_loss=105.0,
+                     target_price=85.0)
+        res, cap = self._open(short)
+        self.assertTrue(res.get("ok"), res)
+        self.assertGreater(res["execution"]["filled_quantity"], 1.0)
+        self.assertLessEqual(cap["fill"], 99.90)
+
+
 class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
     """A VENUE failure is not a verdict on the thesis."""
 
     def _attempt(self, quote):
-        opened = {"called": False}
-
-        def fake_open(sig, current_price=None, execution_provenance=None,
-                      canonical_entry_fee_usd=None):
-            opened["called"] = True
-            return {"ok": True, "position": {"id": "pos-test"}}
-
+        captured = {}
         with patch("lib.kraken_stream.latest_quote", return_value=quote), \
              patch("lib.kraken_stream.trade_flow", return_value=None), \
-             patch("lib.paper_engine.open_paper_position", fake_open):
+             patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(SIGNAL, decision_price=100.0)
-        return res, opened["called"]
+        return res, ("fill" in captured)
 
     def test_a_stale_quote_opens_nothing(self):
         res, opened = self._attempt({"bid": 99.9, "ask": 100.1, "at": _at(600.0)})
@@ -138,16 +245,10 @@ class NoExecutableDataMeansNoPositionTests(unittest.TestCase):
 
     def test_futures_are_refused_before_any_quote_is_sought(self):
         fut = dict(SIGNAL, asset_symbol="ES=F", asset_class="Futures")
-        opened = {"called": False}
-
-        def fake_open(sig, current_price=None, execution_provenance=None,
-                      canonical_entry_fee_usd=None):
-            opened["called"] = True
-            return {"ok": True}
-
-        with patch("lib.paper_engine.open_paper_position", fake_open):
+        captured = {}
+        with patch("lib.paper_engine.settle_entry", _fake_settlement(captured)):
             res = CE.open_canonical_position(fut, decision_price=5432.25)
-        self.assertFalse(opened["called"])
+        self.assertNotIn("fill", captured)
         self.assertEqual(res["error"], POL.UNSUPPORTED_VIRTUAL_VENUE)
 
     def test_an_unreadable_side_is_not_a_venue_failure(self):

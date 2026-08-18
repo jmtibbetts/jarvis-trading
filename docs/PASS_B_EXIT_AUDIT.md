@@ -20,8 +20,14 @@ canonical door beside it.
 
 **Consequence to state plainly: canonical positions currently cannot be
 closed at all.** That is the intended fail-closed state, not an outage — the
-guard exists precisely so a venue-book position cannot settle at a mark. Pass
-B removes it by BUILDING the exit, never by weakening it.
+guard exists precisely so a venue-book position cannot settle at a mark.
+
+**THE GUARD IS PERMANENT.** Pass B does not remove or weaken
+`_refuse_legacy_close()`. It makes canonical callers BYPASS the legacy leaf by
+routing them to `canonical_exit`; the legacy leaf keeps refusing anything with
+a canonical venue-book fill. If a canonical or hybrid position ever reaches it
+again by accident, it must still refuse. Building the canonical door is what
+unblocks canonical positions — the lock on the legacy door stays on.
 
 ## Caller matrix
 

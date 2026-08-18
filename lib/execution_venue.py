@@ -105,7 +105,7 @@ class VirtualCexAdapter(ExecutionVenue):
                            "CRYPTO_SPOT", "CRYPTO_PERP")
 
     def submit(self, plan, *, risk=None, quote=None, bar=None,
-               **kw) -> VenueSubmission:
+               instrument=None, **kw) -> VenueSubmission:
         from lib.virtual_orders import (LIMIT, MARKET, VirtualOrder,
                                         execute_limit, execute_market)
 
@@ -129,7 +129,10 @@ class VirtualCexAdapter(ExecutionVenue):
                     "a market order cannot be simulated without a two-sided "
                     "quote — filling at a reference price would hand the "
                     "model half the spread")
-            res = execute_market(order, quote)
+            # THE EXACT INSTRUMENT TRAVELS WITH THE ORDER. Without it
+            # virtual_orders re-resolves the symbol and a frozen perpetual
+            # silently becomes spot-in-coins.
+            res = execute_market(order, quote, instrument=instrument)
 
         out = VenueSubmission(bool(res.filled), self.family,
                               provenance={"fill_model": res.fill_model,

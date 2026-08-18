@@ -602,3 +602,84 @@ def suggest_micro(symbol: str) -> str | None:
         if spec.micro_of == s:
             return sym
     return None
+
+
+# ── EXACT EXECUTION IDENTITY ─────────────────────────────────────────────
+#
+# `resolve()` answers "what instrument does this symbol usually mean?" and for
+# a bare crypto pair that answer is SPOT in COINS. That is the right default
+# for a watchlist and the wrong one for an execution whose product was already
+# frozen at T0.
+#
+# MEASURED CONSEQUENCE. A canonical plan frozen as
+# BTC/USD / CRYPTO_PERP / kraken_derivatives_us / PBTCUCZ50 reached
+# `virtual_orders.execute_market()` with no instrument, so execution
+# re-resolved it to crypto:BTC/USD, CRYPTO_SPOT, COINS, multiplier 1.0 — while
+# the position's own provenance recorded PBTCUCZ50. One order, two
+# incompatible descriptions of what a unit of quantity means.
+#
+# It is easy to miss because BTC's generic multiplier is 1.0 and the fill
+# price still looks sane. It is not harmless: PBTCUCZ50 has a contract size of
+# 0.01 BTC, so "1 unit" means 1 BTC under one reading and 0.01 BTC under the
+# other — a hundredfold difference in exposure, fees and P&L.
+#
+# This function is the exact-execution answer. It is NOT RoutingIdentity:
+# routing says WHICH product was chosen, this says what ONE executable unit
+# of that product actually is.
+
+
+class ExecutionIdentityRefused(ValueError):
+    """The frozen identity and the venue spec do not describe one instrument."""
+
+
+def resolve_for_execution(symbol: str, *, product: str,
+                          venue: str | None = None,
+                          instrument_id: str | None = None
+                          ) -> InstrumentIdentity:
+    """The instrument an EXECUTION will actually transact, or a refusal.
+
+    Refuses rather than guesses when the caller's frozen contract disagrees
+    with what the venue spec resolves — silently preferring either side is how
+    a position ends up settled in units nobody authorized.
+    """
+    from lib import product_router as PR
+
+    if product == PR.CRYPTO_PERP:
+        from lib import bitnomial_products as BP
+        spec = BP.resolve(symbol)
+        if not spec.ok:
+            raise ExecutionIdentityRefused(
+                f"{symbol} has no executable perpetual identity: "
+                f"{spec.reason}: {spec.detail}")
+        if instrument_id and instrument_id != spec.symbol:
+            raise ExecutionIdentityRefused(
+                f"frozen contract {instrument_id!r} but the venue spec "
+                f"resolves {symbol} to {spec.symbol!r}; refusing rather than "
+                f"choosing one")
+        return InstrumentIdentity(
+            instrument_id=spec.symbol,
+            canonical_symbol=symbol.upper().strip(),
+            display_symbol=symbol.upper().strip(),
+            asset_class="crypto",
+            product=PR.CRYPTO_PERP,
+            # CONTRACTS, not COINS. The whole point of this function.
+            quantity_unit="CONTRACTS",
+            base_asset=spec.contract_size_unit,
+            quote_asset="USD",
+            venue_family=spec.venue or venue,
+            multiplier=float(spec.contract_size),
+            contract_size=float(spec.contract_size),
+            tick_size=float(spec.price_increment),
+            # Perpetual contracts are indivisible.
+            quantity_step=1.0,
+            minimum_quantity=1.0,
+        )
+
+    # Every other product keeps the existing generic behaviour, so no legacy
+    # caller changes shape because perpetuals became exact.
+    ident = resolve(symbol)
+    if instrument_id and ident.instrument_id != instrument_id:
+        raise ExecutionIdentityRefused(
+            f"frozen instrument {instrument_id!r} but {symbol} resolves to "
+            f"{ident.instrument_id!r}")
+    return ident

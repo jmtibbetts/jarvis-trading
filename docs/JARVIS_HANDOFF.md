@@ -1070,9 +1070,12 @@ a sensitivity value, documented as the modelled round-trip COST it always was.
 ### Next: EXECUTION PASS B — canonical exits
 
 Entry is canonical; exits still settle at the mark for canonical positions via
-the legacy path, which is the last place the simulator can invent money. The
-fail-closed guard in `close_paper_position` exists to be removed by BUILDING
-the exit, never by weakening it.
+the legacy path, which is the last place the simulator can invent money.
+
+**The fail-closed guard in `close_paper_position` is PERMANENT.** Pass B does
+not remove it. Canonical callers get routed to `canonical_exit` and BYPASS the
+legacy leaf; the leaf keeps refusing anything carrying a canonical venue-book
+fill, as defence in depth against a caller that is missed or added later.
 
 Live state at this checkpoint: collector RUNNING, campaign
 FORWARD_EVIDENCE_20260818T075321Z, one epoch, original boundary, scheduler

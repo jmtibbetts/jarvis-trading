@@ -70,7 +70,10 @@ PRIOR_TOTAL = 4.0
 # 6.0% ever reached their target. Add the contract-multiplier error on
 # futures and 6-decimal rounding on sub-cent assets, and the win/loss labels
 # describe a machine that is gone.
-CURRENT_EPOCH = "2026-08-13"
+# ONE AUTHORITY — see lib/engine_epoch. Previously "2026-08-13", which
+# did not match the epoch canonical economics were stamped with, so
+# canonical outcomes were filtered out of every query below.
+from lib.engine_epoch import ENGINE_EPOCH as CURRENT_EPOCH
 
 # Confidence a signal may claim when there is no evidence behind it.
 # Without this cap, "insufficient history" silently returns the model's own

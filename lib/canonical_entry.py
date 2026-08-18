@@ -61,7 +61,11 @@ from lib.paper_settlement import (COST_MODEL_CANONICAL,  # noqa: E402,F401
 # The learning epoch that begins with the venue-book executor. Outcomes from
 # the direct-mark era stay in their own epoch; they remain useful research
 # about theses and features, and they are not execution evidence.
-CANONICAL_ENGINE_EPOCH = "2026-08-17-venue-book"
+# ONE AUTHORITY — see lib/engine_epoch. This name is kept because the
+# canonical layer reads better with it, but it is an alias, not a
+# second opinion: while this and calibration disagreed, canonical
+# outcomes were invisible to every learner.
+from lib.engine_epoch import ENGINE_EPOCH as CANONICAL_ENGINE_EPOCH
 
 # Canonical refusal reasons that are ABOUT THE ORDER rather than the venue.
 UNFILLED = "UNFILLED"

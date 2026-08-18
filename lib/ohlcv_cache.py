@@ -27,9 +27,25 @@ logger = logging.getLogger(__name__)
 ALLOW_YFINANCE_CRYPTO_FALLBACK = os.getenv("ALLOW_YFINANCE_CRYPTO_FALLBACK", "false").lower() in ("1", "true", "yes")
 
 # ── Cache DB (separate from main DB — can grow large) ─────────────────────────
-DATA_DIR = Path(__file__).parent.parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
-CACHE_DB = DATA_DIR / "ohlcv_cache.db"
+# REDIRECTABLE, like every other store this application writes. A dry run, a
+# dev copy or a disposable verification process is only disposable if EVERY
+# file it can write lives under its own directory; a single hard-coded path
+# is enough to have an otherwise-isolated process mutate live operator data.
+# This one was computed from __file__ with no override, so importing this
+# module inside a redirected child still opened the operator's cache.
+def _cache_db_path() -> Path:
+    override = os.environ.get("JARVIS_OHLCV_DB_PATH")
+    if override:
+        path = Path(override)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    data_dir = Path(__file__).parent.parent / "data"
+    data_dir.mkdir(exist_ok=True)
+    return data_dir / "ohlcv_cache.db"
+
+
+CACHE_DB = _cache_db_path()
+DATA_DIR = CACHE_DB.parent
 
 cache_engine = create_engine(
     f"sqlite:///{CACHE_DB}",

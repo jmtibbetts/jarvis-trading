@@ -414,37 +414,31 @@ def phase_empty_boot(_payload: dict) -> dict:
             surfaces[name] = f"{type(exc).__name__}: {exc}"
 
     def _calibration():
-        from lib.calibration import build_calibration_table
-        build_calibration_table(force=True)
+        from lib.calibration import build_table, summary
+        build_table(force=True)
+        summary()
 
     def _expectancy():
-        from lib import expectancy
-        for name in ("build_expectancy_table", "build_table", "table"):
-            fn = getattr(expectancy, name, None)
-            if callable(fn):
-                try:
-                    fn(force=True)
-                except TypeError:
-                    fn()
-                return
+        from lib.expectancy import build_table
+        build_table(force=True)
 
-    def _portfolio():
-        from lib.paper_engine import get_paper_portfolio
-        get_paper_portfolio()
+    def _summary():
+        from lib.paper_engine import get_paper_summary
+        get_paper_summary()
 
     def _mark():
         from lib.paper_engine import mark_to_market
         mark_to_market({})
 
-    def _positions():
-        from lib.paper_engine import get_open_paper_positions
-        get_open_paper_positions()
+    def _edge_cost():
+        from lib.edge_cost_matrix import matrix
+        matrix(days=30, top=10)
 
     attempt("calibration", _calibration)
     attempt("expectancy", _expectancy)
-    attempt("paper_portfolio", _portfolio)
+    attempt("paper_summary", _summary)
     attempt("mark_to_market", _mark)
-    attempt("open_positions", _positions)
+    attempt("edge_cost_matrix", _edge_cost)
 
     bad = {k: v for k, v in surfaces.items() if v != "ok"}
     return {"ok": not bad, "surfaces": surfaces,

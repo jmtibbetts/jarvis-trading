@@ -238,7 +238,13 @@ def child_env(candidate: Path, work: Path) -> dict:
     env["JARVIS_EVENTS_DB_PATH"] = str(stores / "events.db")
     env["JARVIS_OHLCV_DB_PATH"] = str(stores / "ohlcv_cache.db")
     env["JARVIS_SCHEDULER_ENABLED"] = "false"
-    env["JARVIS_RUNTIME_MODE"] = "EVIDENCE_ONLY"
+    # FULL_VIRTUAL, deliberately. EVIDENCE_ONLY forbids economic mutation,
+    # which is exactly right for the OPERATOR runtime and exactly wrong
+    # here: the whole point is to prove canonical economics execute end to
+    # end. This applies only to this child process, against the disposable
+    # candidate database. The operator's own runtime mode is not read,
+    # written or affected by any of this.
+    env["JARVIS_RUNTIME_MODE"] = "FULL_VIRTUAL"
     env["PYTHONPATH"] = str(REPO)
     return env
 

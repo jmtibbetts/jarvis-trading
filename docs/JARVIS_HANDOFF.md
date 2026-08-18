@@ -1748,3 +1748,105 @@ stays OFF; operator DB stays unmigrated.
                     trade_outcomes 21,194 hash 74cadca1…)
     scheduler       OFF
     real actions    0
+
+## 26. STOP POINT — PASS B IMPLEMENTATION COMPLETE
+
+**Read this section first if you are continuing.** It supersedes §25.
+
+    main            3a8ae77 + this docs commit   clean, pushed
+    tests           3,786 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              3a8ae77 GREEN (Actions REST, exact head_sha)
+
+### Pass B, end to end
+
+    B0   exact executable identity, contract-native sizing, exact fees
+    B1   atomic canonical entry ledger
+    B2A  atomic canonical exit settlement core
+    B2B  frozen-book market-facing canonical exit
+    B2C  idempotent canonical learning projection
+    ---  CALLER ROUTING (this section)
+
+All ten audited production exit callers now go through ONE classifier,
+`lib/exit_dispatch.py`. Proven from the code by an AST sweep over `lib/`,
+`app/` and `jobs/` — no production module reaches `close_paper_position` or
+`partial_close_paper_position` any more. See `docs/PASS_B_EXIT_AUDIT.md` for
+the full AFTER matrix.
+
+    LEGACY     no canonical fill, no header  -> legacy leaf, unchanged
+    CANONICAL  fill + is_canonical + header  -> canonical_exit -> B2A -> B2C
+    HYBRID     any mixed state               -> refuse, nothing mutates
+
+**There is no fallback.** Not on refusal, not on exception. A canonical exit
+that cannot execute leaves the position OPEN.
+
+### Trigger authority — the load-bearing change
+
+    a caller mark            EVIDENCE
+    the frozen contract book TRIGGER CONFIRMATION and FILL AUTHORITY
+
+Automated price triggers (stop / target / margin call / forced liquidation)
+are re-confirmed on the instrument's EXECUTABLE side before an order exists:
+a LONG exits by SELLING so it is judged on the BID, a SHORT on the ASK.
+Unconfirmed returns `EXIT_TRIGGER_NOT_CONFIRMED` with the threshold and both
+sides quoted, and `mark_to_market` reports it under `trigger_refused` —
+never as a close with a null P&L. The margin-call condition is re-derived at
+the same `MARGIN_CALL_THRESHOLD` constant, imported, never re-typed.
+Discretionary exits (manual / AI / flatten / reset) are INSTRUCTIONS and are
+never second-guessed. `trigger_price` means the THRESHOLD; decision
+reference and actual fill remain two further, separately stored facts.
+
+**KNOWN AND DELIBERATELY UNFIXED:** the legacy mark arithmetic inside
+`mark_to_market` is unit-blind — it prices 26 PBTC CONTRACTS as 26 coins, so
+nearly any adverse mark makes it declare a margin call, and the
+`unrealized_pnl` it writes for a canonical position is wrong (bounded at
+-margin). That is now a DISPLAY defect only, because that arithmetic can no
+longer settle anything. Worth fixing next time canonical display is touched;
+it is not a settlement risk.
+
+### Administrative reset and flatten
+
+`soft_reset_paper_portfolio` may only RESEED when zero positions remain
+open; otherwise `RESET_INCOMPLETE` with successes, failures and what is
+still open, portfolio row untouched. Positions that closed stay closed —
+honest history, not pretend atomicity. The invariant: **never fresh cash
+beside old open exposure.** API flatten applies the same principle without a
+reseed, verifying the final open count rather than counting attempts.
+
+`ADMINISTRATIVE_RESET` is a canonical exit reason with a terminal learning
+state `SKIPPED_POLICY`: full financial history, no trade_outcomes row, no
+aggregates, and no future sweep will teach it.
+
+### Learning handoff
+
+Post-settlement, one attempt, outside the financial transaction. A learning
+fault NEVER reverses a correct close — pinned by injecting one. Partials
+create no outcome and make no call. `apply_pending_realized_outcomes` stays
+the recovery sweep; nothing is scheduled.
+
+### What did NOT change
+
+- `_refuse_legacy_close()` is **permanent** and still refuses canonical
+  positions directly, even though normal callers now use another door.
+- Legacy economics are untouched — a legacy caller's price is still its
+  fill, proved by a control test that keeps the canonical mark-poison proof
+  from being vacuous.
+- `lib/auto_simulator.py` is a separate ORM economy, out of scope.
+- `EVIDENCE_ONLY` still cannot settle on either route.
+
+### NEXT = CANONICAL EPOCH CUTOVER DRY RUN
+
+`READY_FOR_CANONICAL_EPOCH_CUTOVER_DRY_RUN`. The operator DB is still
+UNMIGRATED and the scheduler is still OFF; the cutover is its own explicit
+exercise (migrate a copy, decide the epoch boundary, decide what happens to
+the 667 legacy positions, rehearse). NOT operator migrated. NOT scheduler
+activated. NOT live money.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84,
+                    667 / 664 / 21,194 hashes unchanged; all three ledger
+                    tables truthfully ABSENT)
+    scheduler       OFF
+    real actions    0

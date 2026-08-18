@@ -4,9 +4,27 @@ Migration's highest-risk step is copying a database that is still being
 written. `shutil.copy` on a live SQLite file with an active WAL can capture
 a torn state that opens cleanly and is quietly missing the tail.
 
-This uses SQLite's backup API with the source opened READ-ONLY, records
-size + SHA-256 + `PRAGMA integrity_check` for source and copy, and refuses
-to proceed if a writer still holds the file.
+This uses SQLite's backup API with the source opened READ-ONLY, and records
+size + SHA-256 + `PRAGMA integrity_check` for source and copy.
+
+IT DOES NOT REQUIRE A QUIESCENT SOURCE, and that is deliberate. The backup
+API reads through the WAL and produces a consistent snapshot of a live
+database, which is exactly what makes routine online backups useful — a
+tool you cannot run without stopping the system is a tool that does not get
+run. A non-empty WAL is reported as a NOTE, not a refusal.
+
+    An earlier version of this docstring claimed it "refuses to proceed if
+    a writer still holds the file". It never did. The claim is removed
+    rather than quietly softened, because a safety property that exists
+    only in documentation is worse than no claim at all: it gets relied on.
+
+THE CUTOVER HAS A STRICTER REQUIREMENT, and it lives elsewhere.
+`scripts/canonical_epoch_dry_run.py` scans `/proc/<pid>/fd` and REFUSES if
+any other process holds the database, its WAL or its SHM. The difference is
+what the copy is FOR: a routine snapshot is a recovery point, while a
+cutover archive is a final immutable epoch boundary. "Consistent" is enough
+for the first; for the second the source must also be provably still, or
+the word "immutable" is not one this tool has earned.
 
     python scripts/snapshot_operator_db.py --out <dir>
     python scripts/snapshot_operator_db.py --out <dir> --skip-cache

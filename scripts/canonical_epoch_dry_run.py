@@ -860,10 +860,17 @@ def phase_external_stores(source: Path, g: Gates) -> dict:
         except sqlite3.Error as exc:
             out["forward_evidence.db"]["campaigns_error"] = str(exc)
 
-    g.record("external_stores_preserved",
-             all(v["exists"] for v in out.values()),
-             ", ".join(f"{k}={'ok' if v['exists'] else 'MISSING'}"
-                       for k, v in out.items()))
+    # A store that does not exist beside a FIXTURE source is not a
+    # preservation failure — there was nothing to preserve. What must hold
+    # is that every store which DOES exist is intact and was not imported
+    # into the candidate. Existence itself is asserted separately when the
+    # source is the real operator database, where these files are present.
+    present = {k: v for k, v in out.items() if v["exists"]}
+    intact = all(v.get("integrity") == "ok" for v in present.values())
+    g.record("external_stores_intact_and_not_imported", intact,
+             ", ".join(f"{k}={v.get('integrity')}"
+                       for k, v in present.items())
+             or "no external stores beside this source")
     return out
 
 
@@ -1055,6 +1062,13 @@ def main(argv=None) -> int:
 
     print("\nP8  external evidence stores")
     stores = phase_external_stores(source, g)
+    if not args.allow_non_operator_source:
+        # Against the real operator source these files are known to exist,
+        # and their absence would mean something has already gone wrong.
+        g.record("operator_external_stores_present",
+                 all(v["exists"] for v in stores.values()),
+                 ", ".join(f"{k}={'ok' if v['exists'] else 'MISSING'}"
+                           for k, v in stores.items()))
 
     print("\nP9  candidate process isolation")
     isolation = (phase_isolation(source, candidate, work, g)
@@ -1096,10 +1110,19 @@ def main(argv=None) -> int:
              "the operator DB remains unmigrated")
 
     print("\nP18  live evidence unchanged")
-    campaigns = (stores.get("forward_evidence.db", {}) or {}).get("campaigns")
-    g.record("evidence_campaign_unchanged",
-             bool(campaigns) and len(campaigns) == 1,
-             str(campaigns))
+    fe_info = stores.get("forward_evidence.db", {}) or {}
+    campaigns = fe_info.get("campaigns")
+    if fe_info.get("exists"):
+        g.record("evidence_campaign_unchanged",
+                 bool(campaigns) and len(campaigns) == 1,
+                 str(campaigns))
+    else:
+        # No evidence store beside this source (a fixture run). Recorded
+        # explicitly rather than silently skipped, so the manifest never
+        # implies a campaign was checked when it was not.
+        g.record("evidence_campaign_unchanged", True,
+                 "no forward_evidence.db beside this source — "
+                 "not applicable")
 
     return _finish(g, work, run_id, args, source, classification, quiescence,
                    archive_info, cand_info, copy_info, econ_info, stores,

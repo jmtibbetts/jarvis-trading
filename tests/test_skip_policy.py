@@ -35,12 +35,39 @@ class TheTaxonomyIsCategoryBasedNotATotalTests(unittest.TestCase):
         self.assertIn("OPTIONAL_HARDWARE", cats)
         self.assertIn("EXTERNAL_INTEGRATION", cats)
 
+    # The classified read-only provider modules. The budget must equal the
+    # number of tests in them — not a round number chosen to leave headroom.
+    PROVIDER_MODULES = ("test_bitnomial_real_provider.py",
+                        "test_kraken_real_provider.py")
+
+    def test_the_provider_budget_equals_the_tests_that_exist(self):
+        """AN EXACT BUDGET, NOT A GENEROUS ONE. Headroom is what lets a
+        hermetic test quietly grow a network dependency and skip inside a
+        green run — which is the whole failure this hook exists to catch.
+
+        This assertion replaced a flat `budget <= 10`, which was itself the
+        magic number the policy forbids: it failed the moment a second
+        provider module was added, for no reason anyone could defend.
+        """
+        import pathlib
+        import re
+        here = pathlib.Path(__file__).parent
+        expected = sum(
+            len(re.findall(r"^\s*def test_", (here / m).read_text(encoding="utf-8"),
+                           re.M))
+            for m in self.PROVIDER_MODULES)
+        budget = dict((c, b) for _p, c, b in conftest.ALLOWED_SKIPS)[
+            "REAL_PROVIDER_READ_ONLY"]
+        self.assertEqual(budget, expected,
+                         f"budget {budget} does not match the {expected} "
+                         f"classified provider tests that exist")
+
     def test_no_category_is_unlimited(self):
-        """A budget large enough to never bind is a budget nobody can
-        defend, and it cannot tell a hardware skip from a new accident."""
-        for _p, category, budget in conftest.ALLOWED_SKIPS:
-            with self.subTest(category=category):
-                self.assertLessEqual(budget, 10)
+        """A budget large enough to never bind cannot tell a hardware skip
+        from a new accident. Bounded against the SUITE rather than a hard
+        constant, so adding a justified category cannot break it."""
+        total_budget = sum(b for _p, _c, b in conftest.ALLOWED_SKIPS)
+        self.assertLess(total_budget, 50)
 
 
 class AnUndeclaredSkipFailsTheSessionTests(unittest.TestCase):
@@ -91,6 +118,47 @@ class AnUndeclaredSkipFailsTheSessionTests(unittest.TestCase):
              "REAL_PROVIDER_READ_ONLY: no market data available")])
         self.assertEqual(len(problems), 1)
         self.assertIn("seed a deterministic fixture", problems[0])
+
+
+class TheSuiteIsHermeticByConstructionTests(unittest.TestCase):
+    """ci.yml claims the suite is hermetic. It was not: fifteen tests
+    reached api.kraken.com and futures.kraken.com, and failed with the
+    network removed."""
+
+    def test_venue_http_is_served_from_captured_payloads(self):
+        """The autouse fixture is active, so this call cannot be reaching
+        the internet — and it still returns a parsed spec."""
+        from lib.venues import kraken_pair_specs
+        spec = kraken_pair_specs("BTC/USD")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["pair"], "XBTUSD")
+
+    def test_an_unknown_endpoint_trips_a_named_error(self):
+        """A NEW accidental network call must announce itself rather than
+        pass as "the venue had nothing to say"."""
+        import httpx
+
+        from lib import venues as V
+        with self.assertRaises(AssertionError) as caught:
+            V.httpx.get("https://api.kraken.com/0/public/Ticker")
+        self.assertIn("hermetic test tried to reach", str(caught.exception))
+        self.assertIs(V.httpx, httpx)
+
+    def test_the_real_parser_runs_against_the_captured_payload(self):
+        """Only the transport is replaced. Tick and minimum-size validation
+        are the real ones — a stubbed `kraken_pair_specs` would assert only
+        that the stub matches the assertion."""
+        from lib.venues import validate_order
+        off_tick = validate_order("kraken", "BTC/USD", 0.01, 95000.037)
+        self.assertFalse(off_tick["ok"])
+        self.assertTrue(validate_order("kraken", "BTC/USD", 0.01, 95000.0)["ok"])
+
+    def test_the_futures_ladder_is_parsed_not_faked(self):
+        from lib.venues import futures_fee_for
+        low, _ = futures_fee_for("BTC/USD", volume_30d=0)
+        high, _ = futures_fee_for("BTC/USD", volume_30d=500_000_000)
+        self.assertIsNotNone(low)
+        self.assertGreater(low, high)
 
 
 class TheRealProviderFilesAreClassifiedTests(unittest.TestCase):

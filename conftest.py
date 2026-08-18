@@ -16,6 +16,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 os.environ["JARVIS_UNDER_PYTEST"] = "1"
 os.environ.setdefault("JARVIS_DISABLE_SCHEDULER", "1")
 
@@ -112,7 +114,10 @@ ALLOWED_SKIPS = (
     #   6  tests/test_bitnomial_real_provider.py
     #      (public product specs + public book WebSocket;
     #       twin: tests/test_bitnomial_market_data.py)
-    (r"REAL_PROVIDER_READ_ONLY", "REAL_PROVIDER_READ_ONLY", 6),
+    #   6  tests/test_kraken_real_provider.py
+    #      (public AssetPairs / Spread / futures instruments and fee
+    #       schedules; twin: tests/kraken_twin.py)
+    (r"REAL_PROVIDER_READ_ONLY", "REAL_PROVIDER_READ_ONLY", 12),
 )
 
 # Reasons that are never acceptable, with the fix named. These are the three
@@ -183,6 +188,35 @@ def pytest_sessionfinish(session, exitstatus):
             print(f"  - {p}")
         print("=" * 70)
         session.exitstatus = 1
+
+
+# ── The suite is hermetic BY CONSTRUCTION, not by luck ───────────────────
+#
+# ci.yml states that tests are hermetic and that a test needing a real key
+# is wrong. `lib/venues` disagreed with that in practice: fifteen tests
+# reached api.kraken.com and futures.kraken.com, and with the network
+# removed they all failed. A release gate must not depend on a provider's
+# reachability, rate limiting, DNS or maintenance window.
+#
+# This installs the captured-payload twin over `lib.venues.httpx.get` for
+# every test, so the REAL parsers, fee ladders and margin arithmetic run
+# against deterministic input. It is scoped to one module's transport
+# rather than to sockets generally — an unknown URL raises by name, which
+# is how a NEW accidental network call announces itself instead of quietly
+# passing as "the venue had nothing to say".
+#
+# Tests that genuinely check the live service opt out with
+# JARVIS_REAL_PROVIDER_TESTS=1 and are classified REAL_PROVIDER_READ_ONLY.
+@pytest.fixture(autouse=True)
+def _kraken_hermetic_by_default():
+    if os.getenv("JARVIS_REAL_PROVIDER_TESTS") == "1":
+        yield
+        return
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent / "tests"))
+    from kraken_twin import kraken_offline
+    with kraken_offline():
+        yield
 
 
 def pytest_runtest_logreport(report):

@@ -243,8 +243,9 @@ class RetentionPolicyTests(unittest.TestCase):
     def test_projection_uses_measured_rates_not_assumptions(self):
         from lib import evidence_retention as RET
         p = RET.projection()
-        # The first design assumed 6 samples/product/min; the venue does ~115.
-        self.assertAlmostEqual(p["tob_changes_per_s"], 31.0, places=1)
+        # The first design assumed 6 samples/product/min; measured over 900s
+        # the venue moves the book ~144 times and we persist ~110.
+        self.assertAlmostEqual(p["tob_changes_per_s"], 29.3, places=1)
         self.assertAlmostEqual(p["bytes_per_row"], 353.3, places=1)
         self.assertEqual(p["storage_case"], "CASE_1")
         self.assertLess(p["gb_per_year"], 1000)

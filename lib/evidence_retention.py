@@ -12,14 +12,23 @@ left as an omission.
 
 WHAT THE MEASUREMENTS SAY (live venue, 2026-08-18).
 
-    active perpetuals              16   (17 discovered, SHIB fails closed)
-    provider messages              ~180 /s
-    top-of-book changes            ~31 /s   (~115 per product per minute)
+    session                        900s, 16 active perpetuals
+                                   (17 discovered; SHIB fails closed live on
+                                   its unverified price scale)
+    provider messages              173,617  = 192.9 /s
+    top-of-book changes             34,625  =  38.5 /s  (144 per product/min)
+    ROWS ACTUALLY PERSISTED         26,328  =  29.3 /s  (110 per product/min)
+                                   99.7% change-triggered, 0.3% heartbeat
+
     measured SQLite cost           353.3 bytes/row at 300k rows
     index overhead                 66% of table bytes
     insert throughput              ~83,500 rows/s
 
-    => ~2.7M rows/day  ~0.95 GB/day  ~345 GB/year for the perpetual set
+Persisted rows sit below top-of-book changes because a SIZE-only move is not
+a price move: the evidence schema stores bid/ask prices, so a change in
+resting quantity at an unchanged price is correctly not a new row.
+
+    => ~2.5M rows/day  ~0.89 GB/day  ~326 GB/year for the perpetual set
 
 Against roughly 8 TB of NVMe and 60 TB of SATA SSD, a year of complete
 top-of-book chronology for every US perpetual costs about 4% of one NVMe
@@ -56,7 +65,10 @@ logger = logging.getLogger(__name__)
 # ── Measured inputs, dated so they can be re-measured rather than trusted ──
 MEASURED_ON = "2026-08-18"
 MEASURED_BYTES_PER_ROW = 353.3
-MEASURED_TOB_CHANGES_PER_S = 31.0
+# The rate that actually costs storage is the PERSISTED row rate, not the
+# raw top-of-book change rate — see the size-only note above.
+MEASURED_TOB_CHANGES_PER_S = 29.3
+MEASURED_RAW_TOB_CHANGES_PER_S = 38.5
 MEASURED_ACTIVE_PRODUCTS = 16
 
 # ── The policy ───────────────────────────────────────────────────────────

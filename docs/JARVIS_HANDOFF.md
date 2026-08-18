@@ -411,22 +411,107 @@ Proven on a COPY of the real 402MB schema, never the operator DB:
 before and after**, `integrity_check ok`, `init_db()` idempotent on rerun.
 New tables arrive via `create_all`; the operator DB still does not have them.
 
-### STILL OPEN IN PHASE B
+### B9 — LIVE VENUE MEASUREMENT (2026-08-18) — the assumption was 20x wrong
 
-- **The runtime has not been exercised against the live venue.** Every test
-  is hermetic; `JARVIS_DISABLE_MARKET_DATA=1` under pytest. Reconnect,
-  backoff and subscription-restore are implemented and unit-covered but have
-  NOT been observed against real Bitnomial. Next window should run a
-  deliberate `REAL_PROVIDER_READ_ONLY` session and measure **messages/sec,
-  meaningful top-of-book changes/sec, and resulting rows/day** per product —
-  the sampling rate here is assumed (6/min), not measured.
-- **Retention/compaction is designed-for but NOT built.** ~13.9 GB/year at 20
-  instruments is a hot window with no pruning. Compaction after all dependent
-  horizons finalise is the intended follow-up.
-- Observer is not registered as a scheduler job — deliberate while the
-  scheduler is off. `jobs/observe_decision_outcomes.py` runs standalone.
+Deliberate `REAL_PROVIDER_READ_ONLY` session, 900s, disposable DB, operator
+DB never opened. Reports (gitignored) in `data/reports/`:
+`bitnomial_market_data_measurement_*`, `evidence_storage_measurement_*`,
+`bitnomial_recovery_verification_*`.
+
+    active products      16   (17 discovered; SHIB fails closed LIVE on its
+                         unverified price scale — the guard holds in reality)
+    provider messages    173,617  = 192.9/s  (level 172,032 · book 1,568
+                         snapshots · status 16 · trade 1)
+    top-of-book changes   34,625  =  38.5/s  = 144 per product per minute
+    rows persisted        26,328  =  29.3/s  = 110 per product per minute
+                         99.7% change-triggered · 0.3% heartbeat
+    reconnects 0 · stale 0 · desynced 0 · all 16 books healthy
+
+**The sampler had assumed ~6 changes per product per minute. The venue does
+~144.** A 1Hz polling collector persisted only ~15/product/min — about 13% of
+real book movement — and the missing 87% is exactly what MFE/MAE and touch
+chronology are made of. **The collector is now EVENT-DRIVEN off the same
+ingest** (`add_book_listener` -> bridge -> `note_quote` -> buffered writer),
+routed through `execution_market_snapshot` so it inherits the perp/spot
+refusal and the SHIB fail-closed rather than reimplementing them.
+
+Persisted rows sit below top-of-book changes because a SIZE-only move is not
+a price move — correct, not lossy.
+
+**Measurement artefact found and fixed:** the snapshot API takes a DESK
+symbol while `active_symbols()` returns venue product codes; passing one for
+the other refused all 16 with NO_BITNOMIAL_PRODUCT.
+
+### SQLITE COST AND QUERY SPEED — measured at 300k rows
+
+    bytes/row        353.3   (assumed 220 — 60% under)
+    table / index    64.8MB / 43.1MB  -> 66% index overhead
+    insert           ~83,500 rows/s
+    range queries    ALL use ix_quote_sample_window
+                     1m 0.05ms · 1h 0.42ms · 4h 1.5ms · 1d 9.9ms (p50)
+    chronological 1h scan (the touch-order query)   ~1ms
+
+    => ~2.5M rows/day · ~0.89 GB/day · **~326 GB/year** for all 16 perps
+
+### RECOVERY, PROVEN AGAINST THE LIVE VENUE
+
+One deliberate local socket close (`force_disconnect`, this side only):
+
+    disconnect            04:54:45.192
+    books unusable        04:54:45.693   (+0.5s)
+    reconnected+resubscribed+fresh snapshot+AVAILABLE   04:54:48.693
+    blind interval        3.5s · reconnect_count 0->1 · 16/16 resubscribed
+
+    PASS  stale book NOT executable after the drop
+    PASS  reconnected and resubscribed
+    PASS  quiet-but-healthy NOT flagged GAP_PRESENT
+    PASS  outage window degraded (INSUFFICIENT_RANGE_DATA, 12.8s gap)
+
+Note: a quiet healthy window can read `PARTIAL` (few changes, 30s heartbeat
+leaves edges unattested). That is honest and is NOT `GAP_PRESENT`, which is
+the distinction that matters.
+
+### RETENTION DECISION — ARCHIVE, NEVER DELETE
+
+~326 GB/year against ~8 TB NVMe + ~60 TB SATA is CASE 1 (<1 TB/year), about
+4% of one drive. `lib/evidence_retention.py`:
+
+    RAW_RETENTION_DAYS = None      DELETE_ENABLED = False   (test-enforced)
+
+No pruning job. No 30-day delete. No compaction job. No storage-engine
+migration — SQLite has two orders of magnitude of write headroom and
+single-digit-ms queries, so replacing it now would be rebuilding the database
+stack instead of capturing evidence. Warm 1-minute aggregates remain a
+QUERY-SPEED option for later and never replace raw chronology.
+
+**These rows are the only target-product history that has ever existed for
+these instruments.** The old system lost 11,775 rejected-candidate outcomes
+by discarding evidence before anyone asked; a 30-day rule reproduces that on
+a timer.
+
+### OBSERVER RUNTIME OWNERSHIP — RESOLVED
+
+`lib/evidence_runtime.py`, started from `main.py` lifespan alongside the
+market-data runtime and OUTSIDE the scheduler branch. A decision made at
+09:00 with a 4-hour horizon comes due at 13:00 whether or not JARVIS is
+trading; registering this on APScheduler would make the safe half of the
+system depend on the half under review. Bounded batches (500), contained
+exceptions, idempotent start, clean stop, and health that reports the honest
+backlog signal — the OLDEST OVERDUE horizon, not just a pending count. AST
+test proves it cannot import the execution surface.
+`JARVIS_DISABLE_EVIDENCE_RUNTIME=1` in conftest so it never races tests.
+
+### PHASE B IS COMPLETE
+
+    online   3,363 passed / 16 skipped   TRUE exit 0
+    offline  identical                   TRUE exit 0
+    skips    UNCHANGED 3/4 + 1/1 + 12/12 — no new REAL_PROVIDER skip was
+             added; the live exercise is a manual script, not a skipped test
 
 ### NEXT
 
-Finish the two open items above, then **Evidence Phase C** (decision quality
-analytics), then Execution Pass B. Scheduler stays OFF.
+**Evidence Phase C — decision quality analytics.** Counts by decision /
+binding_constraint / binding_reason / product / timeframe / leverage / price
+band; `FAVORABLE_AFTER_REJECTION`, never automatic `FALSE_NEGATIVE`;
+threshold research 0.20R-0.60R from STORED T0 values only. **Do not change
+the ~0.50R threshold.** Then Execution Pass B. Scheduler stays OFF.

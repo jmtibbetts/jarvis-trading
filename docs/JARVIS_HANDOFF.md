@@ -1081,3 +1081,114 @@ Live state at this checkpoint: collector RUNNING, campaign
 FORWARD_EVIDENCE_20260818T075321Z, one epoch, original boundary, scheduler
 OFF, real orders zero.
 
+---
+
+## 19. STOP POINT — Pass B, B0 partially complete
+
+**Read this section first if you are continuing Pass B.**
+
+    main            8b17781   clean, pushed, CI green
+    branch          b02-sizing-tripwire @ e672e61
+    tests on main   3,526 passed / 16 skipped / TRUE exit 0 / offline identical
+
+### Where Pass B actually stands
+
+Done:
+
+- **Exit audit** (`docs/PASS_B_EXIT_AUDIT.md`) — all ten economic exit routes
+  funnel through `close_paper_position` and `partial_close_paper_position`,
+  and both already refuse canonical positions. All ten pass a MARK as the
+  settlement price; that is the defect the phase removes.
+- **Exact execution identity** — `instruments.resolve_for_execution()` returns
+  contract-native semantics for perpetuals: `PBTCUCZ50`, `CONTRACTS`,
+  multiplier **0.01**, step 1, min 1, `VERIFIED`/executable. Refuses on
+  venue mismatch, contract mismatch, SHIB's unverified scale, and unlisted
+  perps; preserves `EQUITY_SHORT`/`ETF_SPOT` rather than flattening them.
+- **The dead seam is closed** — `canonical_entry` resolves that identity once
+  after readiness and passes it to `EV.submit(instrument=...)`, proven by a
+  test that patches `instruments.resolve` to RAISE and asserts execution still
+  completes in CONTRACTS at 0.01.
+
+**NOT done — B0 is not complete.** The call graph carries the INSTRUMENT but
+not the SIZING. `solve_position` / `size_position` / `prepare_entry` still
+derive units from the bare symbol, so risk speaks generic BTC coins at
+multiplier 1.0 while execution speaks contracts at 0.01. One quantity, two
+meanings, differing by 100x.
+
+### The tripwire branch — start here
+
+`b02-sizing-tripwire` holds `tests/test_executable_quantity_sizing.py`: 14
+tests, **all failing on purpose** against 8b17781. They were written before
+the implementation so they cannot become a confirmation of whatever gets
+built. They are on a branch, not main, because deliberately-red tests must not
+land on a green trunk.
+
+The load-bearing cases:
+
+    0.94 contracts        REJECT, never rounded up to 1
+    2.94 contracts        2
+    notional cap 3.7      3
+    cash cap 2.73         2, and margin strictly BELOW the cap
+    no constraint enlarges quantity
+    generic get_spec() patched to raise -> exact sizing must still succeed
+
+**Why the cash-cap case is the one to watch.** The current code assigns
+`margin = cash_cap` after scaling quantity continuously, which makes 2.73
+contracts look correct. A cap is a CEILING, not an obligation to spend.
+
+**Why they had to exist first.** Every shrinking constraint scales quantity
+continuously (`qty *= scale`). Threading an exact multiplier through without
+re-normalising after EACH constraint yields 2.73 contracts — a number every
+downstream stage agrees on and none can flag, precisely because they agree.
+A visible seam is safer than a silent one.
+
+### Exact next steps
+
+1. `normalize_quantity_down(qty, instrument)` in `lib/instruments.py` —
+   `Decimal` + `ROUND_FLOOR`, with an internal assertion that the result never
+   exceeds the input. One authority; do not add normalizers in `risk_engine`,
+   `paper_engine` or `canonical_entry`.
+2. Thread optional `execution_instrument` through
+   `prepare_entry` -> `size_position` -> `solve_position`. `None` must
+   preserve legacy behaviour exactly.
+3. Re-normalise and recompute economics (`notional`, `margin`,
+   `loss_at_stop`) after EVERY shrinking constraint: initial solve, notional
+   cap, cash cap, manual `margin_override`.
+4. Keep QUANTITY MODEL separate from MARGIN MODEL — PBTC is discrete but does
+   NOT use the CME fixed-margin path. Do not gate on `is_futures(symbol)`.
+5. Both canonical sizing passes (quote mid, then actual fill) must receive the
+   SAME instrument object.
+6. Merge the branch when all 14 pass.
+
+Then, still outstanding for B0: unit basis through
+Authorization -> OrderPlan -> ExecutionResult (`OrderPlan.check` still
+re-resolves the multiplier generically), and the exact executed per-contract
+fee. Then B1's entry settlement ledger.
+
+### Do not
+
+- Build `canonical_exit` or reroute the ten exit callers yet.
+- Remove or weaken `_refuse_legacy_close()` — it is PERMANENT. Canonical
+  callers will BYPASS the legacy leaf; the lock stays on.
+- Migrate the operator DB, start a new evidence epoch, or turn the scheduler
+  on.
+
+### Live state at this stop point
+
+    collector       RUNNING, campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, original activation boundary unchanged
+    operator DB     bcb94dcc... unchanged, structurally isolated
+    scheduler       OFF
+    real orders     0        transfers 0
+    exit callers    all ten untouched
+
+### The pattern that has cost the most time
+
+Four defects this window were **wired but inert** — a guard reading a field
+nothing populated, a signature missing the parameter its body used,
+`snapshot.instrument_id` assigned by no reader across 153,946 rows, and
+`canonical_entry` never calling the resolver it was built for. Structural
+checks found none of them. What worked every time was making the OLD path
+raise and proving the new one survives. Prefer that over asserting a
+signature or a source string exists.
+

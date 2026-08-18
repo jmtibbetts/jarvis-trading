@@ -974,3 +974,107 @@ transfers zero. Operator DB untouched.
 - The 95 pre-fix observations keep NULL routing identity; historical repair
   was deliberately deferred and must not use today's config as proof.
 
+---
+
+## 18. Strict BTC acceptance, operator isolation, Phase C — all green
+
+### Strict-v2 BTC acceptance (the milestone §17 was waiting on)
+
+Observation `90e90a0b5e520101f52c49151029e03b`, BTC/USD long TRADE, frozen as
+crypto / CRYPTO_PERP / kraken_derivatives_us / PBTCUCZ50.
+
+    horizon        1h, due 12:52:04.160080Z, resolved 12:52:58.159915Z
+    observer       decision_outcome_observer_v2_instrument_key
+    range source   range_collector_v3_instrument_key
+    T0 reference   64299.425
+    checkpoint     bid 64150.0 / ask 64180.0 / mid 64165.0
+    samples used   6,491 PBTCUCZ50 (0 anonymous, 0 other contracts)
+    coverage       first 11:52:04.204Z, last 12:52:00.189Z, max gap 20.057s
+    quality        HIGH_FREQUENCY_SAMPLED
+    returns        mid -0.2091%, dir-adj -0.2091%, side-ref -0.2324%
+    excursions     MFE -0.0613% / -0.0287R, MAE -0.2635% / -0.1231R
+    chronology     NEITHER
+    status         COMPLETE
+
+**The negative MFE is correct, not a bug.** The market never traded above T0
+for that hour, so the best excursion was still a loss. Zero would have been a
+lie; this is the "missing is not zero" contract holding under real data.
+
+**The version trap fired as designed.** The row was SCHEDULED under v1 and
+TERMINALIZED under v2, and it records v2 — `observer_version` is stamped at
+scheduling, so without that fix the acceptance would have credited v1 with a
+judgement only v2 made.
+
+The 15m horizon stays untouched as `PRE_STRICT_INSTRUMENT_RESOLUTION`. It
+resolved COMPLETE under v1 from genuinely contract-clean evidence while the
+resolver filtered nothing — right by accident. Keep it: it is the clearest
+demonstration here that accidentally-correct and enforced-correct produce
+identical output, and only one survives a second contract appearing.
+
+### Operator DB immutability gate — PASSED
+
+Structural, from the live process rather than from its launcher script:
+`JARVIS_DB_PATH` points at forward_evidence.db, and the collector's open file
+descriptors are forward_evidence.db, ohlcv_cache.db and its log. **No
+descriptor on data/jarvis.db, its -wal or its -shm** — and a scan of every
+process on the host found none holding it open at all.
+
+Logical, across a live collection interval:
+
+    paper_positions   667    05499bb2...   unchanged
+    paper_trades      664    8827c8e5...   unchanged
+    paper_portfolio     1    f1e08d69...   unchanged
+    trade_outcomes  21194    74cadca1...   unchanged
+    cash            63550.83716433377      unchanged
+    file sha256     bcb94dcc...            identical
+
+while forward_evidence.db gained 3,230 quote samples in the same window.
+
+`scripts/operator_db_fingerprint.py` refuses to import app.database, which
+installs `journal_mode=WAL` on connect — a tool that proves immutability by
+opening in a mode that can rewrite the header is not a proof. Stdlib sqlite3,
+mode=ro, query_only=ON, one BEGIN for a single read snapshot. Row hashing is
+typed and exact (floats via .hex(), NULL distinct from empty string) because
+counts alone cannot detect a table whose every row changed.
+
+**The earlier transient byte difference remains UNEXPLAINED.** Consistent with
+WAL activity; not proven, and not claimed.
+
+### Phase C — decision quality analytics, COMPLETE at `0847955`
+
+`lib/decision_quality.py` + `scripts/report_decision_quality.py`, read-only by
+construction (mode=ro, query_only=ON, no ORM import).
+
+    report version   decision_quality_v1
+    horizon policy   primary_horizon_v1_t0_only
+
+Live population at first report: **215 decisions, 645 outcome rows** — that
+gap is exactly the inflation that counting horizons as decisions would cause.
+
+    verdicts        NO_TRADE 133 / TRADE 82
+    routing         native 120 / legacy-missing 95 (kept in the denominator)
+    primary state   COMPLETE 6, INSUFFICIENT_DATA 127, PENDING 80, PARTIAL 2
+    resolution      STRICT_EXACT 7, PRE_STRICT 13, MISSING_EXACT 20
+
+`policy_changes_authorized = false`. **Analytics verified; the prospective
+sample is far too small for policy conclusions** — six complete primary
+horizons.
+
+Load-bearing behaviours pinned: a decision with an honest 15m (-0.5) and a
+flattering 4h (99.0) reports -0.5, so hindsight cannot pick the horizon;
+DIAGNOSTIC edge can never be reported as binding EDGE (the AMD case);
+threshold labels are `WOULD_CLEAR_POINT_EDGE_AT_T`, never
+`WOULD_HAVE_TRADED`; 0.05R is marked current policy and 0.50R appears only as
+a sensitivity value, documented as the modelled round-trip COST it always was.
+
+### Next: EXECUTION PASS B — canonical exits
+
+Entry is canonical; exits still settle at the mark for canonical positions via
+the legacy path, which is the last place the simulator can invent money. The
+fail-closed guard in `close_paper_position` exists to be removed by BUILDING
+the exit, never by weakening it.
+
+Live state at this checkpoint: collector RUNNING, campaign
+FORWARD_EVIDENCE_20260818T075321Z, one epoch, original boundary, scheduler
+OFF, real orders zero.
+

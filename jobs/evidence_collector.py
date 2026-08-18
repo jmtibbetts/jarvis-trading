@@ -62,6 +62,41 @@ MARKET_INTERVAL_S = float(os.getenv("JARVIS_EVIDENCE_MARKET_S", "900"))    # 15m
 SIGNAL_INTERVAL_S = float(os.getenv("JARVIS_EVIDENCE_SIGNAL_S", "1800"))   # 30m
 
 _stop = threading.Event()
+
+# ── PER-STAGE HEALTH ─────────────────────────────────────────────────────
+#
+# THE DISTINCTION THAT MATTERS IS ATTEMPT vs SUCCESS. The starvation bug hid
+# because "the service is active" and "quote evidence is growing" were both
+# true while the signal stage had never run once. A counter of attempts would
+# not have caught it either, because the stage was never even entered. What
+# exposes it is asking each stage separately: when did you last SUCCEED, and
+# is that older than your own cadence allows?
+STAGE_MARKET = "MARKET_REFRESH"
+STAGE_SIGNAL = "SIGNAL_GENERATION"
+STAGE_SCAN = "CANDIDATE_EVALUATION"
+
+HEALTHY, RUNNING_LONG, STARTING = "HEALTHY", "RUNNING_LONG", "STARTING"
+DEGRADED, STALE, FAILED, NEVER_RAN = "DEGRADED", "STALE", "FAILED", "NEVER_RAN"
+
+_stage_lock = threading.Lock()
+
+
+def _new_stage(cadence_s):
+    return {"cadence_s": cadence_s, "attempts": 0, "successes": 0,
+            "failures": 0, "consecutive_failures": 0,
+            "last_attempt_at": None, "last_success_at": None,
+            "last_failure_at": None, "last_error": None,
+            "last_duration_s": None, "in_progress": False,
+            "started_at": None, "thread_alive": None}
+
+
+_stages = {
+    STAGE_MARKET: _new_stage(900.0),
+    STAGE_SIGNAL: _new_stage(1800.0),
+    STAGE_SCAN: _new_stage(300.0),
+}
+_threads = {}
+
 _state = {
     "started_at": None,
     "scans": 0,
@@ -77,6 +112,90 @@ _state = {
 }
 
 
+def _stage_begin(name):
+    with _stage_lock:
+        st = _stages[name]
+        st["attempts"] += 1
+        st["in_progress"] = True
+        st["started_at"] = _now().isoformat()
+        st["last_attempt_at"] = st["started_at"]
+    return time.monotonic()
+
+
+def _stage_end(name, t0, ok, error=None):
+    """A FAILURE MUST NOT REFRESH THE SUCCESS CLOCK. That is the whole
+    contract; otherwise a stage failing forever looks recently alive."""
+    with _stage_lock:
+        st = _stages[name]
+        st["in_progress"] = False
+        st["started_at"] = None
+        st["last_duration_s"] = round(time.monotonic() - t0, 2)
+        if ok:
+            st["successes"] += 1
+            st["consecutive_failures"] = 0
+            st["last_success_at"] = _now().isoformat()
+        else:
+            st["failures"] += 1
+            st["consecutive_failures"] += 1
+            st["last_failure_at"] = _now().isoformat()
+            st["last_error"] = error
+
+
+def _age_s(iso):
+    if not iso:
+        return None
+    try:
+        t = datetime.fromisoformat(iso)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (_now() - t).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def stage_health(name, uptime_s=0.0, grace_multiple=2.0):
+    """One stage verdict, cadence-aware.
+
+    A 30-minute stage is not stale 30 seconds after boot, so the grace comes
+    from the stage OWN cadence. Once a couple of expected cycles pass with no
+    success, health says so plainly, which is exactly what was missing when
+    the LLM stage never ran.
+    """
+    with _stage_lock:
+        st = dict(_stages[name])
+    st["thread_alive"] = (_threads[name].is_alive()
+                          if name in _threads else None)
+    st["last_success_age_s"] = _age_s(st["last_success_at"])
+    grace = st["cadence_s"] * grace_multiple
+
+    if st["successes"] == 0:
+        if st["in_progress"]:
+            st["status"] = RUNNING_LONG if uptime_s >= grace else STARTING
+        elif uptime_s < grace:
+            st["status"] = STARTING
+        else:
+            # THE STARVATION SIGNATURE: alive, past grace, never succeeded.
+            st["status"] = NEVER_RAN
+    elif st["thread_alive"] is False:
+        st["status"] = FAILED
+    elif st["consecutive_failures"] >= 3:
+        st["status"] = DEGRADED
+    elif (st["last_success_age_s"] or 0) > grace:
+        st["status"] = RUNNING_LONG if st["in_progress"] else STALE
+    else:
+        st["status"] = HEALTHY
+    return st
+
+
+def aggregate_health(stages):
+    order = [FAILED, NEVER_RAN, STALE, DEGRADED, RUNNING_LONG, STARTING, HEALTHY]
+    worst = HEALTHY
+    for st in stages.values():
+        if order.index(st["status"]) < order.index(worst):
+            worst = st["status"]
+    return worst
+
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -90,6 +209,7 @@ def _scan_once() -> dict:
     from jobs.paper_trading import _get_all_prices, evaluate_pending_candidates
 
     out = {"at": _now().isoformat()}
+    t0 = _stage_begin(STAGE_SCAN)
     try:
         prices = _get_all_prices()
         # auto_trade_enabled is irrelevant in EVIDENCE_ONLY — the evaluator
@@ -98,39 +218,44 @@ def _scan_once() -> dict:
         out.update(r)
         _state["evaluated_total"] += int(r.get("evaluated") or 0)
         _state["last_error"] = None
+        _stage_end(STAGE_SCAN, t0, True)
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
         _state["last_error"] = out["error"]
+        _stage_end(STAGE_SCAN, t0, False, out["error"])
         logger.warning("[EvidenceCollector] scan failed: %s", e, exc_info=True)
     _state["scans"] += 1
     _state["last_scan_at"] = out["at"]
     return out
 
 
-def _run_safe_job(name: str, fn) -> dict:
+def _run_safe_job(name: str, fn, stage: str) -> dict:
     """Run one allow-listed generator. A failure degrades health, never the
     daemon — a bad provider must not become a restart storm."""
+    t0 = _stage_begin(stage)
     try:
         r = fn()
         logger.info("[EvidenceCollector] %s: %s", name,
                     str(r)[:300] if r is not None else "ok")
+        _stage_end(stage, t0, True)
         return {"ok": True, "result": r}
     except Exception as e:
         logger.warning("[EvidenceCollector] %s failed: %s", name, e)
         _state["last_error"] = f"{name}: {type(e).__name__}: {e}"
+        _stage_end(stage, t0, False, f"{type(e).__name__}: {e}")
         return {"ok": False, "error": str(e)}
 
 
 def _refresh_market() -> None:
     from jobs.fetch_market_data import run as market_run
-    _run_safe_job("market refresh", market_run)
+    _run_safe_job("market refresh", market_run, STAGE_MARKET)
     _state["market_refreshes"] += 1
     _state["last_market_at"] = _now().isoformat()
 
 
 def _generate_signals() -> None:
     from jobs.generate_signals import run as signals_run
-    r = _run_safe_job("signal generation", signals_run)
+    r = _run_safe_job("signal generation", signals_run, STAGE_SIGNAL)
     _state["signal_runs"] += 1
     _state["last_signal_at"] = _now().isoformat()
     res = r.get("result")
@@ -146,7 +271,12 @@ def health() -> dict:
     from lib import market_data_runtime as MDR
     from lib import runtime_mode as RM
 
-    h = {"runtime_mode": RM.current_mode(),
+    up = _age_s(_state["started_at"]) or 0.0
+    stages = {n: stage_health(n, uptime_s=up) for n in _stages}
+    h = {"aggregate": aggregate_health(stages),
+         "uptime_s": round(up, 1),
+         "stages": stages,
+         "runtime_mode": RM.current_mode(),
          "db_path": os.getenv("JARVIS_DB_PATH"),
          "evidence_epoch": os.getenv("JARVIS_EVIDENCE_EPOCH"),
          "candidate_interval_s": CANDIDATE_INTERVAL_S,
@@ -191,15 +321,25 @@ def main() -> None:                       # pragma: no cover - daemon entry
 
     started = _now()
     _state["started_at"] = started.isoformat()
-    epoch = os.environ.setdefault("JARVIS_EVIDENCE_EPOCH", epoch_name(started))
-    os.environ.setdefault("JARVIS_EVIDENCE_BOUNDARY", started.isoformat())
+
+    # CAMPAIGN IDENTITY IS DURABLE, NOT REGENERATED PER PROCESS.
+    # This used to be os.environ.setdefault(..., epoch_name(now)), which
+    # minted a brand-new epoch and activation boundary on EVERY restart —
+    # it already did so three times — silently shattering one prospective
+    # dataset into fragments that each looked healthy alone.
+    from lib import evidence_campaign as EC
+    camp = EC.get_or_create(os.environ["JARVIS_DB_PATH"], started=started)
+    epoch = camp["epoch"]
+    os.environ["JARVIS_EVIDENCE_EPOCH"] = epoch
+    os.environ["JARVIS_EVIDENCE_BOUNDARY"] = camp["boundary_at"]
 
     logger.info("=" * 66)
     logger.info("JARVIS EVIDENCE COLLECTOR — decide for real, execute never")
     logger.info("  runtime mode : %s", RM.current_mode())
     logger.info("  database     : %s", os.getenv("JARVIS_DB_PATH"))
     logger.info("  epoch        : %s", epoch)
-    logger.info("  boundary     : signals at/after %s", started.isoformat())
+    logger.info("  boundary     : signals at/after %s", camp["boundary_at"])
+    logger.info("  campaign     : %s", "CREATED" if camp["created"] else "CONTINUING")
     logger.info("  scan every   : %.0fs", CANDIDATE_INTERVAL_S)
     logger.info("=" * 66)
 
@@ -233,8 +373,10 @@ def main() -> None:                       # pragma: no cover - daemon entry
         t.start()
         return t
 
-    _periodic("evidence-market", _refresh_market, MARKET_INTERVAL_S)
-    _periodic("evidence-signals", _generate_signals, SIGNAL_INTERVAL_S)
+    _threads[STAGE_MARKET] = _periodic("evidence-market", _refresh_market,
+                                       MARKET_INTERVAL_S)
+    _threads[STAGE_SIGNAL] = _periodic("evidence-signals", _generate_signals,
+                                       SIGNAL_INTERVAL_S)
 
     try:
         while not _stop.is_set():

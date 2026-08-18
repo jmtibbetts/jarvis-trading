@@ -1390,3 +1390,96 @@ hang there):
     GET /repos/jmtibbetts/jarvis-trading/actions/runs?head_sha=<sha>
 
 Never echo the token; feed it straight from `git credential fill` to curl.
+
+## 22. STOP POINT — B1 ENTRY SETTLEMENT LEDGER COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §21.
+
+    main            e5cd441 + this docs commit   clean, pushed
+    tests           3,637 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              e5cd441 GREEN (Actions REST, exact head_sha)
+
+### What closed
+
+A NEW canonical position can no longer exist as only a PaperPosition plus a
+JSON document. `settle_position_entry` — still the ONE transaction — now
+creates atomically, or not at all:
+
+    PaperPosition
+    PaperPositionSettlement          OPEN header, paper_settlement_v1
+    PaperSettlementLeg (ENTRY)
+    the cash/margin debit
+    DecisionObservation SETTLED linkage
+
+- **Canonical intent is the causal pair** (`observation_id` +
+  `execution_id`, together or not at all). Half a pair fails CLOSED
+  (`INCOMPLETE_CANONICAL_LINKAGE`); nothing downgrades to legacy. Legacy
+  callers (neither id) are byte-for-byte unchanged and get ZERO ledger rows.
+- **`lib/settlement_ledger.py`** — a pure validator (no session, no
+  re-pricing) builds one fact set or refuses: one execution identity across
+  the chain, current canonical models only, frozen identity never
+  re-resolved, finite positive unit basis, quantities that agree and relate
+  only downward, one fill, the fee that was actually charged (EXECUTED_EXACT
+  count == settled fill), one arithmetic definition of R. The persister
+  takes the EXISTING session and may not commit / get_db / call the fee
+  authority / risk engine — proven by poisoning all four during a real
+  settlement (success) plus a control where the same poison kills the
+  pricing path (failure).
+- **The ledger describes the cash that moved.** Header figures equal the
+  position row's rounded, debited facts; C1 = C0 − margin − fee exactly.
+  ENTRY legs are structurally not outcomes (zero gross/holding/released/
+  hours, no PaperTrade, no counters, no learning). One `settlement_time`
+  stamps position, portfolio, header, leg, observation.
+- **Uniqueness is database-enforced**: `uq_pps_position`,
+  `uq_pps_entry_execution`, `uq_psl_execution`, plus `ix_psl_position`;
+  named `DUPLICATE_CANONICAL_EXECUTION` refusal ahead of the constraint, and
+  the IntegrityError handler distinguishes a ledger race from a symbol
+  collision. EXPLAIN QUERY PLAN pins B2's four lookups to index walks.
+- **PBTC acceptance**: persisted CONTRACTS / 0.01 / PBTCUCZ50; the 3→2
+  resubmission persists ONLY the surviving 2-contract execution (header 2,
+  leg requested=filled=2, fee count 2 EXECUTED_EXACT, cash moved margin+0.30).
+- **Rollback matrix** at five stages (ledger persist, header ctor, leg ctor,
+  before_commit, observation linkage): the PROPERTY asserted is that no
+  economic mutation survives — counts, cash, and observation state all
+  unchanged.
+
+Proof lives in `tests/test_b1_entry_ledger.py` (44 tests; 42 red against
+pre-B1 code).
+
+### Production-copy migration proof
+
+On a copy of the operator book (667 positions / 664 trades / 21,194
+outcomes / cash 63550.837...): `init_db()` applied the B1 schema; values
+over the ORIGINAL columns are hash-identical for all four economic tables
+(05499bb2…, 8827c8e5…, f1e08d69…, 74cadca1…); the standard pre-existing
+column migration added `paper_positions.execution_provenance` as all-NULL
+(so a WHOLE-ROW hash moves by exactly that NULL column — schema, not
+values; B1 itself adds only tables); new tables created EMPTY; second
+`init_db()` idempotent; `PRAGMA integrity_check` ok.
+
+### Operator DB — deliberately NOT migrated
+
+File sha `bcb94dcc…` identical before and after this continuation; all four
+economic row-hashes unchanged; the fingerprint tool now classifies both
+ledger tables as economic and reports them `NOT_PRESENT_IN_THIS_SCHEMA`
+(ABSENT) on the operator DB truthfully — it never creates, fails, or
+pretends a zero count.
+
+### NEXT = B2 CANONICAL EXIT CORE
+
+READY_FOR_CANONICAL_EXIT_CORE. NOT Pass B complete; NOT exit caller routing;
+NOT scheduler activation. The ten audited exit callers still reach the two
+legacy functions and `_refuse_legacy_close()` remains PERMANENT. Exit leg
+KINDS (PARTIAL_EXIT / FINAL_EXIT) exist in the schema vocabulary; no
+production path writes them. No RealizedOutcome row exists yet — B2 creates
+the final settlement state, ONE canonical RealizedOutcome, ONE learning
+application. `settlement_revision` starts at 0 (entry committed, zero exit
+legs); each B2 exit leg checks and increments it atomically.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, boundary unchanged, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84)
+    scheduler       OFF
+    real actions    0

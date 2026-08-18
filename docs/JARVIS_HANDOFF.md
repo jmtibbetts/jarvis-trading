@@ -759,6 +759,29 @@ Verdicts are cadence-aware: STARTING / HEALTHY / RUNNING_LONG / STALE /
 DEGRADED / FAILED / NEVER_RAN, with NEVER_RAN being the exact starvation
 signature.
 
+### THE SERVICE UNIT IS MOVED ASIDE — RESTORE IT FIRST
+
+It restarted itself once while the operator was on a hotspot. `is-enabled`
+was `disabled` and `NRestarts=0`, so the likely trigger is that
+`systemctl --user reset-failed` on a `Restart=on-failure` unit released a
+queued restart job. **Hazard worth remembering: `reset-failed` is not inert
+on a unit with a restart policy.**
+
+`systemctl --user mask` refused (the unit file exists), so the unit was moved
+instead and cannot now be loaded at all:
+
+    ~/.config/systemd/user/jarvis-evidence.service.DISABLED_HOTSPOT
+
+TO RESTORE, when primary internet is back:
+
+    mv ~/.config/systemd/user/jarvis-evidence.service.DISABLED_HOTSPOT \
+       ~/.config/systemd/user/jarvis-evidence.service
+    systemctl --user daemon-reload
+
+Consider changing `Restart=on-failure` to `Restart=no` for an evidence
+daemon: an operator stop should stay stopped, and a genuine crash is better
+surfaced than silently papered over.
+
 ### CONTROLLED RESTART PROCEDURE (when internet returns)
 
 1. record epoch/boundary/counts · 2. 

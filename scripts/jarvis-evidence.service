@@ -8,7 +8,7 @@ WorkingDirectory=/home/nullcode/jarvis-trading
 ExecStart=/home/nullcode/jarvis-trading/scripts/run_evidence_collector.sh
 # on-failure only: a clean SIGTERM stop must stay stopped, and a provider
 # outage must degrade health rather than become a restart storm.
-Restart=on-failure
+Restart=no
 RestartSec=30
 TimeoutStopSec=30
 KillSignal=SIGTERM

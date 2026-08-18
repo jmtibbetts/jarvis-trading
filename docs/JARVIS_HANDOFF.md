@@ -618,32 +618,78 @@ Source `FORWARD_EVIDENCE_ONLY`, terminal lifecycle `EXECUTION_SUPPRESSED`
 
 ---
 
-## 12. NEXT: ACTIVATE EVIDENCE_ONLY — authorized, NOT yet done
+## 12. EVIDENCE_ONLY IS LIVE — activated 2026-08-18 (commit 73325f5)
 
-C0 is complete and CI-green, so activation is now authorized. It was not
-started in this window for context reasons only; there is no correctness
-blocker left. Do NOT skip any of the following:
+    service   systemctl --user status|start|stop|restart jarvis-evidence
+    logs      tail -f data/evidence_collector.log
+    unit      scripts/jarvis-evidence.service (copy of ~/.config/systemd/user/)
+    launcher  scripts/run_evidence_collector.sh   (no secrets; .env as usual)
 
-1. **Forward evidence DB.** `data/forward_evidence.db`, seeded ONCE via the
-   SQLite **backup API** (never `cp` of a live WAL DB) from the operator DB,
-   then `init_db()` on the COPY. Record source path, checksum, timestamps.
-   The operator DB is never opened for writing. This is a SHADOW RESEARCH DB
-   and must never be silently promoted to the canonical active DB.
-2. **Activation boundary.** Mint an evidence epoch and only observe signals
-   at/after `evidence_epoch_started_at` — the seeded copy contains old
-   signals and legacy rows which must NOT be backfilled as prospective.
-3. **Decision-only path.** Do NOT run `jobs.paper_trading.run()` wholesale:
-   it begins with `mark_to_market` and open-position management. Extract the
-   candidate-evaluation half (`evaluate_pending_candidates`) and reuse the
-   SAME functions the trading path uses — same brain, execution suppressed,
-   not a second shadow brain.
-4. **Safe job allow-list** for candidate generation. Never the whole
-   scheduler (it contains execute_signals, position management, brokers).
-5. **Durable service** — user systemd or equivalent. NOT `nohup ... &` in a
-   Claude subshell; that failed twice. Monitor by PID or service status,
-   never `pgrep -f "<literal>"` (it matches the waiter itself).
-6. **Smoke window** 20-30 min: candidates generated, one event/one row,
-   horizons scheduled, short horizons resolving, quote samples growing, and
-   BEFORE/AFTER proof of zero change to PaperPosition / PaperTrade /
-   RealizedOutcome / cash / margin / counters, real orders still 0.
-7. Then LEAVE IT RUNNING and build Phase C while data accumulates.
+    DB        data/forward_evidence.db   SHADOW RESEARCH — never the epoch
+    seeded    SQLite backup API from data/jarvis.db
+              source sha256 bcb94dccd08ab9c3a7deebe18bb2b5a2 (unchanged after)
+    epoch     FORWARD_EVIDENCE_20260818T075321Z
+    boundary  only signals generated at/after epoch start are eligible
+    cadence   market 15m · signals 30m · candidate evaluation 5m
+    CI        32114925601 all five green · 3,394 passed / 16 skipped exit 0
+
+### FIRST VERIFIED DECISIONS
+
+    AMD       TRADE     EXECUTION_SUPPRESSED_BY_MODE   suppressed
+    NVDA      NO_TRADE  AI_REJECTED_ENTRY
+    PLTR      NO_TRADE  AI_REJECTED_ENTRY
+    NEAR/USD  NO_TRADE  AI_REJECTED_ENTRY
+
+    4 observations / 4 distinct observation_ids  (one event, one row)
+    12 outcome horizons scheduled · 46,630 shared quote samples
+    every row: source FORWARD_EVIDENCE_ONLY, edge_gate_role DIAGNOSTIC,
+    frozen threshold 0.05R, point net, lower bound, robust flag
+
+**AMD is the case `edge_gate_role` exists for:** net 0.02R against the 0.05R
+bar with a negative lower bound — the edge did NOT clear — and the decision
+is still TRADE, because on this path the edge gate has no refusal authority.
+Phase C must therefore NOT report EDGE as its binding constraint.
+
+### ZERO-MUTATION PROOF
+
+Operator DB sha256 identical before/after; still has no
+`decision_observations` table. In the evidence DB: positions 667, trades 664,
+outcomes 21,194, cash $63,550.8371643338, total_trades 78, wins 21 —
+unchanged. Evidence tables moved; economic tables did not. Real orders 0.
+
+### THE DEFECT THAT ALMOST WENT UNNOTICED
+
+The first collector ran both generators inline in one loop. The market
+refresh warms an OHLCV cache over ~157 symbols and took 20+ minutes to
+return, so `_generate_signals` — the ONLY step that calls the LLM — was never
+entered. The service reported healthy, quote evidence accumulated, and the
+GPU sat idle for two hours. The operator noticed; the health output did not.
+Each generator now owns a thread.
+
+**Lesson for future runtime work: "service active" and "evidence growing" are
+not proof that every stage ran.** Health should assert each stage's last
+success, not merely that the process lives.
+
+### SAFE ALLOW-LIST
+
+Only `fetch_market_data` and `generate_signals`, both audited for economic
+surface (no open_paper_position / prepare_entry / settle_position_entry /
+close_paper_position / submit_order / TradingClient). Deliberately absent:
+paper_trading, execute_signals, position management, broker jobs.
+
+### SAME BRAIN
+
+The daemon calls `paper_trading.evaluate_pending_candidates` — the identical
+function `run()` uses. Only execution differs; there is no research replica
+to drift.
+
+---
+
+## 13. NEXT: PHASE C — decision quality analytics
+
+Evidence is accumulating NOW; leave the service running. Build analytics
+against the live epoch. Key contracts: DISTINCT observation_id for decision
+counts (horizons are repeated measures), primary horizon chosen from T0 only,
+FAVORABLE_AFTER_REJECTION never auto-labelled FALSE_NEGATIVE, stored T0 edge
+values only (never rerun expectancy), and DIAGNOSTIC edge never reported as
+binding EDGE. Then Execution Pass B.

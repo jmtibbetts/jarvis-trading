@@ -69,6 +69,10 @@ REJECTED_BY_EXECUTION = "REJECTED_BY_EXECUTION"
 # The instrument costs more to trade than it can plausibly return, at any
 # size. A property of the PRODUCT, not a verdict on the thesis.
 FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL = "FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL"
+# The trade was authorized but its audit record could not be written. An
+# accepted canonical trade fails CLOSED on this: a position with no evidence
+# of why it was allowed is the state this subsystem exists to prevent.
+DECISION_OBSERVATION_PERSIST_FAILED = "DECISION_OBSERVATION_PERSIST_FAILED"
 
 
 def _now() -> str:
@@ -112,7 +116,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     gates: dict = {}
 
     def _observe(decision, *, reason=None, ready=None, authorization=None,
-                 fee_quote=None, venue_failure=False, position_id=None):
+                 fee_quote=None, venue_failure=False, position_id=None,
+                 execution_id=None, execution_state=None):
         """EVERY MATERIAL DECISION IS AN OBSERVATION — traded or refused.
 
         A rejected opportunity used to leave nothing behind, which is why
@@ -126,7 +131,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                            decision=decision, binding_reason=reason,
                            decision_price=decision_price, gates=dict(gates),
                            venue_data_failure=venue_failure,
-                           position_id=position_id, decision_at=decision_at)
+                           position_id=position_id, decision_at=decision_at,
+                           execution_id=execution_id,
+                           execution_state=execution_state)
             return DO.record(row)
         except Exception as e:                       # never take a trade down
             logger.error("[CanonicalEntry] decision observation failed for "
@@ -377,31 +384,69 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # second transaction: when that failed, the first had already committed
     # and left an economically-open position with NULL provenance — invisible
     # to is_canonical(), and therefore invisible to the exit guard.
+    # ONE execution identity, minted here so it can be BOTH stamped into
+    # provenance and linked from the decision observation. It used to be
+    # generated inside build_provenance, where nothing else could see it —
+    # so the observation's `execution_id` was silently always NULL and the
+    # causal chain decision -> execution -> position had a hole in the
+    # middle.
+    entry_execution_id = _execution_id()
     provenance = build_provenance(signal=signal, ready=ready, snap=snap,
                                   execution=execution,
                                   decision_price=decision_price,
                                   authorized_qty=authorized.qty,
-                                  fee_quote=fee_quote)
+                                  fee_quote=fee_quote,
+                                  entry_execution_id=entry_execution_id)
     gates["fee_authority"] = "PASS"
     gates["catastrophic_product"] = "PASS"
     # WRITTEN BEFORE SETTLEMENT, deliberately. A canonical position must not
     # be able to exist without the decision record that authorised it, and
     # this write is a short transaction holding no provider call.
     observation_id = _observe(DO.TRADE, ready=ready, authorization=final,
-                              fee_quote=fee_quote)
+                              fee_quote=fee_quote,
+                              execution_id=entry_execution_id,
+                              execution_state=DO.EXEC_SIMULATED_FILLED)
+
+    # FAIL CLOSED. A CANONICAL POSITION MUST NOT EXIST WITHOUT THE DECISION
+    # RECORD THAT AUTHORIZED IT.
+    #
+    # For a REFUSAL, losing the observation costs evidence and nothing else —
+    # no cash moved. For an ACCEPTED trade it would create exactly the state
+    # this whole subsystem exists to prevent: a position in the book with no
+    # record of why it was allowed, indistinguishable later from the 11,775
+    # historical decisions nobody can explain. The trade is abandoned before
+    # any economic mutation: no settlement, no margin, no fee, no position.
+    if not observation_id:
+        logger.error("[CanonicalEntry] %s refusing to settle: the decision "
+                     "observation could not be persisted", symbol)
+        return {"error": DECISION_OBSERVATION_PERSIST_FAILED,
+                "detail": ("the trade was authorized but its decision record "
+                           "could not be written; settling anyway would put a "
+                           "position in the book with no evidence of why it "
+                           "was allowed"),
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
 
     result = settle_position_entry(
         final, fill_price=fill, execution_provenance=provenance,
         canonical_entry_fee_usd=float(fee_quote.fee_usd))
     if not result.get("ok"):
-        return result
-    # LATE LINKAGE ONLY. The judgment is never rewritten; only the pointer
-    # to what it produced is filled in.
-    if observation_id:
+        # THE DECISION STAYS TRADE. JARVIS did decide to trade, and the
+        # venue did produce a fill; what failed was the account write.
+        # Rewriting the judgment to NO_TRADE would be a lie about what
+        # happened, so the lifecycle carries the truth instead — and a
+        # SETTLEMENT_FAILED row is never execution-calibration eligible.
         _observe(DO.TRADE, ready=ready, authorization=final,
-                 fee_quote=fee_quote,
-                 position_id=(result.get("position") or {}).get("id"))
-        result["observation_id"] = observation_id
+                 fee_quote=fee_quote, execution_id=entry_execution_id,
+                 execution_state=DO.EXEC_SETTLEMENT_FAILED)
+        return result
+
+    _observe(DO.TRADE, ready=ready, authorization=final, fee_quote=fee_quote,
+             execution_id=entry_execution_id,
+             execution_state=DO.EXEC_SETTLED,
+             position_id=(result.get("position") or {}).get("id"))
+    result["observation_id"] = observation_id
 
     # THE REAL CONTRACT IS {"ok": True, "position": {"id": ...}}.
     # This read result["position_id"], which does not exist, so it silently
@@ -446,7 +491,7 @@ def _sizing_reason(prep: dict) -> str:
 
 def build_provenance(*, signal, ready, snap, execution,
                      decision_price, authorized_qty=None,
-                     fee_quote=None) -> dict:
+                     fee_quote=None, entry_execution_id=None) -> dict:
     """How this position came to exist. Persisted by settlement, atomically.
 
     One JSON document rather than a dozen columns. NULL provenance means
@@ -491,7 +536,7 @@ def build_provenance(*, signal, ready, snap, execution,
         # THE ENTRY EXECUTION IDENTITY. is_canonical() requires it, so a
         # position cannot claim the canonical model without naming the
         # execution that produced it.
-        "entry_execution_id": _execution_id(),
+        "entry_execution_id": entry_execution_id or _execution_id(),
         "execution_model": EXECUTION_MODEL_CANONICAL,
         "engine_epoch": CANONICAL_ENGINE_EPOCH,
         "source": "VIRTUAL_CEX_AGENT",

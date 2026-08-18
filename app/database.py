@@ -2547,8 +2547,22 @@ class DecisionObservation(Base):
     venue_data_failure = Column(Boolean, default=False)
 
     # ── linkage to what actually happened, when it did ───────────────────
+    #
+    # APPEND-ONLY LIFECYCLE, and a DIFFERENT FACT from the decision. JARVIS
+    # deciding TRADE and a canonical position existing are two claims, and
+    # settlement can fail between them. Rewriting the decision to NO_TRADE
+    # would be false — it did decide to trade — so the decision stays frozen
+    # and the lifecycle records what became of it.
     execution_id     = Column(String, index=True)   # NULL when nothing was sent
     position_id      = Column(String, index=True)
+    # NOT_APPLICABLE | SIMULATED_FILLED | SETTLED | SETTLEMENT_FAILED
+    execution_state  = Column(String, index=True)
+    settlement_at    = Column(String)
+    settlement_failure_reason = Column(String)
+    # How the market-event identity was established. An UNSTABLE identity
+    # is one anchored to wall-clock, which cannot survive a retry — recorded
+    # rather than hidden, so a duplicate is diagnosable.
+    identity_quality = Column(String)
 
     provenance       = Column(Text)       # JSON, irregular metadata only
 

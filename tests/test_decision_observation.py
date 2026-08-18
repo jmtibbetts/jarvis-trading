@@ -78,6 +78,7 @@ class ARefusalIsRecordedTests(unittest.TestCase):
 
     def setUp(self):
         _clear()
+        self.addCleanup(_clear)
         MD.reset_books()
         self.addCleanup(MD.reset_books)
 
@@ -157,6 +158,7 @@ class AnAcceptedTradeIsObservedTheSameWayTests(unittest.TestCase):
 
     def setUp(self):
         _clear()
+        self.addCleanup(_clear)
         _seed_perp()
         self.addCleanup(MD.reset_books)
 
@@ -242,50 +244,238 @@ class OneMarketEventIsOneObservationTests(unittest.TestCase):
 
     def setUp(self):
         _clear()
+        self.addCleanup(_clear)
         MD.reset_books()
         self.addCleanup(MD.reset_books)
 
-    def test_the_identity_is_deterministic_for_the_same_event(self):
-        a = DO.observation_id_for(signal_id="s1", symbol="BTC/USD",
-                                  decision_at="2026-08-18T00:00:00Z")
-        b = DO.observation_id_for(signal_id="s1", symbol="BTC/USD",
-                                  decision_at="2026-08-18T00:00:00Z")
-        self.assertEqual(a, b)
+    EVENT = dict(PERP, event_at="2026-08-18T14:00:00Z")
 
-    def test_a_different_event_gets_a_different_identity(self):
-        a = DO.observation_id_for(signal_id="s1", symbol="BTC/USD",
-                                  decision_at="2026-08-18T00:00:00Z")
-        b = DO.observation_id_for(signal_id="s2", symbol="BTC/USD",
-                                  decision_at="2026-08-18T00:00:00Z")
-        self.assertNotEqual(a, b)
+    def _attempt(self, signal):
+        from lib.canonical_entry import open_canonical_position
+        with _spot_feed():
+            return open_canonical_position(signal, decision_price=64_400.0)
+
+    def test_a_retry_at_a_different_wall_clock_writes_ONE_row(self):
+        """THE DEFECT. The anchor used to be `_now()`, so a cycle at
+        12:00:00 and its retry at 12:00:01 hashed differently and the retry
+        wrote a SECOND observation of the same market event.
+
+        This goes through the real canonical path twice rather than handing
+        the helper a fixed timestamp, which would prove only that a constant
+        hashes to a constant.
+        """
+        self._attempt(self.EVENT)
+        self._attempt(self.EVENT)          # genuinely later wall-clock
+        rows = _rows("BTC/USD")
+        self.assertEqual(len(rows), 1, "a retry created a second observation")
+        self.assertEqual(rows[0]["identity_quality"],
+                         DO.IDENTITY_SIGNAL_EVENT_TIME)
+
+    def test_a_genuinely_new_market_event_gets_its_own_observation(self):
+        """Re-evaluation is a new observation; a retry is not."""
+        self._attempt(self.EVENT)
+        self._attempt(dict(self.EVENT, event_at="2026-08-18T14:05:00Z"))
+        self.assertEqual(len(_rows("BTC/USD")), 2)
+
+    def test_arms_of_one_event_share_its_identity(self):
+        """Agent and control arms of the same observation must not each
+        become an independent market sample."""
+        agent = DO.build(signal=self.EVENT, decision=DO.TRADE)
+        control = DO.build(signal=self.EVENT, decision=DO.NO_TRADE,
+                           binding_reason="CONTROL_ARM")
+        self.assertEqual(agent["observation_id"], control["observation_id"])
+
+    def test_an_explicit_event_id_outranks_everything(self):
+        row = DO.build(signal=dict(self.EVENT, market_event_id="evt-9"),
+                       decision=DO.NO_TRADE, binding_reason="X")
+        self.assertEqual(row["identity_quality"], DO.IDENTITY_EXPLICIT)
+
+    def test_a_wall_clock_anchor_is_labelled_unstable_rather_than_hidden(self):
+        """When nothing upstream offers a stable anchor the row says so, so
+        a duplicate is diagnosable instead of mysterious."""
+        bare = {k: v for k, v in BASE.items() if k != "id"}
+        row = DO.build(signal=bare, decision=DO.NO_TRADE, binding_reason="X")
+        self.assertEqual(row["identity_quality"], DO.IDENTITY_UNSTABLE)
 
     def test_recording_the_same_event_twice_writes_one_row(self):
-        row = DO.build(signal=BASE, decision=DO.NO_TRADE,
-                       binding_reason="STALE_EXECUTION_DATA",
-                       decision_at="2026-08-18T00:00:00Z")
-        first = DO.record(row)
-        second = DO.record(dict(row))
-        self.assertEqual(first, second)
+        row = DO.build(signal=self.EVENT, decision=DO.NO_TRADE,
+                       binding_reason="STALE_EXECUTION_DATA")
+        self.assertEqual(DO.record(row), DO.record(dict(row)))
         self.assertEqual(len(_rows("BTC/USD")), 1)
 
     def test_a_replayed_write_never_rewrites_the_judgment(self):
         """Hindsight editing its own paper trail is how a learning system
         lies to itself."""
-        row = DO.build(signal=BASE, decision=DO.NO_TRADE,
-                       binding_reason="STALE_EXECUTION_DATA",
-                       decision_at="2026-08-18T00:00:00Z")
+        row = DO.build(signal=self.EVENT, decision=DO.NO_TRADE,
+                       binding_reason="STALE_EXECUTION_DATA")
         DO.record(row)
-        DO.record(dict(row, final_decision=DO.TRADE, binding_reason="CHANGED"))
+        DO.record(dict(row, final_decision=DO.TRADE, binding_reason="CHANGED",
+                       bid=1.0, edge_threshold_r=99.0))
         stored = _rows("BTC/USD")[0]
         self.assertEqual(stored["final_decision"], DO.NO_TRADE)
         self.assertEqual(stored["binding_reason"], "STALE_EXECUTION_DATA")
+        self.assertNotEqual(stored["edge_threshold_r"], 99.0)
 
-    def test_late_linkage_is_the_only_thing_that_may_be_filled_in(self):
-        row = DO.build(signal=BASE, decision=DO.TRADE,
-                       decision_at="2026-08-18T00:00:00Z")
+    def test_only_append_only_lifecycle_fields_may_complete(self):
+        row = DO.build(signal=self.EVENT, decision=DO.TRADE)
         DO.record(row)
-        DO.record(dict(row, position_id="pos-123"))
-        self.assertEqual(_rows("BTC/USD")[0]["position_id"], "pos-123")
+        DO.record(dict(row, position_id="pos-123", execution_id="exec-1",
+                       execution_state=DO.EXEC_SETTLED))
+        stored = _rows("BTC/USD")[0]
+        self.assertEqual(stored["position_id"], "pos-123")
+        self.assertEqual(stored["execution_id"], "exec-1")
+        self.assertEqual(stored["execution_state"], DO.EXEC_SETTLED)
+
+
+class AnAcceptedTradeFailsClosedWithoutItsRecordTests(unittest.TestCase):
+    """A CANONICAL POSITION MUST NOT EXIST WITHOUT THE DECISION RECORD THAT
+    AUTHORIZED IT.
+
+    For a refusal, losing the observation costs evidence and nothing else.
+    For an accepted trade it would create the exact state this subsystem
+    exists to prevent: a position in the book that nobody can explain —
+    indistinguishable, later, from the 11,775 historical decisions that
+    cannot be judged.
+    """
+
+    def setUp(self):
+        _clear()
+        self.addCleanup(_clear)
+        _seed_perp()
+        self.addCleanup(MD.reset_books)
+
+    def _book(self):
+        from app.database import PaperPortfolio, PaperPosition, get_db
+        with get_db() as db:
+            return (float(db.query(PaperPortfolio).first().cash),
+                    db.query(PaperPosition).count())
+
+    def _open_with(self, patch_target, **kw):
+        from lib.canonical_entry import open_canonical_position
+        with _spot_feed(), patch(patch_target, **kw):
+            return open_canonical_position(PERP, decision_price=64_400.0)
+
+    def test_persistence_failure_settles_nothing(self):
+        before = self._book()
+        res = self._open_with("lib.decision_observation.record",
+                              return_value=None)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res["error"], "DECISION_OBSERVATION_PERSIST_FAILED")
+        self.assertEqual(self._book(), before,
+                         "cash or positions moved despite a lost audit record")
+
+    def test_a_raising_build_also_fails_closed(self):
+        before = self._book()
+        res = self._open_with("lib.decision_observation.build",
+                              side_effect=RuntimeError("injected"))
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res["error"], "DECISION_OBSERVATION_PERSIST_FAILED")
+        self.assertEqual(self._book(), before)
+
+    def test_no_fee_is_debited_when_the_record_cannot_be_written(self):
+        from app.database import PaperPortfolio, get_db
+        with get_db() as db:
+            before = float(db.query(PaperPortfolio).first().cash)
+        self._open_with("lib.decision_observation.record", return_value=None)
+        with get_db() as db:
+            self.assertEqual(float(db.query(PaperPortfolio).first().cash),
+                             before)
+
+    def test_a_settlement_failure_leaves_the_decision_as_TRADE(self):
+        """JARVIS did decide to trade, and the venue did produce a fill.
+        Rewriting the judgment to NO_TRADE would be a lie about what
+        happened; the LIFECYCLE carries the truth instead."""
+        res = self._open_with("lib.paper_engine.settle_position_entry",
+                              return_value={"ok": False, "error": "injected"})
+        self.assertFalse(res.get("ok"))
+        row = _rows("BTC/USD")[0]
+        self.assertEqual(row["final_decision"], DO.TRADE)
+        self.assertEqual(row["execution_state"], DO.EXEC_SETTLEMENT_FAILED)
+        self.assertIsNotNone(row["execution_id"])
+        self.assertIsNone(row["position_id"])
+
+    def test_a_failed_settlement_is_never_calibration_evidence(self):
+        self._open_with("lib.paper_engine.settle_position_entry",
+                        return_value={"ok": False, "error": "injected"})
+        self.assertFalse(
+            DO.is_execution_calibration_eligible(_rows("BTC/USD")[0]))
+
+
+class TheCausalChainIsCompleteTests(unittest.TestCase):
+
+    def setUp(self):
+        _clear()
+        self.addCleanup(_clear)
+        _seed_perp()
+        self.addCleanup(MD.reset_books)
+
+    def _open(self):
+        from lib.canonical_entry import open_canonical_position
+        with _spot_feed():
+            return open_canonical_position(PERP, decision_price=64_400.0)
+
+    def test_the_observation_links_the_real_execution_identity(self):
+        """`ExecutionResult` carries no id of its own, so the entry
+        execution identity is minted once and used for BOTH the provenance
+        stamp and this link. It used to be generated inside
+        build_provenance where nothing else could see it, leaving
+        execution_id permanently NULL."""
+        res = self._open()
+        row = _rows("BTC/USD")[0]
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            stamped = json.loads(pos.execution_provenance)["entry_execution_id"]
+        self.assertIsNotNone(row["execution_id"])
+        self.assertEqual(row["execution_id"], stamped)
+
+    def test_a_settled_trade_reaches_the_settled_state(self):
+        res = self._open()
+        row = _rows("BTC/USD")[0]
+        self.assertEqual(row["execution_state"], DO.EXEC_SETTLED)
+        self.assertEqual(row["position_id"], res["position"]["id"])
+        self.assertIsNotNone(row["settlement_at"] or row["execution_state"])
+
+    def test_a_settled_canonical_trade_is_calibration_eligible(self):
+        self._open()
+        self.assertTrue(
+            DO.is_execution_calibration_eligible(_rows("BTC/USD")[0]))
+
+
+class CalibrationEligibilityIsAPredicateTests(unittest.TestCase):
+    """`source == FORWARD_CANONICAL` was never sufficient: the source is
+    written at T0, before settlement is known."""
+
+    def _row(self, **kw):
+        base = {"source": DO.FORWARD_CANONICAL, "final_decision": DO.TRADE,
+                "execution_id": "e1", "execution_state": DO.EXEC_SETTLED,
+                "position_id": "p1"}
+        base.update(kw)
+        return base
+
+    def test_a_fully_settled_canonical_trade_qualifies(self):
+        self.assertTrue(DO.is_execution_calibration_eligible(self._row()))
+
+    def test_a_decision_to_trade_with_no_execution_does_not(self):
+        self.assertFalse(DO.is_execution_calibration_eligible(
+            self._row(execution_id=None, execution_state=None)))
+
+    def test_a_simulated_fill_that_never_settled_does_not(self):
+        self.assertFalse(DO.is_execution_calibration_eligible(
+            self._row(execution_state=DO.EXEC_SIMULATED_FILLED,
+                      position_id=None)))
+
+    def test_a_rejected_observation_never_qualifies(self):
+        self.assertFalse(DO.is_execution_calibration_eligible(
+            self._row(source=DO.FORWARD_REJECTED_OBSERVATION,
+                      final_decision=DO.NO_TRADE)))
+
+    def test_counterfactual_and_backtest_never_qualify(self):
+        for src in (DO.COUNTERFACTUAL_REPLAY, DO.HISTORICAL_BACKTEST):
+            with self.subTest(source=src):
+                self.assertFalse(
+                    DO.is_execution_calibration_eligible(self._row(source=src)))
 
 
 class EvidenceProvenanceIsExplicitTests(unittest.TestCase):

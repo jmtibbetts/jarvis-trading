@@ -58,6 +58,12 @@ FORWARD_EXECUTED_SOURCES = frozenset({FORWARD_CANONICAL, LEGACY_FORWARD_VIRTUAL}
 
 TRADE, NO_TRADE, ABSTAIN = "TRADE", "NO_TRADE", "ABSTAIN"
 
+# APPEND-ONLY LIFECYCLE. These are facts that cannot be known at T0 —
+# what the decision went on to produce. Completing them is causal linkage,
+# not hindsight; everything NOT on this list is frozen at the decision.
+_LATE_LIFECYCLE_FIELDS = ("execution_id", "position_id", "settlement_at",
+                          "settlement_failure_reason")
+
 # ── Which KIND of thing stopped the trade. ───────────────────────────────
 EDGE = "EDGE"                 # the setup did not promise enough
 COST = "COST"                 # edge cleared, costs ate it
@@ -108,19 +114,105 @@ def constraint_for(reason: str | None) -> str:
     return _CONSTRAINT_BY_REASON.get(str(reason), "UNCLASSIFIED")
 
 
-def observation_id_for(*, signal_id=None, symbol=None, decision_at=None,
+# How trustworthy the event identity is. A retry-stable identity is the
+# difference between "one event, observed twice" and "two events".
+IDENTITY_EXPLICIT = "EXPLICIT_EVENT_ID"
+IDENTITY_CANDIDATE = "CANDIDATE_ID"
+IDENTITY_SIGNAL_EVENT_TIME = "SIGNAL_EVENT_TIME"
+IDENTITY_VENUE_EVENT_TIME = "VENUE_EVENT_TIME"
+IDENTITY_UNSTABLE = "UNSTABLE_WALL_CLOCK"
+
+_SIGNAL_TIME_KEYS = ("event_at", "created_at", "generated_at", "signal_at",
+                     "timestamp")
+
+
+def event_identity(signal: dict, snap=None) -> tuple[str, str]:
+    """(the stable anchor for this market event, how it was established).
+
+    THE DEFECT THIS FIXES. The anchor used to be `_now()`, taken at the
+    moment the Python call happened to run. A scheduler cycle at 12:00:00
+    and its retry at 12:00:01 then hashed differently, so the retry wrote a
+    SECOND observation of the same market event — exactly the duplicate the
+    unique index was supposed to prevent, and exactly the way one event
+    comes to vote twice in learning.
+
+    The anchor must be a fact about the EVENT, never about the invocation.
+    In descending order of strength:
+
+        1. an explicit market/event id, when something upstream minted one
+        2. the candidate id — one scored setup is one event
+        3. the signal id plus the signal's OWN timestamp
+        4. the signal id plus the VENUE's event time from the book snapshot,
+           which is a real market instant rather than our clock
+
+    Only if none of those exists does this fall back to wall-clock, and it
+    says so: an UNSTABLE identity is recorded as such rather than quietly
+    pretending to be retry-safe.
+
+    A genuinely NEW evaluation of the same signal against a new book gets a
+    new venue event time, and therefore a new identity — which is correct.
+    Re-evaluation is a new observation; a retry is not.
+    """
+    explicit = signal.get("market_event_id") or signal.get("event_id")
+    if explicit:
+        return str(explicit), IDENTITY_EXPLICIT
+    if signal.get("candidate_id"):
+        return str(signal["candidate_id"]), IDENTITY_CANDIDATE
+    for key in _SIGNAL_TIME_KEYS:
+        if signal.get(key):
+            return str(signal[key]), IDENTITY_SIGNAL_EVENT_TIME
+    venue_at = getattr(snap, "venue_event_at", None) if snap is not None else None
+    if venue_at:
+        return str(venue_at), IDENTITY_VENUE_EVENT_TIME
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(), IDENTITY_UNSTABLE
+
+
+def observation_id_for(*, signal_id=None, symbol=None, event_at=None,
                        thesis_id=None) -> str:
     """A deterministic identity for ONE market event.
 
-    Deterministic rather than random so a retried cycle resolves to the same
-    row. The thesis and the decision instant are what make the event unique;
-    the ARM that observed it (traded, refused, shadow) deliberately is not,
-    because arms of one event must share an identity or they will each look
-    like an independent market sample to the learner.
+    `event_at` is the STABLE anchor from `event_identity` — a fact about the
+    event, not the wall-clock of this invocation. The ARM that observed the
+    event (traded, refused, shadow, control) is deliberately absent: arms of
+    one event must share an identity, or each becomes an independent market
+    sample to the learner.
     """
     parts = [str(thesis_id or ""), str(signal_id or ""), str(symbol or ""),
-             str(decision_at or "")]
+             str(event_at or "")]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+# ── Execution lifecycle. The DECISION and what became of it are different
+# facts, and conflating them is how a failed settlement could have counted
+# as an executed trade. ──────────────────────────────────────────────────
+EXEC_NOT_APPLICABLE = "NOT_APPLICABLE"      # nothing was ever sent
+EXEC_SIMULATED_FILLED = "SIMULATED_FILLED"  # the venue produced a fill
+EXEC_SETTLED = "SETTLED"                    # and the account recorded it
+EXEC_SETTLEMENT_FAILED = "SETTLEMENT_FAILED"
+
+
+def is_execution_calibration_eligible(obs) -> bool:
+    """May this row inform fill/slippage calibration or portfolio results?
+
+    A PREDICATE, NOT A SET MEMBERSHIP TEST. `source == FORWARD_CANONICAL`
+    was never sufficient: the source is written at T0, before settlement is
+    known, so a trade JARVIS decided to take and then failed to settle would
+    have carried an executed-evidence label while no position existed.
+
+    Every one of these must hold — the decision was to trade, from a forward
+    executed source, an execution really happened, settlement really
+    succeeded, and a position exists to point at:
+    """
+    def _g(name):
+        return obs.get(name) if isinstance(obs, dict) else getattr(obs, name, None)
+
+    return bool(
+        _g("source") in FORWARD_EXECUTED_SOURCES
+        and _g("final_decision") == TRADE
+        and _g("execution_id")
+        and _g("execution_state") == EXEC_SETTLED
+        and _g("position_id"))
 
 
 def _f(v):
@@ -154,10 +246,10 @@ def _depth_summary(snap) -> dict | None:
 
 def build(*, signal, ready=None, authorization=None, fee_quote=None,
           decision, binding_reason=None, source=None, decision_price=None,
-          execution=None, position_id=None, gates=None,
+          execution_id=None, position_id=None, gates=None,
           edge_threshold_r=None, gross_expected_r=None,
           estimated_cost_r=None, venue_data_failure=False,
-          decision_at=None) -> dict:
+          decision_at=None, execution_state=None) -> dict:
     """Assemble the row from the artifacts the decision used. No re-deriving.
 
     Every argument is an object the decision already produced. Where one is
@@ -174,11 +266,19 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
     raw_dir = signal.get("paper_direction") or signal.get("direction")
     side = parse_side_strict(raw_dir)
     at = decision_at or _now()
+    # THE EVENT ANCHOR IS NOT `at`. `decision_at` records WHEN JARVIS
+    # decided and is persisted as such; the identity comes from a fact about
+    # the event, so a retry resolves to the same row.
+    anchor, identity_quality = event_identity(signal, snap)
 
     row = {
         "observation_id": observation_id_for(
             signal_id=signal.get("id") or signal.get("signal_id"),
-            symbol=sym, decision_at=at, thesis_id=signal.get("thesis_id")),
+            symbol=sym, event_at=anchor, thesis_id=signal.get("thesis_id")),
+        "identity_quality": identity_quality,
+        "execution_state": execution_state or (
+            EXEC_NOT_APPLICABLE if decision != TRADE else None),
+        "execution_id": execution_id,
         "thesis_id": signal.get("thesis_id"),
         "signal_id": signal.get("id") or signal.get("signal_id"),
         "candidate_id": signal.get("candidate_id"),
@@ -251,7 +351,16 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
             "intended_leverage": _f(authorization.leverage),
             "authorized_risk_usd": _f(authorization.loss_at_stop),
             "loss_at_stop_usd": _f(authorization.loss_at_stop),
-            "risk_budget_usd": _f(authorization.sizing.get("margin")),
+            # risk_budget_usd IS DELIBERATELY NULL. `sizing["margin"]` looks
+            # like a budget and is not: `size_position` seeds it with the
+            # equity slice, hands it to `solve_position` as risk_budget_usd,
+            # then REASSIGNS it to `decision.margin` — the committed margin.
+            # Storing that under "risk budget" would put the same number in
+            # two columns with different meanings, which is the field-name
+            # ambiguity this whole table exists to remove. The pre-solve
+            # budget is not returned by any authority, so the honest value
+            # is absent. `authorized_risk_usd` carries the real approved
+            # money-at-stop.
             "quantity_unit": authorization.sizing.get("quantity_unit"),
             "multiplier": _f(authorization.sizing.get("multiplier")),
         })
@@ -268,9 +377,6 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
                 "fee_authority_version": fee_quote.version,
             }),
         })
-
-    if execution is not None:
-        row["execution_id"] = getattr(execution, "execution_id", None)
 
     if gates:
         row["gate_results"] = json.dumps(gates)
@@ -320,11 +426,20 @@ def record(row: dict) -> str | None:
                 DecisionObservation.observation_id == row["observation_id"]
             ).first()
             if existing is not None:
-                # SAME EVENT, SEEN AGAIN. Late-arriving linkage is filled in;
-                # the judgment itself is never rewritten.
-                for late in ("execution_id", "position_id"):
+                # SAME EVENT, SEEN AGAIN. Only APPEND-ONLY LIFECYCLE facts
+                # may complete — what became of the decision, which is not
+                # known at T0 and is not hindsight. The judgment itself
+                # (decision, binding reason, book, economics, threshold) is
+                # never rewritten: a paper trail its own subject can edit is
+                # not a paper trail.
+                for late in _LATE_LIFECYCLE_FIELDS:
                     if row.get(late) and not getattr(existing, late, None):
                         setattr(existing, late, row[late])
+                # execution_state is the one lifecycle field that legitimately
+                # ADVANCES rather than being filled in once.
+                new_state = row.get("execution_state")
+                if new_state and new_state != getattr(existing, "execution_state", None):
+                    existing.execution_state = new_state
                 return existing.observation_id
             db.add(DecisionObservation(**row))
             return row["observation_id"]

@@ -13,7 +13,7 @@ competing handoff files.
     interpreter  .venv/bin/python   (never bare python3)
     remote       `origin` in the WSL tree; a bare `git push` is correct
 
-    HEAD         3b1184a84d83e786f9fbbbc69329b235fc6eabc2
+    HEAD         see §10 — Evidence Phase B landed on top of 7092d47
     scheduler    OFF — do not restart without explicit operator approval
     platform     VIRTUAL_ONLY
 
@@ -240,7 +240,10 @@ per row** (empty schema baseline is 1.15MB, so a naive divide overstates it)
 
 ## 8. Remaining roadmap — IN ORDER
 
-### Evidence Phase B — forward outcome observer  **NEXT, NOT STARTED**
+### Evidence Phase B — forward outcome observer  **LARGELY LANDED**
+**Read §10 first** — what shipped, what is measured, what is still open.
+The specification below is kept because it is still the contract.
+
 Turn observations into the evidence the old system lost.
 - Audit existing structures first (`SignalEvaluation`, `CandidateSignal`,
   shadow/control, execution samples, events.db, OHLCV cache) before adding
@@ -309,3 +312,121 @@ scheduler stays OFF pending explicit operator approval.
   contract arithmetic, statistics). The LLM owns synthesis and narrative —
   never canonical arithmetic.
 - No new live-trading capability. JARVIS stays virtual-first.
+
+
+---
+
+## 10. Evidence Phase B — landed 2026-08-18
+
+    52b348a  B1-B3  read-only market-data runtime + Bitnomial stream lifecycle
+    e422c06  B4-B8  shared quote samples + forward outcome observer
+
+    online   3,341 passed / 16 skipped   TRUE exit 0
+    offline  identical (unshare -rn)     TRUE exit 0
+    skips    UNCHANGED 3/4 + 1/1 + 12/12, undeclared 0 — no budget was touched
+
+### THE DISCOVERY THAT REORDERED THE PHASE
+
+`bitnomial_market_data.start_stream()` **had no runtime caller anywhere.**
+The provider, its book semantics and its verified price scales were all
+implemented and tested; the stream was simply never switched on. So the
+perpetual books were permanently empty in production and every CRYPTO_PERP
+quote refused for want of data nothing was collecting. Confirmed alongside
+it: **events.db and ohlcv_cache.db contain no Bitnomial history at all**
+(OHLCV sources are twelvedata/alpaca/okx/mexc/kraken/kucoin/coinbase/
+coingecko — all spot or generic). There was no path to perp forward evidence
+until the feed had an owner.
+
+**SCHEDULER OFF ≠ MARKET DATA OFF.** `lib/market_data_runtime` owns
+read-only feeds and `main.py` starts it OUTSIDE the scheduler branch, so
+this state is now expressible and is the intended one:
+
+    autonomous trading scheduler   OFF
+    Bitnomial public market data   ON (when the runtime is enabled)
+    real orders / account changes  STRUCTURALLY IMPOSSIBLE
+
+Feeds have their own switch, `JARVIS_DISABLE_MARKET_DATA`, named for what it
+controls. **conftest forces it to 1** — the scheduler pin does not cover it,
+precisely because the runtime is independent of the scheduler.
+
+### EXISTING-STRUCTURE AUDIT (done before anything was built)
+
+| structure | why it could not carry Phase B |
+|---|---|
+| `signal_evaluations` | signal-keyed, ONE terminal evaluation not per-horizon, generic OHLCV, and it writes `mfe_pct=0.0` on bad data — zero-for-missing |
+| `feature_labels` | **the right PATTERN and it was reused**: per-horizon rows, due_at from birth, abstain-with-reason, grace. But clock-driven BTC/ETH only, bar-based, no product authority |
+| `candidate_signals` | scoring stage, resolved once; the population Phase A already superseded |
+| `execution_samples` | orders actually sent — a NO_TRADE never appears |
+| `events.db` | append-only JSON; deriving extrema means parsing every row, and it holds no Bitnomial |
+| `ohlcv_cache.db` | 37.9M bars but zero perp — cannot price a CRYPTO_PERP outcome |
+| `execution_snapshot` | **REUSED as the sole market face** — already refuses perp→spot and already fails SHIB closed |
+
+### SHAPE CHOSEN, AND THE ONE I REJECTED
+
+First draft bucketed per-minute high/low. **Rejected**: buckets prove a level
+was reached but not WHICH came first, and that ordering is the whole
+difference between a win and a loss. It cannot be precomputed either —
+every observation carries its own stop/target, so a shared market row cannot
+know which levels will matter to a decision not yet made. Storage is
+`instrument_quote_samples`: SHARED, timestamped, keyed by instrument+time.
+
+    shared, 20 instruments    ~38 MB/day    ~13.9 GB/year
+    naive per-decision, 600/d               ~416 GB/year      30x worse
+
+**Sampling is change-triggered with a HEARTBEAT FLOOR (30s).** This is what
+makes a quiet market distinguishable from a dead feed: calm-but-healthy keeps
+emitting rows, a disconnect emits none, so only real downtime becomes
+`GAP_PRESENT`. Gap arithmetic measures between-sample holes AND both edges,
+so a late start or early stop cannot masquerade as full coverage.
+
+### INVARIANTS NOW ENFORCED BY TEST
+
+- **MFE/MAE never from endpoints.** No interval evidence → NULL +
+  `INSUFFICIENT_RANGE_DATA`. Zero is not missing.
+- **Side-aware**: long measured on the bid, short on the ask; midpoint is
+  direction, never an executable exit.
+- **AMBIGUOUS_INTRABAR is narrow and real.** One sample carries one price, so
+  no sample straddles a decision — the earlier crossing genuinely came first
+  *provided we were watching*. Ambiguity lives only in a blind interval
+  before the first crossing. The profitable ordering is never chosen.
+- **Perp never scored from spot** — resolves INSUFFICIENT_DATA instead.
+- **Observer mutates nothing**: no position, trade, cash, counter or learning
+  vote. AST-proven it cannot import the execution surface.
+- Lifecycle monotonic, PENDING the only non-terminal state; retry idempotent.
+
+### TWO DEFECTS FOUND WHILE BUILDING — both would have failed SILENTLY
+
+1. Resolution returned ORM rows across a closed session, so every horizon
+   raised `DetachedInstanceError` into a caught warning and sat PENDING
+   forever. The evidence layer would have looked healthy and collected
+   nothing. Data is now detached at the boundary.
+2. `SessionLocal` is **autoflush=False**, so rows added by
+   `schedule_for_observation` were invisible to any caller sharing the
+   transaction. Now flushed explicitly.
+
+### MIGRATION SAFETY
+
+Proven on a COPY of the real 402MB schema, never the operator DB:
+21,194 outcomes / 667 positions / cash $63,550.8371643338 **byte-identical
+before and after**, `integrity_check ok`, `init_db()` idempotent on rerun.
+New tables arrive via `create_all`; the operator DB still does not have them.
+
+### STILL OPEN IN PHASE B
+
+- **The runtime has not been exercised against the live venue.** Every test
+  is hermetic; `JARVIS_DISABLE_MARKET_DATA=1` under pytest. Reconnect,
+  backoff and subscription-restore are implemented and unit-covered but have
+  NOT been observed against real Bitnomial. Next window should run a
+  deliberate `REAL_PROVIDER_READ_ONLY` session and measure **messages/sec,
+  meaningful top-of-book changes/sec, and resulting rows/day** per product —
+  the sampling rate here is assumed (6/min), not measured.
+- **Retention/compaction is designed-for but NOT built.** ~13.9 GB/year at 20
+  instruments is a hot window with no pruning. Compaction after all dependent
+  horizons finalise is the intended follow-up.
+- Observer is not registered as a scheduler job — deliberate while the
+  scheduler is off. `jobs/observe_decision_outcomes.py` runs standalone.
+
+### NEXT
+
+Finish the two open items above, then **Evidence Phase C** (decision quality
+analytics), then Execution Pass B. Scheduler stays OFF.

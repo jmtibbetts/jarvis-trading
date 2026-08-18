@@ -693,3 +693,78 @@ counts (horizons are repeated measures), primary horizon chosen from T0 only,
 FAVORABLE_AFTER_REJECTION never auto-labelled FALSE_NEGATIVE, stored T0 edge
 values only (never rerun expectancy), and DIAGNOSTIC edge never reported as
 binding EDGE. Then Execution Pass B.
+
+---
+
+## 14. Collector hardening (2026-08-18) — service DOWN on purpose
+
+    ba85586  cooperative cancellation + bounded worker joins
+    d2f6afa  durable campaign identity + per-stage health
+    CI 32121368093 all five green · 3,419 passed / 16 skipped · exit 0
+
+### THE COLLECTOR IS STOPPED AND DISABLED
+
+The operator is on a CELLULAR HOTSPOT (primary internet down). A deliberate
+evidence GAP is accepted; it is NOT a new campaign. **Do not restart until the
+operator says primary internet is restored.** No reduced/degraded live mode
+was built — mixing full and intentionally-incomplete market evidence inside
+one prospective campaign would need its own provenance semantics first.
+
+    epoch     FORWARD_EVIDENCE_20260818T075321Z   (unchanged)
+    boundary  2026-08-18T07:53:21.357402+00:00    (unchanged)
+    dataset   45 observations · 45 distinct ids · 1 epoch
+
+### THE ISP OUTAGE WAS NOT JARVIS
+
+An earlier NAT/conntrack theory was speculative correlation and is dropped.
+The operator confirmed the actual connection went down. Two REAL defects were
+nonetheless exposed and are now fixed.
+
+### DEFECT 1 — epoch minted per process (already fired 3x)
+
+ regenerated
+identity on every start; three restarts produced three epochs. Identity now
+lives in  inside the evidence DB — created once, read
+after. A new campaign takes a deliberate  call, and new
+epochs are forced distinct (second-resolution names would otherwise merge two
+campaigns started in the same second). Proven live: restart kept the epoch and
+boundary, observations grew 32 to 36, rows == distinct ids.
+
+### DEFECT 2 — SIGTERM ignored, systemd escalated to SIGKILL
+
+Observed twice (). **The audit corrected two assumptions:**
+concurrency is already SEQUENTIAL (, plain nested loop) so no
+semaphore was warranted, and provider calls are already bounded by
+ at 12s. The real defect was only cancellation: ~157
+symbols x 6 timeframes with no stop check, each ending in an uninterruptible
+.
+
+Fixed:  take , checked
+per symbol and per timeframe, with the rate-limit pause as
+. The collector passes its OWN . 
+preserves existing behaviour for the scheduler. Shutdown now joins producers
+BEFORE tearing down the runtimes (stopping them under a live worker was its
+own latent bug), bounded at 20s, and a stuck worker is reported as DEGRADED
+rather than silently called clean.
+
+### PER-STAGE HEALTH — attempt vs success
+
+The starvation bug hid because "active" and "evidence growing" were both true
+while the signal stage had never run. Each stage now tracks attempts,
+successes, failures, consecutive failures, durations, thread liveness and
+in-progress state — and **a failure never refreshes the success clock**.
+Verdicts are cadence-aware: STARTING / HEALTHY / RUNNING_LONG / STALE /
+DEGRADED / FAILED / NEVER_RAN, with NEVER_RAN being the exact starvation
+signature.
+
+### CONTROLLED RESTART PROCEDURE (when internet returns)
+
+1. record epoch/boundary/counts · 2. 
+3. prove SAME epoch and boundary · 4. watch per-stage health through one real
+market refresh · 5.  must exit WITHOUT timeout/SIGKILL
+6. restart and leave running.
+
+### PHASE C — NOT STARTED
+
+Deliberate: context, not blockers. It is mostly local work and must not
+require the collector to run; the 45 real rows are read-only fixtures.

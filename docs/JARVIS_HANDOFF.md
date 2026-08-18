@@ -1966,3 +1966,174 @@ The canonical epoch cutover has **not** started, per instruction. What
 exists is the readiness stamp for a **dry run**. The hard reset is
 explicitly not the cutover mechanism; a cutover must close the ledger it
 actually has.
+
+
+## 28. STOP POINT — CANONICAL EPOCH DRY RUN COMPLETE
+
+    CANONICAL_EPOCH_DRY_RUN_COMPLETE
+    READY_FOR_CONTROLLED_CANONICAL_EPOCH_CUTOVER
+
+Implementation SHA `aac8807`. CI at that exact SHA: **GREEN**.
+
+Pass B remains complete. Nothing was cut over. `data/jarvis.db` was not
+renamed, replaced, migrated, reset or opened by `app.database`; no service,
+unit file, env file or symlink was touched; the scheduler stayed off; real
+orders and transfers remain zero.
+
+### The defect this pass found
+
+Auditing the epoch (P1) turned up a live one. Two strings had drifted:
+
+    canonical_entry.CANONICAL_ENGINE_EPOCH = "2026-08-17-venue-book"
+    calibration.CURRENT_EPOCH              = "2026-08-13"
+
+`canonical_learning` correctly stamps its `trade_outcomes` row with the
+PERSISTED epoch — the one that produced the economics. Calibration,
+expectancy, the edge-cost matrix and the paper job's historical-edge query
+then all filter `engine_epoch == CURRENT_EPOCH`.
+
+While those differ, a canonical trade settles exactly, projects its outcome
+exactly, records `learning_state = APPLIED` — and is invisible to every
+consumer of outcomes. **The book would learn nothing while reporting that it
+had.** Every component correct; the system as a whole inert. Had the cutover
+gone ahead first, the fresh book would have inherited that silence
+permanently.
+
+`lib/engine_epoch.py` is now the single authority at
+`2026-08-18-canonical-lifecycle-v1`; both old names alias it. Prior epochs
+are recorded in `PRIOR_EPOCHS`, not relabelled — outcomes from the retired
+simulator stay honest history of the machine that made them, they simply
+stop being evidence about this one. Expect the learners to report no
+evidence on a fresh book; `NO_EVIDENCE_CEILING` already covers that case.
+
+**Proof it is fixed, from the real run:** the candidate's `signal_accuracy`
+went 0 → 1 rows, earned by its own canonical trade (BTC/USD, 1 trade, 1 win,
++6.37%, fresh UUID). `signal_accuracy` is not in the copy plan and the
+pre-lifecycle gate proved it empty, so that row is the epoch fix working.
+
+### Also found: an unredirectable store
+
+`lib/ohlcv_cache.py` computed `CACHE_DB` at import time from `__file__` with
+no override, so a fully redirected child process still opened the operator's
+live cache. It now honours `JARVIS_OHLCV_DB_PATH`. A disposable process is
+only disposable if EVERY file it can write is under its own directory, and
+one hard-coded path is enough to break that.
+
+### The tooling
+
+`scripts/canonical_epoch_dry_run.py` — no apply path. No `--apply`,
+`--activate` or `--swap`; no `os.replace`, no rename, no delete (AST-pinned).
+The parent imports no application code, because `app.database` builds its
+engine at import time and that engine sets `journal_mode=WAL` on connect — a
+tool proving immutability must not open the file in a mode that can rewrite
+its header. Everything needing the ORM runs in
+`scripts/canonical_epoch_child.py` with `JARVIS_DB_PATH`,
+`JARVIS_EVENTS_DB_PATH` and `JARVIS_OHLCV_DB_PATH` all set before the
+interpreter starts. The child refuses outright if pointed at the operator DB.
+
+`lib/cutover_classification.py` — all **64** source tables classified, zero
+`UNKNOWN_REFUSE`; an unclassified table fails the run rather than being
+guessed at.
+
+    ARCHIVE_ONLY_ECONOMIC     12    the money and the votes from it
+    ARCHIVE_ONLY_HISTORY      31    what happened
+    RESET_DERIVED_LEARNING     8    the old machine's conclusions
+    COPY_OPERATOR_CONFIG       5    what the operator chose
+    COPY_REFERENCE             2    static facts about the world
+    RESET_RUNTIME_STATE        6    caches and ephemera
+
+`market_assets` is the mixed case: identity and focus flags cross,
+`price`/`volume`/`market_cap`/`last_updated` are excluded so a stale price
+cannot arrive in a fresh book looking like reference data.
+
+### The real run — 44 gates, 0 failed
+
+    work dir  data/cutover_dry_runs/CUTOVER_DRY_RUN_20260818T224956Z
+
+- source quiescent (no other process held the DB, WAL or SHM); the collector
+  runs but holds `forward_evidence.db`, proved from its own FDs
+- archive: SQLite backup API, integrity ok both sides, **logical
+  equivalence** (identical schema fingerprint and per-table digests — a
+  backup-API copy is legitimately byte-different, so equal file SHAs would be
+  the wrong test), then chmod read-only and an ordinary write attempt proved
+  refused
+- candidate built by the app's own `init_db()`, idempotent on a second run
+- config copy: 19,783 rows across 7 tables, explicit columns only, no
+  economic FK parents required
+- fresh economy: cash 100,000.00, every economic table 0, all 8 derived
+  learning tables 0
+- FD isolation: the candidate process held only candidate paths; **no source
+  FD, no live external store FD**
+- old-ID intersection empty before AND after the lifecycle
+
+**Full canonical lifecycle on the candidate, real call graph:**
+
+    entry     26 CONTRACTS PBTCUCZ50 @ 64,735.66, multiplier 0.01
+              CRYPTO_PERP / kraken_derivatives_us
+              fee 3.90, committed margin 1,214.38
+              epoch 2026-08-18-canonical-lifecycle-v1
+    partial   PAPER_TP1, revision 1, 13 contracts, fee 1.95,
+              gross 42.5646, released margin 607.19
+              no outcome, no trade_outcome, no vote
+    final     API_MANUAL, 13 contracts, fee 1.95, gross 42.5646,
+              released 607.19, qty 0, margin 0, position Closed
+    result    total_trades 1 · realized outcomes 1 · trade_outcomes 1
+              learning_state APPLIED
+
+    cash      100,000.00 + 85.12920000000143 gross
+              − 3.90 entry fee − 3.90 exit fees − 0.0000237 carry
+            = 100,077.32917630076 expected
+            = 100,077.32917630076 actual        (exact)
+
+    margin    committed 1,214.38 == released 1,214.38
+
+Restart in a new process: integrity ok, outcome intact, `APPLIED` intact, no
+duplicate application. A second untouched candidate booted clean with zero
+history across calibration, expectancy, paper summary, mark-to-market and the
+edge-cost matrix.
+
+### Operator and live state after everything
+
+- `data/jarvis.db` — 667 positions / 664 trades / 21,194 outcomes /
+  cash 63,550.8371643338, every economic digest identical to the pre-run
+  fingerprint; canonical ledger tables still **ABSENT** (unmigrated)
+- events.db, ohlcv_cache.db, forward_evidence.db — preserved in place,
+  integrity ok, none imported into the candidate
+- collector RUNNING, campaign `FORWARD_EVIDENCE_20260818T075321Z`, 1 epoch,
+  `EVIDENCE_ONLY`; scheduler OFF; real orders 0; transfers 0
+
+### Verification
+
+Full pytest and offline `unshare -rn` in the canonical tree: **TRUE exit 0**,
+3,881 passed / 16 skipped / 204 subtests, both runs. Windows keeps its 12
+pre-existing platform-only failures (nine cp1252 decode, three shell-guard),
+verified present at HEAD and absent in the canonical tree.
+
+`REAL_PROVIDER_READ_ONLY` (P13, optional): **UNAVAILABLE** — the Bitnomial
+websocket connected but produced no two-sided PBTCUCZ50 book within 40s.
+Read-only subscribe, zero actions. Not a dry-run failure.
+
+### One correction made to another tool
+
+`scripts/snapshot_operator_db.py` claimed it "refuses to proceed if a writer
+still holds the file". It never did — it notes a WAL and continues. The claim
+is removed rather than softened, because a safety property that lives only in
+documentation is worse than none: it gets relied on. That behaviour is right
+for a routine online snapshot; the strict `/proc/<pid>/fd` quiescence gate
+belongs to the cutover, where the copy is a final epoch boundary rather than
+a recovery point.
+
+### The golden rule, unbroken
+
+The 667 legacy positions were not backfilled, converted, re-priced,
+canonically closed, given settlement headers, or fed through B2A/B2B/B2C.
+Open legacy positions remain open **in the archive**. That is honest;
+closing them under economics that did not exist when they opened would be
+fabricated history.
+
+### What is next
+
+Review the artifacts under `data/cutover_dry_runs/`, then a separate
+controlled cutover continuation. The hard reset is explicitly not its
+mechanism — `reset_paper_portfolio()` refuses a canonical ledger, and neither
+cutover script imports or calls it (AST-pinned).

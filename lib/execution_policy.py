@@ -339,6 +339,16 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
         ES.MARKET_HALTED: MARKET_HALTED,
         ES.BOOK_DESYNCED: BOOK_DESYNCED,
     }.get(snap.status, EXECUTION_DATA_UNAVAILABLE)
+
+    # A MISSING PRODUCT IS NOT A MISSING QUOTE. When the reader refused
+    # because the instrument does not exist, is unspecced, or has an
+    # unverified price scale, that name survives instead of collapsing into
+    # "no data". The two demand opposite remedies — wire a feed, versus stop
+    # routing to a product that was never listed — and reporting one as the
+    # other is precisely what made the historical rejections unreadable.
+    product_refusal = (snap.provenance or {}).get("refusal")
+    if product_refusal:
+        reason = product_refusal
     return ExecutionReadiness(False, venue, product, reason, snap.reason, snap,
                               asset_class=ac, instrument=instrument)
 
@@ -394,4 +404,9 @@ def is_venue_data_failure(reason: str | None) -> bool:
         # A closed session, a halt and a desynced book are all facts about
         # the venue and the feed. None of them is a verdict on the trade.
         MARKET_NOT_OPEN, MARKET_HALTED, BOOK_DESYNCED,
+        # Product-level refusals surfaced by the reader. An instrument that
+        # is not listed, not specced, or whose price scale is unverified is
+        # a gap in what this desk can execute — never a losing thesis.
+        "NO_BITNOMIAL_PRODUCT", "MISSING_CONTRACT_SPEC",
+        "UNVERIFIED_PRICE_SCALE",
     }

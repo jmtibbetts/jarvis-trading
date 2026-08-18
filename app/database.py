@@ -2426,6 +2426,142 @@ class KrakenTrade(Base):
     synced_at        = Column(String, default=now_iso)
 
 
+class DecisionObservation(Base):
+    """EVERY MATERIAL DECISION IS AN OBSERVATION — traded or refused.
+
+    THE GAP THIS CLOSES. `CandidateSignal` records the SCORING stage;
+    `ExecutionSample` records an order that was actually sent. Between them
+    sat the decision that matters most and was persisted nowhere: which
+    product was chosen, which venue would have filled it, what the book
+    looked like, what it would have cost, what risk authorized, which gate
+    said no — and why.
+
+    Measured consequence: 11,952 historical cost-gate rejections, of which
+    11,775 have no usable forward evidence at all. "Would the rejected ones
+    have won?" was unanswerable — not because the analysis is hard, but
+    because the evidence was discarded the moment the answer was NO_TRADE.
+    A market JARVIS declines to trade keeps moving, and that movement is
+    free information about the quality of the refusal.
+
+    ROWS ARE IMMUTABLE. Written once, at T0, from the facts the decision
+    ACTUALLY used. Nothing here is recomputed later with better code or
+    later data — an audit trail hindsight can edit is not an audit trail.
+    Forward outcomes belong in their own rows keyed by `observation_id`,
+    never by rewriting this one.
+
+    ONE MARKET EVENT, ONE OBSERVATION. `observation_id` is the identity a
+    thesis carries through every arm — traded, refused, shadow, control —
+    so learning can compare arms without one event voting several times.
+
+    STORAGE. Indexed scalar columns for everything queryable; JSON only for
+    irregular metadata (per-gate detail, depth summary, cost provenance).
+    """
+    __tablename__ = "decision_observations"
+
+    # ── identity ─────────────────────────────────────────────────────────
+    id               = Column(String, primary_key=True, default=new_id)
+    observation_id   = Column(String, index=True)   # one market event
+    thesis_id        = Column(String, index=True)
+    signal_id        = Column(String, index=True)
+    candidate_id     = Column(String, index=True)
+    decision_id      = Column(String)
+    decision_at      = Column(String, index=True, default=now_iso)
+    observed_at      = Column(String, default=now_iso)
+    # FORWARD_CANONICAL | FORWARD_REJECTED_OBSERVATION |
+    # LEGACY_FORWARD_VIRTUAL | HISTORICAL_BACKTEST | COUNTERFACTUAL_REPLAY
+    source           = Column(String, index=True)
+    engine_epoch     = Column(String, index=True)
+    strategy         = Column(String, index=True)
+    timeframe        = Column(String, index=True)
+
+    # ── instrument identity, kept APART (A9) ─────────────────────────────
+    symbol           = Column(String, index=True)
+    asset_class      = Column(String, index=True)
+    product          = Column(String, index=True)   # CRYPTO_PERP | CRYPTO_SPOT | ...
+    venue            = Column(String, index=True)   # where the order would go
+    market_data_source = Column(String)             # whose book priced it
+    instrument_id    = Column(String)
+    provider_product_code = Column(String)          # e.g. PBTCUCZ50
+    quantity_unit    = Column(String)
+    multiplier       = Column(Float)
+    contract_size    = Column(Float)
+
+    # ── the expression ───────────────────────────────────────────────────
+    side             = Column(String)
+    intended_leverage = Column(Float)
+    order_type       = Column(String)
+    expected_hold_hours = Column(Float)
+    decision_price   = Column(Float)      # the reference, never a fill
+    intended_stop    = Column(Float)
+    intended_target  = Column(Float)
+
+    # ── market state ACTUALLY used ───────────────────────────────────────
+    bid              = Column(Float)
+    ask              = Column(Float)
+    bid_size         = Column(Float)
+    ask_size         = Column(Float)
+    quote_age_ms     = Column(Float)
+    quote_status     = Column(String)     # AVAILABLE | STALE | CROSSED | ...
+    book_ack_id      = Column(String)     # sequence provenance
+    market_state     = Column(String)     # Open | Halt | Close
+    price_scale_quality = Column(String)  # VERIFIED | UNVERIFIED_PRICE_SCALE
+    depth_summary    = Column(Text)       # JSON, compact — never a full book
+
+    # ── economics, as evaluated at T0 ────────────────────────────────────
+    gross_expected_r = Column(Float)
+    estimated_cost_r = Column(Float)
+    expected_net_r   = Column(Float)
+    expected_move_pct = Column(Float)
+    spread_cost_r    = Column(Float)
+    slippage_cost_r  = Column(Float)
+    fee_cost_r       = Column(Float)
+    funding_cost_r   = Column(Float)
+    borrow_cost_r    = Column(Float)
+    entry_fee_usd    = Column(Float)
+    fee_basis        = Column(String)     # PER_CONTRACT | PERCENT_OF_NOTIONAL
+    fee_contract_count = Column(Float)
+    cost_provenance  = Column(Text)       # JSON: MEASURED | ESTIMATED | FALLBACK
+
+    # ── the threshold, so future research needs no rerun ─────────────────
+    edge_threshold_r = Column(Float)
+    distance_to_threshold_r = Column(Float)
+
+    # ── risk, from the real authorities ──────────────────────────────────
+    risk_budget_usd  = Column(Float)
+    authorized_risk_usd = Column(Float)
+    authorized_qty   = Column(Float)
+    authorized_notional = Column(Float)
+    committed_margin_usd = Column(Float)
+    leverage         = Column(Float)
+    liquidation_price = Column(Float)
+    loss_at_stop_usd = Column(Float)
+    concentration_after_pct = Column(Float)
+    deployment_after_pct = Column(Float)
+
+    # ── every gate keeps its own verdict ─────────────────────────────────
+    gate_results     = Column(Text)       # JSON {gate: PASS|FAIL|SKIPPED}
+    final_decision   = Column(String, index=True)   # TRADE | NO_TRADE | ABSTAIN
+    binding_reason   = Column(String, index=True)
+    binding_constraint = Column(String, index=True) # EDGE|COST|RISK|CAPABILITY|DATA|ACCOUNT
+    contributing_reasons = Column(Text)   # JSON list
+    venue_data_failure = Column(Boolean, default=False)
+
+    # ── linkage to what actually happened, when it did ───────────────────
+    execution_id     = Column(String, index=True)   # NULL when nothing was sent
+    position_id      = Column(String, index=True)
+
+    provenance       = Column(Text)       # JSON, irregular metadata only
+
+    __table_args__ = (
+        # IDEMPOTENCY. One market event yields one observation row; a
+        # retried scheduler cycle must not create a second sample of the
+        # same decision, which would let one event vote twice.
+        Index("uq_decision_observation_event", "observation_id", unique=True),
+        Index("ix_decision_obs_query", "final_decision", "binding_constraint",
+              "product", "decision_at"),
+    )
+
+
 class CandidateSignal(Base):
     """Every setup the system CONSIDERED — including the ones it refused.
 

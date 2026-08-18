@@ -100,16 +100,48 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     from lib.paper_engine import prepare_entry, settle_position_entry
     from lib.trade_side import SHORT, parse_side_strict
 
+    from lib import decision_observation as DO
+
     symbol = (signal.get("asset_symbol") or "").upper().strip()
     asset_class = signal.get("asset_class")
     raw_dir = signal.get("paper_direction") or signal.get("direction")
+    decision_at = _now()
+    # Gate verdicts accumulate as the decision proceeds, so a refusal
+    # records WHICH gates were reached and passed rather than collapsing to
+    # a single `eligible = false`.
+    gates: dict = {}
+
+    def _observe(decision, *, reason=None, ready=None, authorization=None,
+                 fee_quote=None, venue_failure=False, position_id=None):
+        """EVERY MATERIAL DECISION IS AN OBSERVATION — traded or refused.
+
+        A rejected opportunity used to leave nothing behind, which is why
+        11,775 historical rejections are unanswerable today. This is the
+        audit trail, built from the artifacts the decision actually used;
+        it opens no position, moves no cash and counts no trade.
+        """
+        try:
+            row = DO.build(signal=signal, ready=ready,
+                           authorization=authorization, fee_quote=fee_quote,
+                           decision=decision, binding_reason=reason,
+                           decision_price=decision_price, gates=dict(gates),
+                           venue_data_failure=venue_failure,
+                           position_id=position_id, decision_at=decision_at)
+            return DO.record(row)
+        except Exception as e:                       # never take a trade down
+            logger.error("[CanonicalEntry] decision observation failed for "
+                         "%s: %s", symbol, e, exc_info=True)
+            return None
 
     side = parse_side_strict(raw_dir)
     if side is None:
         # Not a venue failure — an unreadable side is a bad order.
+        gates["side_parse"] = "FAIL"
+        _observe(DO.NO_TRADE, reason="UNPARSEABLE_SIDE")
         return {"error": f"unparseable direction {raw_dir!r} — refusing to "
                          "assume a side for an order",
                 "venue_failure": False}
+    gates["side_parse"] = "PASS"
 
     # ── 1. May this be filled at all, and by whom? ───────────────────────
     ready = POL.execution_readiness(symbol, asset_class, signal=signal,
@@ -118,11 +150,16 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     if not ready.ok:
         logger.info("[CanonicalEntry] %s not executable: %s (%s)",
                     symbol, ready.reason, ready.detail)
+        gates["executable_quote"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=ready.reason, ready=ready,
+                 venue_failure=POL.is_venue_data_failure(ready.reason))
         return {"error": ready.reason, "detail": ready.detail,
                 "venue": ready.venue, "product": ready.product,
                 "asset_class": ready.asset_class,
                 "venue_failure": POL.is_venue_data_failure(ready.reason),
                 "opened": False}
+    gates["executable_quote"] = "PASS"
+    gates["capability"] = "PASS"
 
     snap = ready.snapshot
     quote = VO.Quote(bid=snap.bid, ask=snap.ask, as_of=snap.venue_event_at,
@@ -152,11 +189,14 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                          risk=auth.risk_decision(), product=ready.product,
                          venue=ready.venue, quote=quote)
 
-    def _refuse_submission(sub):
+    def _refuse_submission(sub, authorization=None):
         """A venue refusal is a RESULT, and it is about the order, not the
         market data — so it must not be excused as a venue outage."""
         logger.info("[CanonicalEntry] %s refused by %s: %s (%s)",
                     symbol, sub.venue_family, sub.reason, sub.detail)
+        gates["venue_submission"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=sub.reason or REJECTED_BY_EXECUTION,
+                 ready=ready, authorization=authorization)
         return {"error": sub.reason or REJECTED_BY_EXECUTION,
                 "detail": sub.detail,
                 "execution_state": getattr(sub.execution, "state", None),
@@ -171,21 +211,24 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # position honest about that.
     prep = prepare_entry(signal, reference_price=quote.mid)
     if "authorization" not in prep:
+        gates["risk_sizing"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=_sizing_reason(prep), ready=ready)
         return {**prep, "venue_failure": False, "opened": False}
     authorized = prep["authorization"]
+    gates["risk_sizing"] = "PASS"
 
     # ── 3. EXECUTE THE AUTHORIZED QUANTITY. BUY lifts the ask, SELL hits
     #      the bid, and the result describes THIS order. ──────────────────
     submission = _submit(authorized)
     if not submission.accepted:
-        return _refuse_submission(submission)
+        return _refuse_submission(submission, authorized)
 
     execution = submission.execution
     if execution is None or not execution.filled or not execution.fill_price:
         # An accepted submission with no usable execution is a broken
         # adapter contract, not a fill. A6 made `execution` a real typed
         # field precisely so this could be asserted rather than assumed.
-        return _refuse_submission(submission)
+        return _refuse_submission(submission, authorized)
 
     fill = float(execution.fill_price)
 
@@ -198,6 +241,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # enlarge one.
     repriced = prepare_entry(signal, reference_price=fill)
     if "authorization" not in repriced:
+        gates["post_fill_risk"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=_sizing_reason(repriced), ready=ready,
+                 authorization=authorized)
         return {**repriced, "venue_failure": False, "opened": False}
     final = repriced["authorization"]
     if final.qty > authorized.qty:
@@ -214,10 +260,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                     symbol, authorized.qty, final.qty, fill)
         submission = _submit(final)
         if not submission.accepted:
-            return _refuse_submission(submission)
+            return _refuse_submission(submission, final)
         execution = submission.execution
         if execution is None or not execution.filled or not execution.fill_price:
-            return _refuse_submission(submission)
+            return _refuse_submission(submission, final)
         fill = float(execution.fill_price)
 
     # THE AUTHORIZATION THAT SURVIVES IS THE FIRST ONE. Re-pricing at the
@@ -234,6 +280,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         logger.error("[CanonicalEntry] %s refusing to settle: repriced risk "
                      "$%.2f exceeds the authorized $%.2f",
                      symbol, final.loss_at_stop, authorized.loss_at_stop)
+        gates["post_fill_risk"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=REJECTED_BY_EXECUTION, ready=ready,
+                 authorization=final)
         return {"error": REJECTED_BY_EXECUTION,
                 "detail": (f"repricing at the fill raised money-at-stop from "
                            f"${authorized.loss_at_stop:,.2f} to "
@@ -250,6 +299,9 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         logger.error("[CanonicalEntry] %s refusing to settle: executed %s "
                      "units but authorization holds %s",
                      symbol, execution.filled_quantity, final.qty)
+        gates["execution_matches_authorization"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=REJECTED_BY_EXECUTION, ready=ready,
+                 authorization=final)
         return {"error": REJECTED_BY_EXECUTION,
                 "detail": (f"executed {execution.filled_quantity} units against "
                            f"an authorization of {final.qty} — settling would "
@@ -274,6 +326,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         # trade wearing the label of an accurately-costed one.
         logger.warning("[CanonicalEntry] %s has no entry fee authority: %s",
                        symbol, fee_quote.detail)
+        gates["fee_authority"] = "FAIL"
+        _observe(DO.NO_TRADE,
+                 reason=fee_quote.reason or FA.FEE_AUTHORITY_UNAVAILABLE,
+                 ready=ready, authorization=final)
         return {"error": fee_quote.reason or FA.FEE_AUTHORITY_UNAVAILABLE,
                 "detail": fee_quote.detail,
                 "venue": ready.venue, "product": ready.product,
@@ -298,6 +354,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         logger.warning("[CanonicalEntry] %s refused: round trip is %.2f%% of "
                        "notional (limit %.2f%%)", symbol, round_trip_pct,
                        V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL)
+        gates["fee_authority"] = "PASS"
+        gates["catastrophic_product"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
+                 ready=ready, authorization=final, fee_quote=fee_quote)
         return {"error": FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
                 "detail": (f"${fee_quote.fee_usd:,.2f} per side on "
                            f"${abs(final.notional):,.2f} of notional is a "
@@ -322,11 +382,26 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                                   decision_price=decision_price,
                                   authorized_qty=authorized.qty,
                                   fee_quote=fee_quote)
+    gates["fee_authority"] = "PASS"
+    gates["catastrophic_product"] = "PASS"
+    # WRITTEN BEFORE SETTLEMENT, deliberately. A canonical position must not
+    # be able to exist without the decision record that authorised it, and
+    # this write is a short transaction holding no provider call.
+    observation_id = _observe(DO.TRADE, ready=ready, authorization=final,
+                              fee_quote=fee_quote)
+
     result = settle_position_entry(
         final, fill_price=fill, execution_provenance=provenance,
         canonical_entry_fee_usd=float(fee_quote.fee_usd))
     if not result.get("ok"):
         return result
+    # LATE LINKAGE ONLY. The judgment is never rewritten; only the pointer
+    # to what it produced is filled in.
+    if observation_id:
+        _observe(DO.TRADE, ready=ready, authorization=final,
+                 fee_quote=fee_quote,
+                 position_id=(result.get("position") or {}).get("id"))
+        result["observation_id"] = observation_id
 
     # THE REAL CONTRACT IS {"ok": True, "position": {"id": ...}}.
     # This read result["position_id"], which does not exist, so it silently
@@ -347,6 +422,26 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         "execution_model_version": EXECUTION_MODEL_CANONICAL,
     }
     return result
+
+
+def _sizing_reason(prep: dict) -> str:
+    """The NAMED reason sizing refused, for the observation record.
+
+    "paper sizing rejected: ..." is a sentence; a binding reason has to be
+    queryable years later, which is the whole point of the record.
+    """
+    err = str(prep.get("error") or "").lower()
+    if "concentration" in err:
+        return "CONCENTRATION"
+    if "deployment cap" in err:
+        return "DEPLOYMENT_CAP"
+    if "already open" in err:
+        return "DUPLICATE_OPEN"
+    if "book full" in err:
+        return "MAX_POSITIONS"
+    if "insufficient" in err:
+        return "INSUFFICIENT_CASH"
+    return "RISK_SIZING_REJECTED"
 
 
 def build_provenance(*, signal, ready, snap, execution,

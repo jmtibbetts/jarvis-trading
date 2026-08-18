@@ -198,10 +198,31 @@ difficulty: no historical Bitnomial book was ever stored.
 
     median gross edge  ~0.109R
     max gross edge     ~0.419R
-    edge threshold     ~0.50R
+    modelled ROUND-TRIP COST  ~0.50R      <- A COST, NOT A THRESHOLD
 
-**EDGE, not COST, was the binding historical constraint.** Do **not** lower
-the ~0.50R threshold. Collect forward evidence first.
+**CORRECTED 2026-08-18 (C0.2). There is no 0.50R threshold and there never
+was.** Earlier revisions of this file called ~0.50R the "edge threshold" and
+said not to lower it. That was a mislabel, and it invited someone to tune a
+number that does not exist. ~0.50R is the MODELLED ROUND-TRIP COST in R
+(`edge_cost_matrix` docstring: `gross 0.42R - cost 0.50R = -0.08R`; the
+replay report: "near 0.42R against a cost floor around 0.50R").
+
+So the historical finding is: **the best available gross edge (~0.42R) was
+smaller than the cost of trading it (~0.50R)** — the venue ate the setup.
+That is a COST-limited result, and `edge_cost_matrix` keeps `LIMIT_COST` and
+`LIMIT_EDGE` as distinct verdicts precisely so the two are never conflated.
+
+The ACTUAL live gate is a NET-expectancy floor applied AFTER costs:
+
+    lib.expectancy.MIN_NET_R        = 0.05R   <- the live authority
+    lib.edge_cost_matrix.MIN_NET_R  = 0.05R   (same bar, shared on purpose)
+    lib.dex_autotrade.MIN_NET_R     = 0.05R   (separate DEX constant)
+
+`expectancy.evaluate` returns NO_TRADE when `net_expected_r < 0.05`, and
+`robust` additionally requires the LOWER CONFIDENCE BOUND to clear the same
+0.05 — so a point pass with a failing lower bound is an UNCERTAINTY result,
+not a robust TRADE. Never write "the threshold" again: name it
+`expectancy_min_net_r` or `historical_modelled_round_trip_cost_r`.
 
 Preliminary reports (gitignored, do not delete):
 `data/reports/perp_false_negative_replay_20260818T012836Z.{json,md}`
@@ -515,3 +536,81 @@ binding_constraint / binding_reason / product / timeframe / leverage / price
 band; `FAVORABLE_AFTER_REJECTION`, never automatic `FALSE_NEGATIVE`;
 threshold research 0.20R-0.60R from STORED T0 values only. **Do not change
 the ~0.50R threshold.** Then Execution Pass B. Scheduler stays OFF.
+
+
+---
+
+## 11. Phase C0 — decision funnel (PARTIAL, green, NOT yet activated)
+
+    online 3,379 passed / 16 skipped  TRUE exit 0
+
+### C0.1 — THE FUNNEL AUDIT, AND THE HOLE IT FOUND
+
+**`DecisionObservation` is built in exactly ONE place:**
+`canonical_entry.open_canonical_position`. Everything terminating before that
+call left NOTHING behind. In `jobs/paper_trading.run()` two such paths were
+live, both immediately before the canonical call:
+
+    no usable price   ->  skipped_no_price += 1 ; continue
+    AI rejected       ->  skipped_ai       += 1 ; continue   <- the serious one
+
+The AI path discarded the single richest decision-quality signal the desk
+has. This is the original failure reproduced one layer earlier —
+`candidate -> NO_TRADE -> forgotten`, the shape that left 11,775 historical
+rejections unanswerable.
+
+**FIXED:** `lib/decision_funnel.observe_terminal_refusal()` writes ONE
+observation at each terminal path (`NO_DECISION_PRICE` as ABSTAIN +
+`venue_data_failure`; `AI_REJECTED_ENTRY` as NO_TRADE). One row per event,
+not one per gate; the unique `observation_id` index makes retries idempotent;
+it never raises into the paper cycle. An AST test asserts the job actually
+calls it, so the wiring cannot rot into a helper nobody invokes.
+
+**STILL UNOBSERVED (known, not closed):** the `open_syms` pre-filter drops
+candidates for symbols already open before the loop body runs, so an
+ACCOUNT_STATE refusal still leaves no row; and `auto_trade_enabled=False`
+skips evaluation entirely.
+
+### C0.3 — MeasuredEdge threading: NOT DONE
+
+`canonical_entry` fills NO edge fields — `gross_expected_r`,
+`estimated_cost_r`, `expected_net_r`, `edge_threshold_r`,
+`distance_to_threshold_r` are ALL still NULL on every row.
+`decision_funnel._edge_fields()` accepts a `MeasuredEdge` and maps it, but
+nothing passes one yet. **Threshold research (C10) is impossible until this
+lands** — there are no stored T0 edge values to research.
+
+### C0.6 — EVIDENCE_ONLY SEMANTICS: DONE
+
+    source     FORWARD_EVIDENCE_ONLY   (NOT in FORWARD_EXECUTED_SOURCES, so
+                                       the calibration predicate excludes it
+                                       by construction, not by a new rule)
+    lifecycle  EXECUTION_SUPPRESSED    terminal; never upgrades to SETTLED
+
+Deliberately NOT `SETTLEMENT_FAILED` — nothing failed, execution was not
+permitted, and that word would write a policy choice into the evidence as
+though it were a defect.
+
+`lib/runtime_mode.py`: `EVIDENCE_ONLY` / `FULL_VIRTUAL` (default
+FULL_VIRTUAL, so existing callers and the whole suite keep their meaning).
+**The guard lives at the MUTATION, not the caller** — `prepare_entry`,
+`settle_position_entry`, `close_paper_position` and
+`partial_close_paper_position` each call `forbid_economic_mutation()` and
+raise in EVIDENCE_ONLY. An AST test asserts each guards itself, so a new
+caller inherits protection instead of having to remember it.
+
+### NOT ACTIVATED — and why
+
+Evidence-only collection is **NOT** started. C0 is incomplete: C0.3 is
+missing, the paths above are open, and the full terminal-path funnel test
+(C0.5) is not written. Activating now would accumulate a dataset with known
+holes and no stored edge values — the selection bias this phase exists to
+prevent.
+
+### NEXT, IN ORDER
+
+1. C0.3 — thread `MeasuredEdge` through `canonical_entry` AND the funnel.
+2. Close the `open_syms` / auto-trade-disabled paths.
+3. C0.5 — full terminal-path funnel test.
+4. Then activate EVIDENCE_ONLY (durable supervision, NOT a Claude subshell).
+5. Then Phase C analytics.

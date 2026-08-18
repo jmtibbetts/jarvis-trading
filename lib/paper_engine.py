@@ -827,6 +827,11 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
     Returns {"ok": True, "authorization": EntryAuthorization} or an error
     dict — the same error dicts `open_paper_position` has always returned.
     """
+    # EVIDENCE_ONLY forbids economic mutation AT THE MUTATION, not at the
+    # caller — a caller that forgets to ask is exactly the one that would
+    # open a position in a mode that forbade it.
+    from lib.runtime_mode import forbid_economic_mutation
+    forbid_economic_mutation("prepare_entry")
     sym = signal.get("asset_symbol", "").upper().strip()
     if not sym:
         return {"error": "No asset_symbol provided"}
@@ -1093,6 +1098,11 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
     supplied, the observation is advanced to SETTLED inside this same
     transaction, so the ledger and the evidence chain cannot disagree.
     """
+    # EVIDENCE_ONLY forbids economic mutation AT THE MUTATION, not at the
+    # caller — a caller that forgets to ask is exactly the one that would
+    # open a position in a mode that forbade it.
+    from lib.runtime_mode import forbid_economic_mutation
+    forbid_economic_mutation("settle_position_entry")
     sym = auth.symbol
     asset_class = auth.asset_class
     dir_key = auth.direction
@@ -1359,6 +1369,11 @@ def _refuse_legacy_close(pos) -> dict | None:
 
 def close_paper_position(pos_id: str, close_price: float, reason: str = "manual") -> dict:
     """Close a paper position and record the trade."""
+    # EVIDENCE_ONLY forbids economic mutation AT THE MUTATION, not at the
+    # caller — a caller that forgets to ask is exactly the one that would
+    # open a position in a mode that forbade it.
+    from lib.runtime_mode import forbid_economic_mutation
+    forbid_economic_mutation("close_paper_position")
     with get_db() as _db:
         _pos = _db.query(PaperPosition).filter(PaperPosition.id == pos_id).first()
         _refusal = _refuse_legacy_close(_pos) if _pos is not None else None
@@ -1514,6 +1529,11 @@ def partial_close_paper_position(pos_id: str, close_fraction: float, close_price
     open with reduced size — mirrors close_paper_position but for a partial
     exit (e.g. locking in profit at an intermediate target). The remaining
     qty/notional/margin are reduced proportionally; the position stays Open."""
+    # EVIDENCE_ONLY forbids economic mutation AT THE MUTATION, not at the
+    # caller — a caller that forgets to ask is exactly the one that would
+    # open a position in a mode that forbade it.
+    from lib.runtime_mode import forbid_economic_mutation
+    forbid_economic_mutation("partial_close_paper_position")
     if not (0 < close_fraction < 1):
         return {"error": "close_fraction must be between 0 and 1 (exclusive)"}
 

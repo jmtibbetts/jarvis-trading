@@ -47,10 +47,16 @@ HISTORICAL_BACKTEST = "HISTORICAL_BACKTEST"
 # historical sample's honest answer is UNKNOWN, and infrastructure for an
 # unanswerable question is just infrastructure.
 COUNTERFACTUAL_REPLAY = "COUNTERFACTUAL_REPLAY"
+# EVIDENCE-ONLY / SHADOW. Every decision gate really ran against a real
+# market and reached a real verdict — including TRADE — but the runtime mode
+# forbade execution. That is NOT a canonical execution and NOT a settlement
+# failure: nothing failed, execution was deliberately not permitted. It gets
+# its own source so it can never be mistaken for either.
+FORWARD_EVIDENCE_ONLY = "FORWARD_EVIDENCE_ONLY"
 
 ALL_SOURCES = frozenset({FORWARD_CANONICAL, FORWARD_REJECTED_OBSERVATION,
                          LEGACY_FORWARD_VIRTUAL, HISTORICAL_BACKTEST,
-                         COUNTERFACTUAL_REPLAY})
+                         COUNTERFACTUAL_REPLAY, FORWARD_EVIDENCE_ONLY})
 
 # Sources that describe trades this system actually took forward. Only
 # these may inform execution calibration or portfolio performance.
@@ -190,6 +196,13 @@ EXEC_NOT_APPLICABLE = "NOT_APPLICABLE"      # nothing was ever sent
 EXEC_SIMULATED_FILLED = "SIMULATED_FILLED"  # the venue produced a fill
 EXEC_SETTLED = "SETTLED"                    # and the account recorded it
 EXEC_SETTLEMENT_FAILED = "SETTLEMENT_FAILED"
+# The decision said TRADE and the runtime mode forbade acting on it.
+# DELIBERATELY NOT `SETTLEMENT_FAILED` — that word claims an attempt was made
+# and went wrong, which would write a policy choice into the evidence as
+# though it were a defect. Terminal: a suppressed decision is never later
+# upgraded to SETTLED, because re-evaluating the market once execution is
+# permitted is a NEW market event that earns its own observation.
+EXEC_SUPPRESSED = "EXECUTION_SUPPRESSED"
 
 # THE LIFECYCLE IS MONOTONIC. Terminal means terminal.
 #
@@ -200,9 +213,9 @@ EXEC_SETTLEMENT_FAILED = "SETTLEMENT_FAILED"
 # settlement would be a NEW attempt and needs its own design; until such a
 # thing exists, a terminal state is final.
 _TERMINAL_STATES = frozenset({EXEC_SETTLED, EXEC_SETTLEMENT_FAILED,
-                              EXEC_NOT_APPLICABLE})
+                              EXEC_NOT_APPLICABLE, EXEC_SUPPRESSED})
 _ALLOWED_TRANSITIONS = {
-    None: {EXEC_NOT_APPLICABLE, EXEC_SIMULATED_FILLED},
+    None: {EXEC_NOT_APPLICABLE, EXEC_SIMULATED_FILLED, EXEC_SUPPRESSED},
     EXEC_SIMULATED_FILLED: {EXEC_SETTLED, EXEC_SETTLEMENT_FAILED},
 }
 

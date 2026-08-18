@@ -1002,6 +1002,7 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
 
 def run():
     logger.info("[PaperTrading] v5.0 Starting paper trading job...")
+    from lib import decision_funnel as DF
     from lib.canonical_entry import open_canonical_position
     from lib.paper_engine import mark_to_market, get_paper_summary
 
@@ -1062,7 +1063,13 @@ def run():
         sym = sig["asset_symbol"]
         price = _get_current_price(sym, prices) or sig.get("entry_price") or 0.0
         if not price or price <= 0:
+            # A CANDIDATE THAT DIES HERE IS STILL A DECISION. Counting it
+            # and continuing is how 11,775 historical rejections became
+            # unanswerable; the market kept moving either way.
             logger.warning(f"[PaperTrading] No price for {sym} — skipping")
+            DF.observe_terminal_refusal(
+                sig, decision="ABSTAIN", reason=DF.NO_DECISION_PRICE,
+                decision_price=None, venue_failure=True)
             skipped_no_price += 1
             continue
 
@@ -1073,6 +1080,13 @@ def run():
                 f"score={eval_result['score']:.0f} | {eval_result['reasoning']}"
             )
             log_decision('paper', 'REJECTED', eval_result['reasoning'], symbol=sym, price=price, score=eval_result['score'])
+            # THE MODEL'S REFUSALS ARE THE RICHEST DECISION-QUALITY SIGNAL
+            # THIS DESK HAS, and they used to be counted and thrown away one
+            # line before the observation was written.
+            DF.observe_terminal_refusal(
+                sig, decision="NO_TRADE", reason=DF.AI_REJECTED_ENTRY,
+                decision_price=price,
+                gates={"ai_entry_review": "FAIL"})
             skipped_ai += 1
             continue
 

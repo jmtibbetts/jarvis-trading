@@ -1973,7 +1973,17 @@ actually has.
     CANONICAL_EPOCH_DRY_RUN_COMPLETE
     READY_FOR_CONTROLLED_CANONICAL_EPOCH_CUTOVER
 
-Implementation SHA `aac8807`. CI at that exact SHA: **GREEN**.
+**Provenance.** Three commits make up this stop point, and an earlier
+revision of this line collapsed them into one, calling `aac8807` "the
+implementation SHA". That was imprecise — `aac8807` is a documentation
+correction to an unrelated tool, not the feature:
+
+    98a8b76   canonical epoch dry-run feature implementation
+    aac8807   snapshot_operator_db documentation correction
+    d6a98c1   this stop point
+
+CI: **GREEN** at each exact SHA. The technical conclusions recorded below
+were produced by the run against `aac8807` and are unchanged.
 
 Pass B remains complete. Nothing was cut over. `data/jarvis.db` was not
 renamed, replaced, migrated, reset or opened by `app.database`; no service,

@@ -51,6 +51,18 @@ if not os.getenv("JARVIS_EVENTS_DB_PATH", "").strip():
     _tmp_ev = Path(tempfile.mkdtemp(prefix="jarvis-test-events-"))
     os.environ["JARVIS_EVENTS_DB_PATH"] = str(_tmp_ev / "events.db")
 
+# READ-ONLY MARKET DATA STAYS OFF UNDER PYTEST. The market-data runtime is
+# deliberately independent of JARVIS_DISABLE_SCHEDULER — observing the
+# market while the trading loop is stopped is a supported configuration —
+# which means the scheduler pin above does NOT keep a websocket closed.
+# Hermetic CI must never open one, so it is forced shut by its own name.
+# FORCED for the same reason as LM_STUDIO_URL: an operator shell that
+# exports it cannot be allowed to decide whether CI touches the network.
+# Real-provider runs are the one deliberate exception and are already
+# opt-in behind JARVIS_REAL_PROVIDER_TESTS.
+if os.getenv("JARVIS_REAL_PROVIDER_TESTS") != "1":
+    os.environ["JARVIS_DISABLE_MARKET_DATA"] = "1"
+
 
 def pytest_configure(config):
     """Create the full schema once per session, exactly as the app would."""

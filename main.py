@@ -144,6 +144,24 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         logger.warning(f"[Server] Kraken stream failed to start: {e}")
 
+    # READ-ONLY MARKET DATA RUNTIME. Deliberately OUTSIDE the scheduler
+    # branch above: switching the trading scheduler off says JARVIS may not
+    # ACT, not that it may not LOOK. The forward-evidence work needs the
+    # market observed precisely while the trading loop is stopped, so
+    # coupling the two would close the observation window exactly when it
+    # matters most. `JARVIS_DISABLE_MARKET_DATA=1` turns feeds off by their
+    # own name, for tests and deliberately offline runs.
+    #
+    # This is also where the Bitnomial perpetual book finally gets an
+    # owner: the provider was fully implemented and had no runtime caller
+    # at all, so every US perpetual quote refused for want of a stream.
+    try:
+        from lib.market_data_runtime import start as start_market_data
+        md = start_market_data()
+        logger.info(f"[Server] Read-only market data — {md}")
+    except Exception as e:
+        logger.warning(f"[Server] Market-data runtime failed to start: {e}")
+
     # Twelve Data WebSocket: live forex majors — the one asset class with
     # no real-time feed (Kraken covers crypto, Alpaca covers equities).
     # Same daemon-thread pattern; inert without a TD key.
@@ -172,6 +190,12 @@ async def lifespan(app_: FastAPI):
     try:
         from lib.td_forex_stream import stop as stop_td_forex
         stop_td_forex()
+    except Exception:
+        pass
+
+    try:
+        from lib.market_data_runtime import stop as stop_market_data
+        stop_market_data()
     except Exception:
         pass
 

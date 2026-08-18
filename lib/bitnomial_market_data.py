@@ -312,26 +312,124 @@ def subscribe_message(symbols) -> dict:
                          {"name": "status", "product_codes": syms}]}
 
 
-# ── the reader loop ─────────────────────────────────────────────────────
+# ── the reader loop and its lifecycle ───────────────────────────────────
+#
+# THIS IS A SERVICE, NOT A FIRE-AND-FORGET THREAD. The module previously
+# offered `start_stream()` and nothing else: no way to stop it, no way to
+# ask whether it was connected, and a `_STREAM_STARTED` flag that never
+# cleared — so a stopped desk could not be restarted within one process.
+# It also had NO RUNTIME CALLER ANYWHERE, which is why the perpetual book
+# was never populated outside tests: the provider was fully implemented and
+# simply never switched on.
+#
+# Health is recorded rather than inferred. "The books are empty" has at
+# least four causes — never started, connecting, connected but
+# unsubscribed, and connected but the venue is quiet — and an operator
+# looking at an empty book needs to know which, because the remedies are
+# unrelated to each other.
+
 _STREAM_STARTED = False
+_STOP = threading.Event()
+_THREAD: threading.Thread | None = None
+_HEALTH_LOCK = threading.Lock()
+_HEALTH = {
+    "service_running": False,
+    "connected": False,
+    "subscribed": False,
+    "products_subscribed": 0,
+    "last_message_at": None,
+    "last_connect_at": None,
+    "reconnect_count": 0,
+    "current_error": None,
+}
+
+# Bounded exponential backoff. A venue that is down must not be hammered,
+# and a transient blip must not cost minutes of missing evidence.
+RECONNECT_BASE_S = 2.0
+RECONNECT_MAX_S = 60.0
+
+
+def _health_set(**kw) -> None:
+    with _HEALTH_LOCK:
+        _HEALTH.update(kw)
+
+
+def stream_health() -> dict:
+    """What the feed is actually doing — for ops, and for evidence quality.
+
+    `stale_products` and `desynced_products` are derived from the books
+    themselves rather than tracked alongside them, so they cannot drift out
+    of agreement with what a fill would actually see.
+    """
+    with _HEALTH_LOCK:
+        out = dict(_HEALTH)
+    stale, desynced = [], []
+    with _BOOKS_LOCK:
+        books = list(_BOOKS.values())
+    for b in books:
+        top = b.top()
+        if not top:
+            continue
+        if top.get("state") == BOOK_DESYNCED:
+            desynced.append(b.symbol)
+        age = top.get("age_s")
+        if age is not None and age > 15.0:
+            stale.append(b.symbol)
+    out["desynced_products"] = sorted(desynced)
+    out["stale_products"] = sorted(stale)
+    out["books"] = len(books)
+    return out
 
 
 async def _run(symbols, url):                    # pragma: no cover - network
+    import asyncio
+
     import websockets
-    while True:
+
+    attempt = 0
+    while not _STOP.is_set():
         try:
             async with websockets.connect(url, open_timeout=20) as ws:
+                _health_set(connected=True, current_error=None,
+                            last_connect_at=_now().isoformat())
                 await ws.send(json.dumps(subscribe_message(symbols)))
+                # SUBSCRIPTION IS RESTORED ON EVERY CONNECT, not only the
+                # first. A reconnect that assumed the old subscription
+                # survived would leave a connected socket receiving
+                # nothing at all — the hardest kind of outage to notice,
+                # because every health field except the data looks fine.
+                _health_set(subscribed=True, products_subscribed=len(symbols))
+                attempt = 0
                 logger.info("[Bitnomial] subscribed to %d products", len(symbols))
                 async for raw in ws:
+                    if _STOP.is_set():
+                        break
                     try:
                         apply_message(json.loads(raw))
+                        _health_set(last_message_at=_now().isoformat())
                     except Exception as e:
                         logger.debug("[Bitnomial] bad frame: %s", e)
         except Exception as e:
+            _health_set(current_error=f"{type(e).__name__}: {e}")
             logger.warning("[Bitnomial] stream dropped (%s); books invalidated", e)
+        finally:
+            _health_set(connected=False, subscribed=False)
+            # A BOOK THAT SURVIVED A DISCONNECT IS NOT A SLIGHTLY OLDER
+            # BOOK. The gap is unmeasured, so any level in it may already
+            # be wrong; it must not price a fill or an excursion until a
+            # fresh snapshot arrives.
             reset_books()
-            time.sleep(5)
+
+        if _STOP.is_set():
+            break
+        with _HEALTH_LOCK:
+            _HEALTH["reconnect_count"] += 1
+        attempt += 1
+        # `await`, NOT time.sleep — the previous version blocked the whole
+        # event loop from inside a coroutine.
+        await asyncio.sleep(min(RECONNECT_BASE_S * (2 ** (attempt - 1)),
+                                RECONNECT_MAX_S))
+    _health_set(service_running=False, connected=False, subscribed=False)
 
 
 def start_stream(symbols=None, url: str | None = None) -> bool:
@@ -339,9 +437,10 @@ def start_stream(symbols=None, url: str | None = None) -> bool:
 
     Never started implicitly by a price lookup: a market-data connection is
     a side effect, and an execution path that silently opens one turns a
-    missing quote into a timeout instead of a refusal.
+    missing quote into a timeout instead of a refusal. Lifecycle belongs to
+    the market-data runtime at application startup.
     """
-    global _STREAM_STARTED
+    global _STREAM_STARTED, _THREAD
     if _STREAM_STARTED:
         return False
     from lib import bitnomial_products as BP
@@ -350,9 +449,36 @@ def start_stream(symbols=None, url: str | None = None) -> bool:
         return False
     import asyncio
 
+    _STOP.clear()
+
     def _thread():                               # pragma: no cover - network
         asyncio.run(_run(syms, url or BP.WS_URL))
 
-    threading.Thread(target=_thread, name="bitnomial-md", daemon=True).start()
+    _THREAD = threading.Thread(target=_thread, name="bitnomial-md", daemon=True)
+    _THREAD.start()
     _STREAM_STARTED = True
+    _health_set(service_running=True, products_subscribed=len(syms),
+                current_error=None)
+    return True
+
+
+def stop_stream(timeout: float = 5.0) -> bool:
+    """Stop the feed and invalidate every book. Idempotent.
+
+    Returning the process to a state where `start_stream` works again is
+    the whole point: without it a stopped desk could not be restarted
+    without restarting the process, which makes the service untestable and
+    leaves an operator with a reboot as their only recovery.
+    """
+    global _STREAM_STARTED, _THREAD
+    if not _STREAM_STARTED:
+        return False
+    _STOP.set()
+    t, _THREAD = _THREAD, None
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
+    reset_books()
+    _STREAM_STARTED = False
+    _health_set(service_running=False, connected=False, subscribed=False,
+                products_subscribed=0)
     return True

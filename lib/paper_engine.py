@@ -1902,7 +1902,23 @@ def mark_to_market(prices: dict) -> dict:
             )
             continue
 
-        pnl, pct = _calc_pnl(entry, price, qty, side, lev, margin, symbol=sym)
+        # THE UNIT BASIS DECIDES THE DOLLARS. `_calc_pnl` prices qty as
+        # COINS, which is right for the legacy book and wrong by 100x for a
+        # 26-contract PBTC position at a 0.01 multiplier. The canonical
+        # basis comes from the frozen ledger; legacy keeps legacy
+        # arithmetic exactly.
+        from lib import paper_mark_economics as PME
+        _basis = PME.basis_for_position(pos["id"])
+        if _basis is not None and _basis.route == PME.CANONICAL:
+            _gross = PME.gross_at_mark(_basis, price)
+            if _gross is None:
+                logger.debug("[Paper] %s: no canonical mark economics", sym)
+                continue
+            pnl = _gross
+            pct = PME.return_pct_on_margin(_basis, _gross) or 0.0
+        else:
+            pnl, pct = _calc_pnl(entry, price, qty, side, lev, margin,
+                                 symbol=sym)
 
         # Trigger checks — MUST respect side direction:
         # LONG:  stop when price falls BELOW stop_loss, profit when price rises ABOVE target
@@ -2182,14 +2198,68 @@ def soft_reset_paper_portfolio(starting_cash: float = None) -> dict:
             "history_preserved": True, "cash_reseeded": True}
 
 
+CANONICAL_LEDGER_REQUIRES_EPOCH_RESET = "CANONICAL_LEDGER_REQUIRES_EPOCH_RESET"
+
+
+def _canonical_book_present() -> bool:
+    """Does this database hold any CANONICAL economic record at all?
+
+    Four independent witnesses, because they can outlive one another: a
+    settlement header, a settlement leg, a realized outcome, or a still-open
+    position carrying a canonical fill. A closed canonical trade leaves no
+    open position but still leaves legs and an outcome, so "the open book is
+    empty" is not evidence the ledger is.
+
+    Schema-absent is not canonical. On the operator's unmigrated database
+    the tables do not exist, this answers False, and the legacy reset
+    behaves exactly as it always has. The probe INSPECTS; it never creates a
+    table and never calls init_db.
+    """
+    from lib import exit_dispatch as ED
+    if not ED._canonical_ledger_available():
+        return False
+    from app.database import (PaperPosition, PaperPositionSettlement,
+                              PaperRealizedOutcome, PaperSettlementLeg)
+    from lib.canonical_entry import has_canonical_fill
+    with get_db() as db:
+        for model in (PaperPositionSettlement, PaperSettlementLeg,
+                      PaperRealizedOutcome):
+            if db.query(model).first() is not None:
+                return True
+        # has_canonical_fill is the WIDE claim on purpose: a hybrid whose
+        # fill crossed a real book is exactly the record a legacy wipe
+        # would silently destroy half of.
+        for pos in db.query(PaperPosition).all():
+            if has_canonical_fill(pos):
+                return True
+    return False
+
+
 def reset_paper_portfolio() -> dict:
     """Reset the paper portfolio back to $100k starting capital.
 
     DESTRUCTIVE: deletes every PaperTrade and PaperPosition row — the
     learning data, not just the wallet. Prefer soft_reset_paper_portfolio,
     which refills the funds and keeps the history.
+
+    IT REFUSES A CANONICAL BOOK. This deletes positions, trades and the
+    portfolio and knows nothing about settlement headers, legs or realized
+    outcomes. Run against a canonical ledger it would leave those rows
+    pointing at positions that no longer exist — half an economic record,
+    which is a worse state than either a clean book or an intact one. A
+    canonical book is retired by an EPOCH RESET that closes the ledger it
+    actually has, not by deleting one side of it.
     """
     from app.database import new_id
+    if _canonical_book_present():
+        logger.warning("[Paper] hard reset REFUSED: this book has a "
+                       "canonical settlement ledger")
+        return {"ok": False, "error": CANONICAL_LEDGER_REQUIRES_EPOCH_RESET,
+                "detail": ("this database holds canonical settlement "
+                           "records; the legacy hard reset deletes "
+                           "positions and trades but not the ledger, "
+                           "which would orphan it. Use the soft reset, or "
+                           "a canonical epoch reset.")}
     with get_db() as db:
         db.query(PaperTrade).delete()
         db.query(PaperPosition).delete()

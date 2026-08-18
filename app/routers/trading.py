@@ -1307,10 +1307,20 @@ def paper_reset(hard: bool = False, starting_cash: float = 100000.0):
         if hard:
             from lib.paper_engine import reset_paper_portfolio
             r = reset_paper_portfolio()
+            if not r.get("ok"):
+                # It refused, so nothing was deleted. Saying otherwise
+                # would have the operator believe the book was wiped when
+                # every position, leg and outcome is still there.
+                raise HTTPException(409, f"{r.get('error')}: "
+                                         f"{r.get('detail', '')}".strip())
             r["message"] = "Paper account HARD reset — trade history deleted"
             return r
         from lib.paper_engine import soft_reset_paper_portfolio
         return soft_reset_paper_portfolio(starting_cash=starting_cash)
+    except HTTPException:
+        # A deliberate refusal keeps its own status. Collapsing it into a
+        # 500 would present a policy decision as a server fault.
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 

@@ -421,7 +421,13 @@ def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data:
     # trade — the position carries this same level as a price-enforced stop
     # from the moment it opens, so reaching it here means the price gapped
     # past the level between polls.
-    margin = float(pos.get("margin_used") or 0) or (qty * entry / max(1.0, leverage))
+    # THE UNIT BASIS, when the caller established one. Contract exposure is
+    # qty x price x MULTIPLIER; deriving margin as qty * entry / leverage
+    # treats 26 contracts as 26 coins and inflates it by 100x.
+    basis = pos.get("_basis")
+    mult = float(getattr(basis, "multiplier", None) or 1.0)
+    margin = float(pos.get("margin_used") or 0) or (
+        qty * entry * mult / max(1.0, leverage))
     hard_loss = catastrophic_loss_usd(margin)
     if pl_dollar <= -hard_loss:
         return {"ok": True, "action": "EXIT",
@@ -438,8 +444,15 @@ def _paper_exit_plan(pos: dict, current_price: float, pl_dollar: float, ta_data:
     # The widest the stop may sit from entry, in price. Previously this was
     # $15 spread over the leveraged quantity, which pinned every stop to a
     # ~0.15% move and guaranteed the noise-triggered exits above.
-    risk_per_unit = hard_loss / qty
-    lock_per_unit = PROFIT_LOCK_USD / (qty * leverage) if PROFIT_LOCK_USD else 0
+    # DOLLARS -> PRICE DISTANCE, through the unit basis. $350 across 26
+    # contracts at 0.01 is $1,346.15 of price, not $13.46 — and a stop
+    # placed at the second distance is a different trade from the one risk
+    # authorized. Leverage does not appear: it decides committed capital,
+    # not what a price move is worth.
+    unit_exposure = qty * mult
+    risk_per_unit = hard_loss / unit_exposure if unit_exposure > 0 else 0.0
+    lock_per_unit = (PROFIT_LOCK_USD / unit_exposure
+                     if PROFIT_LOCK_USD and unit_exposure > 0 else 0)
     # STRICT. `"short" in direction` with an `or "Long"` default trails an
     # unreadable direction the wrong way — and a trailing stop moving the
     # wrong way does not sit unused, it walks INTO the position. A side we
@@ -560,7 +573,8 @@ def _manage_open_positions(prices: dict) -> dict:
 
     positions = _get_open_paper_positions()
     if not positions:
-        return {"evaluated": 0, "closed": 0, "held": 0}
+        return {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0,
+                "refused": 0, "no_basis": 0, "mark_unavailable": 0}
 
     threat_ctx, news_ctx = _get_context()
 
@@ -570,7 +584,33 @@ def _manage_open_positions(prices: dict) -> dict:
         positions run through a small pool: the serial version made ~40
         back-to-back LLM calls at ~6s each (visible as 'one prompt at a
         time' in LM Studio) while the model has 4 idle slots."""
-        r = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+        r = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0,
+             "refused": 0, "no_basis": 0, "mark_unavailable": 0}
+
+        def _exit(reason: str, source: str) -> bool:
+            """Ask the dispatcher and REPORT WHAT HAPPENED.
+
+            A close is only a close if it settled. A canonical exit can
+            legitimately refuse — a stale book, an unconfirmed trigger,
+            an unavailable carry — and counting that as closed would put
+            a phantom trade in every downstream total while the position
+            is still open and still at risk.
+            """
+            res = request_position_exit(
+                pos["id"], caller_price=current_price,
+                caller_reason=reason, caller_source=source)
+            if res.get("ok"):
+                r["closed"] += 1
+                return True
+            r["refused"] += 1
+            r.setdefault("refusals", []).append(
+                {"symbol": sym, "source": source,
+                 "error": res.get("error"), "detail": res.get("detail")})
+            logger.warning("[PaperTrading] %s %s exit NOT settled: %s — "
+                           "position remains open", sym, source,
+                           res.get("error"))
+            return False
+
         sym = pos["symbol"]
         current_price = _get_current_price(sym, prices)
         if not current_price or current_price <= 0:
@@ -600,12 +640,45 @@ def _manage_open_positions(prices: dict) -> dict:
             r["invalid_direction"] += 1
             return r
         side = -1 if parsed == SHORT else 1
-        plpc = ((current_price - entry) / entry) * 100 * side
-        # qty ALREADY carries the leveraged exposure (qty = margin*leverage/entry),
-        # so multiplying by leverage again squared it — a 10x position reported
-        # 100x the real P&L. Harmless when everything was 1-2x; badly wrong now
-        # that conviction sizing runs to 20x.
-        pl_dollar = (current_price - entry) * pos["qty"] * side
+
+        # ── THE UNIT BASIS IS NOT OPTIONAL ───────────────────────────────
+        # qty ALREADY carries the leveraged exposure (qty = margin*leverage
+        # /entry), so multiplying by leverage again squared it — a 10x
+        # position reported 100x the real P&L.
+        #
+        # And qty carries a UNIT. 26 PBTC CONTRACTS at a 0.01 multiplier are
+        # 0.26 BTC of exposure, so a $100 move is $26 and not $2,600. This
+        # number is read by the catastrophic backstop, the dynamic risk
+        # distance and the profit lock, so getting it wrong does not merely
+        # misreport a position — it closes one that was never in trouble.
+        from lib import paper_mark_economics as PME
+        basis = PME.basis_for_position(pos["id"])
+        if basis is None or not basis.usable:
+            # A hybrid or unreadable basis gets NO management decision.
+            logger.warning("[PaperTrading] %s: no usable unit basis "
+                           "(%s) — leaving it to the exit dispatcher", sym,
+                           getattr(basis, "route", None))
+            r["no_basis"] += 1
+            return r
+
+        # For a canonical position the economics come from ITS OWN book;
+        # a cross-market print is not the price this contract trades at.
+        # When that book cannot be trusted we abstain rather than manage
+        # from a substituted product.
+        if basis.route == PME.CANONICAL:
+            mark = PME.canonical_market_mark(pos["id"])
+            if not mark.ok:
+                logger.info("[PaperTrading] %s: exact book unusable (%s) — "
+                            "no management decision this cycle", sym,
+                            mark.reason)
+                r["mark_unavailable"] += 1
+                return r
+            current_price = float(mark.mid)
+
+        plpc = PME.underlying_move_pct(basis, current_price)
+        pl_dollar = PME.gross_at_mark(basis, current_price)
+        account_pct = PME.return_pct_on_margin(basis, pl_dollar)
+        pos["_basis"] = basis
         r["evaluated"] += 1
         ta_data = _fetch_ta(sym)
 
@@ -613,11 +686,7 @@ def _manage_open_positions(prices: dict) -> dict:
         if plan.get("ok") and plan.get("action") == "EXIT":
             logger.warning(f"[PaperTrading] Risk EXIT {sym}: {plan.get('reason')} | P&L=${pl_dollar:.2f}")
             log_decision("paper", "EXIT", plan.get("reason", "Max paper loss breached"), symbol=sym, pnl_pct=plpc, price=current_price)
-            request_position_exit(
-                pos["id"], caller_price=current_price,
-                caller_reason=plan.get("reason", "risk_guard"),
-                caller_source="RISK_GUARD")
-            r["closed"] += 1
+            _exit(plan.get("reason", "risk_guard"), "RISK_GUARD")
             return r
         if plan.get("ok") and plan.get("action") == "ADJUST":
             new_stop = float(plan["stop_loss"])
@@ -657,11 +726,7 @@ def _manage_open_positions(prices: dict) -> dict:
         if tier and tier["action"] == "close" and not tier_is_loss_cut:
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
-            request_position_exit(
-                pos["id"], caller_price=current_price,
-                caller_reason=tier["label"],
-                caller_source="TIER_EXIT")
-            r["closed"] += 1
+            _exit(tier["label"], "TIER_EXIT")
             return r
 
         if _maybe_scale_out_paper(pos, current_price):
@@ -693,7 +758,10 @@ def _manage_open_positions(prices: dict) -> dict:
             f"  Open for:        {_fmt_duration(hs['age_min']) if hs['age_min'] is not None else 'unknown'}"
             f"  ({hs['state']})\n"
         )
-        _margin = float(pos.get("margin_used") or 0) or (abs(float(pos.get("qty") or 0)) * entry / max(1.0, float(pos.get("leverage") or 1)))
+        _mult = float(getattr(pos.get("_basis"), "multiplier", None) or 1.0)
+        _margin = float(pos.get("margin_used") or 0) or (
+            abs(float(pos.get("qty") or 0)) * entry * _mult
+            / max(1.0, float(pos.get("leverage") or 1)))
         _hard = catastrophic_loss_usd(_margin)
         _room = _hard - abs(min(0.0, pl_dollar))
         # What is riding on this call, stated plainly. The model is now the
@@ -717,11 +785,25 @@ def _manage_open_positions(prices: dict) -> dict:
             "No deterministic rule is pending; judge the setup on its merits."
         )
 
+        # C8 — a price move and a return on capital are different
+        # numbers with different denominators. The prompt says which is
+        # which, and states the unit basis the dollars were computed on, so
+        # nothing downstream can read one as the other.
+        _b = pos.get("_basis")
+        account_ctx = (f"  ({account_pct:+.2f}% of ${_b.margin:,.2f} margin)"
+                       if account_pct is not None else "")
+        _unit = getattr(_b, "quantity_unit", None) or "units"
+        _m = float(getattr(_b, "multiplier", None) or 1.0)
+        exposure_ctx = (f"{_b.qty:g} {_unit} x {_m:g} = {_b.qty * _m:g} "
+                        f"underlying per point")
+
         prompt = f"""You are managing an open PAPER trade position. Evaluate and decide what to do RIGHT NOW.
 
 POSITION: {sym} ({'Crypto 24/7' if is_c else 'Equity'})
   Direction:      {pos['direction']}
-  P&L:            {plpc:+.2f}%  (${pl_dollar:+.2f})
+  Price move:     {plpc:+.2f}%   (the UNDERLYING move, not a return on capital)
+  Account P&L:    ${pl_dollar:+.2f}{account_ctx}
+  Exposure:       {exposure_ctx}
   Entry:          ${entry:.4f}
   Current Price:  ${current_price:.4f}
   Stop Loss:      ${pos['stop_loss']:.4f}
@@ -791,21 +873,13 @@ Respond ONLY with valid JSON (no markdown):
         if tier_is_loss_cut and not llm_ok:
             logger.info(f"[PaperTrading] 🔒 Tier loss cut (LLM unavailable): {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
-            request_position_exit(
-                pos["id"], caller_price=current_price,
-                caller_reason=tier["label"],
-                caller_source="TIER_EXIT")
-            r["closed"] += 1
+            _exit(tier["label"], "TIER_EXIT")
             return r
 
         if action == "EXIT":
             logger.info(f"[PaperTrading] 🤖 LLM EXIT {sym} {plpc:+.2f}% | {reasoning}")
             log_decision("paper", "EXIT", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
-            request_position_exit(
-                pos["id"], caller_price=current_price,
-                caller_reason=f"AI EXIT: {reasoning[:80]}",
-                caller_source="AI_EXIT")
-            r["closed"] += 1
+            _exit(f"AI EXIT: {reasoning[:80]}", "AI_EXIT")
         elif action == "TIGHTEN_STOP" and new_stop_pct:
             try:
                 # Direction-aware. A short's stop sits ABOVE the price, so
@@ -845,11 +919,19 @@ Respond ONLY with valid JSON (no markdown):
 
     from concurrent.futures import ThreadPoolExecutor
     workers = max(1, min(4, int(os.getenv("LLM_MAX_PARALLEL", "4"))))
-    totals = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+    # REFUSALS AND ABSTENTIONS ARE REPORTED, NOT DROPPED. A cycle that
+    # evaluated ten positions, closed none and refused three is a different
+    # fact from a quiet cycle, and only one of them needs an operator.
+    totals = {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0,
+              "refused": 0, "no_basis": 0, "mark_unavailable": 0}
+    refusals: list[dict] = []
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="papermgmt") as pool:
         for res in pool.map(_manage_one, positions):
             for k in totals:
                 totals[k] += res.get(k, 0)
+            refusals.extend(res.get("refusals") or [])
+    if refusals:
+        totals["refusals"] = refusals
     return totals
 
 
@@ -1261,7 +1343,8 @@ def run():
     mgmt = (
         _manage_open_positions(prices)
         if auto_trade_enabled
-        else {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+        else {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0,
+              "refused": 0, "no_basis": 0, "mark_unavailable": 0}
     )
     logger.info(
         f"[PaperTrading] Position mgmt: evaluated={mgmt['evaluated']} | "

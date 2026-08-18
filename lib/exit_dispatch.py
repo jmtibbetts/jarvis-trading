@@ -49,12 +49,37 @@ UNKNOWN_EXIT_REASON = "UNKNOWN_EXIT_REASON"
 POSITION_NOT_FOUND = "POSITION_NOT_FOUND"
 POSITION_NOT_OPEN = "POSITION_NOT_OPEN"
 
-# ── Caller reason -> canonical semantics (§6). ONE mapping, and an unknown
-# string REFUSES rather than being guessed into the canonical vocabulary.
-# The caller's original spelling survives separately in provenance, so
-# VOLUNTARY_EXIT/"telegram_manual" stays distinguishable from
-# VOLUNTARY_EXIT/"ai_exit".
-_REASON_MAP = {
+# ── Canonical semantics: the SOURCE decides, the reason is provenance ────
+#
+# Real callers do not pass tokens. The tier caller passes its own label —
+# ">=10% — take profit", "<=-4% — cut loss" — and the risk guard passes a
+# whole sentence: "catastrophic backstop — lost $350.00 of $1,000.00 margin
+# (35% cap)". Teaching a table to parse human prose would be a losing race
+# with every future edit to a log message.
+#
+# So the STRUCTURED caller_source carries the canonical meaning, and the
+# reason text is kept verbatim as provenance. That preserves
+# VOLUNTARY_EXIT/">=10% — take profit" as a distinct record from
+# VOLUNTARY_EXIT/"AI EXIT: ..." without pretending either sentence is
+# settlement vocabulary.
+
+# Sources whose semantics are fixed regardless of what they say.
+_SOURCE_REASON = {
+    "SOFT_RESET": ADMINISTRATIVE_RESET,
+    "PAPER_TP1": "SCALE_OUT",
+    "RISK_GUARD": VOLUNTARY_EXIT,
+    "TIER_EXIT": VOLUNTARY_EXIT,
+    "AI_EXIT": VOLUNTARY_EXIT,
+    "TELEGRAM_MANUAL": VOLUNTARY_EXIT,
+    "TELEGRAM_TAKE_PROFIT": VOLUNTARY_EXIT,
+    "API_MANUAL": VOLUNTARY_EXIT,
+    "API_FLATTEN": VOLUNTARY_EXIT,
+}
+
+# The one source whose reason MUST be read: it names WHICH price threshold
+# fired, and that choice drives the exact-book confirmation downstream. It
+# does not get a blanket VOLUNTARY_EXIT.
+_TRIGGER_REASONS = {
     "stop_loss": STOP_EXIT,
     "stop": STOP_EXIT,
     "hard_stop": STOP_EXIT,
@@ -63,12 +88,19 @@ _REASON_MAP = {
     "margin_call": MARGIN_CALL,
     "liquidation": FORCED_LIQUIDATION,
     "forced_liquidation": FORCED_LIQUIDATION,
+}
+_REASON_SOURCES = {"MARK_TO_MARKET"}
+
+KNOWN_CALLER_SOURCES = frozenset(_SOURCE_REASON) | _REASON_SOURCES
+
+# Bare reason tokens, for direct/test callers that state no source. Kept
+# deliberately small: production goes through the source table above.
+_REASON_MAP = {
+    **_TRIGGER_REASONS,
     "scale_out": "SCALE_OUT",
     "scale_out_tp1": "SCALE_OUT",
     "tp1": "SCALE_OUT",
     "reset": ADMINISTRATIVE_RESET,
-    # Discretionary instructions. All VOLUNTARY_EXIT semantically; the
-    # caller_source keeps them apart in the record.
     "manual": VOLUNTARY_EXIT,
     "manual flatten": VOLUNTARY_EXIT,
     "flatten": VOLUNTARY_EXIT,
@@ -82,28 +114,48 @@ _REASON_MAP = {
 }
 
 
-def canonical_reason_for(caller_reason: str | None) -> str | None:
-    """The canonical semantics of a caller's string, or None if unknown.
+def canonical_reason_for(caller_reason: str | None,
+                         caller_source: str | None = None) -> str | None:
+    """Canonical semantics for one exit request, or None if unmappable.
 
-    Prefixed strings are matched on their leading token — the AI exit
-    caller passes "AI EXIT: <reasoning>" and the tier callers pass their
-    label — but only against an EXPLICIT table. Nothing is inferred from a
-    substring that happens to appear inside free text.
+    An unknown source with an unmappable reason REFUSES. The fix for prose
+    was a structured source, not a looser parser — "every unknown string is
+    VOLUNTARY_EXIT" would launder anything into the settlement vocabulary.
     """
-    if not caller_reason:
-        return VOLUNTARY_EXIT           # an explicit close with no stated why
-    raw = str(caller_reason).strip()
+    source = str(caller_source or "").strip().upper()
+    raw = str(caller_reason or "").strip()
     low = raw.lower()
-    if low in _REASON_MAP:
-        return _REASON_MAP[low]
-    # Callers that prefix a label onto free text ("AI EXIT: ...", tier
-    # labels). Split on the first colon and try the label alone.
-    head = low.split(":", 1)[0].strip()
-    if head in _REASON_MAP:
-        return _REASON_MAP[head]
-    if head.replace(" ", "_") in _REASON_MAP:
-        return _REASON_MAP[head.replace(" ", "_")]
-    return None
+
+    if source in _REASON_SOURCES:
+        # A price-threshold caller must say WHICH threshold.
+        return _TRIGGER_REASONS.get(low)
+    if source in _SOURCE_REASON:
+        return _SOURCE_REASON[source]
+    if source:
+        return None          # a source we do not know is not a free pass
+
+    if not raw:
+        return VOLUNTARY_EXIT           # an explicit close with no stated why
+    return _REASON_MAP.get(low)
+
+
+def _canonical_ledger_available() -> bool:
+    """Does this database HAVE a canonical settlement ledger at all?
+
+    The operator book has not been migrated: `paper_position_settlements`
+    does not exist there, and a dispatcher that queries it unconditionally
+    cannot exit a legacy trade on the very schema it has to support today.
+
+    Schema introspection, deliberately — not a broad `except
+    OperationalError`. "The table is absent" and "the database is broken"
+    are different facts, and treating a failed connection as proof that a
+    position is legacy would settle a canonical fill through the old
+    economy. This raises on a real failure; only a genuinely missing table
+    returns False. It never creates anything.
+    """
+    from sqlalchemy import inspect
+    from app.database import engine
+    return inspect(engine).has_table("paper_position_settlements")
 
 
 def classify_position(position, header) -> str:
@@ -124,12 +176,21 @@ def classify_position(position, header) -> str:
     filled = has_canonical_fill(position)
     canonical = is_canonical(position)
 
+    # THE WIDE FILL CLAIM DECIDES FIRST, and it is answered from the
+    # position's own provenance — no table required. That is what makes the
+    # still-unmigrated operator book exitable: a position with no venue-book
+    # fill is legacy whether or not this database has ever heard of a
+    # settlement ledger.
+    if not filled:
+        # ...unless a ledger names it anyway, which is a corrupted pairing
+        # rather than an old trade.
+        return LEGACY if header is None else HYBRID
     if header is None:
-        # No ledger. Only a position with no canonical fill at all is
-        # legitimately legacy; a canonical fill without a header is the
-        # half-migrated state that must never reach either economy.
-        return LEGACY if not filled else HYBRID
-    if not filled or not canonical:
+        # A venue-book fill with no ledger — because the row is missing, or
+        # because the schema cannot hold one — is the half-migrated state
+        # that neither economy may settle.
+        return HYBRID
+    if not canonical:
         return HYBRID
     if (header.settlement_version != SETTLEMENT_VERSION
             or header.cost_model != COST_MODEL_CANONICAL
@@ -142,18 +203,26 @@ def classify_position(position, header) -> str:
 
 
 def _load(position_id: str):
-    """One short read: the position row and its settlement header."""
+    """One short read: the position row, and its header IF one can exist.
+
+    THE POSITION COMES FIRST, AND THE LEDGER IS ONLY CONSULTED WHEN THERE
+    IS A LEDGER. On the unmigrated operator schema the settlement table is
+    absent, and asking for it would break the legacy exit path on the only
+    database that currently matters.
+    """
     from app.database import PaperPosition, PaperPositionSettlement, get_db
     with get_db() as db:
         pos = db.query(PaperPosition).filter(
             PaperPosition.id == position_id).first()
+        if pos is None:
+            return None, None, True
+        ledger = _canonical_ledger_available()
         header = None
-        if pos is not None:
+        if ledger:
             header = db.query(PaperPositionSettlement).filter(
                 PaperPositionSettlement.position_id == position_id).first()
-        if pos is not None:
-            db.expunge_all()
-    return pos, header
+        db.expunge_all()
+    return pos, header, ledger
 
 
 def _hybrid_refusal(position_id: str) -> dict:
@@ -240,7 +309,7 @@ def request_position_exit(position_id: str, *,
                           trigger_price: float | None = None,
                           max_age_s: float | None = None) -> dict:
     """Close a paper position in FULL, by whichever economy owns it."""
-    pos, header = _load(position_id)
+    pos, header, _ledger = _load(position_id)
     if pos is None:
         return {"ok": False, "error": POSITION_NOT_FOUND,
                 "position_id": position_id}
@@ -262,7 +331,8 @@ def request_position_exit(position_id: str, *,
         raw.setdefault("position_id", position_id)
         return raw
 
-    canonical_reason = canonical_reason_for(caller_reason)
+    canonical_reason = canonical_reason_for(caller_reason,
+                                          caller_source=caller_source)
     if canonical_reason is None:
         return {"ok": False, "route": CANONICAL, "error": UNKNOWN_EXIT_REASON,
                 "position_id": position_id,
@@ -291,7 +361,7 @@ def request_position_partial_exit(position_id: str, *,
                                   caller_source: str | None = None,
                                   max_age_s: float | None = None) -> dict:
     """Reduce a paper position, by whichever economy owns it."""
-    pos, header = _load(position_id)
+    pos, header, _ledger = _load(position_id)
     if pos is None:
         return {"ok": False, "error": POSITION_NOT_FOUND,
                 "position_id": position_id}
@@ -313,7 +383,8 @@ def request_position_partial_exit(position_id: str, *,
         raw.setdefault("position_id", position_id)
         return raw
 
-    canonical_reason = canonical_reason_for(caller_reason)
+    canonical_reason = canonical_reason_for(caller_reason,
+                                          caller_source=caller_source)
     if canonical_reason is None:
         return {"ok": False, "route": CANONICAL, "error": UNKNOWN_EXIT_REASON,
                 "position_id": position_id,

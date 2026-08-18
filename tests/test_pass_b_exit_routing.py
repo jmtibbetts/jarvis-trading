@@ -373,7 +373,7 @@ class Tp1CannotScaleOutTwiceTests(_RoutingHarness):
         _seed_book(bid=65_500.0, ask=65_600.0)
         res = ED.request_position_partial_exit(
             pos.id, fraction=0.5, caller_price=65_500.0,
-            caller_reason="scale_out", caller_source="TEST_DIRECT")
+            caller_reason="scale_out_tp1", caller_source="PAPER_TP1")
         self.assertTrue(res.get("ok"), res)
         _, header2, legs, _ = self._state(pos.id)
         self.assertEqual(
@@ -646,8 +646,18 @@ class ReasonMappingTests(unittest.TestCase):
             "telegram_manual": VOLUNTARY_EXIT,
             "api_manual": VOLUNTARY_EXIT,
             "risk_guard": VOLUNTARY_EXIT,
-            "AI EXIT: the thesis broke down": VOLUNTARY_EXIT,
         }
+        # CORRECTED by the #37 gate: bare prose no longer maps. "AI EXIT:
+        # the thesis broke down" used to be matched by a prefix rule, and a
+        # prefix rule is exactly the wrong shape — the caller's SOURCE is
+        # what carries canonical meaning, its sentence is provenance. The
+        # real caller passes AI_EXIT, so that is what is asserted here.
+        self.assertIsNone(
+            ED.canonical_reason_for("AI EXIT: the thesis broke down"))
+        self.assertEqual(
+            ED.canonical_reason_for("AI EXIT: the thesis broke down",
+                                    caller_source="AI_EXIT"),
+            VOLUNTARY_EXIT)
         for caller, expected in cases.items():
             self.assertEqual(ED.canonical_reason_for(caller), expected,
                              f"{caller!r} mapped wrongly")

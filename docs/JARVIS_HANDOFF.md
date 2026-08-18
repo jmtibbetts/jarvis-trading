@@ -1850,3 +1850,119 @@ activated. NOT live money.
                     tables truthfully ABSENT)
     scheduler       OFF
     real actions    0
+
+
+## 27. STOP POINT — PASS B CORRECTION GATE COMPLETE
+
+    PASS_B_IMPLEMENTATION_COMPLETE
+    READY_FOR_CANONICAL_EPOCH_CUTOVER_DRY_RUN
+
+Implementation SHA `81a6546`. CI at that exact SHA: **GREEN** (`tests`,
+completed, success).
+
+Section 26 stamped the routing architecture complete. It was structurally
+complete and behaviourally incomplete in four ways, and this section closes
+them. Full detail is in `docs/PASS_B_EXIT_AUDIT.md`; the correction that
+matters most is repeated here because I got it wrong the first time.
+
+### A correction to section 26
+
+Section 26 recorded the unit-blind mark arithmetic as harmless because it
+could no longer settle — **display-only**. That was wrong.
+
+`jobs/paper_trading` feeds that same number to the catastrophic backstop,
+the dynamic risk distance, the profit lock, and the position-manager prompt.
+The exact failure mode:
+
+    26 PBTC CONTRACTS, multiplier 0.01   (= 0.26 BTC of exposure)
+
+    pl_dollar = (current_price - entry) * qty * side
+
+treated **26 CONTRACTS as 26 BTC** — dollar P&L and every risk decision
+derived from it inflated by exactly **100x**. A $100 adverse move is $26 of
+real loss; it read as $2,600. Against ~$1,214 of margin and a 35%
+catastrophic cap (~$425), an ordinary wobble tripped the backstop and closed
+a position that was never in trouble.
+
+The exit would then execute *perfectly*: exact book, exact fill, exact fee,
+correctly settled, correctly learned from. **An exact fill on a wrong
+decision looks, in every ledger, like a good trade.** Nothing reconciles to
+an error, because the error happened before settlement was consulted.
+
+The same factor ran through dollars→price conversion, where it inverted:
+`hard_loss / qty` placed the widest permitted stop 100x CLOSER to entry than
+risk authorized — the cause of the stops pinned to a fraction of a percent.
+
+### What landed
+
+**A — pre-migration schema.** `exit_dispatch` checks for
+`paper_position_settlements` by schema introspection before querying it, so
+a LEGACY exit works on the operator's unmigrated database. Introspection
+deliberately, not a broad `except OperationalError`: "the table is absent"
+and "the database is broken" are different facts, and reading a failed
+connection as proof of legacy would settle a canonical fill through the old
+economy.
+
+**B — reason vs source.** The structured `caller_source` carries canonical
+meaning; the human sentence rides beside it as provenance, verbatim. The
+`"AI EXIT:"` prefix rule is gone — canonical vocabulary must not depend on
+how a sentence begins. Unknown source fails closed. `MARK_TO_MARKET` must
+still name which threshold fired. Every management exit goes through one
+checked helper, and a cycle now reports `refused`, `no_basis` and
+`mark_unavailable` beside `closed`, with reasons attached.
+
+**C — `lib/paper_mark_economics`,** the single unit authority. The basis
+comes from the frozen B1 header, never from `resolve(symbol)` (which answers
+1.0 COIN for BTC/USD and would reintroduce the error one layer down).
+CANONICAL is contract-native; LEGACY keeps legacy arithmetic exactly;
+HYBRID gets no economics at all. Canonical marks come from the frozen
+product's own book and **abstain** when it is unusable — no spot fallback.
+Underlying move and return-on-margin are kept apart by name.
+
+**D — the hard reset refuses a canonical book.**
+`CANONICAL_LEDGER_REQUIRES_EPOCH_RESET` on any of four witnesses (header,
+leg, outcome, canonical fill), because they outlive one another. The probe
+inspects only; it never creates a table and never calls `init_db`.
+`POST /paper/reset?hard=true` returns **409** instead of claiming a deletion
+it did not perform.
+
+### Verification (canonical WSL tree `~/jarvis-trading`)
+
+- full pytest — **TRUE exit 0**, 3846 passed, 16 skipped, 204 subtests
+- offline pytest under `unshare -rn` — **TRUE exit 0**, same counts
+- operator DB fingerprint before/after — **IDENTICAL**
+  (667 positions / 664 trades / 21,194 outcomes / cash 63,550.83716433377;
+  `paper_position_settlements`, `paper_settlement_legs`,
+  `paper_realized_outcomes` all ABSENT)
+- collector RUNNING, campaign `FORWARD_EVIDENCE_20260818T075321Z`, epoch 1,
+  runtime `EVIDENCE_ONLY`
+- scheduler OFF; real orders 0; transfers 0
+
+Windows tree shows 12 failures, all pre-existing and platform-only: nine are
+`UnicodeDecodeError` from source-reading tests that open files without an
+explicit encoding under cp1252 — verified present at HEAD as well — plus
+three shell-guard tests. None appear in the canonical tree.
+
+### An incident worth recording
+
+Mid-task I ran `git checkout -- jobs/paper_trading.py` to undo a temporary
+one-line poison I had introduced to test whether an assertion discriminated.
+That reverted the file to HEAD and **discarded every uncommitted change to
+it**, not just the poison. The work was reconstructed by replaying the exact
+patches recorded in the session transcript, and confirmed by the 60-test
+correction suite going green again — but the lesson stands: to undo a
+deliberate temporary edit, restore from a copy taken beforehand. `git
+checkout --` is not an undo, it is a discard, and it does not know which of
+your changes you meant.
+
+That poison check earned its keep, though: it showed two of the new
+stop-distance tests passed *with the multiplier removed*. They were
+vacuous. Both were recast as differential tests — same position priced under
+two bases differing only in multiplier — and now fail when it is poisoned.
+
+### What is NOT done
+
+The canonical epoch cutover has **not** started, per instruction. What
+exists is the readiness stamp for a **dry run**. The hard reset is
+explicitly not the cutover mechanism; a cutover must close the ledger it
+actually has.

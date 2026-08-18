@@ -1055,10 +1055,16 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
                     _get_pending_signals(db))
     if not auto_trade_enabled and not _evidence_only:
         from lib import decision_funnel as _DF
+        from lib import routing_identity as _RI
         for _s in sig_list:
+            # This branch runs BEFORE the per-candidate loop, so it had no
+            # identity at all. A policy refusal still concerns a product.
+            _ident = _RI.resolve_execution_identity(
+                _s.get("asset_symbol"), _s.get("routing_asset_class_hint"),
+                signal=_s)
             _DF.observe_terminal_refusal(
                 _s, decision="ABSTAIN", reason=_DF.AUTO_TRADE_DISABLED,
-                decision_price=None)
+                decision_price=None, routing_identity=_ident)
         sig_list = []
 
     if not auto_trade_enabled:
@@ -1176,12 +1182,14 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
                 decision_price=price, edge=edge, edge_gate_role=edge_role,
                 source=DO_CONST.FORWARD_EVIDENCE_ONLY,
                 execution_state=DO_CONST.EXEC_SUPPRESSED,
+                routing_identity=identity,
                 gates={"ai_entry_review": "PASS"})
             executed += 1
             continue
 
         result = open_canonical_position(sig, decision_price=price,
-                                         edge=edge, edge_gate_role=edge_role)
+                                         edge=edge, edge_gate_role=edge_role,
+                                         routing_identity=identity)
         if result.get("ok"):
             executed += 1
         elif result.get("venue_failure"):

@@ -81,7 +81,8 @@ def _now() -> str:
 
 def open_canonical_position(signal: dict, *, decision_price: float | None = None,
                             max_age_s: float | None = None,
-                            edge=None, edge_gate_role=None) -> dict:
+                            edge=None, edge_gate_role=None,
+                            routing_identity=None) -> dict:
     """PREPARE, EXECUTE the authorized quantity, then SETTLE the actual fill.
 
     THE ORDER OF THESE STEPS IS THE WHOLE POINT. This used to push a NOMINAL
@@ -135,6 +136,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                            position_id=position_id, decision_at=decision_at,
                            execution_id=execution_id,
                            edge=edge, edge_gate_role=edge_gate_role,
+                           routing_identity=routing_identity,
                            execution_state=execution_state)
             return DO.record(row)
         except Exception as e:                       # never take a trade down

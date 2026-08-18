@@ -492,7 +492,12 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
             ri.assert_agrees_with(
                 product=getattr(ready, "product", None),
                 venue=getattr(ready, "venue", None),
-                instrument_id=getattr(ready, "instrument_id", None),
+                # ExecutionReadiness.__slots__ names this `instrument`, not
+                # `instrument_id`. Reading the wrong attribute made getattr
+                # return None on every call, so the instrument half of this
+                # conflict check was DEAD CODE — a guard that silently never
+                # fired, which is worse than no guard at all.
+                instrument_id=getattr(ready, "instrument", None),
                 where="execution_readiness")
         if ri.asset_class:
             row["asset_class"] = ri.asset_class

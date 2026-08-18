@@ -80,10 +80,39 @@ def pytest_configure(config):
 # writes down why. Fixing the test is always the better answer than listing
 # it here.
 
+# THE CATEGORY TAXONOMY. A skip states WHICH KIND of coverage is absent,
+# and the kinds are not interchangeable:
+#
+#   HERMETIC                  never skips — it is the release gate
+#   REAL_PROVIDER_READ_ONLY   reads a live PUBLIC provider surface; no
+#                             credentials, no order path, no mutation
+#   OPTIONAL_HARDWARE         needs hardware a runner may not have
+#   EXTERNAL_INTEGRATION      a broader external dependency
+#   PAPER_BROKER_INTEGRATION  reaches a broker's paper environment
+#   LIVE_EXECUTION            real money — must never run in CI at all
+#
+# Filing a read-only provider check under EXTERNAL_INTEGRATION merely to
+# satisfy an existing regex would erase the distinction that makes those
+# tests safe to run on demand, so each kind gets its own line and its own
+# budget.
 ALLOWED_SKIPS = (
     # (regex, category, budget)
     (r"EXTERNAL_INTEGRATION", "EXTERNAL_INTEGRATION", 4),
     (r"hardware-only: no NPU", "OPTIONAL_HARDWARE", 1),
+    # READ-ONLY PUBLIC PROVIDER SURFACES, opted into with
+    # JARVIS_REAL_PROVIDER_TESTS=1. They prove the DETERMINISTIC TWINS still
+    # resemble reality; the twins are hermetic and gate the release, so
+    # skipping these loses no assertion about our own logic.
+    #
+    # The budget is EXACT rather than generous. Each of these has a hermetic
+    # counterpart, so a rising count means either a new provider was
+    # deliberately characterised, or a hermetic test quietly grew a network
+    # dependency — which is precisely what this hook exists to catch.
+    #
+    #   6  tests/test_bitnomial_real_provider.py
+    #      (public product specs + public book WebSocket;
+    #       twin: tests/test_bitnomial_market_data.py)
+    (r"REAL_PROVIDER_READ_ONLY", "REAL_PROVIDER_READ_ONLY", 6),
 )
 
 # Reasons that are never acceptable, with the fix named. These are the three
@@ -97,15 +126,18 @@ FORBIDDEN_SKIPS = (
 )
 
 
-def pytest_sessionfinish(session, exitstatus):
+def classify_skips(reports):
+    """(problems, counts_by_category) for a list of (where, reason) skips.
+
+    Extracted from the session hook so the POLICY can be tested directly.
+    A hook that only speaks at session end is checkable in exactly one way —
+    by running a whole suite and reading an exit code — and this project has
+    already lost a cycle to reading the summary line instead of that exit
+    code. The rule is now a pure function with tests of its own.
+    """
     import re as _re
 
-    reports = getattr(session.config, "_jarvis_skips", [])
-    if not reports:
-        return
-
-    problems = []
-    counts = {}
+    problems, counts = [], {}
     for where, reason in reports:
         for pattern, why in FORBIDDEN_SKIPS:
             if _re.search(pattern, reason, _re.I):
@@ -121,10 +153,28 @@ def pytest_sessionfinish(session, exitstatus):
                                 "reason; fix the test, or declare it in "
                                 "conftest.ALLOWED_SKIPS with a justification")
 
-    for pattern, category, budget in ALLOWED_SKIPS:
+    for _pattern, category, budget in ALLOWED_SKIPS:
         n = counts.get(category, 0)
         if n > budget:
             problems.append(f"{category}: {n} skips exceeds its budget of {budget}")
+    return problems, counts
+
+
+def pytest_sessionfinish(session, exitstatus):
+    reports = getattr(session.config, "_jarvis_skips", [])
+    if not reports:
+        return
+
+    problems, counts = classify_skips(reports)
+
+    # THE CATEGORY REPORT IS PRINTED EVEN WHEN EVERYTHING PASSES. "10
+    # skipped" says nothing about whether the right ten were skipped, and
+    # reading that line is how an undeclared skip got mistaken for a green
+    # run. The categories are what anyone should be looking at.
+    if counts:
+        print("\nSKIP CATEGORIES: " + ", ".join(
+            f"{c}={counts[c]}/{b}" for _p, c, b in ALLOWED_SKIPS
+            if counts.get(c)))
 
     if problems:
         print("\n" + "=" * 70)

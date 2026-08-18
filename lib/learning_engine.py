@@ -129,6 +129,25 @@ def _ensure_tables(conn):
     _safe_add_column(conn, "llm_lessons",        "applied_count",    "INTEGER DEFAULT 0")
     _safe_add_column(conn, "trade_outcomes",     "paper_mode",       "INTEGER DEFAULT 0")
     _safe_add_column(conn, "trade_outcomes",     "market_regime",    "TEXT")
+    # ── B2C canonical projection identity (NULL on legacy rows, never
+    # backfilled). app/database._migrate_columns is the primary authority;
+    # kept in lockstep here so a DB bootstrapped only through the learning
+    # engine agrees.
+    for col, typ in (("canonical_outcome_id", "TEXT"),
+                     ("position_id", "TEXT"), ("product", "TEXT"),
+                     ("instrument_id", "TEXT"), ("quantity_unit", "TEXT"),
+                     ("multiplier", "REAL"), ("return_pct_basis", "TEXT"),
+                     ("outcome_version", "TEXT"), ("execution_model", "TEXT"),
+                     ("cost_model_version", "TEXT"),
+                     ("settlement_version", "TEXT"),
+                     ("gross_pnl_usd", "REAL"), ("explicit_fees_usd", "REAL"),
+                     ("projected_at", "TEXT")):
+        _safe_add_column(conn, "trade_outcomes", col, typ)
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_outcomes_canonical
+        ON trade_outcomes (canonical_outcome_id)
+        WHERE canonical_outcome_id IS NOT NULL
+    """))
     _safe_add_column(conn, "pattern_memory",     "asset_class",      "TEXT")
     _safe_add_column(conn, "regime_performance", "avg_confidence",   "REAL DEFAULT 0.0")
 
@@ -893,62 +912,72 @@ def record_trade_outcome(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _refresh_signal_accuracy(symbol: str, asset_class: str, timeframe: str):
+    """Legacy wrapper — opens its own transaction and swallows errors,
+    exactly as every existing caller expects."""
     from app.database import engine
-    from sqlalchemy import text
     try:
         with engine.begin() as conn:
-            rows = conn.execute(text("""
-                SELECT outcome, pnl_pct, hold_duration_m FROM trade_outcomes
-                WHERE symbol=:sym
-            """), {"sym": symbol}).fetchall()
-
-            if not rows:
-                return
-
-            total  = len(rows)
-            wins   = sum(1 for r in rows if r[0] == "WIN")
-            losses = sum(1 for r in rows if r[0] == "LOSS")
-            pnls   = [r[1] for r in rows if r[1] is not None]
-            holds  = [r[2] for r in rows if r[2] is not None]
-
-            stats = {
-                "total_trades": total, "wins": wins, "losses": losses,
-                "win_rate":    round(wins / total, 4) if total else 0.0,
-                "avg_pnl_pct": round(sum(pnls) / len(pnls), 4) if pnls else 0.0,
-                "avg_hold_min":round(sum(holds) / len(holds), 1) if holds else 0.0,
-                "best_pnl_pct":round(max(pnls), 4) if pnls else 0.0,
-                "worst_pnl_pct":round(min(pnls), 4) if pnls else 0.0,
-                "last_updated": _now_iso(),
-            }
-
-            existing = conn.execute(text(
-                "SELECT id FROM signal_accuracy WHERE symbol=:sym"
-            ), {"sym": symbol}).fetchone()
-
-            if existing:
-                conn.execute(text("""
-                    UPDATE signal_accuracy SET
-                        total_trades=:total_trades, wins=:wins, losses=:losses,
-                        win_rate=:win_rate, avg_pnl_pct=:avg_pnl_pct,
-                        avg_hold_min=:avg_hold_min, best_pnl_pct=:best_pnl_pct,
-                        worst_pnl_pct=:worst_pnl_pct, last_updated=:last_updated
-                    WHERE symbol=:sym
-                """), {**stats, "sym": symbol})
-            else:
-                conn.execute(text("""
-                    INSERT INTO signal_accuracy
-                    (id, symbol, asset_class, timeframe, total_trades, wins, losses,
-                     win_rate, avg_pnl_pct, avg_hold_min, best_pnl_pct, worst_pnl_pct, last_updated)
-                    VALUES
-                    (:id, :sym, :asset_class, :tf, :total_trades, :wins, :losses,
-                     :win_rate, :avg_pnl_pct, :avg_hold_min, :best_pnl_pct, :worst_pnl_pct, :last_updated)
-                """), {**stats, "id": _new_id(), "sym": symbol,
-                       "asset_class": asset_class, "tf": timeframe})
-
-        logger.info(f"[Learning-T2] Updated accuracy {symbol}: {wins}/{total} wins")
+            _refresh_signal_accuracy_conn(symbol, asset_class, timeframe, conn)
     except Exception as e:
         logger.error(f"[Learning-T2] _refresh_signal_accuracy failed: {e}")
 
+
+def _refresh_signal_accuracy_conn(symbol: str, asset_class: str,
+                                  timeframe: str, conn):
+    """The body, on the CALLER's connection (B2C). Accuracy is DERIVED from
+    persisted trade_outcomes inside whatever transaction the caller owns, so
+    a rolled-back projection cannot leave a half-updated aggregate, and a
+    retry recomputes instead of double-incrementing."""
+    from sqlalchemy import text
+
+    rows = conn.execute(text("""
+        SELECT outcome, pnl_pct, hold_duration_m FROM trade_outcomes
+        WHERE symbol=:sym
+    """), {"sym": symbol}).fetchall()
+    if not rows:
+        return
+
+    total  = len(rows)
+    wins   = sum(1 for r in rows if r[0] == "WIN")
+    losses = sum(1 for r in rows if r[0] == "LOSS")
+    pnls   = [r[1] for r in rows if r[1] is not None]
+    holds  = [r[2] for r in rows if r[2] is not None]
+
+    stats = {
+        "total_trades": total, "wins": wins, "losses": losses,
+        "win_rate":    round(wins / total, 4) if total else 0.0,
+        "avg_pnl_pct": round(sum(pnls) / len(pnls), 4) if pnls else 0.0,
+        "avg_hold_min":round(sum(holds) / len(holds), 1) if holds else 0.0,
+        "best_pnl_pct":round(max(pnls), 4) if pnls else 0.0,
+        "worst_pnl_pct":round(min(pnls), 4) if pnls else 0.0,
+        "last_updated": _now_iso(),
+    }
+
+    existing = conn.execute(text(
+        "SELECT id FROM signal_accuracy WHERE symbol=:sym"
+    ), {"sym": symbol}).fetchone()
+
+    if existing:
+        conn.execute(text("""
+            UPDATE signal_accuracy SET
+                total_trades=:total_trades, wins=:wins, losses=:losses,
+                win_rate=:win_rate, avg_pnl_pct=:avg_pnl_pct,
+                avg_hold_min=:avg_hold_min, best_pnl_pct=:best_pnl_pct,
+                worst_pnl_pct=:worst_pnl_pct, last_updated=:last_updated
+            WHERE symbol=:sym
+        """), {**stats, "sym": symbol})
+    else:
+        conn.execute(text("""
+            INSERT INTO signal_accuracy
+            (id, symbol, asset_class, timeframe, total_trades, wins, losses,
+             win_rate, avg_pnl_pct, avg_hold_min, best_pnl_pct, worst_pnl_pct, last_updated)
+            VALUES
+            (:id, :sym, :asset_class, :tf, :total_trades, :wins, :losses,
+             :win_rate, :avg_pnl_pct, :avg_hold_min, :best_pnl_pct, :worst_pnl_pct, :last_updated)
+        """), {**stats, "id": _new_id(), "sym": symbol,
+               "asset_class": asset_class, "tf": timeframe})
+
+    logger.info(f"[Learning-T2] Updated accuracy {symbol}: {wins}/{total} wins")
 
 def get_accuracy_context(symbol: str, timeframe: str = None, lookback_days: int = 30) -> str:
     _lazy_ensure()

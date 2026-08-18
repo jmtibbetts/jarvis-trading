@@ -130,6 +130,13 @@ def read_exit_snapshot(position_id: str) -> CanonicalExitSnapshot | dict:
             return _refuse(NOT_CANONICAL_POSITION,
                            f"header models are not the current canonical "
                            f"set; a hybrid position gets no canonical exit")
+        # P0 (B2C): never prepare an order from a projection that disagrees
+        # with its ledger. Settlement re-validates independently — two
+        # boundaries, neither trusting the other.
+        from lib.settlement_ledger import validate_position_projection
+        drift = validate_position_projection(db, pos, header)
+        if drift:
+            return _refuse("CANONICAL_POSITION_PROJECTION_MISMATCH", drift)
         snap = CanonicalExitSnapshot(
             position_id=position_id,
             remaining_qty=float(pos.qty),

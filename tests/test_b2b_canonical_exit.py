@@ -354,7 +354,12 @@ class PartialExitTests(_B2BHarness):
         before = self._portfolio()
         res = CX.close_canonical_position(pos.id)
         self.assertFalse(res.get("ok"))
-        self.assertEqual(res["error"], CX.EXIT_INVALID_QUANTITY)
+        # P0 (B2C) catches this even earlier than the quantity check: a
+        # 2.4-contract projection disagrees with its own ledger before any
+        # order is prepared. Either named refusal preserves the invariant.
+        self.assertIn(res["error"],
+                      (CX.EXIT_INVALID_QUANTITY,
+                       "CANONICAL_POSITION_PROJECTION_MISMATCH"))
         self.assertEqual(self._portfolio(), before)
 
 

@@ -1065,3 +1065,119 @@ class FrozenContractReachesTheMarketReaderTests(_B2AHarness):
                                     signal={"product": PR.CRYPTO_PERP})
         self.assertTrue(r.ok, f"{r.reason}: {r.detail}")
         self.assertNotIn("requested_instrument_id", r.snapshot.provenance)
+
+
+class PositionProjectionMustAgreeWithLedgerTests(_B2AHarness):
+    """P0 (#35) — the mutable PaperPosition is a PROJECTION of the ledger.
+    A projection that disagrees with its ledger must not become settlement
+    authority for another exit."""
+
+    def _corrupt(self, position_id, **fields):
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            db.query(PaperPosition).filter(
+                PaperPosition.id == position_id).update(fields)
+            db.commit()
+
+    def _refused_drift(self, pos, header, expected_revision=0):
+        before = self._portfolio()
+        facts, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                       fill_price=64_700.0,
+                                       expected_revision=expected_revision,
+                                       exit_reason=CS.SCALE_OUT)
+        res = CS.settle_prepared_exit(facts)
+        self.assertFalse(res.get("ok"),
+                         f"a drifted projection settled: {res}")
+        self.assertEqual(res["error"],
+                         "CANONICAL_POSITION_PROJECTION_MISMATCH")
+        self.assertEqual(self._portfolio(), before)
+        _, h2, legs, _, _ = self._state(pos.id)
+        self.assertEqual(h2.settlement_revision, expected_revision)
+        return res
+
+    def test_rev0_qty_drift_refuses(self):
+        pos, header = self._enter()
+        self._corrupt(pos.id, qty=float(pos.qty) + 3.0)
+        self._refused_drift(pos, header)
+
+    def test_rev0_margin_drift_refuses(self):
+        pos, header = self._enter()
+        self._corrupt(pos.id, margin_used=float(pos.margin_used) * 0.5)
+        self._refused_drift(pos, header)
+
+    def test_post_partial_qty_drift_refuses(self):
+        pos, header = self._enter()
+        f1, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                    fill_price=64_650.0,
+                                    exit_reason=CS.SCALE_OUT)
+        self.assertTrue(CS.settle_prepared_exit(f1).get("ok"))
+        p1, h1, *_ = self._state(pos.id)[:2]
+        self._corrupt(pos.id, qty=float(p1.qty) + 1.0)
+        self._refused_drift(p1, h1, expected_revision=1)
+
+    def test_post_partial_margin_drift_refuses(self):
+        pos, header = self._enter()
+        f1, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                    fill_price=64_650.0,
+                                    exit_reason=CS.SCALE_OUT)
+        self.assertTrue(CS.settle_prepared_exit(f1).get("ok"))
+        p1, h1, *_ = self._state(pos.id)[:2]
+        self._corrupt(pos.id, margin_used=float(p1.margin_used) + 500.0)
+        self._refused_drift(p1, h1, expected_revision=1)
+
+    def test_a_header_revision_naming_no_leg_refuses(self):
+        """P0.4 — revision 2 with no revision-2 leg is broken history."""
+        from app.database import PaperPositionSettlement, get_db
+        pos, header = self._enter()
+        with get_db() as db:
+            db.query(PaperPositionSettlement).filter(
+                PaperPositionSettlement.position_id == pos.id).update(
+                {"settlement_revision": 2})
+            db.commit()
+        before = self._portfolio()
+        facts, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                       fill_price=64_700.0,
+                                       expected_revision=2,
+                                       exit_reason=CS.SCALE_OUT)
+        res = CS.settle_prepared_exit(facts)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res["error"],
+                         "CANONICAL_POSITION_PROJECTION_MISMATCH")
+        self.assertEqual(self._portfolio(), before)
+
+    def test_the_revision_is_database_unique_per_position(self):
+        """P0.3 — never two economic legs at one revision."""
+        from sqlalchemy.exc import IntegrityError
+        from app.database import PaperSettlementLeg, get_db
+        pos, header = self._enter()
+        _, _, (entry_leg,), _, _ = self._state(pos.id)
+        with self.assertRaises(IntegrityError):
+            with get_db() as db:
+                db.add(PaperSettlementLeg(
+                    position_id=pos.id, execution_id=f"dup-{next(_seq)}",
+                    kind="PARTIAL_EXIT",
+                    settlement_version="paper_settlement_v1",
+                    settlement_revision=entry_leg.settlement_revision,
+                    symbol="BTC/USD", product=PR.CRYPTO_PERP,
+                    venue=BP.KRAKEN_US_VENUE, instrument_id=PERP_SYM,
+                    position_side="long", execution_side="sell",
+                    requested_qty=1.0, filled_qty=1.0,
+                    quantity_unit="CONTRACTS", multiplier=0.01,
+                    fill_price=64_700.0, notional_usd=647.0,
+                    explicit_fee_usd=0.15,
+                    execution_model="virtual_cex_venue_book_v2",
+                    cost_model="per_leg_v2", created_at="t"))
+
+    def test_the_normal_path_is_untouched_by_the_validator(self):
+        pos, header = self._enter()
+        f1, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                    fill_price=64_650.0,
+                                    exit_reason=CS.SCALE_OUT)
+        self.assertTrue(CS.settle_prepared_exit(f1).get("ok"))
+        p1, h1, *_ = self._state(pos.id)[:2]
+        f2, _, _ = self._exit_facts(h1, p1, filled=p1.qty,
+                                    fill_price=64_660.0,
+                                    expected_revision=1)
+        res = CS.settle_prepared_exit(f2)
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["kind"], "FINAL_EXIT")

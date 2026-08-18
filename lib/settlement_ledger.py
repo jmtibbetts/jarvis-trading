@@ -445,3 +445,73 @@ def load_position_settlement(db, position_id: str):
             at=row.created_at,
         ))
     return settlement
+
+
+def validate_position_projection(db, position, header) -> str | None:
+    """P0 (B2C) — prove the mutable PaperPosition still agrees with the
+    canonical ledger, or say exactly where it does not.
+
+    The ledger already RECORDS what current exposure must be: at revision 0
+    it is the header's original facts; after any exit leg it is that leg's
+    persisted `remaining_qty_after` / `remaining_margin_after` — persisted
+    running-state facts, deliberately not replayed arithmetic. A projection
+    that drifted (a stray writer, a manual edit, a bug) must not become
+    settlement authority for another exit.
+
+    Returns a human-readable mismatch description, or None when coherent.
+    Reads only; never mutates.
+    """
+    from app.database import PaperSettlementLeg
+    from lib.paper_settlement import LEG_ENTRY
+
+    rev = int(header.settlement_revision)
+    if rev == 0:
+        expected_qty = float(header.original_quantity)
+        expected_margin = float(header.committed_margin_usd)
+    else:
+        legs = db.query(PaperSettlementLeg).filter(
+            PaperSettlementLeg.position_id == header.position_id,
+            PaperSettlementLeg.settlement_revision == rev).all()
+        if len(legs) != 1:
+            return (f"header names revision {rev} but {len(legs)} ledger "
+                    f"legs carry that revision — the ledger and its header "
+                    f"disagree about history")
+        leg = legs[0]
+        if leg.kind == LEG_ENTRY:
+            return (f"revision {rev} is an ENTRY leg — an advanced header "
+                    f"must name an exit leg")
+        if leg.remaining_qty_after is None or leg.remaining_margin_after is None:
+            return (f"revision {rev} leg carries no remaining-state facts")
+        expected_qty = float(leg.remaining_qty_after)
+        expected_margin = float(leg.remaining_margin_after)
+
+    expected_notional = (expected_qty * float(header.actual_entry_fill)
+                         * float(header.multiplier))
+
+    # Lifecycle coherence: OPEN means exposure remains; CLOSED means none.
+    if header.status == "OPEN" and expected_qty <= 0:
+        return "header is OPEN but the ledger says no exposure remains"
+    if header.status == "CLOSED" and expected_qty > 0:
+        return (f"header is CLOSED but the ledger says {expected_qty:g} "
+                f"remains")
+    if header.status == "CLOSED" and position.status == "Open":
+        return "header is CLOSED but the position row is still Open"
+    if header.status == "OPEN" and position.status != "Open":
+        return (f"header is OPEN but the position row is "
+                f"{position.status!r}")
+
+    tol = 1e-6
+    def _differs(a, b):
+        return abs(float(a) - float(b)) > tol * max(1.0, abs(float(a)),
+                                                    abs(float(b)))
+    if _differs(position.qty or 0.0, expected_qty):
+        return (f"position qty {position.qty!r} disagrees with the ledger's "
+                f"{expected_qty!r} at revision {rev}")
+    if _differs(position.margin_used or 0.0, expected_margin):
+        return (f"position margin {position.margin_used!r} disagrees with "
+                f"the ledger's {expected_margin!r} at revision {rev}")
+    if position.notional is not None and _differs(position.notional,
+                                                  expected_notional):
+        return (f"position notional {position.notional!r} disagrees with "
+                f"the ledger's {expected_notional!r} at revision {rev}")
+    return None

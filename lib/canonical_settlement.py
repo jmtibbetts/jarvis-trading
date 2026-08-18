@@ -494,6 +494,18 @@ def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
                     "detail": (f"header epoch {header.engine_epoch!r} is "
                                f"not the current {CANONICAL_ENGINE_EPOCH!r}")}
 
+        # ── P0 (B2C): the mutable projection must agree with the ledger.
+        # The ledger records what current exposure MUST be; a PaperPosition
+        # that drifted from it is not settlement authority, however the
+        # drift happened. Checked here — settlement's own boundary — and
+        # independently at preparation; neither trusts the other.
+        from lib.settlement_ledger import validate_position_projection
+        drift = validate_position_projection(db, pos, header)
+        if drift:
+            return {"ok": False,
+                    "error": "CANONICAL_POSITION_PROJECTION_MISMATCH",
+                    "detail": drift}
+
         # ── Frozen identity (§16) and basis (§17) ───────────────────────
         for name in ("symbol", "product", "venue", "instrument_id"):
             if getattr(header, name) != getattr(f, name):

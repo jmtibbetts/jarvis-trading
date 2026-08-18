@@ -673,6 +673,31 @@ class TradeOutcome(Base):
     entered_at       = Column(String)
     exited_at        = Column(String, default=now_iso)
 
+    # ── Canonical learning projection identity (B2C) ─────────────────────
+    # A canonical row is a PROJECTION of one PaperRealizedOutcome, and says
+    # so: which outcome, which position, which exact contract, which unit
+    # basis, which return denominator, and which model versions produced the
+    # economics. Legacy rows keep all of these NULL — never backfilled,
+    # because inventing a canonical identity for a pre-ledger outcome is
+    # fabrication. `uq_trade_outcomes_canonical` (partial unique index)
+    # makes one-outcome-one-projection a database fact.
+    canonical_outcome_id = Column(String)
+    position_id          = Column(String)
+    product              = Column(String)
+    instrument_id        = Column(String)
+    quantity_unit        = Column(String)
+    multiplier           = Column(Float)
+    return_pct_basis     = Column(String)      # MARGIN, for canonical rows
+    outcome_version      = Column(String)
+    execution_model      = Column(String)
+    cost_model_version   = Column(String)
+    settlement_version   = Column(String)
+    gross_pnl_usd        = Column(Float)
+    explicit_fees_usd    = Column(Float)
+    # When learning CONSUMED the outcome — projection time, never trade
+    # time. exited_at stays the market/account settlement moment.
+    projected_at         = Column(String)
+
 class SignalAccuracy(Base):
     """Aggregated win-rate stats per symbol+timeframe for LLM prompt injection."""
     __tablename__ = "signal_accuracy"
@@ -1788,6 +1813,43 @@ def _ensure_paper_position_unique_open_index():
         )
 
 
+def _ensure_settlement_leg_unique_revision_index():
+    """P0.3 (B2C): (position_id, settlement_revision) is a UNIQUE ledger
+    invariant — never two economic legs at one revision. B1-era databases
+    carry the same composite as a NON-unique index under its old name;
+    replace it idempotently. If pre-constraint data already holds duplicate
+    revisions, creation fails LOUDLY and is skipped — history is refused,
+    never silently repaired."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DROP INDEX IF EXISTS ix_psl_position_revision"))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_psl_position_revision
+                ON paper_settlement_legs (position_id, settlement_revision)
+            """))
+            conn.commit()
+    except Exception as exc:
+        print("[DB] settlement-leg unique revision index not created "
+              f"(likely pre-existing duplicate revisions): {exc}")
+
+
+def _ensure_trade_outcomes_canonical_index():
+    """B2C: one PaperRealizedOutcome projects into at most one
+    trade_outcomes row, enforced by the database — SELECT-then-INSERT
+    races; UNIQUE does not. Partial index so the 21k historical rows with
+    NULL canonical identity stay untouched and unconstrained."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_outcomes_canonical
+                ON trade_outcomes (canonical_outcome_id)
+                WHERE canonical_outcome_id IS NOT NULL
+            """))
+            conn.commit()
+    except Exception as exc:
+        print(f"[DB] trade_outcomes canonical unique index not created: {exc}")
+
+
 def _migrate_columns():
     """Add any missing columns to existing tables without data loss."""
     migrations = {
@@ -1934,6 +1996,22 @@ def _migrate_columns():
         # were closed by an exit rule that no longer exists, so they measure
         # a machine that is gone.
         "trade_outcomes": [
+            # B2C canonical projection identity — NULL on all legacy rows,
+            # never backfilled.
+            ("canonical_outcome_id", "TEXT"),
+            ("position_id",          "TEXT"),
+            ("product",              "TEXT"),
+            ("instrument_id",        "TEXT"),
+            ("quantity_unit",        "TEXT"),
+            ("multiplier",           "REAL"),
+            ("return_pct_basis",     "TEXT"),
+            ("outcome_version",      "TEXT"),
+            ("execution_model",      "TEXT"),
+            ("cost_model_version",   "TEXT"),
+            ("settlement_version",   "TEXT"),
+            ("gross_pnl_usd",        "REAL"),
+            ("explicit_fees_usd",    "REAL"),
+            ("projected_at",         "TEXT"),
             ("engine_epoch", "TEXT"),
             ("outcome_source", "TEXT DEFAULT 'live'"),
             # Path labels — see the TradeOutcome model. Nullable on purpose:
@@ -2133,6 +2211,8 @@ def _migrate_columns():
 
     _repair_auto_sim_history()
     _ensure_paper_position_unique_open_index()
+    _ensure_settlement_leg_unique_revision_index()
+    _ensure_trade_outcomes_canonical_index()
 
     # ── Learning engine tables (Tiers 1-5) ─────────────────────────────────
     # Safe to run on every startup — CREATE TABLE IF NOT EXISTS is idempotent
@@ -2446,10 +2526,12 @@ class PaperSettlementLeg(Base):
     __table_args__ = (
         # One execution settles once, anywhere.
         UniqueConstraint("execution_id", name="uq_psl_execution"),
-        # Composite: B2 reads legs BY POSITION IN REVISION ORDER, and the
-        # leftmost prefix still serves plain position lookups.
-        Index("ix_psl_position_revision", "position_id",
-              "settlement_revision"),
+        # UNIQUE composite (P0.3): the revision is the ledger's ORDER and
+        # its CONCURRENCY authority, so two economic legs at one revision is
+        # a corrupted history, not a tie to break. The same index still
+        # serves ordered-by-revision reads and plain position lookups.
+        Index("uq_psl_position_revision", "position_id",
+              "settlement_revision", unique=True),
     )
 
     id                   = Column(String, primary_key=True, default=new_id)

@@ -103,11 +103,13 @@ class RoutingIdentity:
                 "product_identity_source": self.product_identity_source,
                 "resolver_version": self.resolver_version}
 
-    def assert_agrees_with(self, *, product=None, venue=None,
+    def assert_agrees_with(self, *, symbol=None, product=None, venue=None,
                            asset_class=None, instrument_id=None,
                            where: str = "readiness") -> None:
         """Later stages may CONFIRM this identity. They may not change it."""
-        for name, mine, theirs in (("product", self.product, product),
+        for name, mine, theirs in (("symbol", self.symbol,
+                                    (symbol or "").upper().strip() or None),
+                                   ("product", self.product, product),
                                    ("venue", self.venue, venue),
                                    ("asset_class", self.asset_class, asset_class),
                                    ("instrument_id", self.instrument_id,

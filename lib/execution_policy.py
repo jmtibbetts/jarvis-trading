@@ -276,20 +276,44 @@ class ExecutionReadiness:
 
 def execution_readiness(symbol: str, asset_class: str | None = None, *,
                         max_age_s: float | None = None,
-                        signal: dict | None = None) -> ExecutionReadiness:
+                        signal: dict | None = None,
+                        routing_identity=None) -> ExecutionReadiness:
     """Can a fill be simulated for this instrument RIGHT NOW?
 
     A refusal here is a VENUE/DATA verdict. Callers must not record it
     against the strategy: a thesis that could not be executed because a
     quote was eight seconds stale is not a losing thesis.
+
+    IDENTITY IS AN INPUT, NOT A CONCLUSION. When the caller supplies the
+    RoutingIdentity frozen at T0, this function does NOT re-derive product,
+    venue or instrument. Re-deriving would read whatever configuration holds
+    NOW, so a decision made about a perpetual could be graded as spot simply
+    because a desk setting moved between the decision and the check — the
+    identity would silently follow the config rather than the decision.
+    Readiness answers only whether the frozen identity is executable.
+
+    `routing_identity=None` preserves the original behaviour for every
+    legacy caller.
     """
     from lib import execution_snapshot as ES
 
-    # PRODUCT FIRST, then the venue that executes THAT product. Resolving
-    # the venue first is what produced "kraken" for a perpetual.
-    product = resolve_product(symbol, asset_class, signal=signal)
-    venue, ac = resolve_execution_venue(symbol, asset_class, product=product)
-    instrument = _instrument_id(symbol, venue, product)
+    if routing_identity is not None:
+        # The symbol is part of the identity too: grading BTC/USD readiness
+        # against an ETH/USD identity would silently answer for the wrong
+        # instrument.
+        routing_identity.assert_agrees_with(symbol=symbol,
+                                            asset_class=asset_class,
+                                            where="execution_readiness")
+        product = routing_identity.product
+        venue = routing_identity.venue
+        ac = routing_identity.asset_class
+        instrument = routing_identity.instrument_id
+    else:
+        # PRODUCT FIRST, then the venue that executes THAT product. Resolving
+        # the venue first is what produced "kraken" for a perpetual.
+        product = resolve_product(symbol, asset_class, signal=signal)
+        venue, ac = resolve_execution_venue(symbol, asset_class, product=product)
+        instrument = _instrument_id(symbol, venue, product)
 
     def _refuse(reason, detail):
         return ExecutionReadiness(False, venue, product, reason, detail,

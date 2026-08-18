@@ -212,3 +212,79 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadinessConsumesFrozenIdentityTests(unittest.TestCase):
+    """Readiness answers WHETHER EXECUTABLE. It does not re-answer WHAT."""
+
+    def setUp(self):
+        from lib import execution_policy as EP
+        self.EP = EP
+        self.calls = []
+        self._orig = (EP.resolve_product, EP.resolve_execution_venue,
+                      EP._instrument_id)
+
+        def spy(name, real):
+            def f(*a, **k):
+                self.calls.append(name)
+                return real(*a, **k)
+            return f
+        EP.resolve_product = spy("resolve_product", self._orig[0])
+        EP.resolve_execution_venue = spy("resolve_venue", self._orig[1])
+        EP._instrument_id = spy("instrument_id", self._orig[2])
+
+    def tearDown(self):
+        (self.EP.resolve_product, self.EP.resolve_execution_venue,
+         self.EP._instrument_id) = self._orig
+
+    def test_a_supplied_identity_stops_all_re_resolution(self):
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        self.calls.clear()
+        r = self.EP.execution_readiness("BTC/USD", "crypto",
+                                        routing_identity=ident)
+        self.assertEqual(self.calls, [], "readiness re-derived the identity")
+        self.assertEqual(r.product, "CRYPTO_PERP")
+        self.assertEqual(r.venue, "kraken_derivatives_us")
+        self.assertEqual(r.instrument, "PBTCUCZ50")
+
+    def test_the_legacy_path_still_resolves_normally(self):
+        self.calls.clear()
+        self.EP.execution_readiness("BTC/USD", "crypto")
+        self.assertIn("resolve_product", self.calls)
+
+    def test_config_drift_after_freezing_cannot_change_the_product(self):
+        """The entire reason this artifact exists."""
+        import os
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        self.assertEqual(ident.product, "CRYPTO_PERP")
+        prior = os.environ.get("CRYPTO_PRODUCT")
+        os.environ["CRYPTO_PRODUCT"] = "spot"
+        try:
+            r = self.EP.execution_readiness("BTC/USD", "crypto",
+                                            routing_identity=ident)
+            self.assertEqual(r.product, "CRYPTO_PERP")
+            self.assertEqual(r.venue, "kraken_derivatives_us")
+        finally:
+            if prior is None:
+                os.environ.pop("CRYPTO_PRODUCT", None)
+            else:
+                os.environ["CRYPTO_PRODUCT"] = prior
+
+    def test_readiness_for_a_different_symbol_is_a_conflict(self):
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        with self.assertRaises(RI.RoutingIdentityConflict):
+            self.EP.execution_readiness("ETH/USD", "crypto",
+                                        routing_identity=ident)
+
+    def test_a_different_asset_class_is_a_conflict(self):
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        with self.assertRaises(RI.RoutingIdentityConflict):
+            self.EP.execution_readiness("BTC/USD", "equity",
+                                        routing_identity=ident)
+
+    def test_an_unlisted_perp_is_refused_not_downgraded(self):
+        ident = RI.resolve_execution_identity("NEAR/USD", "crypto")
+        r = self.EP.execution_readiness("NEAR/USD", "crypto",
+                                        routing_identity=ident)
+        self.assertEqual(r.product, "CRYPTO_PERP")
+        self.assertNotEqual(r.product, "CRYPTO_SPOT")

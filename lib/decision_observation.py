@@ -492,6 +492,9 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
             ri.assert_agrees_with(
                 product=getattr(ready, "product", None),
                 venue=getattr(ready, "venue", None),
+                # asset_class was supported by the guard but never passed,
+                # so a frozen crypto identity graded as equity slipped by.
+                asset_class=getattr(ready, "asset_class", None),
                 # ExecutionReadiness.__slots__ names this `instrument`, not
                 # `instrument_id`. Reading the wrong attribute made getattr
                 # return None on every call, so the instrument half of this

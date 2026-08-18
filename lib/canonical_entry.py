@@ -263,7 +263,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # sizes on before it learns what it actually paid. The fill below will
     # be worse than this by construction, and step 4 is what makes the
     # position honest about that.
-    prep = prepare_entry(signal, reference_price=quote.mid)
+    prep = prepare_entry(signal, reference_price=quote.mid,
+                         execution_instrument=execution_instrument)
     if "authorization" not in prep:
         gates["risk_sizing"] = "FAIL"
         _observe(DO.NO_TRADE, reason=_sizing_reason(prep), ready=ready)
@@ -293,7 +294,11 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # SAME risk engine, not a correction factor applied here — and keep
     # whichever size is smaller. Execution may shrink an order; nothing may
     # enlarge one.
-    repriced = prepare_entry(signal, reference_price=fill)
+    # THE SAME OBJECT, not a fresh resolution. Re-resolving here would let
+    # the second pass disagree with the first about what a unit is — and
+    # this pass is the one that decides the size actually settled.
+    repriced = prepare_entry(signal, reference_price=fill,
+                             execution_instrument=execution_instrument)
     if "authorization" not in repriced:
         gates["post_fill_risk"] = "FAIL"
         _observe(DO.NO_TRADE, reason=_sizing_reason(repriced), ready=ready,

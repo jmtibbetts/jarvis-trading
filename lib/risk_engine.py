@@ -41,12 +41,24 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
                    max_margin_frac_of_cash: float = 0.15,
                    notional_cap_usd: float | None = None,
                    whole_units: bool = False,
-                   lifecycle_multiplier: float = 1.0) -> RiskDecision:
+                   lifecycle_multiplier: float = 1.0,
+                   execution_instrument=None) -> RiskDecision:
     """Solve quantity from risk. The single entry point for every book.
 
     `risk_budget_usd` arrives WITH account policy already applied (base
     risk %, lifecycle, regime) — those are per-book decisions. Everything
     after the budget is shared arithmetic and lives here.
+
+    `execution_instrument` is an exact `InstrumentIdentity` — what ONE unit
+    of the thing being traded actually is. When supplied it is the AUTHORITY
+    for the multiplier, the quantity unit, the step and the minimum, and the
+    bare symbol is never consulted for any of them. PBTCUCZ50 is 0.01 BTC per
+    contract; asking `get_spec("BTC/USD")` answers 1.0 coin, and a quantity
+    that means one thing to risk and another to execution is wrong by 100x
+    while looking identical from both sides.
+
+    `None` preserves the legacy path exactly, symbol-derived semantics and
+    all — every book migrates when it is ready, not because this changed.
     """
     try:
         entry = float(entry or 0)
@@ -64,19 +76,70 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
     if stop_distance <= 0:
         return RiskDecision.rejection("no stop distance — cannot size by risk")
 
-    from lib.instruments import get_spec, is_futures, margin_required, suggest_micro, whole_contracts
+    from lib.instruments import (UnexecutableQuantity, get_spec, is_futures,
+                                 margin_required, normalize_quantity_down,
+                                 suggest_micro, whole_contracts)
     from lib.paper_engine import max_safe_leverage
 
-    spec = get_spec(symbol) if symbol else None
-    mult = float(spec.multiplier if spec else 1.0)
+    exact = execution_instrument is not None
+
+    if exact:
+        # The instrument speaks for itself. No get_spec(), no is_futures() —
+        # consulting the bare symbol here is the entire defect this path
+        # exists to remove.
+        mult = float(execution_instrument.multiplier or 1.0)
+        unit_name = str(execution_instrument.quantity_unit or "UNITS")
+        minimum = execution_instrument.minimum_quantity
+        minimum = float(minimum) if minimum is not None else None
+    else:
+        spec = get_spec(symbol) if symbol else None
+        mult = float(spec.multiplier if spec else 1.0)
+        unit_name, minimum = None, None
+
     unit_value = entry * mult
     risk_per_unit = stop_distance * mult
+
+    def executable(q: float, context: str) -> tuple[float | None, str | None]:
+        """Shrink `q` to something the venue can fill: (qty, None) or
+        (None, refusal).
+
+        The minimum is an ELIGIBILITY FLOOR. Falling below it means there is
+        no executable size at this budget, never that the size becomes the
+        minimum — the difference between refusing a trade and opening one.
+        """
+        try:
+            n = normalize_quantity_down(q, execution_instrument)
+        except UnexecutableQuantity as e:
+            return None, f"{context}: {e}"
+        if minimum is not None and n < minimum:
+            return None, (
+                f"{context}: {q:,.6g} {unit_name} is below the {minimum:g} "
+                f"{unit_name} minimum — no executable size at this budget")
+        return n, None
 
     qty = budget / risk_per_unit
     limiting = "risk"
 
+    if exact:
+        # Every shrinking constraint below re-normalises. This is the first
+        # of them, and the reason the theoretical quantity is never allowed
+        # to survive as-is: 0.94 contracts is not 1 contract, it is none.
+        sized, why = executable(qty, "risk budget")
+        if sized is None:
+            return RiskDecision.rejection(why)
+        if sized < qty:
+            limiting = "executable-quantity"
+        qty = sized
+        # The ceiling every later constraint is measured against. Each one
+        # takes a min() and then shrinks to the step, so this should be
+        # unreachable — which is exactly why it is worth stating: the
+        # constraints are what would have to break for it to fire.
+        risk_ceiling = qty
+
     # Whole-unit instruments (futures contracts, integer shares) round DOWN.
-    futures = bool(symbol and is_futures(symbol))
+    # An exact instrument has already answered this question with its own
+    # step, so the symbol-derived rules are skipped rather than re-applied.
+    futures = (not exact) and bool(symbol and is_futures(symbol))
     if futures:
         qty = whole_contracts(symbol, qty)
         if qty < 1:
@@ -86,7 +149,7 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
                 f"{symbol}: one contract risks ${risk_per_unit:,.0f} at this stop, "
                 f"over the ${budget:,.0f} budget.{hint}")
         limiting = "whole-contracts"
-    elif whole_units:
+    elif whole_units and not exact:
         qty = float(int(qty))
         if qty < 1:
             return RiskDecision.rejection(
@@ -97,12 +160,23 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
     notional = qty * unit_value
 
     if notional_cap_usd and notional > notional_cap_usd > 0:
-        scale = notional_cap_usd / notional
-        qty *= scale
-        if futures or whole_units:
-            qty = float(int(qty))
-            if qty < 1:
-                return RiskDecision.rejection("notional cap leaves no whole unit")
+        if exact:
+            # Take the cap as a CONTINUOUS ceiling, then shrink to something
+            # executable. Scaling qty by the ratio instead would leave 3.7
+            # contracts — a number the notional, the margin and the loss all
+            # agree on, and which no venue will fill.
+            proposed = min(qty, notional_cap_usd / unit_value)
+            sized, why = executable(proposed, "notional cap")
+            if sized is None:
+                return RiskDecision.rejection(why)
+            qty = sized
+        else:
+            scale = notional_cap_usd / notional
+            qty *= scale
+            if futures or whole_units:
+                qty = float(int(qty))
+                if qty < 1:
+                    return RiskDecision.rejection("notional cap leaves no whole unit")
         notional = qty * unit_value
         limiting = "notional-cap"
 
@@ -128,11 +202,59 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
     else:
         margin = notional / leverage
         if cash_cap > 0 and margin > cash_cap:
-            scale = cash_cap / margin
-            qty *= scale
-            notional *= scale
-            margin = cash_cap
+            if exact:
+                # THE ONE THAT MATTERS. The generic branch below sets
+                # `margin = cash_cap` after scaling quantity continuously,
+                # which reads a CEILING as an instruction to spend it all —
+                # and at a step of 1 contract that is not even possible. Here
+                # the cap bounds the notional, the quantity shrinks to the
+                # step, and the margin is whatever that quantity actually
+                # costs. It lands BELOW the cap, and that is correct.
+                proposed = min(qty, (cash_cap * leverage) / unit_value)
+                sized, why = executable(proposed, "free-cash cap")
+                if sized is None:
+                    return RiskDecision.rejection(why)
+                qty = sized
+                notional = qty * unit_value
+                margin = notional / leverage
+            else:
+                scale = cash_cap / margin
+                qty *= scale
+                notional *= scale
+                margin = cash_cap
             limiting = "cash"
+
+    if exact:
+        # Step 8 — the last word on quantity, after every constraint has had
+        # its turn. A no-op when the path above was correct; when it was not,
+        # this is what stops a fractional contract reaching a venue.
+        final, why = executable(qty, "final normalisation")
+        if final is None:
+            return RiskDecision.rejection(why)
+        if final != qty:
+            qty = final
+            notional = qty * unit_value
+            margin = notional / leverage
+
+        if qty > risk_ceiling + 1e-12:
+            return RiskDecision.rejection(
+                f"internal sizing inconsistency: a constraint enlarged the "
+                f"quantity from {risk_ceiling:g} to {qty:g} — constraints "
+                f"only ever shrink")
+
+        # Step 9 — the economics must FOLLOW from the quantity, not merely
+        # accompany it. A decision that looks plausible and disagrees with
+        # itself is worse than a refusal, because nothing downstream can see
+        # the disagreement.
+        tol = 1e-6 * max(1.0, abs(notional))
+        if abs(notional - qty * entry * mult) > tol:
+            return RiskDecision.rejection(
+                "internal sizing inconsistency: notional is not "
+                "qty x entry x multiplier")
+        if abs(margin * leverage - notional) > tol:
+            return RiskDecision.rejection(
+                "internal sizing inconsistency: margin x leverage is not "
+                "the notional")
 
     if qty <= 0 or margin <= 0:
         return RiskDecision.rejection("sized to zero after constraints")
@@ -159,4 +281,8 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
         leverage=leverage,
         lifecycle_multiplier=lifecycle_multiplier,
         limiting_constraint=limiting,
+        # The unit basis travels WITH the quantity. Downstream stages that
+        # re-derive it from the symbol are the reason it has to.
+        quantity_unit=unit_name if exact else None,
+        multiplier=mult if exact else None,
     )

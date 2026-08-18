@@ -154,6 +154,17 @@ class RiskDecision:
     rejected: bool = False
     rejection_reason: str | None = None
 
+    # THE UNIT BASIS `qty` IS COUNTED IN (B0.2). A quantity without its unit
+    # is not a quantity: 2 meant COINS to sizing and CONTRACTS to execution,
+    # and at a 0.01 multiplier those differ by 100x while both look like "2".
+    # Populated only when an exact execution instrument was supplied; legacy
+    # callers keep None, which is honest about the fact that nobody stated it.
+    # NOTE there is deliberately no stored `loss_at_stop` — it follows from
+    # qty * stop_distance * multiplier, and a stored copy is a second place
+    # for it to disagree.
+    quantity_unit: str | None = None         # COINS | CONTRACTS | SHARES
+    multiplier: float | None = None          # units of the base per 1 qty
+
     @classmethod
     def rejection(cls, reason: str) -> "RiskDecision":
         return cls(allowed_risk_usd=0.0, stop_distance=0.0, qty=0.0,
@@ -253,6 +264,29 @@ class OrderPlan:
         #    risk per contract and not $10.
         stop_distance = abs(float(self.entry) - float(self.initial_stop))
         multiplier: float | None = 1.0
+
+        # THE APPROVED DECISION STATES ITS OWN UNITS, AND THEY WIN.
+        #
+        # This gate compares an order against what was APPROVED, so it has to
+        # price both in the same units. Re-resolving from the bare symbol
+        # asked a different question — "what does BTC/USD usually mean" —
+        # and answered 1.0 coin for a quantity approved in 0.01-BTC
+        # contracts. The gate then read 100x the risk it had itself approved
+        # and refused every perpetual order: $99,400.00 against an approved
+        # $994.00, which is exactly 100.0.
+        #
+        # Nothing is loosened here. When the decision does not state a basis
+        # (every legacy caller), the resolution below runs exactly as before,
+        # including its fail-closed refusal for unspecced instruments.
+        if risk.multiplier is not None:
+            try:
+                stated = float(risk.multiplier)
+            except (TypeError, ValueError):
+                stated = None
+            if stated is not None and math.isfinite(stated) and stated > 0:
+                return self._verdict_from(
+                    fails, risk, stop_distance, stated, tol)
+
         try:
             from lib.instruments import resolve
             ident = resolve(self.symbol, product=self.product)
@@ -274,6 +308,16 @@ class OrderPlan:
                          f"({e}) — risk at stop is not computable")
             multiplier = None
 
+        return self._verdict_from(fails, risk, stop_distance, multiplier, tol)
+
+    def _verdict_from(self, fails, risk, stop_distance, multiplier, tol):
+        """The stop-risk ceiling, priced through whichever multiplier the
+        caller established. Shared so the stated-basis and resolved-basis
+        paths cannot drift into two different definitions of the same check.
+
+        `multiplier is None` means the units are UNKNOWN, and an unknown
+        unit is a refusal, not a 1.0 default.
+        """
         if multiplier is not None:
             if risk.stop_distance and stop_distance > risk.stop_distance + tol:
                 fails.append(

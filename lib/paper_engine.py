@@ -380,7 +380,8 @@ def venue_max_leverage(symbol: str, notional: float) -> tuple[float, str]:
 
 def size_position(equity: float, entry: float, stop: float, leverage: float,
                   free_cash: float, margin_override: float = 0.0,
-                  symbol: str = "", notional_cap_usd: float | None = None) -> dict:
+                  symbol: str = "", notional_cap_usd: float | None = None,
+                  execution_instrument=None) -> dict:
     """Margin-first sizing.
 
         margin   = equity * TRADE_MARGIN_PCT   (or an explicit override)
@@ -402,10 +403,20 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
     if margin <= 0:
         return {"ok": False, "reason": "no free cash to commit"}
 
-    from lib.instruments import (get_spec, is_futures, whole_contracts,
-                                 margin_required, suggest_micro)
-    spec = get_spec(symbol) if symbol else None
-    unit_value = entry * (spec.multiplier if spec else 1.0)
+    from lib.instruments import (UnexecutableQuantity, get_spec, is_futures,
+                                 whole_contracts, margin_required,
+                                 normalize_quantity_down, suggest_micro)
+    # An exact execution instrument is the authority for what one unit IS.
+    # Falling back to get_spec(symbol) here would answer "1.0 coin" for a
+    # contract worth 0.01 BTC, and the wrapper would then undo the correct
+    # answer solve_position had just produced.
+    exact = execution_instrument is not None
+    if exact:
+        mult = float(execution_instrument.multiplier or 1.0)
+    else:
+        spec = get_spec(symbol) if symbol else None
+        mult = float(spec.multiplier if spec else 1.0)
+    unit_value = entry * mult
 
     # ── Risk-first for EVERY asset class (P0.8 / Phase 1 §5) ─────────────
     # The ARITHMETIC lives in lib/risk_engine.solve_position — the single
@@ -414,7 +425,7 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
     # POLICY: the equity slice as risk budget, the free-cash financing
     # fraction, and the venue fee model.
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
-    if margin_override > 0 and not (symbol and is_futures(symbol)):
+    if margin_override > 0 and not ((not exact) and symbol and is_futures(symbol)):
         # EXPLICIT operator margin ("commit $435 at 9.6x") is a deliberate
         # instruction, like Long_10x — the manual-trade path keeps
         # margin-first semantics. The venue cap still applies, and the
@@ -434,6 +445,25 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
             notional = notional_cap_usd
             margin = notional / max(1.0, leverage)
         qty = notional / unit_value if unit_value > 0 else 0.0
+        if exact:
+            # OPERATOR MARGIN IS A MAXIMUM COMMITMENT, NOT AN OBLIGATION TO
+            # SPEND IT. "Commit $435 at 9.6x" against a contract worth $640
+            # buys 6 contracts, not 6.53 — and the $435 becomes whatever 6
+            # contracts actually cost. The manual path bypasses
+            # solve_position, so it needs the same executable-quantity rule
+            # rather than an exemption from it.
+            try:
+                qty = normalize_quantity_down(qty, execution_instrument)
+            except UnexecutableQuantity as e:
+                return {"ok": False, "reason": str(e)}
+            _min = execution_instrument.minimum_quantity
+            if _min is not None and qty < float(_min):
+                return {"ok": False, "reason": (
+                    f"manual margin ${margin:,.2f} at {leverage:g}x buys less "
+                    f"than the {float(_min):g} "
+                    f"{execution_instrument.quantity_unit} minimum")}
+            notional = qty * unit_value
+            margin = notional / max(1.0, leverage)
     else:
         # The shared engine solves everything else — futures included.
         # `notional_cap_usd` is the concentration headroom: solve_position has
@@ -459,6 +489,7 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
             requested_leverage=leverage if leverage > 1.0 else None,
             max_margin_frac_of_cash=MAX_MARGIN_PCT_OF_CASH / 100.0,
             notional_cap_usd=notional_cap_usd,
+            execution_instrument=execution_instrument,
         )
         if decision.rejected:
             return {"ok": False, "reason": decision.rejection_reason}
@@ -469,7 +500,7 @@ def size_position(equity: float, entry: float, stop: float, leverage: float,
         capped = capped or decision.limiting_constraint == "cash"
 
     stop_distance = abs(entry - stop) if stop > 0 else 0.0
-    loss_at_stop = qty * stop_distance * (spec.multiplier if spec else 1.0)
+    loss_at_stop = qty * stop_distance * mult
     fees, fee_why = venue_round_trip_fee(symbol, notional, leverage, entry)
     return {
         "ok": True,
@@ -764,20 +795,41 @@ class EntryAuthorization:
         at a tighter tolerance than the rounding that produced them asks the
         arithmetic a question it cannot answer, and the answer comes back as
         "$863.46 exceeds $863.46" — a refusal with no readable cause.
+
+        WHICH STEP, THOUGH. QTY_STEP is the CONTINUOUS step, and reading it
+        for a discrete instrument understates the quantum by six orders of
+        magnitude. A perpetual rounds to ONE CONTRACT: re-pricing a 3-lot at
+        a fill that sits further from the stop cannot answer "hold slightly
+        less" — the only sizes available are 3 and 2. So the same 3 contracts
+        legitimately risk $981.57 where the mid said $966.00, and comparing
+        that at a 1e-6 quantum refused an order whose size never changed and
+        whose loss stayed inside the approved budget. The budget itself is
+        still enforced exactly, in `solve_position`; this tolerance only ever
+        governs the precision of the comparison.
         """
         mult = float(self.sizing.get("multiplier") or 1.0)
-        return QTY_STEP * self.stop_distance * mult
+        step = float(self.sizing.get("quantity_step") or QTY_STEP)
+        return step * self.stop_distance * mult
 
     def risk_decision(self):
         """The approval, in the canonical type the risk gate understands."""
         from lib.decision_types import RiskDecision
+        _unit = self.sizing.get("quantity_unit")
         return RiskDecision(
             allowed_risk_usd=float(self.loss_at_stop),
             stop_distance=self.stop_distance,
             qty=float(self.qty), notional=float(self.notional),
             margin=float(self.margin), leverage=float(self.leverage),
             limiting_constraint=("cash" if self.sizing.get("capped_by_cash")
-                                 else "risk"))
+                                 else "risk"),
+            # THE BASIS TRAVELS OR THE GATE GUESSES. Rebuilding the decision
+            # without it left the last gate to re-resolve the bare symbol,
+            # which answered 1.0 coin for a quantity approved in 0.01-BTC
+            # contracts — and it then refused the very order it had approved,
+            # by a factor of exactly 100.
+            quantity_unit=_unit,
+            multiplier=(float(self.sizing.get("multiplier") or 1.0)
+                        if _unit else None))
 
     def shrunk_to(self, qty: float) -> "EntryAuthorization":
         """A SMALLER authorization. Refuses to enlarge, by construction.
@@ -803,7 +855,8 @@ class EntryAuthorization:
                        loss_at_stop=float(self.loss_at_stop) * scale)
 
 
-def prepare_entry(signal: dict, reference_price: float = None) -> dict:
+def prepare_entry(signal: dict, reference_price: float = None,
+                  execution_instrument=None) -> dict:
     """PREPARE — read, calculate, AUTHORIZE. No mutation, no cash moves.
 
     Everything that decides whether and how large this trade may be: side
@@ -979,7 +1032,8 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
                 _sizing_blocked = None
                 sizing = size_position(_equity, entry, stop, leverage, float(_pf.cash or 0),
                                        margin_override=override_margin, symbol=sym,
-                                       notional_cap_usd=_cap)
+                                       notional_cap_usd=_cap,
+                                       execution_instrument=execution_instrument)
     except Exception as e:
         # FAIL CLOSED (P0.3's paper twin): a sizing crash is not a license
         # to open a flat-size position.
@@ -1037,15 +1091,37 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
     # Tiny in dollars and structural in kind: a risk figure must be derived
     # from the size that will actually be sent, not from the one that was
     # solved before rounding.
-    _mult = 1.0
-    try:
-        from lib.instruments import get_spec
-        _spec = get_spec(sym) if sym else None
-        _mult = float(getattr(_spec, "multiplier", 1.0) or 1.0)
-    except Exception:
-        pass
+    #
+    # And the MULTIPLIER has to come from the same place the sizing did. An
+    # exact instrument that reached solve_position and then had its loss
+    # recomputed against get_spec(sym) would authorize a contract quantity
+    # and describe its risk in coins — the 100x seam, reopened one line
+    # before the authorization is built.
+    if execution_instrument is not None:
+        _mult = float(execution_instrument.multiplier or 1.0)
+        _unit = execution_instrument.quantity_unit
+        _step = execution_instrument.quantity_step
+        # `round()` above can go UP, and up is the one direction a quantity
+        # may never move. Harmless at an integer step, structural at any
+        # other, so it is re-normalised rather than trusted.
+        from lib.instruments import normalize_quantity_down
+        qty = normalize_quantity_down(qty, execution_instrument)
+    else:
+        _mult, _unit, _step = 1.0, None, None
+        try:
+            from lib.instruments import get_spec
+            _spec = get_spec(sym) if sym else None
+            _mult = float(getattr(_spec, "multiplier", 1.0) or 1.0)
+        except Exception:
+            pass
     loss_at_stop = qty * abs(entry - stop) * _mult
-    sizing = dict(sizing, multiplier=_mult)
+    # `quantity_unit` is set ONLY when an exact instrument stated it. It is
+    # what tells the last risk gate that the basis is already established and
+    # need not be re-derived; a legacy authorization leaves it None so that
+    # gate keeps resolving — and keeps refusing instruments whose units are
+    # unknown — exactly as before.
+    sizing = dict(sizing, multiplier=_mult, quantity_unit=_unit,
+                  quantity_step=_step)
 
     return {"ok": True, "authorization": EntryAuthorization(
         signal=signal, symbol=sym, asset_class=asset_class, direction=dir_key,

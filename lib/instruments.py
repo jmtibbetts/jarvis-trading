@@ -702,3 +702,98 @@ def resolve_for_execution(symbol: str, *, product: str,
             f"frozen instrument {instrument_id!r} but {symbol} resolves to "
             f"{ident.instrument_id!r}")
     return ident
+
+
+# ── Executable quantity (B0.2) ───────────────────────────────────────────────
+#
+# ONE shrink-only authority for "what quantity can this venue actually fill".
+# It lives here, beside the identity that defines the step, and NOT in
+# risk_engine, paper_engine or canonical_entry — a second normaliser is a
+# second rounding rule, and two rounding rules on one order is how a position
+# gets opened in a size nobody authorised.
+
+
+class UnexecutableQuantity(ValueError):
+    """The proposed quantity, or the step it must obey, is not a number a
+    venue could act on. Refused rather than rounded: floating-point semantics
+    should not get to decide what happens to a malformed order."""
+
+
+def normalize_quantity_down(qty: float, instrument: "InstrumentIdentity") -> float:
+    """Shrink `qty` to the largest executable quantity at or below it.
+
+    SHRINK-ONLY, ALWAYS. Never nearest, never ceil, and never "round up to
+    the minimum" — a minimum quantity is an ELIGIBILITY FLOOR, a statement
+    about which orders the venue will accept at all. Reading it as permission
+    to enlarge turns "you cannot afford one contract" into "here is one
+    contract", which is the single most expensive way to misread a spec.
+    Deciding a quantity is ineligible is the caller's job; this function only
+    ever makes a number smaller.
+
+    Decimal and ROUND_FLOOR rather than `int(qty / step)`, because binary
+    floats do not represent decimal steps: `0.1 * 3` is 0.30000000000000004,
+    and a step of 0.001 applied in binary drifts by a unit at the tail. The
+    ratio is quantised at 1e-9 first so that a quantity which is exactly 3
+    in decimal but 2.9999999999999996 in binary floors to 3 and not to 2 —
+    the one place where a tiny upward correction is correct, and it is
+    bounded by the assertion below.
+
+    A missing or zero `quantity_step` means the instrument is continuous
+    (coins, fractional shares) and the quantity is returned unchanged. A
+    NEGATIVE or non-finite step is not continuity, it is malformed metadata,
+    and malformed metadata must not become executable.
+    """
+    import math
+    from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        raise UnexecutableQuantity(f"non-numeric quantity {qty!r}")
+    if not math.isfinite(q):
+        raise UnexecutableQuantity(f"quantity is not finite: {qty!r}")
+    if q < 0:
+        raise UnexecutableQuantity(
+            f"negative quantity {q!r}; direction is a side, not a sign here")
+    if q == 0:
+        return 0.0
+
+    raw_step = getattr(instrument, "quantity_step", None)
+    if raw_step is None:
+        return q                                  # continuous instrument
+    try:
+        step = float(raw_step)
+    except (TypeError, ValueError):
+        raise UnexecutableQuantity(
+            f"{getattr(instrument, 'instrument_id', '?')}: non-numeric "
+            f"quantity_step {raw_step!r}")
+    if not math.isfinite(step):
+        raise UnexecutableQuantity(
+            f"{getattr(instrument, 'instrument_id', '?')}: quantity_step is "
+            f"not finite ({raw_step!r})")
+    if step < 0:
+        raise UnexecutableQuantity(
+            f"{getattr(instrument, 'instrument_id', '?')}: negative "
+            f"quantity_step {step!r}")
+    if step == 0:
+        return q                                  # continuous instrument
+
+    with localcontext() as ctx:
+        ctx.prec = 50
+        d_q, d_step = Decimal(str(q)), Decimal(str(step))
+        ratio = d_q / d_step
+        try:
+            ratio = ratio.quantize(Decimal("1e-9"), rounding=ROUND_HALF_EVEN)
+        except InvalidOperation:
+            pass                                  # already coarser than 1e-9
+        units = ratio.to_integral_value(rounding=ROUND_FLOOR)
+        result = float(units * d_step)
+
+    # The normaliser policing ITSELF. If this ever trips, the arithmetic
+    # above is broken and the right answer is a loud crash, not a silent
+    # clamp — clamping would hide exactly the defect worth finding.
+    if result > q + 1e-9 * max(1.0, step):
+        raise AssertionError(
+            f"normalize_quantity_down ENLARGED {q!r} to {result!r} at step "
+            f"{step!r} — shrink-only was violated")
+    return result

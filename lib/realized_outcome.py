@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # Bumped when the arithmetic changes materially. Outcomes from different
 # versions are NOT comparable and must not be pooled.
 OUTCOME_VERSION = "outcome_v1"
+# Outcomes produced by the persistent multi-leg settlement ledger (B2A).
+# A DISTINCT version, not a relabel: outcome_v1 rows were built from one
+# entry and one synthetic exit, and stamping them v2 retroactively would
+# claim ledger provenance they never had. Old builders keep OUTCOME_VERSION;
+# the settlement-native builder stamps this.
+SETTLEMENT_OUTCOME_VERSION = "outcome_v2_settlement"
 
 WIN = "WIN"
 LOSS = "LOSS"
@@ -271,4 +277,138 @@ def attribute_execution(o: RealizedOutcome, *,
         o.slippage_attribution_usd += (
             (float(decision_exit) - float(o.actual_exit_fill))
             * notional_unit * sign)
+    return o
+
+
+def build_from_settlement(header, legs, *, strategy: str | None = None,
+                          timeframe: str | None = None,
+                          thesis_id: str | None = None) -> RealizedOutcome:
+    """The settlement-native builder (B2A): ledger rows in, one outcome out.
+
+    NOT `build()`. That path computes gross from one entry and one exit,
+    which is correct for the single-fill world it was written in and WRONG
+    for a multi-leg position: recomputing gross from a weighted exit price
+    silently re-derives what the ledger already settled, and the two drift
+    at the fourth decimal. Here the LEDGER IS THE FINANCIAL TRUTH:
+
+        gross          = SUM(exit leg gross)         never recomputed
+        exit fill      = quantity-weighted VWAP      display/attribution only
+        decision exit  = decision VWAP, or None when ANY leg lacks one —
+                         an average of only the favorable subset is not an
+                         average
+        fees           = header entry fee ONCE (the ENTRY leg's fee is the
+                         same charge's second durable view, not a second
+                         charge) + each exit leg's fee, mapped by basis
+        carry          = each exit leg's holding cost, mapped by kind
+        returns        = on COMMITTED MARGIN, stated as such; R on the
+                         header's initial risk. R IS NOT PERCENT.
+
+    Stamped SETTLEMENT_OUTCOME_VERSION — outcome_v1 rows keep their own
+    provenance and are never relabelled.
+    """
+    from datetime import datetime
+
+    from lib.fee_authority import REGULATORY_PER_SHARE
+    from lib.holding_cost_authority import KIND_BORROW, KIND_FUNDING
+    from lib.paper_settlement import LEG_ENTRY
+
+    exit_legs = [l for l in legs if l.kind != LEG_ENTRY]
+    if not exit_legs:
+        raise ValueError(
+            f"position {header.position_id} has no exit legs — there is no "
+            f"realized outcome to build")
+
+    closed_qty = sum(float(l.filled_qty or 0.0) for l in exit_legs)
+    if closed_qty <= 0:
+        raise ValueError(f"position {header.position_id} closed no quantity")
+
+    # Financial truth: the sum of what each leg settled.
+    gross = sum(float(l.gross_pnl_usd or 0.0) for l in exit_legs)
+
+    # Display truth: what the exits averaged, weighted by size.
+    exit_vwap = (sum(float(l.fill_price) * float(l.filled_qty)
+                     for l in exit_legs) / closed_qty)
+    if all(l.decision_price is not None for l in exit_legs):
+        decision_exit = (sum(float(l.decision_price) * float(l.filled_qty)
+                             for l in exit_legs) / closed_qty)
+    else:
+        decision_exit = None                       # missing is missing
+
+    # Explicit charges, by category. The entry fee is counted ONCE, from
+    # the header; the ENTRY leg carries the same dollars as audit, and
+    # summing both would charge one fee twice.
+    commission = 0.0
+    regulatory = 0.0
+    if header.entry_fee_usd:
+        if header.entry_fee_basis == REGULATORY_PER_SHARE:
+            regulatory += float(header.entry_fee_usd)
+        else:
+            commission += float(header.entry_fee_usd)
+    funding = 0.0
+    borrow = 0.0
+    for l in exit_legs:
+        fee = float(l.explicit_fee_usd or 0.0)
+        if l.fee_basis == REGULATORY_PER_SHARE:
+            regulatory += fee
+        else:
+            commission += fee
+        hc = float(l.holding_cost_usd or 0.0)
+        if l.holding_cost_type == KIND_BORROW:
+            borrow += hc
+        elif l.holding_cost_type == KIND_FUNDING or hc:
+            funding += hc
+
+    spread = sum(float(l.spread_attribution_usd or 0.0) for l in legs)
+    slippage = sum(float(l.slippage_attribution_usd or 0.0) for l in legs)
+    impact = sum(float(l.impact_attribution_usd or 0.0) for l in legs)
+
+    final_leg = exit_legs[-1]
+    closed_at = final_leg.created_at
+    hold_minutes = None
+    try:
+        t0 = datetime.fromisoformat(str(header.opened_at))
+        t1 = datetime.fromisoformat(str(closed_at))
+        hold_minutes = (t1 - t0).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        pass
+
+    o = RealizedOutcome(
+        thesis_id=thesis_id, signal_id=header.signal_id,
+        position_id=header.position_id,
+        source=VIRTUAL_CEX_AGENT, venue_type="CEX",
+        venue=header.venue, product=header.product,
+        instrument_id=header.instrument_id, symbol=header.symbol,
+        side=header.position_side,
+        quantity=float(header.original_quantity),
+        quantity_unit=header.quantity_unit,
+        multiplier=float(header.multiplier),
+        decision_entry_price=header.decision_entry_price,
+        actual_entry_fill=float(header.actual_entry_fill),
+        decision_exit_price=decision_exit,
+        actual_exit_fill=exit_vwap,
+        gross_pnl_usd=gross,
+        spread_attribution_usd=spread,
+        slippage_attribution_usd=slippage,
+        price_impact_attribution_usd=impact,
+        commission_usd=commission, regulatory_fees_usd=regulatory,
+        funding_usd=funding, borrow_cost_usd=borrow,
+        initial_risk_usd=header.initial_risk_usd,
+        exit_reason=final_leg.exit_reason,
+        opened_at=header.opened_at, closed_at=closed_at,
+        hold_minutes=hold_minutes,
+        strategy=strategy, timeframe=timeframe,
+        engine_epoch=header.engine_epoch,
+        outcome_version=SETTLEMENT_OUTCOME_VERSION,
+        execution_model=header.execution_model,
+        cost_model_version=header.cost_model,
+    )
+    finalize(o)
+
+    # ROI on COMMITTED MARGIN — the paper book's documented contract, and
+    # the basis is stated so nobody later guesses NOTIONAL.
+    margin = float(header.committed_margin_usd or 0.0)
+    if margin > 0:
+        o.gross_return_pct = o.gross_pnl_usd / margin * 100.0
+        o.net_return_pct = o.net_pnl_usd / margin * 100.0
+        o.return_pct_basis = "MARGIN"
     return o

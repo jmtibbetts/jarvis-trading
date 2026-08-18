@@ -422,9 +422,15 @@ def load_position_settlement(db, position_id: str):
         entry_fee_usd=float(header.entry_fee_usd or 0.0),
         committed_margin_usd=float(header.committed_margin_usd or 0.0),
     )
+    # DETERMINISTIC LEDGER ORDER IS THE REVISION, not the clock. Two legs
+    # written in one busy second have equal timestamps; the revision is the
+    # concurrency authority and therefore the ordering authority, with
+    # created_at and id only as stable tie-breakers.
     rows = db.query(PaperSettlementLeg).filter(
         PaperSettlementLeg.position_id == position_id).order_by(
-        PaperSettlementLeg.created_at).all()
+        PaperSettlementLeg.settlement_revision,
+        PaperSettlementLeg.created_at,
+        PaperSettlementLeg.id).all()
     for row in rows:
         settlement.add(SettlementLeg(
             kind=row.kind,

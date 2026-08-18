@@ -49,7 +49,8 @@ DEFAULT_DB = REPO / "data" / "jarvis.db"
 # the tool whose only job is not lying.
 ECONOMIC_TABLES = ("paper_positions", "paper_trades", "paper_portfolio",
                    "trade_outcomes",
-                   "paper_position_settlements", "paper_settlement_legs")
+                   "paper_position_settlements", "paper_settlement_legs",
+                   "paper_realized_outcomes")
 
 
 def _now() -> str:

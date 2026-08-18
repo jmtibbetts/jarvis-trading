@@ -152,6 +152,17 @@ class TheExactInstrumentReachesTheSizingAuthorityTests(unittest.TestCase):
         instrument, and the answer must move. That is what makes the silence
         in the exact case evidence of something.
         """
+        # The control OWNS its book state. Legacy sizing is a function of
+        # equity, and this file shares its database with tests that settle
+        # real positions — at the wrong equity the clean run sits exactly on
+        # the 25% concentration cap and the control tests the cap instead of
+        # the poison.
+        from app.database import PaperPortfolio, PaperPosition, get_db
+        with get_db() as db:
+            db.query(PaperPosition).delete()
+            db.query(PaperPortfolio).first().cash = 100_000.0
+            db.commit()
+
         legacy_clean, _, _ = self._prepare(None)
 
         real = INST.get_spec
@@ -160,13 +171,23 @@ class TheExactInstrumentReachesTheSizingAuthorityTests(unittest.TestCase):
             spec = real(symbol)
             return type(spec)(**{**spec.__dict__, "multiplier": 999.0}) \
                 if hasattr(spec, "__dict__") else spec
+        # The poisoned legacy run must produce a DIFFERENT result — either a
+        # 999x loss figure, or an outright refusal (a 999x notional can trip
+        # the book's concentration cap, depending on what earlier tests left
+        # in the shared book's equity). Both are the poison biting; only an
+        # UNCHANGED authorization would prove the probe inert.
+        from lib import paper_engine as PE
         with patch.object(INST, "get_spec", poisoned):
-            legacy_dirty, _, _ = self._prepare(None)
-
-        self.assertNotAlmostEqual(
-            legacy_dirty.loss_at_stop, legacy_clean.loss_at_stop, places=6,
-            msg="the generic multiplier poison changes nothing even on the "
-                "legacy path — the probe is inert and proves nothing")
+            prep = PE.prepare_entry(PERP_SIGNAL, reference_price=ENTRY,
+                                    execution_instrument=None)
+        if "authorization" in prep:
+            self.assertNotAlmostEqual(
+                prep["authorization"].loss_at_stop,
+                legacy_clean.loss_at_stop, places=6,
+                msg="the generic multiplier poison changes nothing even on "
+                    "the legacy path — the probe is inert and proves nothing")
+        else:
+            self.assertIn("error", prep)
 
 
 class BothCanonicalSizingPassesShareOneInstrumentTests(unittest.TestCase):

@@ -1791,6 +1791,22 @@ def _ensure_paper_position_unique_open_index():
 def _migrate_columns():
     """Add any missing columns to existing tables without data loss."""
     migrations = {
+        # B2A exit facts on B1-era ledger tables. NULL on existing ENTRY
+        # legs, which is correct: an entry has no exit facts.
+        "paper_settlement_legs": [
+            ("exit_reason",            "TEXT"),
+            ("trigger_price",          "REAL"),
+            ("holding_cost_type",      "TEXT"),
+            ("holding_cost_source",    "TEXT"),
+            ("holding_cost_quality",   "TEXT"),
+            ("holding_cost_version",   "TEXT"),
+            ("remaining_qty_after",    "REAL"),
+            ("remaining_margin_after", "REAL"),
+        ],
+        "paper_position_settlements": [
+            ("final_execution_id",  "TEXT"),
+            ("realized_outcome_id", "TEXT"),
+        ],
         "trading_signals": [
             ("composite_score",  "REAL"),
             ("signal_source",    "TEXT DEFAULT 'watchlist'"),
@@ -2411,6 +2427,10 @@ class PaperPositionSettlement(Base):
     settlement_revision  = Column(Integer, nullable=False, default=0)
     opened_at            = Column(String, nullable=False)
     closed_at            = Column(String)                    # NULL until final
+    # ── Final-lifecycle links (B2A). Aggregates stay DERIVED from legs —
+    # these are pointers, not a second copy of the totals. ────────────────
+    final_execution_id   = Column(String)                    # NULL until final
+    realized_outcome_id  = Column(String)                    # NULL until final
 
 
 class PaperSettlementLeg(Base):
@@ -2426,7 +2446,10 @@ class PaperSettlementLeg(Base):
     __table_args__ = (
         # One execution settles once, anywhere.
         UniqueConstraint("execution_id", name="uq_psl_execution"),
-        Index("ix_psl_position", "position_id"),
+        # Composite: B2 reads legs BY POSITION IN REVISION ORDER, and the
+        # leftmost prefix still serves plain position lookups.
+        Index("ix_psl_position_revision", "position_id",
+              "settlement_revision"),
     )
 
     id                   = Column(String, primary_key=True, default=new_id)
@@ -2469,6 +2492,23 @@ class PaperSettlementLeg(Base):
     released_margin_usd  = Column(Float, nullable=False, default=0.0)
     hours_held           = Column(Float, nullable=False, default=0.0)
 
+    # ── Exit facts (B2A) — NULL on ENTRY legs ────────────────────────────
+    # Three prices, three different facts, never collapsed: trigger_price is
+    # the stop/target/liquidation level that fired; decision_price (above)
+    # is the mark at the exit decision; fill_price is what the venue paid.
+    exit_reason          = Column(String)
+    trigger_price        = Column(Float)
+    # The holding cost's provenance travels with its amount — a zero without
+    # a quality is six different facts wearing one number.
+    holding_cost_type    = Column(String)   # FUNDING | BORROW | NOT_APPLICABLE
+    holding_cost_source  = Column(String)
+    holding_cost_quality = Column(String)
+    holding_cost_version = Column(String)
+    # What the position looked like AFTER this leg — audit fields so a
+    # ledger reader never has to replay arithmetic to know the running state.
+    remaining_qty_after    = Column(Float)
+    remaining_margin_after = Column(Float)
+
     spread_attribution_usd   = Column(Float, default=0.0)
     slippage_attribution_usd = Column(Float, default=0.0)
     impact_attribution_usd   = Column(Float, default=0.0)
@@ -2479,6 +2519,92 @@ class PaperSettlementLeg(Base):
 
     created_at           = Column(String, nullable=False)
     provenance_json      = Column(Text)
+
+
+class PaperRealizedOutcome(Base):
+    """THE final canonical result of one position (B2A, outcome_v2_settlement).
+
+    Written exactly once, at FINAL exit, inside the same transaction that
+    closes the position and the settlement header — a closed canonical
+    position with no final truth is not an acceptable state. Built from
+    SETTLEMENT TRUTH: gross is the sum of exit-leg gross, never recomputed
+    from a synthetic single exit; the weighted exit fill is display, not the
+    P&L authority. This is the PERSISTED row; the semantic object remains
+    `lib.realized_outcome.RealizedOutcome`.
+
+    LEARNING IS DELIBERATELY DECOUPLED. `learning_state` starts PENDING and
+    a later idempotent projection marks it APPLIED — a pattern-memory
+    failure must never unwind a correct exit. Financial truth commits
+    first; learning consumes it afterwards.
+    """
+    __tablename__ = "paper_realized_outcomes"
+    __table_args__ = (
+        # One canonical position, one canonical realized outcome.
+        UniqueConstraint("position_id", name="uq_pro_position"),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    position_id          = Column(String, nullable=False)
+    signal_id            = Column(String, index=True)
+    source               = Column(String)
+
+    venue_type           = Column(String)
+    venue                = Column(String, nullable=False)
+    product              = Column(String, nullable=False)
+    instrument_id        = Column(String, nullable=False)
+    symbol               = Column(String, nullable=False)
+
+    side                 = Column(String, nullable=False)    # long | short
+    quantity             = Column(Float, nullable=False)
+    quantity_unit        = Column(String, nullable=False)
+    multiplier           = Column(Float, nullable=False)
+
+    decision_entry_price = Column(Float)
+    actual_entry_fill    = Column(Float, nullable=False)
+    decision_exit_price  = Column(Float)                     # VWAP or NULL
+    actual_exit_fill     = Column(Float, nullable=False)     # qty-weighted VWAP
+
+    gross_pnl_usd        = Column(Float, nullable=False)
+    spread_attribution_usd       = Column(Float, default=0.0)
+    slippage_attribution_usd     = Column(Float, default=0.0)
+    price_impact_attribution_usd = Column(Float, default=0.0)
+    commission_usd       = Column(Float, nullable=False, default=0.0)
+    regulatory_fees_usd  = Column(Float, nullable=False, default=0.0)
+    funding_usd          = Column(Float, nullable=False, default=0.0)
+    borrow_cost_usd      = Column(Float, nullable=False, default=0.0)
+    net_pnl_usd          = Column(Float, nullable=False)
+
+    initial_risk_usd     = Column(Float)
+    gross_r              = Column(Float)
+    net_r                = Column(Float)
+    gross_return_pct     = Column(Float)
+    net_return_pct       = Column(Float)
+    return_pct_basis     = Column(String)                    # MARGIN
+
+    outcome              = Column(String, nullable=False)    # WIN | LOSS | BREAKEVEN
+    exit_reason          = Column(String)
+
+    opened_at            = Column(String)
+    closed_at            = Column(String, nullable=False)
+    hold_minutes         = Column(Float)
+
+    engine_epoch         = Column(String)
+    outcome_version      = Column(String, nullable=False)
+    execution_model      = Column(String)
+    cost_model_version   = Column(String)
+    settlement_version   = Column(String)
+
+    provenance_json      = Column(Text)
+
+    # Learning projection state — never part of the financial transaction's
+    # correctness, always part of its record.
+    learning_state       = Column(String, nullable=False, default="PENDING")
+    learning_applied_at  = Column(String)
+    learning_error       = Column(Text)
+
+    # Compatibility links, when the projections exist.
+    paper_trade_id       = Column(String)
+    trade_outcome_id     = Column(String)
 
 
 class PaperPortfolio(Base):

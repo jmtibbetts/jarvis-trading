@@ -866,3 +866,27 @@ reading anything into the coverage numbers.
 observations at T0, verify a BTC/USD horizon resolves to COMPLETE against the
 9,622 samples already collected, then build Phase C on a population that can
 actually answer.
+
+### Collection PAUSED 2026-08-18 ~03:05Z — deliberate, same campaign
+
+Stopped so the pipeline stops accumulating observations that provably cannot
+resolve. This is a **COLLECTION GAP inside**
+, not a new campaign: the epoch and the
+original boundary are untouched on disk, and the raw evidence already
+collected is preserved.
+
+State frozen at the pause:
+
+    observations        95   (95 distinct ids, 1 epoch)
+    verdicts            70 NO_TRADE / 25 TRADE
+    outcome horizons    160 PENDING / 125 INSUFFICIENT_DATA / 0 COMPLETE
+    quote samples       143,994
+    stop                Result=success, 5.3s, no SIGKILL
+
+The ten observations added between the defect being found and the pause carry
+the same NULL product/venue as the other 85 — that is precisely why
+collection is paused rather than left running.
+
+**Resuming is not a matter of waiting.** The next window of work is the P0
+routing-identity fix described in section 15; until product identity is
+recorded at T0, every additional observation is another unresolvable row.

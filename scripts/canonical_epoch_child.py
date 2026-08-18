@@ -210,7 +210,7 @@ def phase_lifecycle(payload: dict) -> dict:
                  "venue": header.venue, "instrument": header.instrument_id,
                  "quantity_unit": header.quantity_unit,
                  "multiplier": float(header.multiplier),
-                 "qty": float(header.quantity)}
+                 "qty": float(header.original_quantity)}
         header_epoch = header.engine_epoch
         entry_fill = float(header.actual_entry_fill)
         entry_fee = float(header.entry_fee_usd or 0.0)
@@ -257,8 +257,8 @@ def phase_lifecycle(payload: dict) -> dict:
         partial_facts = {
             "kind": p_leg.kind if p_leg else None,
             "revision": int(p_leg.settlement_revision) if p_leg else None,
-            "qty": float(p_leg.filled_quantity) if p_leg else None,
-            "fee": float(p_leg.fee_usd or 0.0) if p_leg else None,
+            "qty": float(p_leg.filled_qty) if p_leg else None,
+            "fee": float(p_leg.explicit_fee_usd or 0.0) if p_leg else None,
             "holding": float(p_leg.holding_cost_usd or 0.0) if p_leg else None,
             "gross": float(p_leg.gross_pnl_usd or 0.0) if p_leg else None,
             "released": float(p_leg.released_margin_usd or 0.0) if p_leg else None,
@@ -299,19 +299,21 @@ def phase_lifecycle(payload: dict) -> dict:
             "header_status": header.status if header else None,
             "leg_kinds": [l.kind for l in legs],
             "final_revision": int(f_leg.settlement_revision) if f_leg else None,
-            "remaining_qty": float(header.remaining_quantity or 0.0) if header else None,
-            "remaining_margin": float(header.remaining_margin_usd or 0.0) if header else None,
+            "remaining_qty": (float(legs[-1].remaining_qty_after or 0.0)
+                              if legs else None),
+            "remaining_margin": (float(legs[-1].remaining_margin_after or 0.0)
+                                 if legs else None),
             "learning_state": outcome.learning_state if outcome else None,
             "outcome_epoch": outcome.engine_epoch if outcome else None,
         }
-        exit_fees = sum(float(l.fee_usd or 0.0) for l in legs
+        exit_fees = sum(float(l.explicit_fee_usd or 0.0) for l in legs
                         if l.kind in ("PARTIAL_EXIT", "FINAL_EXIT"))
         holding = sum(float(l.holding_cost_usd or 0.0) for l in legs)
         gross = sum(float(l.gross_pnl_usd or 0.0) for l in legs)
         released = sum(float(l.released_margin_usd or 0.0) for l in legs)
         final_facts = {
-            "qty": float(f_leg.filled_quantity) if f_leg else None,
-            "fee": float(f_leg.fee_usd or 0.0) if f_leg else None,
+            "qty": float(f_leg.filled_qty) if f_leg else None,
+            "fee": float(f_leg.explicit_fee_usd or 0.0) if f_leg else None,
             "holding": float(f_leg.holding_cost_usd or 0.0) if f_leg else None,
             "gross": float(f_leg.gross_pnl_usd or 0.0) if f_leg else None,
             "released": float(f_leg.released_margin_usd or 0.0) if f_leg else None,

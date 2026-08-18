@@ -870,8 +870,8 @@ actually answer.
 ### Collection PAUSED 2026-08-18 ~03:05Z — deliberate, same campaign
 
 Stopped so the pipeline stops accumulating observations that provably cannot
-resolve. This is a **COLLECTION GAP inside**
-, not a new campaign: the epoch and the
+resolve. This is a **COLLECTION GAP inside campaign
+FORWARD_EVIDENCE_20260818T075321Z**, not a new campaign: the epoch and the
 original boundary are untouched on disk, and the raw evidence already
 collected is preserved.
 

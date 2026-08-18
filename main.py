@@ -162,6 +162,18 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         logger.warning(f"[Server] Market-data runtime failed to start: {e}")
 
+    # EVIDENCE RUNTIME. Also outside the scheduler branch, and for the same
+    # reason one layer up: a decision made at 09:00 with a 4-hour horizon
+    # comes due at 13:00 whether or not JARVIS is trading in between. If
+    # resolution rode on the trading loop, pausing trading would silently
+    # stop the measurement that says whether trading should resume.
+    try:
+        from lib.evidence_runtime import start as start_evidence
+        ev = start_evidence()
+        logger.info(f"[Server] Evidence runtime — {ev}")
+    except Exception as e:
+        logger.warning(f"[Server] Evidence runtime failed to start: {e}")
+
     # Twelve Data WebSocket: live forex majors — the one asset class with
     # no real-time feed (Kraken covers crypto, Alpaca covers equities).
     # Same daemon-thread pattern; inert without a TD key.
@@ -190,6 +202,12 @@ async def lifespan(app_: FastAPI):
     try:
         from lib.td_forex_stream import stop as stop_td_forex
         stop_td_forex()
+    except Exception:
+        pass
+
+    try:
+        from lib.evidence_runtime import stop as stop_evidence
+        stop_evidence()
     except Exception:
         pass
 

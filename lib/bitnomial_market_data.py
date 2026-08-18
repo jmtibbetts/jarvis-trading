@@ -282,12 +282,40 @@ def book_for(symbol: str, *, create: bool = False) -> PerpBook | None:
         return b
 
 
+# ── Downstream consumers of the ONE ingest ──────────────────────────────
+#
+# Execution snapshots, the shared evidence collector and diagnostics all
+# read the same maintained books. Listeners exist so the EVIDENCE collector
+# can be driven by actual book movement rather than by a clock: measured
+# against the live venue, a 1Hz poll captured only ~13% of real top-of-book
+# changes, and the missing 87% is exactly what MFE/MAE and touch chronology
+# are made of.
+#
+# A listener must not raise into the reader loop and must not block it.
+_LISTENERS: list = []
+
+
+def add_book_listener(fn) -> None:
+    """Register a callback invoked after each applied book update."""
+    if fn not in _LISTENERS:
+        _LISTENERS.append(fn)
+
+
+def clear_book_listeners() -> None:
+    _LISTENERS.clear()
+
+
 def apply_message(msg: dict) -> None:
     """Route one decoded feed message to its product's book."""
     sym = msg.get("symbol")
     if not sym:
         return
     book_for(sym, create=True).apply(msg)
+    for fn in _LISTENERS:
+        try:
+            fn(sym)
+        except Exception as e:      # a consumer fault never stops ingest
+            logger.debug("[Bitnomial] listener failed for %s: %s", sym, e)
 
 
 def latest_top(symbol: str) -> dict | None:
@@ -331,6 +359,10 @@ def subscribe_message(symbols) -> dict:
 _STREAM_STARTED = False
 _STOP = threading.Event()
 _THREAD: threading.Thread | None = None
+# The live socket and the loop it runs on, kept ONLY so a disconnect can be
+# forced deliberately — see `force_disconnect`.
+_WS = None
+_LOOP = None
 _HEALTH_LOCK = threading.Lock()
 _HEALTH = {
     "service_running": False,
@@ -390,6 +422,8 @@ async def _run(symbols, url):                    # pragma: no cover - network
     while not _STOP.is_set():
         try:
             async with websockets.connect(url, open_timeout=20) as ws:
+                global _WS, _LOOP
+                _WS, _LOOP = ws, asyncio.get_running_loop()
                 _health_set(connected=True, current_error=None,
                             last_connect_at=_now().isoformat())
                 await ws.send(json.dumps(subscribe_message(symbols)))
@@ -460,6 +494,28 @@ def start_stream(symbols=None, url: str | None = None) -> bool:
     _health_set(service_running=True, products_subscribed=len(syms),
                 current_error=None)
     return True
+
+
+def force_disconnect() -> bool:
+    """Drop the current socket to exercise the recovery path. Returns True
+    if a close was actually dispatched.
+
+    FOR DELIBERATE VERIFICATION AND OPS RECOVERY, NOT FOR NORMAL USE. The
+    recovery path is the part of a feed nobody sees until it matters, so it
+    has to be provable on demand rather than left to be discovered during an
+    outage. It closes only THIS side of the connection; the venue is not
+    asked for anything, so proving reconnect costs the exchange nothing
+    beyond one ordinary re-subscribe.
+    """
+    ws, loop = _WS, _LOOP
+    if ws is None or loop is None or loop.is_closed():
+        return False
+    try:
+        loop.call_soon_threadsafe(lambda: loop.create_task(ws.close()))
+        return True
+    except Exception as e:
+        logger.debug("[Bitnomial] force_disconnect failed: %s", e)
+        return False
 
 
 def stop_stream(timeout: float = 5.0) -> bool:

@@ -60,6 +60,7 @@ over by the last good number.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -118,6 +119,102 @@ def _parse(ts):
 
 # ── Writing samples ──────────────────────────────────────────────────────
 
+def _should_record(prev_bid, prev_ask, prev_at, bid, ask, at,
+                   heartbeat_s: float) -> str | None:
+    """THE SAMPLING RULE, in one place. CHANGE, HEARTBEAT, or None.
+
+    Both the event-driven hot path and the polling path go through this, so
+    there is one definition of what gets kept rather than two that drift.
+    """
+    if prev_bid is None or prev_ask is None or prev_at is None:
+        return CHANGE
+    if prev_bid != bid or prev_ask != ask:
+        return CHANGE
+    # Unchanged book: keep it only to hold the heartbeat up, so a quiet
+    # market stays visibly observed without paying per poll.
+    return HEARTBEAT if (at - prev_at).total_seconds() >= heartbeat_s else None
+
+
+# ── The event-driven hot path ────────────────────────────────────────────
+#
+# MEASURED 2026-08-18 against the live venue: 16 active perpetuals produced
+# ~180 provider messages/sec and ~31 TOP-OF-BOOK changes/sec (~115 per
+# product per minute), while a 1Hz polling collector persisted only ~15 per
+# product per minute — **about 13% of the real book movement.** The missing
+# 87% is exactly the evidence MFE/MAE and touch chronology are made of, so
+# the collector is driven by the ingest itself rather than by a clock.
+#
+# In-memory dedupe and a buffered writer keep that affordable: one dict
+# lookup per update instead of a SELECT, and one batched INSERT per flush
+# instead of a transaction per tick.
+
+_LAST: dict = {}
+_BUF: list = []
+_BUF_LOCK = threading.Lock()
+MAX_BUFFER = 5000
+
+
+def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
+               at: datetime | None = None, source: str | None = None,
+               instrument_id: str | None = None,
+               heartbeat_s: float = HEARTBEAT_S) -> str | None:
+    """Offer one top-of-book observation to the shared evidence buffer.
+
+    Called from the market-data ingest on every book update. Cheap by
+    design: no database work happens here, so a busy feed never blocks on
+    a writer.
+    """
+    if bid is None or ask is None:
+        return None
+    at = at or _now()
+    key = (product, venue, symbol)
+    prev = _LAST.get(key)
+    reason = _should_record(*(prev or (None, None, None)), bid, ask, at,
+                            heartbeat_s)
+    if reason is None:
+        return None
+    _LAST[key] = (bid, ask, at)
+    with _BUF_LOCK:
+        if len(_BUF) < MAX_BUFFER:
+            _BUF.append({
+                "product": product, "venue": venue, "symbol": symbol,
+                "instrument_id": instrument_id, "market_data_source": source,
+                "observed_at": at.isoformat(), "bid": bid, "ask": ask,
+                "mid": (bid + ask) / 2.0, "sample_reason": reason,
+            })
+    return reason
+
+
+def flush_samples() -> int:
+    """Write buffered observations. Returns rows written."""
+    from app.database import InstrumentQuoteSample, get_db
+
+    with _BUF_LOCK:
+        if not _BUF:
+            return 0
+        batch, _BUF[:] = list(_BUF), []
+    with get_db() as db:
+        db.bulk_insert_mappings(InstrumentQuoteSample.__mapper__, batch)
+    return len(batch)
+
+
+def buffered_count() -> int:
+    with _BUF_LOCK:
+        return len(_BUF)
+
+
+def reset_stream_state() -> None:
+    """Forget in-memory dedupe state. Used on disconnect and by tests.
+
+    A reconnect must not compare a fresh book against a pre-disconnect one
+    — the interval between them is unobserved, so the first post-reconnect
+    quote is genuinely new evidence even if the numbers happen to match.
+    """
+    _LAST.clear()
+    with _BUF_LOCK:
+        _BUF.clear()
+
+
 def record_sample(*, symbol: str, product: str, venue: str, snap,
                   at: datetime | None = None,
                   heartbeat_s: float = HEARTBEAT_S) -> bool:
@@ -143,18 +240,12 @@ def record_sample(*, symbol: str, product: str, venue: str, snap,
                           InstrumentQuoteSample.symbol == symbol)
                   .order_by(InstrumentQuoteSample.observed_at.desc())
                   .first())
-        reason = CHANGE
-        if prev is not None:
-            moved = (prev.bid != bid) or (prev.ask != ask)
-            last = _parse(prev.observed_at)
-            since = (at - last).total_seconds() if last else None
-            if not moved:
-                # Unchanged book: write only to keep the heartbeat alive,
-                # so a quiet market stays visibly observed without paying
-                # per poll for a price nobody moved.
-                if since is not None and since < heartbeat_s:
-                    return False
-                reason = HEARTBEAT
+        reason = _should_record(
+            prev.bid if prev else None, prev.ask if prev else None,
+            _parse(prev.observed_at) if prev else None,
+            bid, ask, at, heartbeat_s)
+        if reason is None:
+            return False
 
         db.add(InstrumentQuoteSample(
             product=product, venue=venue, symbol=symbol,

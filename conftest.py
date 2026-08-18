@@ -63,6 +63,11 @@ if not os.getenv("JARVIS_EVENTS_DB_PATH", "").strip():
 if os.getenv("JARVIS_REAL_PROVIDER_TESTS") != "1":
     os.environ["JARVIS_DISABLE_MARKET_DATA"] = "1"
 
+# The evidence runtime is a background THREAD that writes outcome rows on a
+# timer. Under pytest that would race every test asserting on those rows, so
+# it is off by default and started explicitly by the tests that exercise it.
+os.environ["JARVIS_DISABLE_EVIDENCE_RUNTIME"] = "1"
+
 
 def pytest_configure(config):
     """Create the full schema once per session, exactly as the app would."""

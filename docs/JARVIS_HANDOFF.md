@@ -2147,3 +2147,151 @@ Review the artifacts under `data/cutover_dry_runs/`, then a separate
 controlled cutover continuation. The hard reset is explicitly not its
 mechanism — `reset_paper_portfolio()` refuses a canonical ledger, and neither
 cutover script imports or calls it (AST-pinned).
+
+
+## 29. STOP POINT — CONTROLLED CANONICAL EPOCH CUTOVER COMPLETE
+
+    CONTROLLED_CANONICAL_EPOCH_CUTOVER_COMPLETE
+    ACTIVE_CANONICAL_BOOK_DISARMED
+    READY_FOR_FULL_VIRTUAL_ACTIVATION_GATE
+
+Implementation SHA `6b36b89`. CI at that exact SHA: **GREEN**. The cutover
+itself was executed from `180c252` (also GREEN) — no filesystem change was
+made from unverified code.
+
+**The legacy economy is retired.** `data/jarvis.db` is now a fresh canonical
+book with $100,000 and zero history. The old economy exists in two places and
+was never closed, converted or migrated.
+
+### What is where now
+
+    data/jarvis.db
+        the NEW canonical book — 70 tables, current schema,
+        cash 100,000.00, every economic table 0
+
+    data/legacy_epochs/LEGACY_20260818T233203.836369Z/jarvis.db
+        the verified archive — 402,829,312 bytes, mode 0444,
+        logical equivalence proved against the source
+
+    data/legacy_epochs/LEGACY_20260818T233203.836369Z/original_source/
+        jarvis_legacy_original.db  (+ -wal, -shm)
+        the original file itself, dormant
+
+    data/cutover_runs/CANONICAL_CUTOVER_20260818T233203Z/
+        manifest, report, journal, fingerprints
+
+Two recovery artifacts, deliberately. Storage is not the constraint.
+
+### The legacy economy, as archived
+
+    667 paper positions   — of which 20 are STILL OPEN
+    664 paper trades
+    21,194 trade outcomes
+    cash 63,550.83716433377
+
+Those 20 open positions stay open forever in the archive. **They were not
+closed under canonical economics.** Closing a position under a machine that
+did not exist when it opened would be fabricated history — that is the whole
+content of NEVER OLD ENTRY + NEW EXIT.
+
+### The sidecar trap, handled
+
+SQLite's `-wal` and `-shm` belong to one specific database history. Because
+the active path is reused, a new book that inherited the old sidecars could
+read stale pages or refuse to open. So the legacy sidecars moved WITH the
+legacy database, and the active path was asserted **completely empty — file,
+WAL and SHM —** before the candidate was renamed in. That assertion is a
+gate, not a comment.
+
+The swap journal advanced `PREPARED → LEGACY_MOVED → CANDIDATE_PROMOTED →
+VERIFIED`, fsynced at each step. The promoted database's SHA equals the
+prepared candidate's SHA (`cb1eeebc239ed989…`).
+
+### The new book arrives DISARMED
+
+| flag | operator's value | active value |
+|---|---|---|
+| `system_state.live_trading_enabled` | 1 | **0** |
+| `user_preferences.paper_auto_trade_enabled` | 1 | **0** |
+| `user_preferences.auto_sim_enabled` | 1 | **0** |
+| `user_preferences.trade_mode` | (recorded) | **paper** |
+
+Recorded as `CUTOVER_DISARM`. This is **not** a claim that the operator chose
+these values — it is an operational interlock, and the legacy source was
+never written. Lifting it is the next continuation's explicit act.
+
+Defence in depth: the DB flags are off, the boot ran `EVIDENCE_ONLY`, and the
+scheduler was disabled by environment. No single switch is load-bearing.
+
+### API-only boot proof
+
+Booted `main.py` on port 3199 (never 3000) with
+`JARVIS_RUNTIME_MODE=EVIDENCE_ONLY` and `JARVIS_DISABLE_SCHEDULER=1`.
+
+- process FDs held `data/jarvis.db`, `-wal`, `-shm` and **zero** legacy or
+  archive descriptors
+- `/api/health` 200; `/api/paper/summary` cash 100,000, 0 trades;
+  `/api/paper/positions` `[]`; `/api/paper/trades` `[]`;
+  `/api/portfolio/equity` `[]`; `/api/concentration/status` 200;
+  `/api/jobs/status` all idle. **Empty meant empty, not a crash.**
+- mutation refused: `POST /api/paper/open` returned
+  *"prepare_entry is an economic mutation and the runtime is in
+  EVIDENCE_ONLY"*, and the book was unchanged
+
+Boot-time writes audited: exactly two tables changed, both non-economic —
+`instrument_quote_samples` 0→1975 (read-only venue quote evidence) and
+`wallet_registry` 0→15 (seed bootstrap). Every economic invariant stayed 0.
+
+**One honest note on the mutation probe.** The first attempt returned 500
+from a `TypeError`, not from the guard — `market_assets` crosses without its
+price column by design, and `paper_open` does `float(a.price)` with no NULL
+check. That first result proved nothing and is not counted; the probe was
+repeated with an explicit price so the refusal came from the guard itself.
+The unguarded `float(a.price)` is a real if minor defect, left as found.
+
+### A gap this closed
+
+Auditing the boot writes showed `instrument_quote_samples`,
+`decision_observations` and `decision_observation_outcomes` were
+unclassified — they exist in the CURRENT schema but not in the legacy source,
+so the first cutover never had to classify them. The next run happens against
+a book that HAS them, and an unclassified table refuses. Now classified.
+
+### Live state
+
+- evidence collector RUNNING, pid unchanged, holding `forward_evidence.db`
+  and **not** the new book — its explicit `JARVIS_DB_PATH` still beats the
+  default
+- campaign `FORWARD_EVIDENCE_20260818T075321Z`, 1 epoch, `EVIDENCE_ONLY`
+- scheduler OFF; real orders 0; transfers 0; paper trades 0
+- `REAL_PROVIDER_READ_ONLY` still **UNAVAILABLE** — no fallback was used and
+  none is permitted; provider readiness is the next gate, not this one
+
+### Verification
+
+Full pytest and offline `unshare -rn`, canonical tree, both **TRUE exit 0**,
+3,910 passed / 16 skipped / 204 subtests — before and after the cutover.
+
+One real bug was found by the offline run and fixed before the cutover: the
+archive read-only gate asserted "a write was refused", but `unshare -r` maps
+the user to uid 0 and **root bypasses permission bits**. A successful write
+there says nothing about permissions and everything about privilege. The gate
+now asserts the mode bits, with the write probe recorded as corroboration
+that is meaningful only unprivileged.
+
+### THE ROLLBACK BOUNDARY — read this before the next continuation
+
+Rollback is **still possible right now**, because this continuation created
+zero canonical economic rows after promotion. Restoring
+`jarvis_legacy_original.db` to the active path would lose nothing.
+
+**Once a later continuation permits canonical economic mutation, that stops
+being true.** New canonical trades are facts that exist only in the new book;
+rolling back would discard them. After the first canonical economic row is
+written, the old economy is history and only history.
+
+### Not done, deliberately
+
+FULL_VIRTUAL is not active. The scheduler is not active. Live money is not
+active. Automatic paper trading is disarmed. The next continuation is the
+activation gate, and it needs a verified provider book first.

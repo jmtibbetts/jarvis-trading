@@ -191,3 +191,148 @@ class ThresholdReconciliationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class T0EdgeArtifactTests(unittest.TestCase):
+    """C0.3 — the stored numbers are the ones the decision actually used."""
+
+    def setUp(self):
+        _clear()
+
+    def _edge(self, net=0.12, lower=0.07, thr=0.05, robust=True):
+        from lib.decision_types import MeasuredEdge
+        return MeasuredEdge.from_expectancy({
+            "verdict": "TRADE", "robust": robust, "threshold_used": thr,
+            "net": {"net_expected_r": net},
+            "net_lower": {"net_expected_r": lower},
+            "costs": {"cost_r": 0.09},
+            "expectancy": {"bucket": "crypto/15m", "raw_sample": 40,
+                           "sample": 38.5, "gross_expected_r": 0.21},
+        })
+
+    def test_expectancy_freezes_the_threshold_into_its_result(self):
+        from lib.expectancy import MIN_NET_R
+        e = self._edge()
+        self.assertAlmostEqual(e.threshold_used, 0.05, places=6)
+        self.assertAlmostEqual(e.threshold_used, MIN_NET_R, places=6)
+
+    def test_original_net_is_stored_not_recomputed_from_gross_minus_cost(self):
+        """gross - cost would give 0.12; the artifact says 0.99. Artifact wins."""
+        e = self._edge(net=0.99)
+        DF.observe_terminal_refusal(_sig("sig-net"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=e)
+        r = _rows()[0]
+        self.assertAlmostEqual(r["expected_net_r"], 0.99, places=6)
+
+    def test_lower_bound_and_robust_survive_into_the_row(self):
+        DF.observe_terminal_refusal(_sig("sig-lb"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0,
+                                    edge=self._edge(lower=0.07, robust=True))
+        r = _rows()[0]
+        self.assertAlmostEqual(r["net_expected_r_lower"], 0.07, places=6)
+        self.assertTrue(r["robust"])
+
+    def test_point_pass_with_failing_lower_bound_is_not_robust(self):
+        e = self._edge(net=0.12, lower=0.01, robust=False)
+        DF.observe_terminal_refusal(_sig("sig-unc"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=e)
+        r = _rows()[0]
+        self.assertFalse(r["robust"])
+        self.assertGreater(r["distance_to_threshold_r"], 0)          # point clears
+        self.assertLess(r["robust_distance_to_threshold_r"], 0)      # bound does not
+
+    def test_distances_come_from_the_stored_threshold(self):
+        DF.observe_terminal_refusal(_sig("sig-d"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=self._edge())
+        r = _rows()[0]
+        self.assertAlmostEqual(r["distance_to_threshold_r"], 0.07, places=6)
+        self.assertAlmostEqual(r["robust_distance_to_threshold_r"], 0.02, places=6)
+
+    def test_expectancy_provenance_is_kept(self):
+        DF.observe_terminal_refusal(_sig("sig-prov"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=self._edge())
+        r = _rows()[0]
+        self.assertEqual(r["expectancy_bucket"], "crypto/15m")
+        self.assertEqual(r["expectancy_raw_sample"], 40)
+        self.assertEqual(r["expectancy_verdict"], "TRADE")
+
+    def test_a_measured_edge_is_diagnostic_not_binding_by_default(self):
+        """The paper path never used the edge gate to refuse anything."""
+        DF.observe_terminal_refusal(_sig("sig-role"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=self._edge())
+        self.assertEqual(_rows()[0]["edge_gate_role"], DO.EDGE_DIAGNOSTIC)
+
+    def test_no_edge_at_all_is_not_evaluated_never_diagnostic(self):
+        DF.observe_terminal_refusal(_sig("sig-none"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0)
+        self.assertEqual(_rows()[0]["edge_gate_role"], DO.EDGE_NOT_EVALUATED)
+
+    def test_diagnostic_edge_must_not_be_reported_as_binding_edge(self):
+        """Phase C may not blame EDGE for a refusal edge never caused."""
+        DF.observe_terminal_refusal(_sig("sig-blame"), decision="NO_TRADE",
+                                    reason=DF.AI_REJECTED_ENTRY,
+                                    decision_price=100.0, edge=self._edge())
+        r = _rows()[0]
+        self.assertEqual(r["edge_gate_role"], DO.EDGE_DIAGNOSTIC)
+        self.assertNotEqual(r["binding_constraint"], DO.EDGE)
+
+    def test_the_edge_mapping_exists_in_exactly_one_place(self):
+        import pathlib
+        src = pathlib.Path("lib/decision_funnel.py").read_text()
+        self.assertNotIn("def _edge_fields", src)
+
+
+class RemainingFunnelHoleTests(unittest.TestCase):
+    """C0.4 — the two paths that still deleted candidates."""
+
+    def setUp(self):
+        _clear()
+
+    def tearDown(self):
+        os.environ.pop("JARVIS_RUNTIME_MODE", None)
+
+    def test_the_silent_open_symbol_prefilter_is_gone(self):
+        """The list comprehension that deleted already-open candidates."""
+        import pathlib
+        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        self.assertNotIn("not in open_syms]", src)
+
+    def test_already_open_is_account_state_not_a_thesis_verdict(self):
+        DF.observe_terminal_refusal(_sig("sig-open"), decision="ABSTAIN",
+                                    reason=DF.ALREADY_OPEN)
+        r = _rows()[0]
+        self.assertEqual(r["binding_reason"], DF.ALREADY_OPEN)
+        self.assertNotEqual(r["binding_constraint"], DO.EDGE)
+
+    def test_evidence_only_still_evaluates_an_already_held_symbol(self):
+        """667 legacy positions must not filter a clean research epoch."""
+        import ast
+        import pathlib
+        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        self.assertIn("if sym in open_syms and not RM.is_evidence_only():", src)
+        ast.parse(src)
+
+    def test_auto_trade_disabled_leaves_evidence_in_full_virtual(self):
+        import pathlib
+        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        self.assertIn("AUTO_TRADE_DISABLED", src)
+        self.assertIn("if not auto_trade_enabled and not _evidence_only:", src)
+
+    def test_do_not_trade_does_not_mean_do_not_think(self):
+        """In EVIDENCE_ONLY the economic switch must not empty the list."""
+        import pathlib
+        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        self.assertNotIn(
+            "sig_list = _get_pending_signals(db) if auto_trade_enabled else []",
+            src)
+
+
+if __name__ == "__main__":
+    unittest.main()

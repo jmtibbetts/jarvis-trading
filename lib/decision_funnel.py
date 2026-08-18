@@ -49,7 +49,8 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
                              decision_price=None, gates: dict | None = None,
                              source: str | None = None,
                              venue_failure: bool = False,
-                             edge=None) -> str | None:
+                             edge=None, edge_gate_role: str | None = None
+                             ) -> str | None:
     """Persist the ONE observation for a candidate that ends here.
 
     Returns the observation id, or None if it could not be recorded. Never
@@ -68,7 +69,7 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
             decision_price=decision_price, gates=dict(gates or {}),
             source=src, venue_data_failure=venue_failure,
             execution_state=DO.EXEC_NOT_APPLICABLE,
-            **_edge_fields(edge))
+            edge=edge, edge_gate_role=edge_gate_role)
         return DO.record(row)
     except Exception as e:                    # never break the cycle
         logger.warning("[DecisionFunnel] could not record %s refusal for %s: %s",
@@ -76,24 +77,7 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
         return None
 
 
-def _edge_fields(edge) -> dict:
-    """Carry the ORIGINAL T0 edge measurement, never a later recomputation.
-
-    `MeasuredEdge` is produced once while the decision is being made. Reading
-    it here — rather than rerunning expectancy when the row is written — is
-    what makes the stored numbers what JARVIS actually knew at T0 instead of
-    what today's model would say about yesterday's market.
-    """
-    if edge is None:
-        return {}
-    def g(*names):
-        for n in names:
-            v = getattr(edge, n, None) if not isinstance(edge, dict) else edge.get(n)
-            if v is not None:
-                return v
-        return None
-    return {
-        "gross_expected_r": g("gross_expected_r"),
-        "estimated_cost_r": g("expected_cost_r", "estimated_cost_r"),
-        "edge_threshold_r": g("threshold_used", "min_net_r"),
-    }
+# `_edge_fields` was removed: `decision_observation.build(edge=...)` now owns
+# the single mapping from the typed artifact to columns. Two copies of that
+# mapping would drift, and the whole point of C0.3 is that the stored numbers
+# are the ones the decision actually used.

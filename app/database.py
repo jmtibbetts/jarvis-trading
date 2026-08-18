@@ -2526,6 +2526,25 @@ class DecisionObservation(Base):
     edge_threshold_r = Column(Float)
     distance_to_threshold_r = Column(Float)
 
+    # ── UNCERTAINTY IS A SEPARATE VERDICT, NOT A WEAKER TRADE (C0.3) ─────
+    # A point estimate that clears the bar while its lower confidence bound
+    # does not is an edge inside the noise. Storing only the point value
+    # would let that case be counted later as an ordinary TRADE, which is
+    # exactly the distinction `gate.decide` goes to the trouble of making.
+    net_expected_r_lower = Column(Float)
+    robust_distance_to_threshold_r = Column(Float)
+    robust = Column(Boolean)
+
+    # WAS THE EDGE A GATE, OR JUST A READING? The paper path has never used
+    # the edge gate as binding, so an edge measured there did NOT cause the
+    # refusal. Recording the role stops Phase C reporting EDGE as the
+    # binding constraint for a decision that edge never actually blocked.
+    edge_gate_role = Column(String)     # BINDING | DIAGNOSTIC | NOT_EVALUATED
+    expectancy_verdict = Column(String)
+    expectancy_bucket = Column(String)
+    expectancy_sample = Column(Float)
+    expectancy_raw_sample = Column(Integer)
+
     # ── risk, from the real authorities ──────────────────────────────────
     risk_budget_usd  = Column(Float)
     authorized_risk_usd = Column(Float)

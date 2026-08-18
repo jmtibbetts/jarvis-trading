@@ -344,6 +344,11 @@ def evaluate(signal: dict, *, hold_hours: float | None = None,
         "net_lower": net_lower,
         "robust": bool(net_lower.get("net_expected_r") is not None
                        and net_lower["net_expected_r"] >= MIN_NET_R),
+        # THE THRESHOLD TRAVELS WITH THE MEASUREMENT. Without this the only
+        # way to know what bar a past decision was judged against is to read
+        # today's constant — which silently reinterprets old decisions every
+        # time the policy moves. Frozen here, at T0, on purpose.
+        "threshold_used": MIN_NET_R,
     }
 
 

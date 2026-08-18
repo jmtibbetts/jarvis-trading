@@ -1003,6 +1003,8 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
 def run():
     logger.info("[PaperTrading] v5.0 Starting paper trading job...")
     from lib import decision_funnel as DF
+    from lib import decision_observation as DO_CONST
+    from lib import runtime_mode as RM
     from lib.canonical_entry import open_canonical_position
     from lib.paper_engine import mark_to_market, get_paper_summary
 
@@ -1036,8 +1038,24 @@ def run():
     )
 
     # ── Step 3: Evaluate and open new positions ───────────────────────────────
+    # EVIDENCE_ONLY MUST NOT BE SILENCED BY AN ECONOMIC SWITCH (C0.4).
+    # "do not trade" is not "do not think": nothing economic can happen in
+    # evidence-only mode, so the candidates are still evaluated and still
+    # observed. In FULL_VIRTUAL the switch really does block execution, and
+    # that blocking is itself recorded rather than deleting the candidate.
+    from lib import runtime_mode as _RM
+    _evidence_only = _RM.is_evidence_only()
     with get_db() as db:
-        sig_list = _get_pending_signals(db) if auto_trade_enabled else []
+        sig_list = (_get_pending_signals(db)
+                    if (auto_trade_enabled or _evidence_only) else
+                    _get_pending_signals(db))
+    if not auto_trade_enabled and not _evidence_only:
+        from lib import decision_funnel as _DF
+        for _s in sig_list:
+            _DF.observe_terminal_refusal(
+                _s, decision="ABSTAIN", reason=_DF.AUTO_TRADE_DISABLED,
+                decision_price=None)
+        sig_list = []
 
     if not auto_trade_enabled:
         logger.info(
@@ -1045,8 +1063,11 @@ def run():
             "hard stop-loss/take-profit checks remain active"
         )
 
+    # THE SILENT PRE-FILTER IS GONE (C0.4). Dropping already-open symbols
+    # here meant an ACCOUNT_STATE refusal never became a decision, and in
+    # EVIDENCE_ONLY it would have let the 667 legacy positions act as a
+    # hidden research filter on a supposedly clean prospective epoch.
     open_syms = _get_open_paper_symbols()
-    sig_list = [s for s in sig_list if s["asset_symbol"] not in open_syms]
 
     if not sig_list:
         logger.info("[PaperTrading] No new signals to evaluate")
@@ -1061,6 +1082,31 @@ def run():
 
     for sig in sig_list:
         sym = sig["asset_symbol"]
+
+        # THE T0 EDGE IS MEASURED ONCE, HERE, and the same object is handed
+        # to whichever terminal route this candidate takes. Measured, not
+        # binding: this path has never used the edge gate to refuse, so
+        # calling it BINDING would report EDGE as the cause of refusals it
+        # never caused. Adding it as a gate would also change FULL_VIRTUAL
+        # behaviour, which C0 is explicitly not allowed to do.
+        edge, edge_role = None, DO_CONST.EDGE_NOT_EVALUATED
+        try:
+            from lib.gate import decide as _decide
+            edge = _decide(sig).edge
+            if edge is not None:
+                edge_role = DO_CONST.EDGE_DIAGNOSTIC
+        except Exception as _e:
+            logger.debug(f"[PaperTrading] edge unavailable for {sym}: {_e}")
+
+        if sym in open_syms and not RM.is_evidence_only():
+            # An open position is an ACCOUNT_STATE fact, not a verdict on
+            # the thesis. In EVIDENCE_ONLY nothing economic can happen, so
+            # the thesis is still evaluated rather than filtered away.
+            DF.observe_terminal_refusal(
+                sig, decision="ABSTAIN", reason=DF.ALREADY_OPEN,
+                decision_price=None, edge=edge, edge_gate_role=edge_role)
+            continue
+
         price = _get_current_price(sym, prices) or sig.get("entry_price") or 0.0
         if not price or price <= 0:
             # A CANDIDATE THAT DIES HERE IS STILL A DECISION. Counting it
@@ -1069,7 +1115,8 @@ def run():
             logger.warning(f"[PaperTrading] No price for {sym} — skipping")
             DF.observe_terminal_refusal(
                 sig, decision="ABSTAIN", reason=DF.NO_DECISION_PRICE,
-                decision_price=None, venue_failure=True)
+                decision_price=None, venue_failure=True,
+                edge=edge, edge_gate_role=edge_role)
             skipped_no_price += 1
             continue
 
@@ -1085,7 +1132,7 @@ def run():
             # line before the observation was written.
             DF.observe_terminal_refusal(
                 sig, decision="NO_TRADE", reason=DF.AI_REJECTED_ENTRY,
-                decision_price=price,
+                decision_price=price, edge=edge, edge_gate_role=edge_role,
                 gates={"ai_entry_review": "FAIL"})
             skipped_ai += 1
             continue
@@ -1106,7 +1153,8 @@ def run():
         #
         # `price` survives as decision_price, which is what makes the
         # slippage measurable.
-        result = open_canonical_position(sig, decision_price=price)
+        result = open_canonical_position(sig, decision_price=price,
+                                         edge=edge, edge_gate_role=edge_role)
         if result.get("ok"):
             executed += 1
         elif result.get("venue_failure"):

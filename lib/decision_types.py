@@ -89,6 +89,29 @@ class MeasuredEdge:
     robust: bool = False                     # lower bound clears the bar too
     verdict: str = "UNKNOWN"                 # TRADE | NO_TRADE | UNKNOWN
     reason: str | None = None
+    # The bar this measurement was actually judged against, captured when
+    # the judgement happened. Reading a module constant later would answer
+    # "what is the bar now", which is a different question.
+    threshold_used: float | None = None
+
+    @property
+    def distance_to_threshold_r(self) -> float | None:
+        """How far the POINT estimate cleared or missed by."""
+        if self.net_expected_r is None or self.threshold_used is None:
+            return None
+        return round(self.net_expected_r - self.threshold_used, 6)
+
+    @property
+    def robust_distance_to_threshold_r(self) -> float | None:
+        """The same for the LOWER BOUND — the uncertainty question.
+
+        A point pass with a failing lower bound is not a weaker TRADE; it
+        is a different verdict, and keeping the two distances apart is what
+        stops that distinction being averaged away later.
+        """
+        if self.net_expected_r_lower is None or self.threshold_used is None:
+            return None
+        return round(self.net_expected_r_lower - self.threshold_used, 6)
 
     @classmethod
     def from_expectancy(cls, ev: dict) -> "MeasuredEdge":
@@ -110,6 +133,7 @@ class MeasuredEdge:
             net_expected_r=_f(net.get("net_expected_r")),
             net_expected_r_lower=_f(net_lower.get("net_expected_r")),
             robust=bool(ev.get("robust")),
+            threshold_used=_f(ev.get("threshold_used")),
             verdict=str(ev.get("verdict") or "UNKNOWN"),
             reason=ev.get("reason"),
         )

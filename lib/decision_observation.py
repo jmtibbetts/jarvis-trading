@@ -71,6 +71,11 @@ _LATE_LIFECYCLE_FIELDS = ("execution_id", "position_id", "settlement_at",
                           "settlement_failure_reason")
 
 # ── Which KIND of thing stopped the trade. ───────────────────────────────
+# What role the edge measurement actually played in THIS decision.
+EDGE_BINDING = "BINDING"           # the edge gate could and did refuse
+EDGE_DIAGNOSTIC = "DIAGNOSTIC"     # measured for the record; refused nothing
+EDGE_NOT_EVALUATED = "NOT_EVALUATED"
+
 EDGE = "EDGE"                 # the setup did not promise enough
 COST = "COST"                 # edge cleared, costs ate it
 RISK = "RISK"                 # the account could not carry it
@@ -306,7 +311,8 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
           execution_id=None, position_id=None, gates=None,
           edge_threshold_r=None, gross_expected_r=None,
           estimated_cost_r=None, venue_data_failure=False,
-          decision_at=None, execution_state=None) -> dict:
+          decision_at=None, execution_state=None,
+          edge=None, edge_gate_role=None) -> dict:
     """Assemble the row from the artifacts the decision used. No re-deriving.
 
     Every argument is an object the decision already produced. Where one is
@@ -446,6 +452,30 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
                               "snapshot_count", "feed_products")
                              if prov.get(k) is not None},
     })
+    # ── THE ORIGINAL T0 EDGE, COPIED, NEVER RECOMPUTED (C0.3) ────────────
+    #
+    # `net_expected_r` used to be derived here as gross - cost whenever both
+    # happened to be present. That is a reconstruction, and it silently
+    # disagrees with the number the decision actually used the moment the
+    # cost model changes. When the typed artifact exists its own values win,
+    # and the derivation survives only as a fallback for older callers.
+    if edge is not None:
+        row["gross_expected_r"] = _f(getattr(edge, "gross_expected_r", None))
+        row["estimated_cost_r"] = _f(getattr(edge, "expected_cost_r", None))
+        row["expected_net_r"] = _f(getattr(edge, "net_expected_r", None))
+        row["net_expected_r_lower"] = _f(getattr(edge, "net_expected_r_lower", None))
+        row["edge_threshold_r"] = _f(getattr(edge, "threshold_used", None))
+        row["distance_to_threshold_r"] = _f(getattr(edge, "distance_to_threshold_r", None))
+        row["robust_distance_to_threshold_r"] = _f(
+            getattr(edge, "robust_distance_to_threshold_r", None))
+        row["robust"] = bool(getattr(edge, "robust", False))
+        row["expectancy_verdict"] = getattr(edge, "verdict", None)
+        row["expectancy_bucket"] = getattr(edge, "bucket", None)
+        row["expectancy_sample"] = _f(getattr(edge, "sample", None))
+        raw = getattr(edge, "raw_sample", None)
+        row["expectancy_raw_sample"] = int(raw) if raw is not None else None
+    row["edge_gate_role"] = edge_gate_role or (
+        EDGE_DIAGNOSTIC if edge is not None else EDGE_NOT_EVALUATED)
     return row
 
 

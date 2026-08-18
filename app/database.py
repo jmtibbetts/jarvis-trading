@@ -2576,6 +2576,178 @@ class DecisionObservation(Base):
     )
 
 
+class DecisionOutcome(Base):
+    """WHAT THE MARKET DID AFTER A DECISION. Evidence — never a trade.
+
+    A market JARVIS declines to trade keeps moving, and that movement is
+    free information about the quality of the refusal. Phase A stopped
+    discarding the decision; this table stops discarding what happened
+    next.
+
+    THIS IS NOT AN ExecutionResult, a PaperTrade or a RealizedOutcome.
+    Nothing here moves cash, opens a position, increments a counter or
+    votes in learning. Rows are forward MARKET EVIDENCE attached to a
+    decision, and a decision that was refused has no fill to calibrate —
+    so this evidence is barred from fill/slippage calibration and from
+    portfolio P&L by construction, not by convention.
+
+    ONE ROW PER (observation_id, horizon). A retried observer finalises
+    the SAME row; it never appends a second sample of one horizon, which
+    would let one market event vote twice.
+
+    MISSING IS NULL, NEVER ZERO. `mfe_pct = 0.0` claims the market did not
+    move in our favour at all — an extremely strong and usually false
+    claim. A horizon with no interval evidence carries NULL extrema and
+    says INSUFFICIENT_RANGE_DATA, because a single endpoint quote at
+    due_at cannot know what happened between T0 and then.
+    """
+    __tablename__ = "decision_observation_outcomes"
+
+    # ── identity ─────────────────────────────────────────────────────────
+    id             = Column(String, primary_key=True, default=new_id)
+    observation_id = Column(String, index=True)
+    horizon        = Column(String)          # "5m" | "1h" | ...
+    horizon_min    = Column(Integer)
+    # DUE FROM T0, NEVER FROM THE OBSERVER'S WAKE-UP. An observer that
+    # starts late must still measure the horizon the decision actually
+    # had, or every outage silently lengthens the thing being measured.
+    due_at         = Column(String, index=True)
+    decision_at    = Column(String)          # T0, copied for audit
+    observed_at    = Column(String)          # when this row was resolved
+
+    # ── product identity, kept apart exactly as at T0 (A9) ───────────────
+    symbol         = Column(String, index=True)
+    asset_class    = Column(String)
+    product        = Column(String, index=True)
+    venue          = Column(String)
+    instrument_id  = Column(String)
+    market_data_source = Column(String)      # whose book answered
+
+    # ── what the decision was, carried forward so resolution re-derives
+    #    nothing from today's code ────────────────────────────────────────
+    side            = Column(String)
+    reference_price = Column(Float)          # T0 decision_price
+    intended_stop   = Column(Float)
+    intended_target = Column(Float)
+
+    # ── the checkpoint AT the horizon ────────────────────────────────────
+    bid            = Column(Float)
+    ask            = Column(Float)
+    midpoint       = Column(Float)
+    # LONG closes by SELLING into the bid; SHORT closes by BUYING the ask.
+    # The midpoint is market direction and is NOT an executable exit.
+    side_executable_reference = Column(Float)
+    quote_status   = Column(String)
+    quote_source   = Column(String)
+    quote_age_ms   = Column(Float)
+    source_timestamp = Column(String)
+
+    # ── returns ──────────────────────────────────────────────────────────
+    midpoint_return_pct = Column(Float)
+    direction_adjusted_mid_return_pct = Column(Float)
+    side_reference_return_pct = Column(Float)
+
+    # ── range, ONLY from interval evidence ───────────────────────────────
+    mfe_pct        = Column(Float)
+    mae_pct        = Column(Float)
+    mfe_r          = Column(Float)
+    mae_r          = Column(Float)
+
+    # ── levels. NULLABLE BOOLEANS: None is "not established", which is a
+    #    different fact from False, "established as not touched". ─────────
+    stop_touched        = Column(Boolean)
+    stop_first_seen_at  = Column(String)
+    target_touched      = Column(Boolean)
+    target_first_seen_at = Column(String)
+    touch_order         = Column(String)   # TARGET_FIRST | STOP_FIRST |
+                                           # AMBIGUOUS_INTRABAR | NEITHER
+
+    # ── evidence quality, with the MEASURES and not merely a label ───────
+    data_quality     = Column(String)
+    range_quality    = Column(String)
+    sample_count     = Column(Integer)
+    max_sample_gap_s = Column(Float)
+    first_sample_at  = Column(String)
+    last_sample_at   = Column(String)
+
+    # ── lifecycle. Monotonic; terminal is terminal. ──────────────────────
+    status         = Column(String, index=True)
+    status_reason  = Column(String)
+
+    # ── provenance ───────────────────────────────────────────────────────
+    observer_version = Column(String)
+    range_source     = Column(String)
+    provenance       = Column(Text)
+
+    __table_args__ = (
+        # IDEMPOTENCY. One observation, one row per horizon.
+        Index("uq_decision_outcome_horizon", "observation_id", "horizon",
+              unique=True),
+        # THE DUE QUERY. The observer must never scan every observation
+        # every cycle; it asks only for pending work that is actually due.
+        Index("ix_decision_outcome_due", "status", "due_at"),
+    )
+
+
+class InstrumentQuoteSample(Base):
+    """SHARED, TIMESTAMPED top-of-book evidence for ONE instrument.
+
+    THE POINT IS THE SHARING. Two hundred pending BTC-perp observations
+    describe two hundred decisions but only ONE market. Sampling per
+    decision would store the same book two hundred times and scale with
+    decision volume instead of with the number of instruments that exist.
+    Evidence is therefore keyed by INSTRUMENT AND TIME, and every
+    observation whose interval overlaps these rows reads the same ones.
+    Adding a decision costs nothing; only a new instrument costs anything.
+
+    WHY TIMESTAMPED SAMPLES AND NOT HIGH/LOW BUCKETS. Bucketed extrema are
+    cheaper and can answer "was the target reached". They cannot answer
+    "was the target reached BEFORE the stop", because ordering inside a
+    bucket is erased by construction — and that ordering is the difference
+    between a win and a loss. It cannot be recovered by precomputing
+    crossings either: every observation carries its OWN stop and target,
+    so a shared market row has no way to know which levels will matter to
+    a decision that has not been made yet. Chronology is therefore kept,
+    and compaction into aggregates is left available for after all
+    dependent horizons are final.
+
+    SAMPLING RULE: change-triggered with a heartbeat floor. A row is
+    written when the top of book actually MOVES, and at least once per
+    heartbeat interval while the feed is healthy even when it does not.
+    That floor is what separates the two situations a naive sampler
+    confuses: a quiet market on a healthy feed keeps producing rows, while
+    a disconnected feed produces none. Without it, calm and outage look
+    identical in the evidence — and only one of them should reduce the
+    quality of a measurement.
+    """
+    __tablename__ = "instrument_quote_samples"
+
+    id            = Column(String, primary_key=True, default=new_id)
+    product       = Column(String)
+    venue         = Column(String)
+    symbol        = Column(String)
+    instrument_id = Column(String)
+    market_data_source = Column(String)
+
+    observed_at = Column(String)   # when this desk saw it
+    source_at   = Column(String)   # the venue's own timestamp, where given
+
+    bid = Column(Float)
+    ask = Column(Float)
+    mid = Column(Float)
+
+    # Why this row exists: CHANGE (the book moved) or HEARTBEAT (it did
+    # not, and the feed was healthy enough to say so).
+    sample_reason = Column(String)
+
+    __table_args__ = (
+        # THE WINDOW QUERY. Every read is "this instrument, between these
+        # two times", so the index leads with identity and ends with time.
+        Index("ix_quote_sample_window", "symbol", "product", "venue",
+              "observed_at"),
+    )
+
+
 class CandidateSignal(Base):
     """Every setup the system CONSIDERED — including the ones it refused.
 

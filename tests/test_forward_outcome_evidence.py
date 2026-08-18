@@ -37,10 +37,16 @@ def _clear():
 
 def _obs(db, *, oid, side="long", product=SPOT, venue=KRAKEN,
          symbol="BTC/USD", decision="NO_TRADE", t0=None, timeframe="15m",
-         bid=99.5, ask=100.5, stop=95.0, target=110.0, price=100.0):
+         bid=99.5, ask=100.5, stop=95.0, target=110.0, price=100.0,
+         instrument_id=None):
+    # A perpetual decision without its listed contract is now refused, so
+    # perp fixtures must name one exactly as the live router does.
+    if instrument_id is None and product == PERP:
+        instrument_id = symbol
     row = DecisionObservation(
         observation_id=oid, symbol=symbol, asset_class="crypto",
         product=product, venue=venue, side=side, timeframe=timeframe,
+        instrument_id=instrument_id,
         decision_at=(t0 or datetime.now(timezone.utc)).isoformat(),
         decision_price=price, bid=bid, ask=ask,
         intended_stop=stop, intended_target=target,
@@ -72,13 +78,16 @@ class _D(dict):
             raise AttributeError(k) from e
 
 
-def _fill(symbol, product, venue, t0, prices, *, step_s=60):
+def _fill(symbol, product, venue, t0, prices, *, step_s=60,
+          instrument_id=None):
     """Write a chronological series of (bid, ask) samples from t0."""
+    if instrument_id is None and product == PERP:
+        instrument_id = symbol
     for i, (b, a) in enumerate(prices):
+        snap = _snap(b, a, symbol=symbol, product=product, venue=venue)
+        snap.instrument_id = instrument_id
         RC.record_sample(symbol=symbol, product=product, venue=venue,
-                         snap=_snap(b, a, symbol=symbol, product=product,
-                                    venue=venue),
-                         at=t0 + timedelta(seconds=i * step_s))
+                         snap=snap, at=t0 + timedelta(seconds=i * step_s))
 
 
 class HorizonSchedulingTests(unittest.TestCase):

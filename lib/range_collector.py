@@ -66,7 +66,30 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-RANGE_COLLECTOR_VERSION = "range_collector_v2_samples"
+RANGE_COLLECTOR_VERSION = "range_collector_v3_instrument_key"
+
+# ── EXACT-CONTRACT PRODUCTS ──────────────────────────────────────────────
+#
+# A perpetual's economics belong to a LISTED CONTRACT, not to a display
+# symbol. "BTC/USD perp" names a thesis; PBTCUCZ50 is the thing whose book
+# actually determines the P&L. Two contracts can share a symbol, a venue and
+# a product and still be different markets.
+#
+# THE RULE THAT MATTERS: for these products a NULL instrument_id means the
+# contract is UNKNOWN. It never means "any contract". Anonymous evidence
+# cannot become exact-contract evidence merely because no other contract
+# happened to be present — that is how a resolver ends up accidentally
+# right, which is indistinguishable from correct until the day it is not.
+_EXACT_INSTRUMENT_PRODUCTS = frozenset({"CRYPTO_PERP"})
+
+
+def requires_exact_instrument(product: str | None) -> bool:
+    """Whether evidence for this product must match a specific contract.
+
+    One authority, consulted by every seam, so the rule cannot be enforced
+    in six places and quietly forgotten in the seventh.
+    """
+    return str(product or "") in _EXACT_INSTRUMENT_PRODUCTS
 
 # While the feed is healthy, write at least one row this often even if the
 # book has not moved. This is the floor that makes "quiet" legible.
@@ -167,7 +190,10 @@ def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
     if bid is None or ask is None:
         return None
     at = at or _now()
-    key = (product, venue, symbol)
+    # SEAM 1. Contract is part of the stream identity: two contracts sharing
+    # a visible symbol must keep independent change/heartbeat state, or one
+    # suppresses the other's samples.
+    key = (product, venue, symbol, instrument_id)
     prev = _LAST.get(key)
     reason = _should_record(*(prev or (None, None, None)), bid, ask, at,
                             heartbeat_s)
@@ -233,13 +259,23 @@ def record_sample(*, symbol: str, product: str, venue: str, snap,
         return False
 
     at = at or _now()
+    instrument_id = getattr(snap, "instrument_id", None)
+    if requires_exact_instrument(product) and not instrument_id:
+        # SEAM 7 (producer half). An exact product whose snapshot carries no
+        # contract cannot be filed under one.
+        return False
+
     with get_db() as db:
-        prev = (db.query(InstrumentQuoteSample)
-                  .filter(InstrumentQuoteSample.product == product,
-                          InstrumentQuoteSample.venue == venue,
-                          InstrumentQuoteSample.symbol == symbol)
-                  .order_by(InstrumentQuoteSample.observed_at.desc())
-                  .first())
+        # SEAM 2. The previous sample must describe the SAME stream. Comparing
+        # a PBTCUCZ50 quote against an anonymous or different-contract row
+        # corrupts both the data and the CHANGE/HEARTBEAT classification.
+        q = (db.query(InstrumentQuoteSample)
+               .filter(InstrumentQuoteSample.product == product,
+                       InstrumentQuoteSample.venue == venue,
+                       InstrumentQuoteSample.symbol == symbol))
+        if requires_exact_instrument(product):
+            q = q.filter(InstrumentQuoteSample.instrument_id == instrument_id)
+        prev = q.order_by(InstrumentQuoteSample.observed_at.desc()).first()
         reason = _should_record(
             prev.bid if prev else None, prev.ask if prev else None,
             _parse(prev.observed_at) if prev else None,
@@ -249,7 +285,7 @@ def record_sample(*, symbol: str, product: str, venue: str, snap,
 
         db.add(InstrumentQuoteSample(
             product=product, venue=venue, symbol=symbol,
-            instrument_id=getattr(snap, "instrument_id", None),
+            instrument_id=instrument_id,
             market_data_source=getattr(snap, "source", None),
             observed_at=at.isoformat(),
             source_at=getattr(snap, "venue_event_at", None),
@@ -277,6 +313,9 @@ class Sample:
     ask: float
     mid: float
     reason: str | None = None
+    # Self-describing on purpose: an acceptance proof should not have to
+    # trust that some SQL WHERE clause upstream was written correctly.
+    instrument_id: str | None = None
 
 
 @dataclass
@@ -286,6 +325,7 @@ class RangeEvidence:
     symbol: str
     product: str
     venue: str
+    instrument_id: str | None
     start: str
     end: str
 
@@ -318,40 +358,51 @@ class RangeEvidence:
 
 
 def samples_between(*, symbol: str, product: str, venue: str,
-                    start, end) -> list[Sample]:
-    """Chronological shared samples in [start, end], detached from the DB."""
+                    start, end, instrument_id: str | None = None
+                    ) -> list[Sample]:
+    """Chronological shared samples in [start, end], detached from the DB.
+
+    SEAM 3. For an exact-contract product the instrument is REQUIRED and is
+    filtered in SQL. Omitting it returns nothing rather than everything:
+    a missing contract is unknown identity, never a wildcard.
+    """
     from app.database import InstrumentQuoteSample, get_db
 
     s, e = _parse(start), _parse(end)
     if s is None or e is None:
         return []
+    if requires_exact_instrument(product) and not instrument_id:
+        return []
     with get_db() as db:
-        rows = (db.query(InstrumentQuoteSample.observed_at,
-                         InstrumentQuoteSample.bid,
-                         InstrumentQuoteSample.ask,
-                         InstrumentQuoteSample.mid,
-                         InstrumentQuoteSample.sample_reason)
-                  .filter(InstrumentQuoteSample.product == product,
-                          InstrumentQuoteSample.venue == venue,
-                          InstrumentQuoteSample.symbol == symbol,
-                          InstrumentQuoteSample.observed_at >= s.isoformat(),
-                          InstrumentQuoteSample.observed_at <= e.isoformat())
-                  .order_by(InstrumentQuoteSample.observed_at.asc())
-                  .all())
+        q = (db.query(InstrumentQuoteSample.observed_at,
+                      InstrumentQuoteSample.bid,
+                      InstrumentQuoteSample.ask,
+                      InstrumentQuoteSample.mid,
+                      InstrumentQuoteSample.sample_reason,
+                      InstrumentQuoteSample.instrument_id)
+               .filter(InstrumentQuoteSample.product == product,
+                       InstrumentQuoteSample.venue == venue,
+                       InstrumentQuoteSample.symbol == symbol,
+                       InstrumentQuoteSample.observed_at >= s.isoformat(),
+                       InstrumentQuoteSample.observed_at <= e.isoformat()))
+        if requires_exact_instrument(product):
+            q = q.filter(InstrumentQuoteSample.instrument_id == instrument_id)
+        rows = q.order_by(InstrumentQuoteSample.observed_at.asc()).all()
     out = []
-    for at, bid, ask, mid, reason in rows:
+    for at, bid, ask, mid, reason, instr in rows:
         t = _parse(at)
         if t is None or bid is None or ask is None:
             continue
         out.append(Sample(at=t, bid=float(bid), ask=float(ask),
                           mid=float(mid) if mid is not None
                           else (float(bid) + float(ask)) / 2.0,
-                          reason=reason))
+                          reason=reason, instrument_id=instr))
     return out
 
 
 def range_over(*, symbol: str, product: str, venue: str,
-               start, end) -> RangeEvidence:
+               start, end, instrument_id: str | None = None
+               ) -> RangeEvidence:
     """Aggregate the shared samples covering [start, end].
 
     THE GAP ARITHMETIC IS THE POINT. A window is continuously observed only
@@ -367,12 +418,14 @@ def range_over(*, symbol: str, product: str, venue: str,
     """
     s, e = _parse(start), _parse(end)
     ev = RangeEvidence(symbol=symbol, product=product, venue=venue,
+                       instrument_id=instrument_id,
                        start=s.isoformat() if s else str(start),
                        end=e.isoformat() if e else str(end))
     if s is None or e is None or e <= s:
         return ev
 
     rows = samples_between(symbol=symbol, product=product, venue=venue,
+                           instrument_id=instrument_id,
                            start=s, end=e)
     if not rows:
         return ev
@@ -423,6 +476,7 @@ class Checkpoint:
     source: str | None = None
     ok: bool = False
     reason: str | None = None
+    instrument_id: str | None = None
 
     @property
     def mid(self) -> float | None:
@@ -432,7 +486,8 @@ class Checkpoint:
 
 
 def checkpoint_at(*, symbol: str, product: str, venue: str, at,
-                  tolerance_s: float = GAP_THRESHOLD_S) -> Checkpoint:
+                  tolerance_s: float = GAP_THRESHOLD_S,
+                  instrument_id: str | None = None) -> Checkpoint:
     """The last observed book at or before `at`, if it is close enough.
 
     The observer must state the market at the HORIZON, not at its own
@@ -448,27 +503,37 @@ def checkpoint_at(*, symbol: str, product: str, venue: str, at,
     from app.database import InstrumentQuoteSample, get_db
 
     t = _parse(at)
-    cp = Checkpoint(source=RANGE_COLLECTOR_VERSION)
+    cp = Checkpoint(source=RANGE_COLLECTOR_VERSION,
+                    instrument_id=instrument_id)
     if t is None:
         cp.reason = "unparseable checkpoint time"
         return cp
+    if requires_exact_instrument(product) and not instrument_id:
+        # SEAM 5. Without the contract there is nothing to be the checkpoint
+        # OF, and the newest quote on ANOTHER contract must never win merely
+        # because its observed_at is later.
+        cp.reason = "exact contract identity unavailable for this product"
+        return cp
 
     with get_db() as db:
-        row = (db.query(InstrumentQuoteSample.observed_at,
-                        InstrumentQuoteSample.bid,
-                        InstrumentQuoteSample.ask,
-                        InstrumentQuoteSample.market_data_source)
-                 .filter(InstrumentQuoteSample.product == product,
-                         InstrumentQuoteSample.venue == venue,
-                         InstrumentQuoteSample.symbol == symbol,
-                         InstrumentQuoteSample.observed_at <= t.isoformat())
-                 .order_by(InstrumentQuoteSample.observed_at.desc())
-                 .first())
+        q = (db.query(InstrumentQuoteSample.observed_at,
+                      InstrumentQuoteSample.bid,
+                      InstrumentQuoteSample.ask,
+                      InstrumentQuoteSample.market_data_source,
+                      InstrumentQuoteSample.instrument_id)
+               .filter(InstrumentQuoteSample.product == product,
+                       InstrumentQuoteSample.venue == venue,
+                       InstrumentQuoteSample.symbol == symbol,
+                       InstrumentQuoteSample.observed_at <= t.isoformat()))
+        if requires_exact_instrument(product):
+            q = q.filter(InstrumentQuoteSample.instrument_id == instrument_id)
+        row = q.order_by(InstrumentQuoteSample.observed_at.desc()).first()
     if row is None:
         cp.reason = "no shared evidence at or before this instant"
         return cp
 
-    observed_at, bid, ask, src = row
+    observed_at, bid, ask, src, instr = row
+    cp.instrument_id = instr or instrument_id
     last = _parse(observed_at)
     if last is None or bid is None or ask is None:
         cp.reason = "sample carries no usable quote"
@@ -498,11 +563,21 @@ def instruments_pending() -> list[dict]:
 
     with get_db() as db:
         rows = (db.query(DecisionOutcome.symbol, DecisionOutcome.product,
-                         DecisionOutcome.venue)
+                         DecisionOutcome.venue, DecisionOutcome.instrument_id)
                   .filter(DecisionOutcome.status == "PENDING")
                   .distinct().all())
-    return [{"symbol": s, "product": p, "venue": v}
-            for s, p, v in rows if s and p and v]
+    out = []
+    for sym, prod, ven, instr in rows:
+        if not (sym and prod and ven):
+            continue
+        # SEAM 6. An exact product with no contract is NOT a wildcard target.
+        # NEAR/USD intending a perpetual Bitnomial does not list stays
+        # uncollectable rather than becoming "sample any NEAR perp".
+        if requires_exact_instrument(prod) and not instr:
+            continue
+        out.append({"symbol": sym, "product": prod, "venue": ven,
+                    "instrument_id": instr})
+    return out
 
 
 def collect_once(instruments: list[dict] | None = None,
@@ -535,6 +610,18 @@ def collect_once(instruments: list[dict] | None = None,
             out["refused"] += 1
             out["refusals"][f"{t['symbol']}:ERROR"] = str(exc)
             continue
+        # SEAM 7. The snapshot must BE the contract we asked for. Writing
+        # another contract's book under the requested instrument manufactures
+        # exactly the contamination this key exists to prevent.
+        want = t.get("instrument_id")
+        if requires_exact_instrument(product) and want:
+            got = getattr(snap, "instrument_id", None)
+            if got != want:
+                out["refused"] += 1
+                out["refusals"][f"{t['symbol']}:INSTRUMENT_IDENTITY_MISMATCH"] = (
+                    f"requested {want!r}, snapshot reported {got!r}")
+                continue
+
         if record_sample(symbol=t["symbol"], product=product,
                          venue=t["venue"], snap=snap,
                          heartbeat_s=heartbeat_s):

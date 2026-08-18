@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-OUTCOME_OBSERVER_VERSION = "decision_outcome_observer_v1"
+OUTCOME_OBSERVER_VERSION = "decision_outcome_observer_v2_instrument_key"
 
 # ── Lifecycle. Monotonic: PENDING is the only non-terminal state. ────────
 #
@@ -430,7 +430,13 @@ def resolve_outcome(row) -> dict:
     beyond the fields it returns — the caller owns the transaction."""
     from lib import range_collector as RC
 
+    # PROVENANCE DESCRIBES WHO MADE THE TERMINAL CLAIM, not who started the
+    # clock. `observer_version` is stamped at SCHEDULING, so a horizon
+    # scheduled under v1 and resolved under v2 would otherwise credit v1 with
+    # a judgement it never made — and the version exists precisely to say
+    # which semantics produced the evidence.
     fields: dict = {"observed_at": _now().isoformat(),
+                    "observer_version": OUTCOME_OBSERVER_VERSION,
                     "range_source": RC.RANGE_COLLECTOR_VERSION}
     t0, due = _parse(row.decision_at), _parse(row.due_at)
     if t0 is None or due is None:
@@ -449,6 +455,16 @@ def resolve_outcome(row) -> dict:
         return {**fields, "status": INSUFFICIENT_DATA,
                 "status_reason": "incomplete product identity",
                 "range_quality": RC.INSUFFICIENT_RANGE_DATA}
+
+    # SEAM 8. A derivative's evidence belongs to its LISTED CONTRACT. With no
+    # contract there is no exact market to read, and a broad symbol query
+    # would let another contract — or an anonymous pre-stamp row — answer for
+    # PBTCUCZ50.
+    if RC.requires_exact_instrument(row.product) and not row.instrument_id:
+        return {**fields, "status": INSUFFICIENT_DATA,
+                "status_reason": "exact contract identity unavailable",
+                "range_quality": RC.INSUFFICIENT_RANGE_DATA}
+    key["instrument_id"] = row.instrument_id
 
     cp = RC.checkpoint_at(**key, at=due)
     ev = RC.range_over(**key, start=t0, end=due)

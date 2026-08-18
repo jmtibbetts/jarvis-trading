@@ -369,6 +369,13 @@ def _from_bitnomial_perp(symbol: str,
         snap.provenance["refusal"] = prod.reason
         return snap
 
+    # THE CONTRACT IS THE INSTRUMENT IDENTITY, and it belongs on the typed
+    # field rather than only in provenance.  was declared on
+    # the snapshot and assigned by NO reader, so every consumer read None:
+    # 153,946 stored quote samples carry a NULL instrument while the
+    # decisions beside them name PBTCUCZ50. Evidence cannot be matched to a
+    # contract it never recorded.
+    snap.instrument_id = prod.symbol
     snap.provenance.update({
         "bitnomial_symbol": prod.symbol, "bitnomial_product_id": prod.product_id,
         "product_code": prod.product_code, "contract_size": prod.contract_size,

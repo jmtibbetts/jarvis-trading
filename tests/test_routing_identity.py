@@ -322,3 +322,27 @@ class DisplayAssetClassIsNotRoutingTruthTests(unittest.TestCase):
         ident = RI.resolve_execution_identity("BTC/USD", "crypto")
         with self.assertRaises(RI.RoutingIdentityConflict):
             EP.execution_readiness("BTC/USD", "equity", routing_identity=ident)
+
+
+class SnapshotStampsInstrumentTests(unittest.TestCase):
+    """instrument_id was declared on the snapshot and assigned by NO reader.
+
+    Every consumer read None, so 153,946 stored quote samples carry a NULL
+    instrument while the decisions beside them name PBTCUCZ50. Evidence
+    cannot be joined to a contract it never recorded.
+    """
+
+    def test_the_perp_reader_assigns_the_contract(self):
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path("lib/execution_snapshot.py").read_text())
+        assigns = [n for n in ast.walk(tree)
+                   if isinstance(n, ast.Assign)
+                   for t in n.targets
+                   if isinstance(t, ast.Attribute) and t.attr == "instrument_id"]
+        self.assertTrue(assigns, "no reader assigns snapshot.instrument_id")
+
+    def test_the_collector_forwards_it(self):
+        import pathlib
+        src = pathlib.Path("lib/market_data_runtime.py").read_text()
+        self.assertIn("instrument_id=snap.instrument_id", src)

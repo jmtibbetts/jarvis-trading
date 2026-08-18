@@ -262,7 +262,8 @@ def _refresh_market() -> None:
 
 def _generate_signals() -> None:
     from jobs.generate_signals import run as signals_run
-    r = _run_safe_job("signal generation", signals_run, STAGE_SIGNAL)
+    r = _run_safe_job("signal generation",
+                      lambda: signals_run(cancel_event=_stop), STAGE_SIGNAL)
     _state["signal_runs"] += 1
     _state["last_signal_at"] = _now().isoformat()
     res = r.get("result")

@@ -749,7 +749,7 @@ def watchlist_symbols(limit: int = 25) -> list:
     return picked
 
 
-def run(focus_only: bool = False, only_symbols: list | None = None):
+def run(focus_only: bool = False, only_symbols: list | None = None, cancel_event=None):
     """Full generation cycle, or just the FOCUS track, or ONE focus coin.
 
     focus_only runs the identical pipeline — same cached TA and indicators,
@@ -1080,6 +1080,13 @@ def run(focus_only: bool = False, only_symbols: list | None = None):
     # Track D — opportunistic
     if opp_syms:
         for i, batch in enumerate(_chunk(opp_syms, BATCH_SIZE)):
+            # COOPERATIVE CANCELLATION BETWEEN LLM BATCHES. A full pass is
+            # ~27 batches of multi-second model calls, so without a check here
+            # a stop request waits out the whole generation — which is exactly
+            # why SIGNAL_GENERATION was the worker that would not exit.
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("[Signals] CANCELLED between batches — stop requested")
+                break
             prompt = make_batch_prompt(
                 batch, "OPPORTUNISTIC",
                 f"These appeared in threat/news: {batch}. Best setup only.",

@@ -443,7 +443,13 @@ def run(cancel_event=None):
     if missing_crypto:
         results.update(_fetch_crypto_multi_provider(missing_crypto))
 
+    # The price-fetch phase is a SECOND long per-symbol loop, separate from
+    # the OHLCV warm below. Cancelling only the warm loop left this one
+    # running, which is why a stop during price fetch still timed out.
     for sym, meta in crypto_meta.items():
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("[Market] price fetch CANCELLED — stop requested")
+            break
         if sym in results:
             results[sym]["name"] = meta.get("name") or results[sym].get("name") or sym
             results[sym]["change_percent"] = meta.get("change_pct", results[sym].get("change_percent"))
@@ -490,6 +496,9 @@ def run(cancel_event=None):
     try:
         cache_crypto_symbols = crypto_symbols[:CRYPTO_CACHE_LIMIT]
         all_symbols = list(dict.fromkeys(EQUITY_WATCHLIST + cache_crypto_symbols))
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("[Market] skipping OHLCV warm — stop requested")
+            return results
         cached = _warm_ohlcv_cache(all_symbols, stock_client, crypto_client,
                                    cancel_event=cancel_event)
     except Exception as e:

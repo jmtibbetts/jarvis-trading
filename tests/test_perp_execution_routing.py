@@ -190,7 +190,8 @@ class ABuyLiftsThePerpAskAndASellHitsThePerpBidTests(unittest.TestCase):
         captured = {}
 
         def fake_settle(auth, *, fill_price, execution_provenance=None,
-                        canonical_entry_fee_usd=None):
+                        canonical_entry_fee_usd=None, observation_id=None,
+                        execution_id=None):
             captured["fill"] = fill_price
             captured["qty"] = auth.qty
             captured["provenance"] = execution_provenance
@@ -252,7 +253,8 @@ class TheFeedFailsClosedTests(unittest.TestCase):
         captured = {}
 
         def fake_settle(auth, *, fill_price, execution_provenance=None,
-                        canonical_entry_fee_usd=None):
+                        canonical_entry_fee_usd=None, observation_id=None,
+                        execution_id=None):
             captured["fill"] = fill_price
             return {"ok": True, "position": {"id": "pos-test"}}
 

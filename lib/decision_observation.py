@@ -191,6 +191,50 @@ EXEC_SIMULATED_FILLED = "SIMULATED_FILLED"  # the venue produced a fill
 EXEC_SETTLED = "SETTLED"                    # and the account recorded it
 EXEC_SETTLEMENT_FAILED = "SETTLEMENT_FAILED"
 
+# THE LIFECYCLE IS MONOTONIC. Terminal means terminal.
+#
+# `record()` used to accept whatever state arrived, so a retried scheduler
+# cycle could walk SETTLED back to SIMULATED_FILLED, or turn a genuine
+# SETTLEMENT_FAILED into SETTLED — rewriting history about whether the
+# account ever recorded the trade. A recovery protocol that re-attempts
+# settlement would be a NEW attempt and needs its own design; until such a
+# thing exists, a terminal state is final.
+_TERMINAL_STATES = frozenset({EXEC_SETTLED, EXEC_SETTLEMENT_FAILED,
+                              EXEC_NOT_APPLICABLE})
+_ALLOWED_TRANSITIONS = {
+    None: {EXEC_NOT_APPLICABLE, EXEC_SIMULATED_FILLED},
+    EXEC_SIMULATED_FILLED: {EXEC_SETTLED, EXEC_SETTLEMENT_FAILED},
+}
+
+
+class LifecycleConflict(RuntimeError):
+    """The causal chain disagrees with itself.
+
+    Raised rather than silently keeping the first value: if one write says
+    the position is X and another says Y, the linkage is CORRUPT, and
+    quietly retaining X would preserve a chain that no longer describes
+    what happened.
+    """
+
+
+def next_execution_state(current: str | None, proposed: str | None) -> str | None:
+    """The state to store, or raise if the transition is not legal.
+
+    Returns `current` unchanged when the proposal repeats it, so a duplicate
+    completion is idempotent rather than an error.
+    """
+    if not proposed or proposed == current:
+        return current
+    if current in _TERMINAL_STATES:
+        raise LifecycleConflict(
+            f"execution_state {current} is terminal; refusing to rewrite it "
+            f"to {proposed}. A re-attempt is a NEW settlement and needs its "
+            f"own protocol, not a retroactive edit.")
+    if proposed not in _ALLOWED_TRANSITIONS.get(current, set()):
+        raise LifecycleConflict(
+            f"illegal execution_state transition {current} -> {proposed}")
+    return proposed
+
 
 def is_execution_calibration_eligible(obs) -> bool:
     """May this row inform fill/slippage calibration or portfolio results?
@@ -405,6 +449,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def advance_lifecycle(existing, row: dict) -> None:
+    """Complete the APPEND-ONLY lifecycle on an existing observation.
+
+    What may change is only what could not be known at T0 — what the
+    decision went on to produce. The judgment itself (decision, binding
+    reason, book, economics, threshold) is frozen: a paper trail its own
+    subject can edit is not a paper trail.
+
+    A CONFLICT IS AN ERROR, not something to absorb. Filling a missing value
+    is linkage; overwriting a different one means two writes disagree about
+    which execution or which position this decision produced, and keeping
+    the first silently would leave a chain that no longer describes reality.
+    """
+    for late in _LATE_LIFECYCLE_FIELDS:
+        proposed = row.get(late)
+        if not proposed:
+            continue
+        current = getattr(existing, late, None)
+        if current and current != proposed:
+            raise LifecycleConflict(
+                f"{late} is already {current!r}; a later write claims "
+                f"{proposed!r}. The causal chain disagrees with itself.")
+        if not current:
+            setattr(existing, late, proposed)
+
+    existing.execution_state = next_execution_state(
+        getattr(existing, "execution_state", None), row.get("execution_state"))
+
+
 def record(row: dict) -> str | None:
     """Persist ONE observation, idempotently, in a short transaction.
 
@@ -426,25 +499,53 @@ def record(row: dict) -> str | None:
                 DecisionObservation.observation_id == row["observation_id"]
             ).first()
             if existing is not None:
-                # SAME EVENT, SEEN AGAIN. Only APPEND-ONLY LIFECYCLE facts
-                # may complete — what became of the decision, which is not
-                # known at T0 and is not hindsight. The judgment itself
-                # (decision, binding reason, book, economics, threshold) is
-                # never rewritten: a paper trail its own subject can edit is
-                # not a paper trail.
-                for late in _LATE_LIFECYCLE_FIELDS:
-                    if row.get(late) and not getattr(existing, late, None):
-                        setattr(existing, late, row[late])
-                # execution_state is the one lifecycle field that legitimately
-                # ADVANCES rather than being filled in once.
-                new_state = row.get("execution_state")
-                if new_state and new_state != getattr(existing, "execution_state", None):
-                    existing.execution_state = new_state
+                advance_lifecycle(existing, row)
                 return existing.observation_id
             db.add(DecisionObservation(**row))
             return row["observation_id"]
+    except LifecycleConflict:
+        # A corrupt causal chain is NOT a persistence failure and must not be
+        # reported as one. It propagates so the caller sees the disagreement
+        # rather than a generic "could not write".
+        raise
     except Exception as e:
         logger.error("[DecisionObservation] FAILED to persist %s for %s: %s",
                      row.get("final_decision"), row.get("symbol"), e,
                      exc_info=True)
         return None
+
+
+def finalise_failed_settlement(observation_id, reason: str) -> None:
+    """Move an observation to SETTLEMENT_FAILED, loudly on failure.
+
+    THIS LIVES HERE, NOT IN canonical_entry, and not by preference: an AST
+    guard from A7 forbids the entry path opening its own session, because
+    that is exactly how provenance came to be stamped in a SECOND
+    transaction that could fail after the first had committed. Observation
+    persistence belongs to the module that owns observations.
+
+    No economic mutation occurs on this path — settlement either refused
+    before touching the ledger or rolled back entirely — so there is nothing
+    to unwind. What losing this would cost is a row stuck at
+    SIMULATED_FILLED forever, which reads like an unresolved trade rather
+    than a refused one.
+    """
+    if not observation_id:
+        return
+    from datetime import datetime, timezone
+
+    from app.database import DecisionObservation, get_db
+    try:
+        with get_db() as db:
+            obs = db.query(DecisionObservation).filter(
+                DecisionObservation.observation_id == observation_id).first()
+            if obs is None:
+                return
+            obs.execution_state = next_execution_state(
+                obs.execution_state, EXEC_SETTLEMENT_FAILED)
+            obs.settlement_at = datetime.now(timezone.utc).isoformat()
+            obs.settlement_failure_reason = reason
+    except Exception as e:
+        logger.error("[DecisionObservation] could not finalise %s as "
+                     "SETTLEMENT_FAILED (%s): %s", observation_id, reason, e,
+                     exc_info=True)

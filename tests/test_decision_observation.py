@@ -317,9 +317,13 @@ class OneMarketEventIsOneObservationTests(unittest.TestCase):
         self.assertNotEqual(stored["edge_threshold_r"], 99.0)
 
     def test_only_append_only_lifecycle_fields_may_complete(self):
-        row = DO.build(signal=self.EVENT, decision=DO.TRADE)
+        """The lifecycle advances through its legal path — a decision that
+        never reached a simulated fill cannot jump straight to SETTLED."""
+        row = DO.build(signal=self.EVENT, decision=DO.TRADE,
+                       execution_id="exec-1",
+                       execution_state=DO.EXEC_SIMULATED_FILLED)
         DO.record(row)
-        DO.record(dict(row, position_id="pos-123", execution_id="exec-1",
+        DO.record(dict(row, position_id="pos-123",
                        execution_state=DO.EXEC_SETTLED))
         stored = _rows("BTC/USD")[0]
         self.assertEqual(stored["position_id"], "pos-123")
@@ -441,6 +445,186 @@ class TheCausalChainIsCompleteTests(unittest.TestCase):
         self._open()
         self.assertTrue(
             DO.is_execution_calibration_eligible(_rows("BTC/USD")[0]))
+
+
+class SettlementAndLinkageAreOneTransactionTests(unittest.TestCase):
+    """A.1.1. Linking the observation AFTER settlement was a smaller version
+    of the A7 mistake: `get_db()` commits on context exit, so a third
+    transaction that failed left the LEDGER perfectly correct — position
+    created, margin and fee debited — while the evidence chain still said
+    SIMULATED_FILLED with no position_id.
+    """
+
+    def setUp(self):
+        _clear()
+        self.addCleanup(_clear)
+        _seed_perp()
+        self.addCleanup(MD.reset_books)
+
+    def _book(self):
+        from app.database import PaperPortfolio, PaperPosition, get_db
+        with get_db() as db:
+            return (round(float(db.query(PaperPortfolio).first().cash), 6),
+                    db.query(PaperPosition).count())
+
+    def _open(self):
+        from lib.canonical_entry import open_canonical_position
+        with _spot_feed():
+            return open_canonical_position(PERP, decision_price=64_400.0)
+
+    def test_the_chain_closes_atomically_on_success(self):
+        res = self._open()
+        self.assertTrue(res.get("ok"), res)
+        row = _rows("BTC/USD")[0]
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == res["position"]["id"]).first()
+            pos_id = pos.id
+            stamped = json.loads(pos.execution_provenance)["entry_execution_id"]
+        self.assertEqual(row["execution_state"], DO.EXEC_SETTLED)
+        self.assertEqual(row["position_id"], pos_id)
+        self.assertEqual(row["execution_id"], stamped)
+        self.assertIsNotNone(row["settlement_at"])
+        self.assertIsNone(row["settlement_failure_reason"])
+
+    def test_a_linkage_that_cannot_be_proven_rolls_back_everything(self):
+        """The position, the margin, the fee and the provenance unwind
+        together — there is no state in which the ledger moved but the
+        evidence chain did not.
+
+        Injected by making `record()` report success without writing a row,
+        which is exactly the case settlement must refuse: an observation id
+        it cannot verify against.
+        """
+        before = self._book()
+        from lib.canonical_entry import open_canonical_position
+        with _spot_feed(), patch("lib.decision_observation.record",
+                                 return_value="ghost-observation-id"):
+            res = open_canonical_position(PERP, decision_price=64_400.0)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res["error"], "SETTLEMENT_ROLLED_BACK")
+        self.assertEqual(self._book(), before,
+                         "cash or positions moved despite a broken chain")
+
+    def test_a_mismatched_execution_id_rolls_back_everything(self):
+        """A settlement that does not belong to this decision."""
+        before = self._book()
+        from lib.canonical_entry import open_canonical_position
+        real_build = DO.build
+
+        def wrong_exec(**kw):
+            row = real_build(**kw)
+            if row.get("execution_id"):
+                row["execution_id"] = "some-other-execution"
+            return row
+
+        with _spot_feed(), patch("lib.decision_observation.build", wrong_exec):
+            res = open_canonical_position(PERP, decision_price=64_400.0)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(self._book(), before)
+
+    def test_settlement_refused_finalises_the_observation_as_failed(self):
+        """A refusal before any economic mutation. The DECISION stays TRADE
+        — JARVIS did choose to trade and the venue did fill."""
+        with _spot_feed(), patch(
+                "lib.paper_engine.settle_position_entry",
+                return_value={"ok": False,
+                              "error": "Paper position already open for BTC/USD"}):
+            from lib.canonical_entry import open_canonical_position
+            res = open_canonical_position(PERP, decision_price=64_400.0)
+        self.assertFalse(res.get("ok"))
+        row = _rows("BTC/USD")[0]
+        self.assertEqual(row["final_decision"], DO.TRADE)
+        self.assertEqual(row["execution_state"], DO.EXEC_SETTLEMENT_FAILED)
+        self.assertEqual(row["settlement_failure_reason"], "DUPLICATE_OPEN")
+        self.assertIsNotNone(row["settlement_at"])
+        self.assertIsNone(row["position_id"])
+
+    def test_a_failure_reason_is_a_category_not_a_sentence(self):
+        with _spot_feed(), patch(
+                "lib.paper_engine.settle_position_entry",
+                return_value={"ok": False,
+                              "error": "Paper deployment cap reached: $12,345 of $60,000"}):
+            from lib.canonical_entry import open_canonical_position
+            open_canonical_position(PERP, decision_price=64_400.0)
+        self.assertEqual(_rows("BTC/USD")[0]["settlement_failure_reason"],
+                         "DEPLOYMENT_CAP")
+
+    def test_legacy_settlement_needs_no_observation(self):
+        """Telegram and the trading routes price their own entries and never
+        went through a canonical decision path; requiring one would force
+        them to manufacture evidence."""
+        from lib.paper_engine import open_paper_position
+        _clear()
+        res = open_paper_position(
+            {"asset_symbol": "BTC/USD", "asset_class": "Crypto",
+             "paper_direction": "Long", "entry_price": 64_400.0,
+             "stop_loss": 61_000.0, "target_price": 70_000.0,
+             "timeframe": "4H"}, current_price=64_400.0)
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(_rows("BTC/USD"), [])
+
+
+class TheLifecycleIsMonotonicTests(unittest.TestCase):
+    """Terminal means terminal. A retried scheduler cycle must not be able
+    to rewrite history about whether the account recorded the trade."""
+
+    def _obs(self, state):
+        return type("O", (), {"execution_state": state})()
+
+    def test_settled_cannot_regress_to_simulated(self):
+        with self.assertRaises(DO.LifecycleConflict):
+            DO.next_execution_state(DO.EXEC_SETTLED, DO.EXEC_SIMULATED_FILLED)
+
+    def test_settled_cannot_become_failed(self):
+        with self.assertRaises(DO.LifecycleConflict):
+            DO.next_execution_state(DO.EXEC_SETTLED, DO.EXEC_SETTLEMENT_FAILED)
+
+    def test_failed_cannot_silently_become_settled(self):
+        """A re-attempt is a NEW settlement and needs its own protocol, not
+        a retroactive edit."""
+        with self.assertRaises(DO.LifecycleConflict):
+            DO.next_execution_state(DO.EXEC_SETTLEMENT_FAILED, DO.EXEC_SETTLED)
+
+    def test_the_legal_path_is_allowed(self):
+        self.assertEqual(
+            DO.next_execution_state(DO.EXEC_SIMULATED_FILLED, DO.EXEC_SETTLED),
+            DO.EXEC_SETTLED)
+        self.assertEqual(
+            DO.next_execution_state(None, DO.EXEC_SIMULATED_FILLED),
+            DO.EXEC_SIMULATED_FILLED)
+
+    def test_repeating_a_terminal_state_is_idempotent_not_an_error(self):
+        self.assertEqual(
+            DO.next_execution_state(DO.EXEC_SETTLED, DO.EXEC_SETTLED),
+            DO.EXEC_SETTLED)
+
+    def test_a_conflicting_execution_id_is_refused(self):
+        obs = type("O", (), {"execution_state": DO.EXEC_SIMULATED_FILLED,
+                             "execution_id": "exec-A", "position_id": None,
+                             "settlement_at": None,
+                             "settlement_failure_reason": None})()
+        with self.assertRaises(DO.LifecycleConflict):
+            DO.advance_lifecycle(obs, {"execution_id": "exec-B"})
+
+    def test_a_conflicting_position_id_is_refused(self):
+        obs = type("O", (), {"execution_state": DO.EXEC_SETTLED,
+                             "execution_id": "exec-A", "position_id": "pos-A",
+                             "settlement_at": None,
+                             "settlement_failure_reason": None})()
+        with self.assertRaises(DO.LifecycleConflict):
+            DO.advance_lifecycle(obs, {"position_id": "pos-B"})
+
+    def test_identical_completion_is_idempotent(self):
+        obs = type("O", (), {"execution_state": DO.EXEC_SETTLED,
+                             "execution_id": "exec-A", "position_id": "pos-A",
+                             "settlement_at": "t",
+                             "settlement_failure_reason": None})()
+        DO.advance_lifecycle(obs, {"execution_id": "exec-A",
+                                   "position_id": "pos-A",
+                                   "execution_state": DO.EXEC_SETTLED})
+        self.assertEqual(obs.position_id, "pos-A")
 
 
 class CalibrationEligibilityIsAPredicateTests(unittest.TestCase):

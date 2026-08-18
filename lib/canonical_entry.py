@@ -428,24 +428,43 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "asset_class": ready.asset_class,
                 "venue_failure": False, "opened": False}
 
-    result = settle_position_entry(
-        final, fill_price=fill, execution_provenance=provenance,
-        canonical_entry_fee_usd=float(fee_quote.fee_usd))
+    # THE LINKAGE IS PART OF THE SETTLEMENT TRANSACTION, not a third one
+    # after it. Advancing the observation separately would leave a window in
+    # which the ledger is correct — position created, margin and fee debited
+    # — while the evidence chain still said SIMULATED_FILLED with no
+    # position_id. Settlement now closes the chain or rolls back everything.
+    try:
+        result = settle_position_entry(
+            final, fill_price=fill, execution_provenance=provenance,
+            canonical_entry_fee_usd=float(fee_quote.fee_usd),
+            observation_id=observation_id,
+            execution_id=entry_execution_id)
+    except Exception as e:
+        # The whole transaction unwound: no position, no margin, no fee. The
+        # decision still happened, so it is finalised as failed rather than
+        # left pending forever.
+        logger.error("[CanonicalEntry] %s settlement rolled back: %s",
+                     symbol, e, exc_info=True)
+        DO.finalise_failed_settlement(observation_id,
+                                    "SETTLEMENT_TRANSACTION_ROLLED_BACK")
+        return {"error": "SETTLEMENT_ROLLED_BACK", "detail": str(e),
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
+
     if not result.get("ok"):
-        # THE DECISION STAYS TRADE. JARVIS did decide to trade, and the
-        # venue did produce a fill; what failed was the account write.
-        # Rewriting the judgment to NO_TRADE would be a lie about what
-        # happened, so the lifecycle carries the truth instead — and a
+        # A refusal BEFORE any economic mutation — duplicate open, book
+        # full, deployment cap, insufficient cash. THE DECISION STAYS TRADE:
+        # JARVIS did decide to trade and the venue did produce a fill, so
+        # rewriting the judgment to NO_TRADE would be a lie about what
+        # happened. The lifecycle carries the truth instead, and a
         # SETTLEMENT_FAILED row is never execution-calibration eligible.
-        _observe(DO.TRADE, ready=ready, authorization=final,
-                 fee_quote=fee_quote, execution_id=entry_execution_id,
-                 execution_state=DO.EXEC_SETTLEMENT_FAILED)
+        # Nothing moved, so this diagnostic update needs no shared
+        # transaction with the settlement that refused.
+        DO.finalise_failed_settlement(observation_id,
+                                    _settlement_failure_reason(result))
         return result
 
-    _observe(DO.TRADE, ready=ready, authorization=final, fee_quote=fee_quote,
-             execution_id=entry_execution_id,
-             execution_state=DO.EXEC_SETTLED,
-             position_id=(result.get("position") or {}).get("id"))
     result["observation_id"] = observation_id
 
     # THE REAL CONTRACT IS {"ok": True, "position": {"id": ...}}.
@@ -467,6 +486,27 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         "execution_model_version": EXECUTION_MODEL_CANONICAL,
     }
     return result
+
+
+def _settlement_failure_reason(result: dict) -> str:
+    """A NAMED reason, not the prose the caller happened to log.
+
+    `settlement_failure_reason` is meant to be queryable years later, and
+    "Paper deployment cap reached: $12,345 of $60,000 ..." is a sentence
+    about one moment, not a category.
+    """
+    err = str(result.get("error") or "").lower()
+    if "already open" in err:
+        return "DUPLICATE_OPEN"
+    if "book full" in err:
+        return "MAX_POSITIONS"
+    if "deployment cap" in err:
+        return "DEPLOYMENT_CAP"
+    if "insufficient" in err:
+        return "INSUFFICIENT_CASH"
+    if "concentration" in err:
+        return "CONCENTRATION"
+    return "SETTLEMENT_REFUSED"
 
 
 def _sizing_reason(prep: dict) -> str:

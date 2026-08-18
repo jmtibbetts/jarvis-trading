@@ -314,6 +314,16 @@ class SettlementIsAtomicTests(unittest.TestCase):
                 PaperPosition.symbol == "BTC/USD").delete()
             db.commit()
 
+    # THE GUARANTEE IS THE PROPERTY, NOT THE MECHANISM.
+    #
+    # These asserted that the injected RuntimeError ESCAPED
+    # `open_canonical_position`. A.1.1 made the entry path catch a rolled-back
+    # settlement and return a named fail-closed refusal instead, which is
+    # what a caller can actually act on. The property A7 exists to protect —
+    # NO ECONOMIC MUTATION SURVIVES A FAILED ENTRY — is unchanged and is now
+    # asserted directly, along with the refusal itself, rather than through
+    # the exception that used to carry it.
+
     def test_a_failure_during_settlement_rolls_back_cash_and_position(self):
         import lib.paper_engine as PE
         from lib.canonical_entry import open_canonical_position
@@ -321,10 +331,11 @@ class SettlementIsAtomicTests(unittest.TestCase):
         before_cash, before_n = self._cash_and_count()
         with _kraken_quote(), patch.object(PE, "json") as J:
             J.dumps.side_effect = RuntimeError("injected provenance failure")
-            with self.assertRaises(RuntimeError):
-                open_canonical_position(SIGNAL, decision_price=100.0)
+            res = open_canonical_position(SIGNAL, decision_price=100.0)
         after_cash, after_n = self._cash_and_count()
 
+        self.assertFalse(res.get("ok"), "a failed entry reported success")
+        self.assertEqual(res["error"], "SETTLEMENT_ROLLED_BACK")
         self.assertEqual(after_cash, before_cash, "cash was debited by a failed entry")
         self.assertEqual(after_n, before_n, "a failed entry left a position behind")
 
@@ -336,8 +347,8 @@ class SettlementIsAtomicTests(unittest.TestCase):
 
         with _kraken_quote(), patch.object(PE, "json") as J:
             J.dumps.side_effect = RuntimeError("injected provenance failure")
-            with self.assertRaises(RuntimeError):
-                open_canonical_position(SIGNAL, decision_price=100.0)
+            res = open_canonical_position(SIGNAL, decision_price=100.0)
+        self.assertFalse(res.get("ok"))
 
         with get_db() as db:
             orphans = db.query(PaperPosition).filter(

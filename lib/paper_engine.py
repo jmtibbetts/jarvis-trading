@@ -1051,7 +1051,9 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
 
 def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                  execution_provenance: dict | None = None,
-                 canonical_entry_fee_usd: float | None = None) -> dict:
+                 canonical_entry_fee_usd: float | None = None,
+                 observation_id: str | None = None,
+                 execution_id: str | None = None) -> dict:
     """SETTLE — ONE transaction: revalidate the book, create, debit, commit.
 
     The authorization arrives already decided; nothing here may enlarge it.
@@ -1082,6 +1084,14 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
     equals the reference the size was solved against; for the canonical path
     it is the executed fill, and the two differ by exactly the spread and
     slippage that crossing the book actually cost.
+
+    `observation_id` / `execution_id` are the CANONICAL evidence linkage and
+    are OPTIONAL by design. The legacy and manual callers — Telegram, the
+    trading routes, `open_paper_position` — price their own entries and have
+    no decision observation; requiring one would force them to manufacture
+    evidence about a decision path they never went through. When they ARE
+    supplied, the observation is advanced to SETTLED inside this same
+    transaction, so the ledger and the evidence chain cannot disagree.
     """
     sym = auth.symbol
     asset_class = auth.asset_class
@@ -1207,6 +1217,57 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
             portfolio.updated_at = _now()
 
             pos_id   = pos.id
+
+            # ── A.1.1: THE EVIDENCE CHAIN CLOSES IN THIS TRANSACTION ─────
+            #
+            # Linking the decision observation AFTERWARDS was a smaller
+            # version of the A7 mistake. `get_db()` commits on context exit,
+            # so a third transaction that failed would leave the ledger
+            # perfectly correct — position created, margin and fee debited,
+            # provenance stamped — while the observation still said
+            # SIMULATED_FILLED with no position_id. The economics would be
+            # right and the causal chain
+            #
+            #     observation -> execution -> settled position
+            #
+            # would have a hole in the middle, which is exactly the state
+            # this evidence subsystem exists to make impossible.
+            #
+            # Verified against the row rather than assumed: a mismatch means
+            # this settlement does not belong to this decision, and raising
+            # rolls back the position, the margin, the fee and the
+            # provenance together.
+            if observation_id:
+                from lib import decision_observation as DO
+                from app.database import DecisionObservation
+                obs = db.query(DecisionObservation).filter(
+                    DecisionObservation.observation_id == observation_id).first()
+                if obs is None:
+                    raise ValueError(
+                        f"no decision observation {observation_id} to settle "
+                        f"against — refusing to create a position with no "
+                        f"record of why it was allowed")
+                if obs.final_decision != DO.TRADE:
+                    raise ValueError(
+                        f"observation {observation_id} decided "
+                        f"{obs.final_decision}, not TRADE")
+                if execution_id and obs.execution_id != execution_id:
+                    raise ValueError(
+                        f"observation {observation_id} names execution "
+                        f"{obs.execution_id!r}, settlement carries "
+                        f"{execution_id!r}")
+                if obs.execution_state != DO.EXEC_SIMULATED_FILLED:
+                    raise ValueError(
+                        f"observation {observation_id} is "
+                        f"{obs.execution_state}, not {DO.EXEC_SIMULATED_FILLED}")
+                if obs.position_id:
+                    raise ValueError(
+                        f"observation {observation_id} already settled into "
+                        f"position {obs.position_id}")
+                obs.execution_state = DO.EXEC_SETTLED
+                obs.position_id = pos_id
+                obs.settlement_at = _now()
+
             pos_data = {
                 "id": pos_id, "symbol": sym, "direction": dir_key,
                 "side": "long" if side == 1 else "short", "leverage": leverage, "qty": qty,

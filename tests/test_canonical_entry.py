@@ -57,7 +57,8 @@ def _fake_settlement(captured):
     thing under test.
     """
     def fake_settle(auth, *, fill_price, execution_provenance=None,
-                    canonical_entry_fee_usd=None):
+                    canonical_entry_fee_usd=None, observation_id=None,
+                    execution_id=None):
         captured["fill"] = fill_price
         captured["qty"] = auth.qty
         captured["auth"] = auth

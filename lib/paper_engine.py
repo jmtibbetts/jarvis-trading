@@ -1831,6 +1831,10 @@ def mark_to_market(prices: dict) -> dict:
     """
     closed  = []
     updated = []
+    # Triggers whose settlement was REFUSED — most often a canonical
+    # threshold the contract's own book did not confirm. Reported under its
+    # own name so nothing downstream mistakes a refusal for a trade.
+    refused = []
 
     with get_db() as db:
         positions = db.query(PaperPosition).filter(PaperPosition.status == "Open").all()
@@ -1920,8 +1924,30 @@ def mark_to_market(prices: dict) -> dict:
             reason = "margin_call"
 
         if reason:
-            result = close_paper_position(pos["id"], price, reason)
-            closed.append({"symbol": sym, "reason": reason, "pnl": result.get("pnl")})
+            # THE MARK GOT US HERE; IT DOES NOT SETTLE. Routed through the
+            # dispatcher: a legacy position closes exactly as before, and a
+            # canonical one re-confirms the threshold on its OWN executable
+            # book before any order exists — a cross-market print must not
+            # liquidate a contract whose book never reached the level.
+            from lib.exit_dispatch import request_position_exit
+            threshold = (stop if reason == "stop_loss"
+                         else target if reason == "take_profit" else None)
+            result = request_position_exit(
+                pos["id"], caller_price=price, caller_reason=reason,
+                caller_source="MARK_TO_MARKET", trigger_price=threshold)
+            if result.get("ok"):
+                closed.append({"symbol": sym, "reason": reason,
+                               "pnl": result.get("pnl"),
+                               "route": result.get("route")})
+            else:
+                # NOT CLOSED. Reporting an unconfirmed trigger as "closed
+                # with pnl=None" is how a refusal becomes a phantom trade in
+                # every dashboard downstream.
+                refused.append({"symbol": sym, "reason": reason,
+                                "error": result.get("error"),
+                                "detail": result.get("detail")})
+                logger.info("[Paper] %s %s not settled: %s", sym, reason,
+                            result.get("error"))
         else:
             with get_db() as db:
                 p = db.query(PaperPosition).filter(PaperPosition.id == pos["id"]).first()
@@ -1932,7 +1958,8 @@ def mark_to_market(prices: dict) -> dict:
                     p.updated_at      = _now()
             updated.append(sym)
 
-    return {"updated": len(updated), "closed": closed}
+    return {"updated": len(updated), "closed": closed,
+            "trigger_refused": refused}
 
 
 def get_paper_summary() -> dict:
@@ -2089,13 +2116,49 @@ def soft_reset_paper_portfolio(starting_cash: float = None) -> dict:
         open_ids = [(p.id, p.current_price or p.entry_price)
                     for p in db.query(PaperPosition).filter(
                         func.lower(PaperPosition.status) == "open").all()]
+    from lib.exit_dispatch import request_position_exit
+    failed = []
     for pos_id, price in open_ids:
         try:
-            r = close_paper_position(pos_id, float(price or 0), reason="reset")
-            closed.append({"id": pos_id, "ok": bool(r.get("ok", True))})
+            r = request_position_exit(pos_id, caller_price=float(price or 0),
+                                      caller_reason="reset",
+                                      caller_source="SOFT_RESET")
+            ok = bool(r.get("ok"))
+            closed.append({"id": pos_id, "ok": ok})
+            if not ok:
+                failed.append({"id": pos_id, "error": r.get("error"),
+                               "detail": r.get("detail")})
         except Exception as e:
             logger.warning(f"[Paper] soft reset: close {pos_id} failed: {e}")
             closed.append({"id": pos_id, "ok": False})
+            failed.append({"id": pos_id, "error": "EXCEPTION",
+                           "detail": str(e)[:200]})
+
+    # NEVER FRESH CASH + OLD OPEN EXPOSURE.
+    #
+    # Closing N positions against N live markets is not one transaction, and
+    # pretending otherwise is not the safety property that matters. What
+    # matters is that the RESEED — which invents capital — happens only when
+    # nothing is still exposed. A canonical position whose book was stale
+    # cannot be closed right now; reseeding around it would leave the book
+    # holding real risk against a wallet that says it is flat.
+    #
+    # Positions that DID close stay closed. That is honest economic history,
+    # and a later reset may finish the job.
+    with get_db() as db:
+        still_open = [p.id for p in db.query(PaperPosition).filter(
+            func.lower(PaperPosition.status) == "open").all()]
+    if still_open:
+        logger.error("[Paper] soft reset INCOMPLETE: %d position(s) remain "
+                     "open; refusing to reseed capital over live exposure",
+                     len(still_open))
+        return {"ok": False, "error": "RESET_INCOMPLETE",
+                "detail": (f"{len(still_open)} position(s) could not be "
+                           f"closed; capital was NOT reseeded because fresh "
+                           f"cash beside open exposure is not a reset"),
+                "successfully_closed": [c["id"] for c in closed if c["ok"]],
+                "failed": failed, "still_open": still_open,
+                "cash_reseeded": False}
 
     from app.database import new_id
     with get_db() as db:
@@ -2116,7 +2179,7 @@ def soft_reset_paper_portfolio(starting_cash: float = None) -> dict:
     logger.info(f"[Paper] Soft reset: cash=${cash:,.0f}, "
                 f"{len(closed)} positions closed, history preserved")
     return {"ok": True, "cash": cash, "positions_closed": len(closed),
-            "history_preserved": True}
+            "history_preserved": True, "cash_reseeded": True}
 
 
 def reset_paper_portfolio() -> dict:

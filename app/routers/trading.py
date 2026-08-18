@@ -1156,7 +1156,7 @@ def paper_open(body: PaperOpenRequest):
 def paper_close(pos_id: str, price: Optional[float] = None):
     """Close a paper position at current market price."""
     try:
-        from lib.paper_engine import close_paper_position
+        from lib.exit_dispatch import request_position_exit
         from app.database import PaperPosition, MarketAsset
         close_price = price
         if not close_price:
@@ -1168,7 +1168,12 @@ def paper_close(pos_id: str, price: Optional[float] = None):
                     if a: close_price = float(a.price or pos.current_price or pos.entry_price)
         if not close_price:
             raise HTTPException(400, "No close price available")
-        return close_paper_position(pos_id, close_price, reason="manual")
+        # ROUTED. The supplied/looked-up price is a REFERENCE; a canonical
+        # position fills on its own venue book, and the response reports
+        # that actual fill rather than what the caller asked for.
+        return request_position_exit(pos_id, caller_price=close_price,
+                                     caller_reason="api_manual",
+                                     caller_source="API_MANUAL")
     except HTTPException: raise
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -1233,9 +1238,10 @@ def flatten_trading(body: FlattenRequest):
         out["live"] = live_res
 
     if scope in ("paper", "all"):
-        paper_res = {"positions_closed": 0, "errors": []}
+        paper_res = {"positions_closed": 0, "errors": [],
+                     "refused": []}
         try:
-            from lib.paper_engine import close_paper_position
+            from lib.exit_dispatch import request_position_exit
             from app.database import PaperPosition
             with get_db() as db:
                 open_ids = [
@@ -1245,12 +1251,25 @@ def flatten_trading(body: FlattenRequest):
             for pid, sym, px in open_ids:
                 try:
                     if px > 0:
-                        close_paper_position(pid, px, reason="manual flatten")
-                        paper_res["positions_closed"] += 1
+                        r = request_position_exit(
+                            pid, caller_price=px, caller_reason="flatten",
+                            caller_source="API_FLATTEN")
+                        if r.get("ok"):
+                            paper_res["positions_closed"] += 1
+                        else:
+                            paper_res["refused"].append(
+                                {"symbol": sym, "error": r.get("error"),
+                                 "detail": r.get("detail")})
                     else:
                         paper_res["errors"].append(f"{sym}: no price to close at")
                 except Exception as e:
                     paper_res["errors"].append(f"{sym}: {str(e)[:60]}")
+            # NO FALSE SUCCESS. "Flattened" is a claim about the book, so it
+            # is verified against the book rather than counted from attempts.
+            with get_db() as db:
+                paper_res["remaining_open"] = db.query(PaperPosition).filter(
+                    PaperPosition.status == "Open").count()
+            paper_res["flattened"] = paper_res["remaining_open"] == 0
         except Exception as e:
             paper_res["errors"].append(str(e)[:80])
         out["paper"] = paper_res

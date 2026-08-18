@@ -66,8 +66,9 @@ from lib.paper_settlement import (COST_MODEL_CANONICAL,
                                   EXECUTION_SIDE_BUY, EXECUTION_SIDE_SELL,
                                   LEG_FINAL_EXIT, LEG_PARTIAL_EXIT,
                                   SETTLEMENT_VERSION)
-from lib.realized_outcome import (FORCED_LIQUIDATION, MARGIN_CALL, STOP_EXIT,
-                                  TARGET_EXIT, VOLUNTARY_EXIT)
+from lib.realized_outcome import (ADMINISTRATIVE_RESET, FORCED_LIQUIDATION,
+                                  MARGIN_CALL, STOP_EXIT, TARGET_EXIT,
+                                  VOLUNTARY_EXIT)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,8 @@ logger = logging.getLogger(__name__)
 SCALE_OUT = "SCALE_OUT"
 
 EXIT_REASONS = frozenset({VOLUNTARY_EXIT, STOP_EXIT, TARGET_EXIT,
-                          MARGIN_CALL, FORCED_LIQUIDATION, SCALE_OUT})
+                          MARGIN_CALL, FORCED_LIQUIDATION, SCALE_OUT,
+                          ADMINISTRATIVE_RESET})
 
 # Refusal vocabulary — named, so a caller can tell them apart.
 NOT_CANONICAL_SETTLEMENT_POSITION = "NOT_CANONICAL_SETTLEMENT_POSITION"
@@ -659,6 +661,14 @@ def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
         pos.margin_used = m_after
         pos.current_price = float(f.fill_price)
         pos.updated_at = f.settled_at
+        if kind == LEG_PARTIAL_EXIT:
+            # COMPATIBILITY LATCH ONLY, set in the SAME transaction so a
+            # scale-out cannot fire again next cycle. The legacy strategy
+            # and UI read `scaled_out`; canonical accounting deliberately
+            # does NOT — the ledger supports any number of valid partials,
+            # and this flag is never consulted as accounting authority.
+            pos.scaled_out = True
+            pos.scaled_out_qty = filled
         if is_final:
             pos.status = "Closed"
             pos.unrealized_pnl = 0.0
@@ -677,6 +687,11 @@ def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
         result = {"ok": True, "kind": kind, "position_id": f.position_id,
                   "leg_id": leg.id, "revision": new_revision,
                   "gross_pnl_usd": gross, "released_margin_usd": release,
+                  # CASH DELTA IS NOT P&L: it carries the released margin,
+                  # which was always ours. `leg_net_pnl_usd` is this leg's
+                  # actual economics — exposed as a RESULT field, computed
+                  # once above, never a second arithmetic definition.
+                  "leg_net_pnl_usd": leg_net,
                   "cash_delta_usd": cash_delta,
                   "remaining_qty": q_after, "remaining_margin": m_after}
 

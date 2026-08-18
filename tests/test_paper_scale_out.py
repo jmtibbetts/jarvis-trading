@@ -87,10 +87,15 @@ class PartialClosePaperPositionTests(unittest.TestCase):
 
 
 class MaybeScaleOutPaperTests(unittest.TestCase):
+    """TP1 asks the EXIT DISPATCHER (Pass B routing), which sends a
+    legacy position to the legacy leaf and a canonical one to its own
+    venue book. The caller's price is a decision reference either way;
+    only the legacy economy still treats it as the fill."""
+
     def test_no_action_before_tp1(self):
         pos = {"id": "pos-1", "symbol": "AAPL", "direction": "Long", "entry_price": 100.0,
                "target_price": 110.0, "qty": 10.0, "scaled_out": False}
-        with patch("lib.paper_engine.partial_close_paper_position") as mock_partial:
+        with patch("lib.exit_dispatch.request_position_partial_exit") as mock_partial:
             result = paper_trading._maybe_scale_out_paper(pos, 104.0)
         self.assertIsNone(result)
         mock_partial.assert_not_called()
@@ -98,19 +103,21 @@ class MaybeScaleOutPaperTests(unittest.TestCase):
     def test_scales_out_long_at_tp1(self):
         pos = {"id": "pos-1", "symbol": "AAPL", "direction": "Long", "entry_price": 100.0,
                "target_price": 110.0, "qty": 10.0, "scaled_out": False}
-        with patch("lib.paper_engine.partial_close_paper_position",
+        with patch("lib.exit_dispatch.request_position_partial_exit",
                     return_value={"ok": True, "closed_qty": 5.0, "remaining_qty": 5.0, "pnl": 30.0}) as mock_partial, \
              patch.object(paper_trading, "get_db") as mock_get_db:
             mock_get_db.return_value.__enter__.return_value.query.return_value.filter.return_value.first.return_value = None
             result = paper_trading._maybe_scale_out_paper(pos, 106.0)
         self.assertIsNotNone(result)
-        mock_partial.assert_called_once_with("pos-1", 0.5, 106.0, reason="scale_out_tp1")
+        mock_partial.assert_called_once_with(
+            "pos-1", fraction=0.5, caller_price=106.0,
+            caller_reason="scale_out_tp1", caller_source="PAPER_TP1")
 
     def test_scales_out_short_at_tp1(self):
         # short: entry=100, target=90 -> TP1 = 100 - (100-90)*0.5 = 95; price 94 has reached it
         pos = {"id": "pos-2", "symbol": "AAPL", "direction": "Short", "entry_price": 100.0,
                "target_price": 90.0, "qty": 10.0, "scaled_out": False}
-        with patch("lib.paper_engine.partial_close_paper_position",
+        with patch("lib.exit_dispatch.request_position_partial_exit",
                     return_value={"ok": True, "closed_qty": 5.0, "remaining_qty": 5.0, "pnl": 30.0}) as mock_partial, \
              patch.object(paper_trading, "get_db") as mock_get_db:
             mock_get_db.return_value.__enter__.return_value.query.return_value.filter.return_value.first.return_value = None
@@ -121,7 +128,7 @@ class MaybeScaleOutPaperTests(unittest.TestCase):
     def test_already_scaled_out_is_a_no_op(self):
         pos = {"id": "pos-1", "symbol": "AAPL", "direction": "Long", "entry_price": 100.0,
                "target_price": 110.0, "qty": 10.0, "scaled_out": True}
-        with patch("lib.paper_engine.partial_close_paper_position") as mock_partial:
+        with patch("lib.exit_dispatch.request_position_partial_exit") as mock_partial:
             result = paper_trading._maybe_scale_out_paper(pos, 108.0)
         self.assertIsNone(result)
         mock_partial.assert_not_called()

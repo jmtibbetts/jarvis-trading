@@ -186,12 +186,20 @@ class GuardedCloseTests(unittest.TestCase):
             ))
             session.commit()
 
+            # ROUTED (Pass B): mark_to_market now asks the exit dispatcher,
+            # which reads the book through app.database.get_db to classify
+            # the position. This is a LEGACY equity position, so it lands on
+            # the legacy leaf with legacy mark-as-fill semantics — but the
+            # routing layer must see the same book the engine does.
+            import app.database as _dbmod
             with patch.object(paper_engine, "get_db", closed_session), \
+                 patch.object(_dbmod, "get_db", closed_session), \
                  patch.object(paper_engine, "_record_outcome"):
                 result = paper_engine.mark_to_market({"AAPL": 111.0})
 
-            self.assertEqual(len(result["closed"]), 1)
+            self.assertEqual(len(result["closed"]), 1, result)
             self.assertEqual(result["closed"][0]["reason"], "take_profit")
+            self.assertEqual(result["closed"][0]["route"], "LEGACY")
             pos = session.query(PaperPosition).filter(PaperPosition.id == "pos-tp").first()
             self.assertEqual(pos.status, "Closed")
         finally:

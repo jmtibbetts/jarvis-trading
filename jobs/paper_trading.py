@@ -515,9 +515,17 @@ def _maybe_scale_out_paper(pos: dict, current_price: float) -> dict | None:
     if not reached:
         return None
 
-    from lib.paper_engine import partial_close_paper_position
-    result = partial_close_paper_position(pos["id"], SCALE_OUT_FRACTION, current_price, reason="scale_out_tp1")
+    # ROUTED. Legacy positions scale out exactly as before; a canonical one
+    # goes to its own book, and B2A sets the `scaled_out` compatibility
+    # latch inside the settlement transaction so this trigger cannot fire
+    # again next cycle.
+    from lib.exit_dispatch import request_position_partial_exit
+    result = request_position_partial_exit(
+        pos["id"], fraction=SCALE_OUT_FRACTION, caller_price=current_price,
+        caller_reason="scale_out_tp1", caller_source="PAPER_TP1")
     if not result.get("ok"):
+        logger.info("[PaperTrading] TP1 not settled for %s: %s",
+                    pos.get("symbol"), result.get("error"))
         return None
 
     breakeven_stop = entry
@@ -540,9 +548,10 @@ def _maybe_scale_out_paper(pos: dict, current_price: float) -> dict | None:
 def _manage_open_positions(prices: dict) -> dict:
     """
     Evaluate every open paper position with deterministic tiers + LLM + TA.
-    Same logic as manage_positions.py but closes via close_paper_position().
+    Same logic as manage_positions.py, but every close is ROUTED through
+    lib/exit_dispatch so a canonical position settles on its own book.
     """
-    from lib.paper_engine import close_paper_position
+    from lib.exit_dispatch import request_position_exit
     from lib.lmstudio import call_lm_studio
     try:
         from lib.ta_engine import build_ta_prompt_block
@@ -604,7 +613,10 @@ def _manage_open_positions(prices: dict) -> dict:
         if plan.get("ok") and plan.get("action") == "EXIT":
             logger.warning(f"[PaperTrading] Risk EXIT {sym}: {plan.get('reason')} | P&L=${pl_dollar:.2f}")
             log_decision("paper", "EXIT", plan.get("reason", "Max paper loss breached"), symbol=sym, pnl_pct=plpc, price=current_price)
-            close_paper_position(pos["id"], current_price, reason=plan.get("reason", "risk_guard"))
+            request_position_exit(
+                pos["id"], caller_price=current_price,
+                caller_reason=plan.get("reason", "risk_guard"),
+                caller_source="RISK_GUARD")
             r["closed"] += 1
             return r
         if plan.get("ok") and plan.get("action") == "ADJUST":
@@ -645,7 +657,10 @@ def _manage_open_positions(prices: dict) -> dict:
         if tier and tier["action"] == "close" and not tier_is_loss_cut:
             logger.info(f"[PaperTrading] 🔒 Hard rule: {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
-            close_paper_position(pos["id"], current_price, reason=tier["label"])
+            request_position_exit(
+                pos["id"], caller_price=current_price,
+                caller_reason=tier["label"],
+                caller_source="TIER_EXIT")
             r["closed"] += 1
             return r
 
@@ -776,14 +791,20 @@ Respond ONLY with valid JSON (no markdown):
         if tier_is_loss_cut and not llm_ok:
             logger.info(f"[PaperTrading] 🔒 Tier loss cut (LLM unavailable): {sym} {plpc:+.2f}% → {tier['label']}")
             log_decision('paper', 'EXIT', tier['label'], symbol=sym, pnl_pct=plpc, price=current_price)
-            close_paper_position(pos["id"], current_price, reason=tier["label"])
+            request_position_exit(
+                pos["id"], caller_price=current_price,
+                caller_reason=tier["label"],
+                caller_source="TIER_EXIT")
             r["closed"] += 1
             return r
 
         if action == "EXIT":
             logger.info(f"[PaperTrading] 🤖 LLM EXIT {sym} {plpc:+.2f}% | {reasoning}")
             log_decision("paper", "EXIT", reasoning, symbol=sym, pnl_pct=plpc, price=current_price)
-            close_paper_position(pos["id"], current_price, reason=f"AI EXIT: {reasoning[:80]}")
+            request_position_exit(
+                pos["id"], caller_price=current_price,
+                caller_reason=f"AI EXIT: {reasoning[:80]}",
+                caller_source="AI_EXIT")
             r["closed"] += 1
         elif action == "TIGHTEN_STOP" and new_stop_pct:
             try:

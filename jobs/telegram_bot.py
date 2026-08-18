@@ -819,18 +819,31 @@ def handle_callback(callback, configured_chat_id, token):
                 show_alert=True,
             )
             return
-        from lib.paper_engine import close_paper_position
-        result = close_paper_position(
-            entity_id, close_price,
-            reason="telegram_take_profit" if action == "tp" else "telegram_close",
+        # ROUTED. An operator pressing Close is an INSTRUCTION to exit, so
+        # it is never second-guessed against a price threshold — but the
+        # price shown in the app is a reference, and a canonical position
+        # still fills on its own venue book.
+        from lib.exit_dispatch import request_position_exit
+        result = request_position_exit(
+            entity_id, caller_price=close_price,
+            caller_reason="telegram_manual",
+            caller_source="TELEGRAM_TAKE_PROFIT" if action == "tp"
+            else "TELEGRAM_MANUAL",
         )
         if not result.get("ok"):
             answer_callback(token, callback_id, result.get("error", "Close failed"), show_alert=True)
             return
         edit_keyboard(token, chat_id, message_id, {"inline_keyboard": []})
+        _pnl = result.get("pnl")
+        _pnl_txt = f"${_pnl:+.2f}" if _pnl is not None else "n/a"
+        # The ACTUAL fill, which for a canonical position is the venue's
+        # price and not the one the button was drawn with.
+        _fill = result.get("close_price")
+        _fill_txt = f" @ ${_fill:,.2f}" if _fill else ""
         answer_callback(
             token, callback_id,
-            f"Paper position closed: {result['symbol']} P/L ${result['pnl']:+.2f}",
+            f"Paper position closed: {result.get('symbol')}{_fill_txt} "
+            f"P/L {_pnl_txt}",
             show_alert=True,
         )
     except Exception as exc:

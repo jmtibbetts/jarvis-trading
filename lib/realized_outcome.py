@@ -77,6 +77,12 @@ STOP_EXIT = "STOP_EXIT"
 TARGET_EXIT = "TARGET_EXIT"
 MARGIN_CALL = "MARGIN_CALL"
 FORCED_LIQUIDATION = "FORCED_LIQUIDATION"
+# An ADMINISTRATIVE portfolio operation — a book reset — not a decision the
+# strategy made about this trade. It gets full financial history and no
+# learning vote: teaching the desk that "the thesis exited here" because an
+# operator reseeded the wallet would poison the training set with an event
+# the market had no part in.
+ADMINISTRATIVE_RESET = "ADMINISTRATIVE_RESET"
 
 
 @dataclass

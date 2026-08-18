@@ -57,9 +57,17 @@ PENDING = "PENDING"
 APPLIED = "APPLIED"
 FAILED_RETRYABLE = "FAILED_RETRYABLE"
 FAILED_PERMANENT = "FAILED_PERMANENT"
+# TERMINAL, and deliberately not a failure: this outcome is real financial
+# history that the strategy must never be taught from. An administrative
+# book reset closed the position; the market did not.
+SKIPPED_POLICY = "SKIPPED_POLICY"
+
+# Exit reasons whose outcomes are financial truth but NOT strategy evidence.
+NON_LEARNING_EXIT_REASONS = frozenset({"ADMINISTRATIVE_RESET"})
 
 # ── Result vocabulary ────────────────────────────────────────────────────
 LEARNING_ALREADY_APPLIED = "LEARNING_ALREADY_APPLIED"
+LEARNING_SKIPPED_POLICY = "LEARNING_SKIPPED_POLICY"
 LEARNING_OUTCOME_INVALID = "LEARNING_OUTCOME_INVALID"
 LEARNING_STATE_CORRUPT = "LEARNING_STATE_CORRUPT"
 LEARNING_PROJECTION_FAILED = "LEARNING_PROJECTION_FAILED"
@@ -401,6 +409,23 @@ def apply_realized_outcome(outcome_id: str) -> dict:
 
     state = outcome.learning_state
 
+    # ── POLICY SKIP, checked before anything else. An administrative reset
+    # is real financial history and NOT strategy evidence: no learning row,
+    # no aggregates, no Tier 5, ever. Terminal and idempotent — a later
+    # sweep finds it already terminal and moves on.
+    if outcome.exit_reason in NON_LEARNING_EXIT_REASONS:
+        if state != SKIPPED_POLICY:
+            _set_learning_state(outcome_id, SKIPPED_POLICY, None)
+        return {"ok": True, "skipped": True,
+                "result": LEARNING_SKIPPED_POLICY,
+                "detail": (f"{outcome.exit_reason} is an administrative "
+                           f"operation, not a decision the strategy made "
+                           f"about this trade")}
+    if state == SKIPPED_POLICY:
+        return {"ok": True, "skipped": True,
+                "result": LEARNING_SKIPPED_POLICY,
+                "detail": "already terminal by policy"}
+
     # ── APPLIED: idempotent only when the projection is intact (§27/§28) ─
     if state == APPLIED:
         with engine.connect() as conn:
@@ -614,10 +639,13 @@ def apply_pending_realized_outcomes(limit: int = 50,
                                    "lim": int(limit)}).fetchall()
 
     summary = {"scanned": len(rows), "applied": 0, "already_applied": 0,
-               "retryable_failed": 0, "permanent_failed": 0, "other": 0}
+               "retryable_failed": 0, "permanent_failed": 0,
+               "skipped_policy": 0, "other": 0}
     for (oid,) in rows:
         res = apply_realized_outcome(oid)
-        if res.get("ok") and res.get("idempotent"):
+        if res.get("ok") and res.get("skipped"):
+            summary["skipped_policy"] += 1
+        elif res.get("ok") and res.get("idempotent"):
             summary["already_applied"] += 1
         elif res.get("ok"):
             summary["applied"] += 1

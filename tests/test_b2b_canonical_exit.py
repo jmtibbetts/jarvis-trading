@@ -149,8 +149,11 @@ class LongAcceptanceTests(_B2BHarness):
         return pos, header, before, res
 
     def test_a_long_full_close_settles_through_the_whole_chain(self):
+        # An automated TARGET_EXIT must name the THRESHOLD it fired on, and
+        # the exact book must confirm it: the bid is 65,000, so a 64,900
+        # target is genuinely reachable on the side this long exits through.
         pos, header, before, res = self._close_full(
-            exit_reason=CS.TARGET_EXIT)
+            exit_reason=CS.TARGET_EXIT, trigger_price=64_900.0)
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res["kind"], "FINAL_EXIT")
 

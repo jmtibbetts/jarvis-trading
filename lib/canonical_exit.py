@@ -47,10 +47,22 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-from lib.realized_outcome import VOLUNTARY_EXIT  # noqa: E402
+from lib.realized_outcome import (FORCED_LIQUIDATION,  # noqa: E402
+                                  MARGIN_CALL, STOP_EXIT, TARGET_EXIT,
+                                  VOLUNTARY_EXIT)
 
 # ── Refusal vocabulary (§36). Named, never "could not close". ────────────
 NOT_CANONICAL_POSITION = "NOT_CANONICAL_POSITION"
+# An automated PRICE-THRESHOLD claim that the contract's own executable
+# book does not support. Not a failure — the trigger simply is not true.
+EXIT_TRIGGER_NOT_CONFIRMED = "EXIT_TRIGGER_NOT_CONFIRMED"
+
+# Exits whose justification IS a price threshold, and which therefore must
+# be re-confirmed against the exact book. Everything else — a manual close,
+# an AI decision, an administrative reset — is an INSTRUCTION to exit, not
+# a claim about price, and is never second-guessed here.
+AUTOMATED_TRIGGER_REASONS = frozenset({STOP_EXIT, TARGET_EXIT, MARGIN_CALL,
+                                       FORCED_LIQUIDATION})
 EXIT_MARKET_DATA_UNAVAILABLE = "EXIT_MARKET_DATA_UNAVAILABLE"
 EXIT_EXACT_INSTRUMENT_UNAVAILABLE = "EXIT_EXACT_INSTRUMENT_UNAVAILABLE"
 EXIT_INVALID_QUANTITY = "EXIT_INVALID_QUANTITY"
@@ -157,13 +169,88 @@ def read_exit_snapshot(position_id: str) -> CanonicalExitSnapshot | dict:
     return snap
 
 
+def confirm_exit_trigger(snap: CanonicalExitSnapshot, ready, exit_reason: str,
+                         *, trigger_price: float | None,
+                         caller_price: float | None) -> dict | None:
+    """Is this automated price trigger still true on the contract's OWN book?
+
+    A generic cross-market mark is EVIDENCE that something may have
+    happened. It is not authority to liquidate a contract whose executable
+    book has not reached the level — a spot print, another venue's tape, or
+    a stale cache can all cross a threshold the perpetual never did.
+
+    THE EXECUTABLE SIDE IS THE REFERENCE, because that is the side the
+    position must actually leave through. A LONG exits by SELLING, so its
+    stop and target are judged on the BID; a SHORT exits by BUYING and is
+    judged on the ASK. A midpoint that touches the target while the
+    executable side has not is not an executable target.
+
+    Returns a refusal dict, or None when the trigger is confirmed.
+    """
+    if exit_reason not in AUTOMATED_TRIGGER_REASONS:
+        return None                      # an instruction, not a claim
+
+    bid = float(ready.snapshot.bid)
+    ask = float(ready.snapshot.ask)
+    long_side = snap.position_side == "long"
+    reference = bid if long_side else ask
+
+    def _no(detail: str) -> dict:
+        return _refuse(
+            EXIT_TRIGGER_NOT_CONFIRMED, detail,
+            reason=exit_reason, threshold=trigger_price,
+            caller_reference=caller_price, canonical_bid=bid,
+            canonical_ask=ask, executable_reference=reference,
+            position_id=snap.position_id)
+
+    if exit_reason in (STOP_EXIT, TARGET_EXIT):
+        if trigger_price is None:
+            return _no(f"{exit_reason} names no threshold, so there is "
+                       f"nothing to confirm against the book")
+        threshold = float(trigger_price)
+        if exit_reason == STOP_EXIT:
+            fired = reference <= threshold if long_side else \
+                reference >= threshold
+        else:
+            fired = reference >= threshold if long_side else \
+                reference <= threshold
+        if not fired:
+            side_word = "bid" if long_side else "ask"
+            return _no(
+                f"{exit_reason} at {threshold:g} is not confirmed: the "
+                f"executable {side_word} is {reference:g}. A caller "
+                f"reference of {caller_price!r} is evidence, not the "
+                f"contract's own book")
+        return None
+
+    # MARGIN_CALL / FORCED_LIQUIDATION — re-derive the condition from the
+    # exact book, at the SAME threshold the legacy path uses. One constant,
+    # imported, never a second literal.
+    from lib.paper_engine import MARGIN_CALL_THRESHOLD
+    sign = 1.0 if long_side else -1.0
+    gross = ((reference - snap.actual_entry_fill) * sign
+             * snap.remaining_qty * snap.multiplier)
+    equity_in_position = snap.remaining_margin + gross
+    if snap.remaining_margin > 0 and equity_in_position >= \
+            snap.remaining_margin * MARGIN_CALL_THRESHOLD:
+        return _no(
+            f"{exit_reason} is not confirmed: at the executable "
+            f"{reference:g} this position still holds "
+            f"${equity_in_position:,.2f} of its ${snap.remaining_margin:,.2f} "
+            f"margin, above the {MARGIN_CALL_THRESHOLD:.0%} floor")
+    return None
+
+
 def close_canonical_position(position_id: str, *,
                              requested_qty: float | None = None,
                              close_fraction: float | None = None,
                              exit_reason: str = VOLUNTARY_EXIT,
                              trigger_price: float | None = None,
                              decision_price: float | None = None,
-                             max_age_s: float | None = None) -> dict:
+                             max_age_s: float | None = None,
+                             caller_source: str | None = None,
+                             caller_reason: str | None = None,
+                             request_metadata: dict | None = None) -> dict:
     """Close (some of) one canonical position against its own frozen book.
 
     NOT wired to the ten production callers — direct invocation only, until
@@ -223,6 +310,15 @@ def close_canonical_position(position_id: str, *,
                        f"the book confirmed "
                        f"{ready.snapshot.instrument_id!r}, not the frozen "
                        f"{snap.instrument_id!r}")
+
+    # ── 2b. An automated PRICE TRIGGER is re-confirmed on this contract's
+    # own executable book, before any order exists. A caller's mark got us
+    # here; it does not get to liquidate.
+    unconfirmed = confirm_exit_trigger(snap, ready, exit_reason,
+                                       trigger_price=trigger_price,
+                                       caller_price=decision_price)
+    if unconfirmed:
+        return unconfirmed
 
     # ── 3. The exact execution instrument. No bare resolve(). ────────────
     try:
@@ -406,6 +502,14 @@ def close_canonical_position(position_id: str, *,
                 "identity_source": PERSISTED_CANONICAL_ENTRY,
                 "theoretical_qty": theoretical,
                 "authorized_qty": authorized,
+                # WHO ASKED, AND IN WHAT WORDS. Provenance only — these
+                # never touch economics. The canonical reason is normalized
+                # semantics; the caller's own spelling is kept beside it so
+                # VOLUNTARY_EXIT/"telegram_manual" stays distinguishable
+                # from VOLUNTARY_EXIT/"ai_exit".
+                "caller_source": caller_source,
+                "caller_reason": caller_reason,
+                "request_metadata": request_metadata or None,
             })
     except CS.ExitValidationError as e:
         return _refuse(CS.EXIT_VALIDATION_FAILED, str(e))

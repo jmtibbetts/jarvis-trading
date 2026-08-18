@@ -39,8 +39,17 @@ DEFAULT_DB = REPO / "data" / "jarvis.db"
 # Tables whose contents ARE the economic claim. Deliberately not "every table":
 # market data and caches change constantly and calling that an economic
 # mutation would make the alarm useless.
+#
+# The B1 settlement ledger tables are ECONOMIC_MUTATION_SENSITIVE and listed
+# here from the day the schema exists — but the OPERATOR database is
+# deliberately not migrated yet, so on that DB they are reported truthfully
+# as NOT_PRESENT_IN_THIS_SCHEMA rather than created, failed on, or padded to
+# a fictitious row count of zero. Absence of a table is a fact about the
+# schema; pretending otherwise would make the fingerprint a liar in exactly
+# the tool whose only job is not lying.
 ECONOMIC_TABLES = ("paper_positions", "paper_trades", "paper_portfolio",
-                   "trade_outcomes")
+                   "trade_outcomes",
+                   "paper_position_settlements", "paper_settlement_legs")
 
 
 def _now() -> str:
@@ -96,7 +105,8 @@ def fingerprint(db_path: Path) -> dict:
         out: dict = {}
         for table in ECONOMIC_TABLES:
             if table not in present:
-                out[table] = {"present": False}
+                out[table] = {"present": False,
+                              "status": "NOT_PRESENT_IN_THIS_SCHEMA"}
                 continue
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
             pk = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")

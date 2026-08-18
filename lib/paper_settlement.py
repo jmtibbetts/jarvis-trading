@@ -82,6 +82,17 @@ LEG_ENTRY = "ENTRY"
 LEG_PARTIAL_EXIT = "PARTIAL_EXIT"
 LEG_FINAL_EXIT = "FINAL_EXIT"
 
+# The durable ledger's version (B1). Stamped on every NEW canonical
+# settlement header and leg at write time; never inferred for historical
+# positions — absence means legacy, exactly like NULL provenance.
+SETTLEMENT_VERSION = "paper_settlement_v1"
+
+# Canonical leg execution sides. Deterministic from the entry order — a LONG
+# position enters by BUYING, a SHORT by SELLING — never inferred from price
+# movement.
+EXECUTION_SIDE_BUY = "buy"
+EXECUTION_SIDE_SELL = "sell"
+
 
 def funding_for_interval(symbol: str, notional: float, is_short: bool,
                          hours_held: float) -> float:

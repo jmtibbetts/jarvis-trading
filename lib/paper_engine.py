@@ -1189,6 +1189,56 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
     notional, leverage = auth.notional, auth.leverage
     sizing = auth.sizing
 
+    # ── B1: CANONICAL INTENT IS THE CAUSAL PAIR, STATED OR ABSENT ────────
+    #
+    # observation_id and execution_id arrive together or not at all. The
+    # individual companion arguments (`execution_provenance`,
+    # `canonical_entry_fee_usd`) have each existed independently, so their
+    # presence proves nothing about intent — but the PAIR is minted only by
+    # the canonical entry path. Half a pair is a broken causal chain, and a
+    # broken chain FAILS CLOSED rather than quietly settling as legacy: a
+    # canonical trade that loses its evidence linkage must not become a
+    # legacy-shaped position nobody can explain later.
+    canonical = bool(observation_id) and bool(execution_id)
+    if bool(observation_id) != bool(execution_id):
+        return {"error": "INCOMPLETE_CANONICAL_LINKAGE",
+                "detail": (f"canonical settlement requires BOTH "
+                           f"observation_id and execution_id; got "
+                           f"observation_id={'set' if observation_id else 'missing'}, "
+                           f"execution_id={'set' if execution_id else 'missing'} "
+                           f"— refusing rather than downgrading to legacy")}
+
+    ledger_facts = None
+    if canonical:
+        # Canonical intent requires the full canonical invocation, validated
+        # as ONE self-consistent fact set BEFORE any mutation. The validator
+        # is pure: it re-prices nothing and opens no session.
+        from lib.settlement_ledger import (LedgerValidationError,
+                                           validate_entry_ledger_facts)
+        if execution_provenance is None or canonical_entry_fee_usd is None:
+            return {"error": "INCOMPLETE_CANONICAL_LINKAGE",
+                    "detail": ("canonical settlement requires execution "
+                               "provenance and the exact entry fee; refusing "
+                               "rather than settling half a canonical entry "
+                               "as legacy")}
+        try:
+            ledger_facts = validate_entry_ledger_facts(
+                auth, settled_qty=qty, settled_margin=margin,
+                fill_price=entry,
+                canonical_entry_fee_usd=float(canonical_entry_fee_usd),
+                execution_provenance=execution_provenance,
+                observation_id=observation_id, execution_id=execution_id)
+        except LedgerValidationError as e:
+            logger.error("[Paper] %s canonical ledger validation refused: %s",
+                         sym, e)
+            return {"error": "CANONICAL_LEDGER_VALIDATION_FAILED",
+                    "detail": str(e)}
+
+    # ONE settlement time for the whole entry transaction (§24). This is
+    # ACCOUNT SETTLEMENT TIME, not the venue execution event — venue event
+    # time stays in provenance.
+    settlement_time = _now()
+
     # NOTE on the duplicate-open race: the "already open?" check below and the
     # INSERT further down happen in the same SQLAlchemy session/transaction,
     # but that only protects against races *within* this process — a second
@@ -1209,6 +1259,21 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
             ).first()
             if existing:
                 return {"error": f"Paper position already open for {sym}"}
+
+            # B1: one entry execution cannot create two canonical positions.
+            # Named refusal here; the UNIQUE constraint on the header is the
+            # backstop for the race this SELECT cannot see.
+            if canonical:
+                from app.database import PaperPositionSettlement
+                dup = db.query(PaperPositionSettlement).filter(
+                    PaperPositionSettlement.entry_execution_id == execution_id
+                ).first()
+                if dup:
+                    return {"error": "DUPLICATE_CANONICAL_EXECUTION",
+                            "detail": (f"execution {execution_id} already "
+                                       f"settled into position "
+                                       f"{dup.position_id}; one execution is "
+                                       f"one entry")}
 
             portfolio = _get_portfolio_cash(db)
 
@@ -1287,8 +1352,8 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                 unrealized_pct= 0.0,
                 signal_id     = auth.signal.get("id"),
                 status        = "Open",
-                opened_at     = _now(),
-                updated_at    = _now(),
+                opened_at     = settlement_time,
+                updated_at    = settlement_time,
             )
             db.add(pos)
             # ONE debit, inside ONE transaction. The canonical entry fee is
@@ -1300,7 +1365,7 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                     f"cash {portfolio.cash:.2f} cannot cover margin {margin:.2f} "
                     f"plus entry fee {entry_fee:.2f} at settlement")
             portfolio.cash    -= (margin + entry_fee)
-            portfolio.updated_at = _now()
+            portfolio.updated_at = settlement_time
 
             pos_id   = pos.id
 
@@ -1352,7 +1417,18 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                         f"position {obs.position_id}")
                 obs.execution_state = DO.EXEC_SETTLED
                 obs.position_id = pos_id
-                obs.settlement_at = _now()
+                obs.settlement_at = settlement_time
+
+            # ── B1: THE LEDGER COMMITS WITH THE POSITION OR NOT AT ALL ───
+            # Header and ENTRY leg are added to THIS session, inside THIS
+            # transaction — no second session, no post-commit stamping. If
+            # anything from the position insert to this point fails, the
+            # position, the cash, the observation linkage and the ledger all
+            # unwind together, which is the entire reason B1 exists.
+            if canonical:
+                from lib.settlement_ledger import persist_entry_ledger
+                persist_entry_ledger(db, position=pos, facts=ledger_facts,
+                                     settlement_time=settlement_time)
 
             pos_data = {
                 "id": pos_id, "symbol": sym, "direction": dir_key,
@@ -1361,7 +1437,18 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
                 "notional": notional, "margin_required": margin, "asset_class": asset_class,
                 "entry_fee_usd": float(canonical_entry_fee_usd or 0.0),
             }
-    except IntegrityError:
+    except IntegrityError as e:
+        # WHICH constraint fired matters: the same exception class covers
+        # two different races, and answering both with "already open" would
+        # misreport a duplicated canonical execution as a symbol collision.
+        detail = str(e)
+        if ("paper_position_settlements" in detail
+                or "paper_settlement_legs" in detail):
+            logger.warning(f"[Paper] Duplicate canonical settlement race for "
+                           f"{sym}: {detail}")
+            return {"error": "DUPLICATE_CANONICAL_EXECUTION",
+                    "detail": ("another settlement committed this execution "
+                               "concurrently; one execution is one entry")}
         # Lost the race: another session committed an open position for this
         # symbol between our SELECT above and this transaction's commit.
         logger.warning(f"[Paper] Duplicate-open race detected for {sym} — a position was already opened concurrently")

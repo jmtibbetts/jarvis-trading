@@ -2334,6 +2334,153 @@ class PaperTrade(Base):
     closed_at     = Column(String, default=now_iso)
 
 
+class PaperPositionSettlement(Base):
+    """The durable OPEN-position accounting header (B1, paper_settlement_v1).
+
+    One row per NEW canonical position, written in THE SAME transaction that
+    creates the PaperPosition and moves cash — a canonical position must not
+    be able to exist as only a position plus a JSON document. This is the
+    PERSISTED row; the semantic accounting object it will reconstruct into is
+    `lib.paper_settlement.PositionSettlement`, and the two are deliberately
+    named apart so neither is mistaken for the other.
+
+    Every economic figure here is the ACTUAL SETTLED FACT — the quantity the
+    position row carries, the margin the cash debit moved, the fee that left
+    the account — never an earlier unrounded authorization estimate. A pretty
+    ledger that disagrees with cash is worse than no ledger.
+
+    Legacy positions get NO row here, ever. NULL absence means legacy,
+    exactly like NULL provenance; it is never inferred and never backfilled.
+    """
+    __tablename__ = "paper_position_settlements"
+    __table_args__ = (
+        # One position settles once.
+        UniqueConstraint("position_id", name="uq_pps_position"),
+        # One entry execution cannot create two canonical positions.
+        UniqueConstraint("entry_execution_id", name="uq_pps_entry_execution"),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    position_id          = Column(String, nullable=False)
+    observation_id       = Column(String, index=True)
+    signal_id            = Column(String)
+
+    # Frozen entry identity — persisted, never re-resolved from today's
+    # config. product+symbol names a family; instrument_id names the
+    # contract the quantity is counted in.
+    symbol               = Column(String, nullable=False)
+    asset_class          = Column(String)
+    product              = Column(String, nullable=False)
+    venue                = Column(String, nullable=False)
+    instrument_id        = Column(String, nullable=False)
+    position_side        = Column(String, nullable=False)   # long | short
+
+    # Unit basis. 2 CONTRACTS at 0.01 and 2 COINS at 1.0 are different
+    # exposures wearing the same number; the basis makes the row readable.
+    quantity_unit        = Column(String, nullable=False)
+    multiplier           = Column(Float, nullable=False)
+
+    # Original economic facts, as settled.
+    original_quantity    = Column(Float, nullable=False)
+    original_notional_usd = Column(Float, nullable=False)
+    committed_margin_usd = Column(Float, nullable=False)
+    decision_entry_price = Column(Float)
+    actual_entry_fill    = Column(Float, nullable=False)
+    entry_execution_id   = Column(String, nullable=False)
+
+    entry_fee_usd        = Column(Float, nullable=False)
+    entry_fee_basis      = Column(String)
+    entry_fee_source     = Column(String)
+    entry_fee_quality    = Column(String)
+    entry_fee_contract_count       = Column(Float)
+    entry_fee_contract_count_basis = Column(String)
+
+    initial_stop         = Column(Float)
+    initial_risk_usd     = Column(Float)
+
+    # Models, frozen at settlement.
+    settlement_version   = Column(String, nullable=False)
+    cost_model           = Column(String, nullable=False)
+    execution_model      = Column(String, nullable=False)
+    engine_epoch         = Column(String, nullable=False)
+
+    # Lifecycle. OPEN until a canonical exit exists (B2); revision 0 means
+    # "entry committed, zero exit legs committed" — each future exit leg
+    # checks and increments it atomically. ENTRY does not increment.
+    status               = Column(String, nullable=False, default="OPEN")
+    settlement_revision  = Column(Integer, nullable=False, default=0)
+    opened_at            = Column(String, nullable=False)
+    closed_at            = Column(String)                    # NULL until final
+
+
+class PaperSettlementLeg(Base):
+    """One executed leg's durable accounting record (B1).
+
+    An ENTRY leg is never a trade outcome: gross P&L, holding cost, released
+    margin and hours held are all structurally zero at entry, and writing an
+    ENTRY row must not touch trade counters, PaperTrade, or learning. Exit
+    leg KINDS exist in the vocabulary (PARTIAL_EXIT / FINAL_EXIT) but no
+    production path writes them until B2.
+    """
+    __tablename__ = "paper_settlement_legs"
+    __table_args__ = (
+        # One execution settles once, anywhere.
+        UniqueConstraint("execution_id", name="uq_psl_execution"),
+        Index("ix_psl_position", "position_id"),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    position_id          = Column(String, nullable=False)
+    observation_id       = Column(String)
+    signal_id            = Column(String)
+    execution_id         = Column(String, nullable=False)
+    kind                 = Column(String, nullable=False)    # ENTRY | PARTIAL_EXIT | FINAL_EXIT
+
+    settlement_version   = Column(String, nullable=False)
+    settlement_revision  = Column(Integer, nullable=False, default=0)
+
+    symbol               = Column(String, nullable=False)
+    product              = Column(String, nullable=False)
+    venue                = Column(String, nullable=False)
+    instrument_id        = Column(String, nullable=False)
+
+    position_side        = Column(String, nullable=False)    # long | short
+    execution_side       = Column(String, nullable=False)    # buy | sell
+
+    requested_qty        = Column(Float, nullable=False)
+    filled_qty           = Column(Float, nullable=False)
+    quantity_unit        = Column(String, nullable=False)
+    multiplier           = Column(Float, nullable=False)
+
+    decision_price       = Column(Float)
+    fill_price           = Column(Float, nullable=False)
+    notional_usd         = Column(Float, nullable=False)
+
+    explicit_fee_usd     = Column(Float, nullable=False)
+    fee_basis            = Column(String)
+    fee_source           = Column(String)
+    fee_quality          = Column(String)
+    fee_contract_count   = Column(Float)
+    fee_contract_count_basis = Column(String)
+
+    # Entry accounting — structurally zero for kind=ENTRY.
+    gross_pnl_usd        = Column(Float, nullable=False, default=0.0)
+    holding_cost_usd     = Column(Float, nullable=False, default=0.0)
+    released_margin_usd  = Column(Float, nullable=False, default=0.0)
+    hours_held           = Column(Float, nullable=False, default=0.0)
+
+    spread_attribution_usd   = Column(Float, default=0.0)
+    slippage_attribution_usd = Column(Float, default=0.0)
+    impact_attribution_usd   = Column(Float, default=0.0)
+
+    execution_model      = Column(String, nullable=False)
+    cost_model           = Column(String, nullable=False)
+    fill_model           = Column(String)
+
+    created_at           = Column(String, nullable=False)
+    provenance_json      = Column(Text)
+
+
 class PaperPortfolio(Base):
     """Single-row virtual account state."""
     __tablename__ = "paper_portfolio"

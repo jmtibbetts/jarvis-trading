@@ -224,7 +224,13 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # fill re-ran the risk engine, and a second engine run must not become a
     # second, larger approval — so the money at risk is checked back against
     # what was approved BEFORE the order went out.
-    if final.loss_at_stop > authorized.loss_at_stop * (1 + 1e-6):
+    # TOLERANCE IN THE UNITS OF THE ROUNDING THAT PRODUCED THE NUMBER. Both
+    # figures come from a quantity rounded to 6dp, so they are meaningful
+    # only to within one such step; a 1e-6 RELATIVE comparison is tighter
+    # than the arithmetic underneath and produced the unreadable refusal
+    # "$863.46 exceeds $863.46". Size itself is still bounded exactly, by
+    # `final.qty <= authorized.qty` above.
+    if final.loss_at_stop > authorized.loss_at_stop + authorized.risk_quantum:
         logger.error("[CanonicalEntry] %s refusing to settle: repriced risk "
                      "$%.2f exceeds the authorized $%.2f",
                      symbol, final.loss_at_stop, authorized.loss_at_stop)

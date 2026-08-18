@@ -67,6 +67,13 @@ UNKNOWN_PRODUCT           = "UNKNOWN_PRODUCT"
 # spot book is not an approximation — it is a different instrument.
 NO_EXECUTABLE_PERP_QUOTE  = "NO_EXECUTABLE_PERP_QUOTE"
 NO_EXECUTABLE_PRODUCT_QUOTE = "NO_EXECUTABLE_PRODUCT_QUOTE"
+# Derivatives sessions are scheduled and can halt. A closed market is not a
+# data outage and not a losing thesis — it is a time of day.
+MARKET_NOT_OPEN           = "MARKET_NOT_OPEN"
+MARKET_HALTED             = "MARKET_HALTED"
+# The feed is connected but its sequence cannot be proven. Filling against a
+# book whose ordering is unknown is worse than not filling.
+BOOK_DESYNCED             = "BOOK_DESYNCED"
 
 # ASSET CLASSES whose execution venue has a real two-sided quote feed wired
 # up. Adding a member here is a claim that lib/execution_snapshot can produce
@@ -179,19 +186,31 @@ def resolve_product(symbol: str, asset_class: str | None = None, *,
     return None
 
 
-def resolve_execution_venue(symbol: str,
-                            asset_class: str | None = None) -> tuple[str | None, str]:
+def resolve_execution_venue(symbol: str, asset_class: str | None = None,
+                            product: str | None = None) -> tuple[str | None, str]:
     """(venue, asset_class) that WOULD have executed this, or (None, class).
 
     PAPER_VENUE is deliberately consulted for crypto only. It is a crypto
     setting; letting it capture equities and futures is how one variable
     routes an S&P future through a Bitcoin exchange.
 
+    THE VENUE FOLLOWS THE PRODUCT (A10.1). Spot and perpetual crypto do not
+    execute in the same place: spot crosses Kraken's own book, while US
+    perpetuals list on Bitnomial and reach it through Kraken Derivatives US.
+    Returning one venue for both is what let a spot book price a perpetual,
+    and `PAPER_VENUE=kraken` is a SPOT setting — it must not capture a
+    derivative any more than it may capture an equity.
+
     THE SECOND ELEMENT IS AN ASSET CLASS. It was called `product` and it
     never was one — see `resolve_product` for the actual product.
     """
+    from lib import product_router as PR
+
     ac = classify_asset_class(symbol, asset_class)
     if ac == "crypto":
+        if product == PR.CRYPTO_PERP:
+            from lib.bitnomial_products import KRAKEN_US_VENUE
+            return KRAKEN_US_VENUE, ac
         venue = (os.getenv("PAPER_VENUE") or os.getenv("DEFAULT_CRYPTO_VENUE")
                  or "kraken")
         return str(venue).lower(), ac
@@ -250,8 +269,10 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
     """
     from lib import execution_snapshot as ES
 
-    venue, ac = resolve_execution_venue(symbol, asset_class)
+    # PRODUCT FIRST, then the venue that executes THAT product. Resolving
+    # the venue first is what produced "kraken" for a perpetual.
     product = resolve_product(symbol, asset_class, signal=signal)
+    venue, ac = resolve_execution_venue(symbol, asset_class, product=product)
     instrument = _instrument_id(symbol, venue, product)
 
     def _refuse(reason, detail):
@@ -297,7 +318,14 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
             f"{sorted(ES.products_for(venue))} but not for {product!r}; a "
             f"spot quote must never be labelled as perpetual execution truth")
 
-    kwargs = {} if max_age_s is None else {"max_age_s": max_age_s}
+    # Staleness is a PRODUCT property. A perpetual book that stops changing
+    # is quiet, not dead — see DEFAULT_PERP_MAX_AGE_S, which is measured.
+    from lib import product_router as PR
+    if max_age_s is None:
+        kwargs = ({"max_age_s": ES.DEFAULT_PERP_MAX_AGE_S}
+                  if product == PR.CRYPTO_PERP else {})
+    else:
+        kwargs = {"max_age_s": max_age_s}
     snap = ES.execution_market_snapshot(symbol, venue, product=product, **kwargs)
     if snap.status == ES.AVAILABLE:
         return ExecutionReadiness(True, venue, product, snapshot=snap,
@@ -307,6 +335,9 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
         ES.STALE: STALE_EXECUTION_DATA,
         ES.CROSSED: CROSSED_BOOK,
         ES.ONE_SIDED: ONE_SIDED_BOOK,
+        ES.MARKET_NOT_OPEN: MARKET_NOT_OPEN,
+        ES.MARKET_HALTED: MARKET_HALTED,
+        ES.BOOK_DESYNCED: BOOK_DESYNCED,
     }.get(snap.status, EXECUTION_DATA_UNAVAILABLE)
     return ExecutionReadiness(False, venue, product, reason, snap.reason, snap,
                               asset_class=ac, instrument=instrument)
@@ -320,6 +351,20 @@ def _instrument_id(symbol: str, venue: str | None, product: str | None):
     place to raise it.
     """
     if not (symbol and venue and product):
+        return None
+    from lib import product_router as PR
+    if product == PR.CRYPTO_PERP:
+        # THE CONTRACT, not the pair. A perpetual's identity is its listed
+        # contract (PBTCUCZ50) — "crypto:BTC/USD" names the thesis, not the
+        # instrument that was traded, and a ledger that records the latter
+        # cannot tell two contracts on the same underlying apart.
+        try:
+            from lib.bitnomial_products import resolve as resolve_perp
+            prod = resolve_perp(symbol)
+            if prod.ok:
+                return prod.symbol
+        except Exception:
+            pass
         return None
     try:
         from lib.instruments import resolve
@@ -346,4 +391,7 @@ def is_venue_data_failure(reason: str | None) -> bool:
         # and recording it against the strategy would teach the learner that
         # perp theses lose.
         NO_EXECUTABLE_PERP_QUOTE, NO_EXECUTABLE_PRODUCT_QUOTE,
+        # A closed session, a halt and a desynced book are all facts about
+        # the venue and the feed. None of them is a verdict on the trade.
+        MARKET_NOT_OPEN, MARKET_HALTED, BOOK_DESYNCED,
     }

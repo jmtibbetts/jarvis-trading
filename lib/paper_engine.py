@@ -55,6 +55,13 @@ MAX_MARGIN_PCT_OF_CASH = 15.0   # one position may tie up at most this % of free
 # venue expensive. Kept as a backstop over whatever schedule is selected.
 FEE_SANITY_CEILING = 0.05
 
+# Quantity is persisted and authorized at this precision, so every risk
+# figure derived from it is meaningful only to within one step. Named
+# rather than inlined because the tolerance of the last risk gate has to be
+# expressed in the SAME units as the rounding that produced the number.
+QTY_DECIMALS = 6
+QTY_STEP = 10.0 ** -QTY_DECIMALS
+
 
 def perp_base_rate() -> tuple[float, str]:
     """Fallback rate for a LEVERAGED position, per side.
@@ -748,6 +755,19 @@ class EntryAuthorization:
     def stop_distance(self) -> float:
         return abs(float(self.reference_price) - float(self.stop))
 
+    @property
+    def risk_quantum(self) -> float:
+        """The dollar risk of ONE quantity-rounding step.
+
+        `qty` is rounded to QTY_DECIMALS, so every risk figure derived from
+        it is only meaningful to within one step. Comparing two such figures
+        at a tighter tolerance than the rounding that produced them asks the
+        arithmetic a question it cannot answer, and the answer comes back as
+        "$863.46 exceeds $863.46" — a refusal with no readable cause.
+        """
+        mult = float(self.sizing.get("multiplier") or 1.0)
+        return QTY_STEP * self.stop_distance * mult
+
     def risk_decision(self):
         """The approval, in the canonical type the risk gate understands."""
         from lib.decision_types import RiskDecision
@@ -989,7 +1009,7 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
         return {"error": f"concentration limit: {conc['reason']}",
                 "concentration": conc}
 
-    qty = round(sizing["qty"], 6)
+    qty = round(sizing["qty"], QTY_DECIMALS)
     margin = round(sizing["margin"], 2)
     notional = sizing["notional"]
     leverage = float(sizing.get("leverage") or leverage or 1.0)
@@ -1000,12 +1020,33 @@ def prepare_entry(signal: dict, reference_price: float = None) -> dict:
         + (" [capped by free cash]" if sizing.get("capped_by_cash") else "")
     )
 
+    # THE AUTHORIZATION MUST DESCRIBE THE QUANTITY IT AUTHORIZES.
+    #
+    # `qty` is rounded to 6dp above, and rounding can go UP: a solved
+    # 0.29411764... becomes 0.294118, which risks $1,000.0012 against a
+    # $1,000.00 budget. `sizing["loss_at_stop"]` was computed from the
+    # UNROUNDED quantity, so the record said 1,000.00 while the size it
+    # carried risked fractionally more — and the last risk gate, comparing
+    # the two honestly, refused the order it had itself approved.
+    #
+    # Tiny in dollars and structural in kind: a risk figure must be derived
+    # from the size that will actually be sent, not from the one that was
+    # solved before rounding.
+    _mult = 1.0
+    try:
+        from lib.instruments import get_spec
+        _spec = get_spec(sym) if sym else None
+        _mult = float(getattr(_spec, "multiplier", 1.0) or 1.0)
+    except Exception:
+        pass
+    loss_at_stop = qty * abs(entry - stop) * _mult
+    sizing = dict(sizing, multiplier=_mult)
+
     return {"ok": True, "authorization": EntryAuthorization(
         signal=signal, symbol=sym, asset_class=asset_class, direction=dir_key,
         side=side, reference_price=entry, target=target, stop=stop,
         qty=qty, margin=margin, notional=notional, leverage=leverage,
-        loss_at_stop=float(sizing["loss_at_stop"]), equity=_equity,
-        sizing=sizing)}
+        loss_at_stop=loss_at_stop, equity=_equity, sizing=sizing)}
 
 
 def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
@@ -1048,7 +1089,7 @@ def settle_position_entry(auth: EntryAuthorization, *, fill_price: float,
     side = auth.side
     entry = float(fill_price)
     target, stop = auth.target, auth.stop
-    qty, margin = round(auth.qty, 6), round(auth.margin, 2)
+    qty, margin = round(auth.qty, QTY_DECIMALS), round(auth.margin, 2)
     notional, leverage = auth.notional, auth.leverage
     sizing = auth.sizing
 

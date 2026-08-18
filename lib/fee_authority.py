@@ -181,13 +181,18 @@ def _perp_leg_fee(symbol: str, *, price: float, notional_usd: float,
     common = dict(venue=venue, product=product, region=region, maker=maker,
                   notional_usd=notional_usd)
 
-    if region == "us" and V.us_perp_venue_applies(venue):
+    # `us_perp_venue_applies` is the authority on whether the per-contract
+    # schedule governs. It already folds in the region, and it recognises
+    # `kraken_derivatives_us` outright — testing `region == "us"` here as
+    # well would bill the explicit US derivatives venue on the international
+    # ladder whenever VENUE_REGION happened to be unset.
+    if V.us_perp_venue_applies(venue):
         # PLANNING COUNT. us_perp_contracts rounds UP, which overstates the
         # fee — the safe direction for a cost estimate, and the wrong one
         # for an executable quantity. See executable_contracts().
-        contracts, why = V.us_perp_contracts(symbol, notional_usd, price)
+        contracts, why = V.us_perp_contracts(symbol, notional_usd, price, venue)
         if contracts is not None:
-            spec = V.us_perp_spec(symbol) or {}
+            spec = V.us_perp_spec(symbol, venue) or {}
             per_side = float(spec.get("fee_per_contract_per_side",
                                       V.US_PERPETUAL_FEE_PER_SIDE))
             return FeeQuote(

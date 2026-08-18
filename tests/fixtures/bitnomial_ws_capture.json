@@ -1,0 +1,163 @@
+{
+ "subscribe": {
+  "type": "subscribe",
+  "product_codes": [
+   "PBTCUCZ50"
+  ],
+  "channels": [
+   {
+    "name": "book",
+    "product_codes": [
+     "PBTCUCZ50"
+    ]
+   },
+   {
+    "name": "status",
+    "product_codes": [
+     "PBTCUCZ50"
+    ]
+   },
+   {
+    "name": "trade",
+    "product_codes": [
+     "PBTCUCZ50"
+    ]
+   }
+  ]
+ },
+ "messages": [
+  {
+   "ack_id": "7674028327896836521",
+   "asks": [
+    [
+     12882,
+     100
+    ],
+    [
+     12884,
+     50
+    ],
+    [
+     12885,
+     60
+    ],
+    [
+     12904,
+     5
+    ],
+    [
+     12914,
+     9
+    ],
+    [
+     12928,
+     11
+    ],
+    [
+     12930,
+     5
+    ],
+    [
+     13007,
+     5
+    ],
+    [
+     13136,
+     5
+    ],
+    [
+     13270,
+     4
+    ]
+   ],
+   "bids": [
+    [
+     12878,
+     50
+    ],
+    [
+     12875,
+     100
+    ],
+    [
+     12872,
+     60
+    ],
+    [
+     12860,
+     9
+    ],
+    [
+     12853,
+     5
+    ],
+    [
+     12847,
+     9
+    ],
+    [
+     12838,
+     1
+    ],
+    [
+     12828,
+     5
+    ],
+    [
+     12800,
+     5
+    ],
+    [
+     12760,
+     3
+    ]
+   ],
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.496334704Z",
+   "type": "book"
+  },
+  {
+   "ack_id": "7674028327896836521",
+   "state": "Open",
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.498529654Z",
+   "type": "status"
+  },
+  {
+   "ack_id": "7674028327896836555",
+   "price": 12872,
+   "quantity": 0,
+   "side": "Bid",
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.655799994Z",
+   "type": "level"
+  },
+  {
+   "ack_id": "7674028327896836555",
+   "price": 12871,
+   "quantity": 60,
+   "side": "Bid",
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.656220803Z",
+   "type": "level"
+  },
+  {
+   "ack_id": "7674028327896836562",
+   "price": 12871,
+   "quantity": 0,
+   "side": "Bid",
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.670685427Z",
+   "type": "level"
+  },
+  {
+   "ack_id": "7674028327896836562",
+   "price": 12872,
+   "quantity": 60,
+   "side": "Bid",
+   "symbol": "PBTCUCZ50",
+   "timestamp": "2026-08-17T23:45:21.67083022Z",
+   "type": "level"
+  }
+ ]
+}

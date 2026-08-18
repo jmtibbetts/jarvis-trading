@@ -641,10 +641,18 @@ def us_perp_venue_applies(venue: str | None = None) -> bool:
     instrument against a schedule that was written for a different product.
     """
     import os
-    v = (venue or os.getenv("PAPER_VENUE") or
-         os.getenv("DEFAULT_CRYPTO_VENUE") or DEFAULT_VENUE)
-    region = (os.getenv("VENUE_REGION") or "international").lower()
-    return str(v).lower() == "kraken" and region == "us"
+    v = str(venue or os.getenv("PAPER_VENUE") or
+            os.getenv("DEFAULT_CRYPTO_VENUE") or DEFAULT_VENUE).lower()
+    # `kraken_derivatives_us` is the explicit US perpetual venue introduced
+    # with the Bitnomial book (A10.1). It names the per-contract schedule
+    # outright instead of inferring it from a region variable, and is
+    # honoured regardless of VENUE_REGION: a venue whose whole identity is
+    # "the US derivatives venue" cannot be billed on the international
+    # ladder just because an environment variable was left unset.
+    if v == "kraken_derivatives_us":
+        return True
+    return v == "kraken" and (os.getenv("VENUE_REGION") or
+                              "international").lower() == "us"
 
 
 def us_perp_spec(symbol: str, venue: str | None = None) -> dict | None:
@@ -705,8 +713,8 @@ def us_perp_viability(symbol: str, price: float) -> dict:
     }
 
 
-def us_perp_contracts(symbol: str, notional: float,
-                      price: float) -> tuple[float | None, str]:
+def us_perp_contracts(symbol: str, notional: float, price: float,
+                      venue: str | None = None) -> tuple[float | None, str]:
     """(whole contracts needed, explanation) for a US perpetual, or None when
     no verified perpetual spec is on file.
 
@@ -717,7 +725,13 @@ def us_perp_contracts(symbol: str, notional: float,
     the whole point: a fabricated size is what produced every absurd fee this
     model has emitted.
     """
-    spec = us_perp_spec(symbol)
+    # THE VENUE IS FORWARDED. It used to be dropped here, so `us_perp_spec`
+    # re-derived it from the environment: a caller that knew perfectly well
+    # it was pricing `kraken_derivatives_us` got None whenever VENUE_REGION
+    # happened to be unset, and the leg silently fell to a percentage
+    # estimate. Knowing the venue and then asking the environment for it is
+    # how an explicit fact becomes a guess.
+    spec = us_perp_spec(symbol, venue)
     if not spec:
         return None, (f"{symbol}: contract size not on file, so contracts "
                       f"cannot be counted — add it to US_PERP_CONTRACTS to "
@@ -738,7 +752,8 @@ def us_perp_contracts(symbol: str, notional: float,
         f"({US_PERP_SCHEDULE_VINTAGE})")
 
 
-def us_perp_fee(symbol: str, notional: float, price: float) -> tuple[float | None, str]:
+def us_perp_fee(symbol: str, notional: float, price: float,
+                venue: str | None = None) -> tuple[float | None, str]:
     """Round-trip cost.
 
         contracts  = ceil(requested_underlying / contract_size)
@@ -746,10 +761,10 @@ def us_perp_fee(symbol: str, notional: float, price: float) -> tuple[float | Non
         exit_fee   = contracts * fee_per_contract_per_side
         round_trip = contracts * fee_per_contract_per_side * 2
     """
-    contracts, why = us_perp_contracts(symbol, notional, price)
+    contracts, why = us_perp_contracts(symbol, notional, price, venue)
     if contracts is None:
         return None, why
-    spec = us_perp_spec(symbol) or {}
+    spec = us_perp_spec(symbol, venue) or {}
     per_side = float(spec.get("fee_per_contract_per_side", US_PERP_FEE_PER_SIDE))
     entry_fee = contracts * per_side
     exit_fee = contracts * per_side

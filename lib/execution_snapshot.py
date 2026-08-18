@@ -48,6 +48,13 @@ CROSSED     = "CROSSED"        # bid >= ask; the book is not usable
 ONE_SIDED   = "ONE_SIDED"      # only one side quoted
 UNAVAILABLE = "UNAVAILABLE"    # nothing to read
 FALLBACK    = "FALLBACK"       # from a labelled substitute, never silent
+# Derivatives sessions are scheduled and can halt, and a book can be
+# published while the session is shut. "No fill because the market is
+# closed" and "no fill because we cannot see the market" are different
+# facts and only one of them is a data problem.
+MARKET_NOT_OPEN = "MARKET_NOT_OPEN"
+MARKET_HALTED   = "MARKET_HALTED"
+BOOK_DESYNCED   = "BOOK_DESYNCED"   # sequence integrity lost; not priceable
 
 # Only this one may price a normal fill. The others are all refusals with
 # different explanations, and the difference is what tells an operator
@@ -58,6 +65,23 @@ FILLABLE = frozenset({AVAILABLE})
 # Deliberately short: a 30-second-old crypto quote is a historical fact, not
 # an offer, and treating it as one is how a simulator invents free money.
 DEFAULT_MAX_AGE_S = 10.0
+
+# ── Perpetual books age differently from a spot ticker ───────────────────
+# A TICKER that stops arriving means the data stopped. A BOOK that stops
+# changing means nobody moved a price — the levels are still live — so
+# copying spot's 10s would mark a perfectly good quiet book stale.
+#
+# MEASURED against the live Bitnomial feed on 2026-08-17, 90s across
+# PBTCUCZ50 / PETHUIZ50 / PXRPUHZ50 / PDOGUKZ50, n=4,363 updates:
+#
+#     median 0.00s   p95 0.39s   p99 1.43s   max 11.12s
+#
+# The 11.12s maximum was a genuine quiet period on XRP, not an outage. 15s
+# sits above the observed quiet-period maximum with margin, so this flags a
+# DEAD FEED rather than a calm market. It is a measurement with a date, not
+# a round number — re-measure if the product set changes.
+DEFAULT_PERP_MAX_AGE_S = 15.0
+PERP_AGE_MEASURED_ON = "2026-08-17"
 
 
 @dataclass
@@ -146,7 +170,14 @@ def _grade(snap: ExecutionMarketSnapshot, max_age_s: float) -> ExecutionMarketSn
 
     Order matters: a crossed book is unusable regardless of age, and a
     one-sided book cannot price either direction, so both outrank staleness.
+
+    A reader that has already reached a TERMINAL verdict keeps it. "The
+    session is closed" and "the book desynced" are statements about the
+    market and the feed, not about the prices — regrading them as
+    UNAVAILABLE would collapse three different remedies into one message.
     """
+    if snap.status in (MARKET_NOT_OPEN, MARKET_HALTED, BOOK_DESYNCED):
+        return snap
     if snap.bid is None and snap.ask is None:
         snap.status = UNAVAILABLE
         snap.reason = snap.reason or "no quote from this venue"
@@ -314,12 +345,102 @@ def _f(v):
 # venue -> the reader that speaks for it. A venue absent from this map has
 # no execution-data authority, which is a fact worth reporting rather than
 # an invitation to borrow another venue's.
+def _from_bitnomial_perp(symbol: str,
+                         snap: ExecutionMarketSnapshot) -> ExecutionMarketSnapshot:
+    """US PERPETUALS, priced from the exchange they actually list on.
+
+    The execution VENUE is Kraken Derivatives US; the market-data SOURCE is
+    Bitnomial's public book. Those are different facts and the snapshot says
+    both, so nothing downstream can read "kraken" and conclude the spot
+    WebSocket priced this.
+
+    Raw book integers are converted here and ONLY here, through the
+    product's audited price scale. A product whose scale was not verified
+    never reaches this function — `bitnomial_products.resolve` refuses it —
+    so there is no path on which the wrong multiplier is silently applied.
+    """
+    from lib import bitnomial_market_data as MD
+    from lib import bitnomial_products as BP
+
+    prod = BP.resolve(symbol)
+    if not prod.ok:
+        snap.status = UNAVAILABLE
+        snap.reason = f"{prod.reason}: {prod.detail}"
+        snap.provenance["refusal"] = prod.reason
+        return snap
+
+    snap.provenance.update({
+        "bitnomial_symbol": prod.symbol, "bitnomial_product_id": prod.product_id,
+        "product_code": prod.product_code, "contract_size": prod.contract_size,
+        "contract_size_unit": prod.contract_size_unit,
+        "price_increment": prod.price_increment,
+        "market_data_source": prod.market_data_source,
+        "execution_venue": prod.venue,
+    })
+
+    top = MD.latest_top(prod.symbol)
+    if top is None:
+        snap.status = UNAVAILABLE
+        snap.reason = (f"the Bitnomial feed has not seen {prod.symbol}; the "
+                       f"read-only stream may not be running")
+        return snap
+
+    snap.source = top["source"]
+    snap.provenance.update({"ack_id": top["ack_id"],
+                            "book_state": top["state"],
+                            "market_state": top["market_state"],
+                            "bid_levels": top["bid_levels"],
+                            "ask_levels": top["ask_levels"],
+                            "depth_bids": top["depth_bids"],
+                            "depth_asks": top["depth_asks"],
+                            "snapshot_count": top["snapshot_count"]})
+
+    # A BOOK WHOSE SEQUENCE IS UNPROVEN IS NOT A SLIGHTLY WORSE BOOK.
+    if top["state"] == MD.BOOK_DESYNCED:
+        snap.status = BOOK_DESYNCED
+        snap.reason = (f"book sequence integrity lost "
+                       f"({top['desync_reason']}); awaiting a fresh snapshot")
+        return snap
+    if top["state"] == MD.BOOK_CLOSED:
+        snap.status = MARKET_NOT_OPEN
+        snap.reason = f"{prod.symbol} session is {top['market_state']!r}"
+        return snap
+    if top["state"] == MD.BOOK_HALTED:
+        snap.status = MARKET_HALTED
+        snap.reason = f"{prod.symbol} is halted"
+        return snap
+    if top["state"] == MD.BOOK_EMPTY:
+        snap.status = UNAVAILABLE
+        snap.reason = f"subscribed to {prod.symbol} but no snapshot has arrived"
+        return snap
+
+    if top["bid_raw"] is not None:
+        snap.bid = prod.price_usd(top["bid_raw"])
+        snap.bid_size = top["bid_size"]
+    if top["ask_raw"] is not None:
+        snap.ask = prod.price_usd(top["ask_raw"])
+        snap.ask_size = top["ask_size"]
+    snap.venue_event_at = top["venue_event_at"]
+    if top["age_s"] is not None:
+        snap.age_ms = max(0.0, float(top["age_s"]) * 1000.0)
+
+    # Depth is RECORDED but not yet consumed by the fill model. Saying so
+    # here keeps the follow-up honest: claiming depth-aware impact while
+    # filling at top of book would misdescribe the simulator.
+    snap.depth = None
+    snap.provenance["depth_recorded_not_consumed"] = True
+    return snap
+
+
 _READERS = {
     "kraken": lambda sym, snap: _from_kraken(sym, snap),
     "alpaca": lambda sym, snap: _from_alpaca_equity(sym, snap),
     "binance": lambda sym, snap: _from_orderbook_stream("binance", sym, snap),
     "binanceus": lambda sym, snap: _from_orderbook_stream("binance", sym, snap),
     "coinbase": lambda sym, snap: _from_orderbook_stream("coinbase", sym, snap),
+    # US PERPETUALS. A separate identity on purpose — overloading the
+    # "kraken" reader is exactly how a spot book came to price a perpetual.
+    "kraken_derivatives_us": lambda sym, snap: _from_bitnomial_perp(sym, snap),
 }
 
 # WHICH PRODUCTS EACH READER ACTUALLY SPEAKS FOR. A10.
@@ -360,6 +481,11 @@ _READER_PRODUCTS = {
     "binance": frozenset({"CRYPTO_SPOT"}),
     "binanceus": frozenset({"CRYPTO_SPOT"}),
     "coinbase": frozenset({"CRYPTO_SPOT"}),
+    # A10.1. The US perpetual venue speaks for PERPETUALS ONLY. It must not
+    # acquire CRYPTO_SPOT: a perpetual book is no more a spot price than a
+    # spot book was a perpetual price, and the whole point of this map is
+    # that the substitution cannot happen in either direction.
+    "kraken_derivatives_us": frozenset({"CRYPTO_PERP"}),
 }
 
 

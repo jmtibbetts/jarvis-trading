@@ -479,9 +479,17 @@ class PerpFillsNeedPerpQuotesTests(unittest.TestCase):
         self.assertFalse(ES.prices_product("kraken", "CRYPTO_PERP"))
 
     def test_a_perp_opens_nothing_against_a_spot_book(self):
+        """A10.1 gave perpetuals a real book (Bitnomial), so the refusal is
+        no longer unconditional — but the property this pins never changes:
+        with NO perpetual book available, a perp opens NOTHING rather than
+        quietly falling back to the spot quote sitting right there.
+        """
+        from lib import bitnomial_market_data as MD
+        MD.reset_books()
         res, cap = self._attempt(self.PERP)
         self.assertNotIn("fill", cap, "a perp was filled off the spot book")
-        self.assertEqual(res["error"], POL.NO_EXECUTABLE_PERP_QUOTE)
+        self.assertTrue(POL.is_venue_data_failure(res["error"]), res)
+        self.assertNotEqual(res["error"], "OK")
 
     def test_the_refusal_is_a_venue_gap_not_a_losing_thesis(self):
         """Recording it against the strategy would teach the learner that
@@ -508,15 +516,25 @@ class PerpFillsNeedPerpQuotesTests(unittest.TestCase):
         self.assertIsNone(snap.bid)
         self.assertIsNone(snap.ask)
 
-    def test_no_reader_claims_a_perp_it_cannot_price(self):
+    def test_no_spot_reader_claims_a_perp_it_cannot_price(self):
         """Adding a product to _READER_PRODUCTS is a claim that the feed
-        behind it actually carries that book."""
+        behind it actually carries that book.
+
+        Exactly ONE venue may claim CRYPTO_PERP — the US derivatives venue,
+        whose feed is the Bitnomial book. Every SPOT reader must still
+        refuse it: that a perpetual book now exists somewhere is not licence
+        for `wss://ws.kraken.com/v2` to price one.
+        """
+        from lib import bitnomial_products as BP
         from lib import execution_snapshot as ES
-        for venue, products in ES._READER_PRODUCTS.items():
+        claimants = {v for v, products in ES._READER_PRODUCTS.items()
+                     if "CRYPTO_PERP" in products}
+        self.assertEqual(claimants, {BP.KRAKEN_US_VENUE})
+        for venue in ("kraken", "alpaca", "binance", "binanceus", "coinbase"):
             with self.subTest(venue=venue):
-                self.assertNotIn("CRYPTO_PERP", products,
-                                 f"{venue} claims to price perpetuals — wire "
-                                 f"the feed before making that claim")
+                self.assertNotIn("CRYPTO_PERP", ES.products_for(venue),
+                                 f"the {venue} SPOT feed claims to price "
+                                 f"perpetuals")
 
 
 class IsCanonicalRequiresAllFourClaimsTests(unittest.TestCase):

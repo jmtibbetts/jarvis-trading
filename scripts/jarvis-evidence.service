@@ -1,0 +1,19 @@
+[Unit]
+Description=JARVIS EVIDENCE_ONLY forward decision collector (read-only, non-economic)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nullcode/jarvis-trading
+ExecStart=/home/nullcode/jarvis-trading/scripts/run_evidence_collector.sh
+# on-failure only: a clean SIGTERM stop must stay stopped, and a provider
+# outage must degrade health rather than become a restart storm.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=append:/home/nullcode/jarvis-trading/data/evidence_collector.log
+StandardError=append:/home/nullcode/jarvis-trading/data/evidence_collector.log
+
+[Install]
+WantedBy=default.target

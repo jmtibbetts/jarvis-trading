@@ -49,7 +49,8 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
                              decision_price=None, gates: dict | None = None,
                              source: str | None = None,
                              venue_failure: bool = False,
-                             edge=None, edge_gate_role: str | None = None
+                             edge=None, edge_gate_role: str | None = None,
+                             execution_state: str | None = None
                              ) -> str | None:
     """Persist the ONE observation for a candidate that ends here.
 
@@ -68,7 +69,7 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
             signal=signal, decision=decision, binding_reason=reason,
             decision_price=decision_price, gates=dict(gates or {}),
             source=src, venue_data_failure=venue_failure,
-            execution_state=DO.EXEC_NOT_APPLICABLE,
+            execution_state=execution_state or DO.EXEC_NOT_APPLICABLE,
             edge=edge, edge_gate_role=edge_gate_role)
         return DO.record(row)
     except Exception as e:                    # never break the cycle

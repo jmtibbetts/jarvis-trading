@@ -845,9 +845,20 @@ def _get_pending_signals(db) -> list:
     are handled exclusively by execute_signals.py — never touched here.
     """
     eligible_statuses = ["Active", "Executed", "PendingApproval"]
-    signals = db.query(TradingSignal).filter(
+    q = db.query(TradingSignal).filter(
         TradingSignal.status.in_(eligible_statuses),
-    ).order_by(TradingSignal.generated_at.desc()).limit(200).all()
+    )
+    # THE ACTIVATION BOUNDARY. The forward-evidence database is SEEDED from
+    # the operator DB, so it arrives already full of old signals. Observing
+    # those as prospective would backfill thousands of stale rows into a
+    # dataset whose entire value is that it looks forward. Anything older
+    # than the epoch start needs replay semantics, which is a different
+    # claim with a different label — never this one.
+    import os as _os
+    _boundary = _os.getenv("JARVIS_EVIDENCE_BOUNDARY")
+    if _boundary:
+        q = q.filter(TradingSignal.generated_at >= _boundary)
+    signals = q.order_by(TradingSignal.generated_at.desc()).limit(200).all()
     seen = set()
     result = []
     for s in signals:
@@ -1000,44 +1011,28 @@ approved=true means enter the paper trade. Score below {min_conf} should set app
 # MAIN JOB
 # ────────────────────────────────────────────────────────────────────────────
 
-def run():
-    logger.info("[PaperTrading] v5.0 Starting paper trading job...")
+def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True,
+                                threat_ctx=None, news_ctx=None) -> dict:
+    """THE DECISION HALF, shared by FULL_VIRTUAL and EVIDENCE_ONLY.
+
+    SAME BRAIN, NOT A SECOND ONE. Evidence-only collection reuses this exact
+    function — the same candidate query, the same T0 edge measurement, the
+    same AI entry review, the same readiness and product logic — so what the
+    research dataset records is what the trading path would have decided.
+    A separate "research evaluator" would drift from the real one and quietly
+    make the whole dataset describe a system that does not exist.
+
+    Only EXECUTION differs. In EVIDENCE_ONLY the canonical entry call is not
+    made at all; the decision terminates as TRADE with execution suppressed.
+    That is enforced structurally as well — `prepare_entry` and friends refuse
+    in this mode — but not reaching them is the cleaner architecture, which is
+    why the evidence daemon calls THIS function rather than `run()`.
+    """
     from lib import decision_funnel as DF
     from lib import decision_observation as DO_CONST
     from lib import runtime_mode as RM
     from lib.canonical_entry import open_canonical_position
-    from lib.paper_engine import mark_to_market, get_paper_summary
 
-    # ── Step 1: Mark-to-market ────────────────────────────────────────────────
-    prices = _get_all_prices()
-    logger.info(f"[PaperTrading] Price cache: {len(prices)} symbols loaded")
-    mtm = mark_to_market(prices)
-    logger.info(f"[PaperTrading] MTM: updated={mtm['updated']} | auto-closed={len(mtm['closed'])}")
-    for c in mtm.get("closed", []):
-        logger.info(f"[PaperTrading] MTM auto-closed {c['symbol']} via {c['reason']} | P&L=${c.get('pnl', 0):.2f}")
-
-    # ── Step 2: AI position management on all open positions ──────────────────
-    # Hard stop-loss/take-profit checks above always run. This preference only
-    # controls discretionary AI management and automatic entries.
-    with get_db() as db:
-        pref = db.query(UserPreference).filter(
-            UserPreference.user_id == DEFAULT_USER_ID
-        ).first()
-        auto_trade_enabled = bool(
-            pref.paper_auto_trade_enabled if pref is not None else True
-        )
-
-    mgmt = (
-        _manage_open_positions(prices)
-        if auto_trade_enabled
-        else {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
-    )
-    logger.info(
-        f"[PaperTrading] Position mgmt: evaluated={mgmt['evaluated']} | "
-        f"closed={mgmt['closed']} | held={mgmt['held']} | adjusted={mgmt.get('adjusted', 0)}"
-    )
-
-    # ── Step 3: Evaluate and open new positions ───────────────────────────────
     # EVIDENCE_ONLY MUST NOT BE SILENCED BY AN ECONOMIC SWITCH (C0.4).
     # "do not trade" is not "do not think": nothing economic can happen in
     # evidence-only mode, so the candidates are still evaluated and still
@@ -1153,6 +1148,19 @@ def run():
         #
         # `price` survives as decision_price, which is what makes the
         # slippage measurable.
+        if RM.is_evidence_only():
+            # EVERY GATE RAN AND SAID TRADE; THE MODE FORBADE ACTING ON IT.
+            # Recorded as a real TRADE decision with execution suppressed —
+            # not a failure, and not a canonical execution.
+            DF.observe_terminal_refusal(
+                sig, decision="TRADE", reason="EXECUTION_SUPPRESSED_BY_MODE",
+                decision_price=price, edge=edge, edge_gate_role=edge_role,
+                source=DO_CONST.FORWARD_EVIDENCE_ONLY,
+                execution_state=DO_CONST.EXEC_SUPPRESSED,
+                gates={"ai_entry_review": "PASS"})
+            executed += 1
+            continue
+
         result = open_canonical_position(sig, decision_price=price,
                                          edge=edge, edge_gate_role=edge_role)
         if result.get("ok"):
@@ -1168,6 +1176,53 @@ def run():
             logger.debug(f"[PaperTrading] {sym} already open — skipping")
         else:
             logger.warning(f"[PaperTrading] Could not open {sym}: {result.get('error')}")
+
+    return {"evaluated": len(sig_list), "executed": executed,
+            "ai_rejected": skipped_ai, "no_price": skipped_no_price,
+            "no_execution": skipped_no_execution,
+            "mode": RM.current_mode()}
+
+
+def run():
+    logger.info("[PaperTrading] v5.0 Starting paper trading job...")
+    from lib import decision_funnel as DF
+    from lib import decision_observation as DO_CONST
+    from lib import runtime_mode as RM
+    from lib.canonical_entry import open_canonical_position
+    from lib.paper_engine import mark_to_market, get_paper_summary
+
+    # ── Step 1: Mark-to-market ────────────────────────────────────────────────
+    prices = _get_all_prices()
+    logger.info(f"[PaperTrading] Price cache: {len(prices)} symbols loaded")
+    mtm = mark_to_market(prices)
+    logger.info(f"[PaperTrading] MTM: updated={mtm['updated']} | auto-closed={len(mtm['closed'])}")
+    for c in mtm.get("closed", []):
+        logger.info(f"[PaperTrading] MTM auto-closed {c['symbol']} via {c['reason']} | P&L=${c.get('pnl', 0):.2f}")
+
+    # ── Step 2: AI position management on all open positions ──────────────────
+    # Hard stop-loss/take-profit checks above always run. This preference only
+    # controls discretionary AI management and automatic entries.
+    with get_db() as db:
+        pref = db.query(UserPreference).filter(
+            UserPreference.user_id == DEFAULT_USER_ID
+        ).first()
+        auto_trade_enabled = bool(
+            pref.paper_auto_trade_enabled if pref is not None else True
+        )
+
+    mgmt = (
+        _manage_open_positions(prices)
+        if auto_trade_enabled
+        else {"evaluated": 0, "closed": 0, "held": 0, "adjusted": 0}
+    )
+    logger.info(
+        f"[PaperTrading] Position mgmt: evaluated={mgmt['evaluated']} | "
+        f"closed={mgmt['closed']} | held={mgmt['held']} | adjusted={mgmt.get('adjusted', 0)}"
+    )
+
+    r = evaluate_pending_candidates(prices,
+                                    auto_trade_enabled=auto_trade_enabled)
+    executed = r["executed"]
 
     # ── Step 4: Summary ───────────────────────────────────────────────────────
     summary = get_paper_summary()

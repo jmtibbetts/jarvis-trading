@@ -480,6 +480,13 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
 
 
 def _epoch() -> str:
+    # A prospective evidence run stamps its OWN epoch, so research queries
+    # can separate the forward population from the legacy substrate that was
+    # copied into the same file when the evidence DB was seeded.
+    import os
+    ev = os.getenv("JARVIS_EVIDENCE_EPOCH")
+    if ev:
+        return ev
     try:
         from lib.canonical_entry import CANONICAL_ENGINE_EPOCH
         return CANONICAL_ENGINE_EPOCH

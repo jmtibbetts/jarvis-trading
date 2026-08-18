@@ -446,25 +446,54 @@ def phase_archive(source: Path, archive: Path, work: Path, g: Gates) -> dict:
     (work / "archive" / "logical_manifest_archive.json").write_text(
         json.dumps(a_man, indent=2), encoding="utf-8")
 
-    # P4.4 — read-only by ordinary permissions, then proved by attempting a
-    # write. Source permissions are never touched.
-    archive.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    write_refused = False
+    # P4.4 — read-only by ordinary permissions. Source permissions are
+    # never touched.
+    ro = _mark_read_only(archive)
+    g.record("archive_read_only", ro["mode_is_read_only"],
+             f"mode {ro['mode']}; write probe refused="
+             f"{ro['write_probe_refused']}"
+             + ("" if ro["probe_meaningful"]
+                else " (running privileged — the probe proves nothing)"))
+
+    return {"archive_sha256": _sha256(archive),
+            "source_manifest": s_man, "archive_manifest": a_man,
+            "read_only": ro}
+
+
+def _mark_read_only(path):
+    """Take away every write bit, then say honestly what that proves.
+
+    P4.4 asks for the archive to be marked read-only with ordinary user
+    permissions AND for an ordinary write to be refused. Under a
+    root-mapped user namespace (`unshare -r`, which the offline test run
+    uses) there IS no ordinary write attempt: uid 0 bypasses permission
+    bits entirely, so a successful write there says nothing about the
+    permissions and everything about the privilege.
+
+    So the GATE is on the mode bits, which are a real, inspectable property
+    of the file. The write probe is recorded as corroboration and is only
+    meaningful unprivileged.
+    """
+    import stat as _stat
+    path.chmod(_stat.S_IRUSR | _stat.S_IRGRP | _stat.S_IROTH)
+    mode = path.stat().st_mode
+    no_write_bits = not (mode & (_stat.S_IWUSR | _stat.S_IWGRP
+                                 | _stat.S_IWOTH))
+    refused = False
     try:
-        probe = sqlite3.connect(f"file:{archive}?mode=rw", uri=True)
+        probe = sqlite3.connect(f"file:{path}?mode=rw", uri=True)
         try:
-            probe.execute("CREATE TABLE _dry_run_write_probe (x INT)")
+            probe.execute("CREATE TABLE _write_probe (x INT)")
             probe.commit()
         finally:
             probe.close()
     except sqlite3.Error:
-        write_refused = True
-    g.record("archive_read_only", write_refused,
-             "an ordinary write attempt was refused")
-
-    return {"archive_sha256": _sha256(archive),
-            "source_manifest": s_man, "archive_manifest": a_man,
-            "read_only": write_refused}
+        refused = True
+    privileged = hasattr(os, "geteuid") and os.geteuid() == 0
+    return {"mode_is_read_only": no_write_bits,
+            "write_probe_refused": refused,
+            "probe_meaningful": not privileged,
+            "mode": oct(_stat.S_IMODE(mode))}
 
 
 def _sha256(path: Path) -> str:

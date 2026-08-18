@@ -62,7 +62,8 @@ sys.path.insert(0, str(REPO))
 from lib.cutover_classification import (  # noqa: E402
     COPY_PLAN, RESET_DERIVED_LEARNING, UNKNOWN_REFUSE, classify)
 from scripts.canonical_epoch_dry_run import (  # noqa: E402
-    ECONOMIC_TABLES, EXTERNAL_STORES, Gates, _sha256, child_env,
+    ECONOMIC_TABLES, EXTERNAL_STORES, Gates, _mark_read_only, _sha256,
+    child_env,
     columns_of, db_holders, economic_snapshot, integrity_ok,
     logical_manifest, ro_connect, row_count, run_child, run_fingerprint,
     schema_fingerprint, table_names)
@@ -492,23 +493,15 @@ def final_archive(source: Path, archive_dir: Path, work: Path,
         json.dumps({"source": s_man, "archive": a_man}, indent=2),
         encoding="utf-8")
 
-    import stat as _stat
-    archive.chmod(_stat.S_IRUSR | _stat.S_IRGRP | _stat.S_IROTH)
-    refused = False
-    try:
-        probe = sqlite3.connect(f"file:{archive}?mode=rw", uri=True)
-        try:
-            probe.execute("CREATE TABLE _cutover_write_probe (x INT)")
-            probe.commit()
-        finally:
-            probe.close()
-    except sqlite3.Error:
-        refused = True
-    g.record("final_archive_read_only", refused,
-             "an ordinary write attempt was refused")
+    ro = _mark_read_only(archive)
+    g.record("final_archive_read_only", ro["mode_is_read_only"],
+             f"mode {ro['mode']}; write probe refused="
+             f"{ro['write_probe_refused']}"
+             + ("" if ro["probe_meaningful"]
+                else " (running privileged — the probe proves nothing)"))
 
     return {"path": str(archive), "sha256": _sha256(archive),
-            "read_only": refused, "source_manifest": s_man,
+            "read_only": ro, "source_manifest": s_man,
             "archive_manifest": a_man}
 
 

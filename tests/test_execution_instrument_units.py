@@ -106,6 +106,39 @@ class VenueBoundaryTests(unittest.TestCase):
                       src)
 
 
+class ExecutableStatusAndAgreementTests(unittest.TestCase):
+    """A1/A2/A3 — the identity must be truthful, and agreement is required on
+    every axis the caller already froze."""
+
+    def test_a_verified_contract_is_actually_executable(self):
+        """An object described as the exact executable identity must not be
+        unexecutable merely because status defaulted."""
+        i = resolve_for_execution("BTC/USD", product=PERP, venue=VENUE,
+                                  instrument_id=CONTRACT)
+        self.assertEqual(i.status, instruments.VERIFIED)
+        self.assertTrue(i.executable)
+        i.require_executable()
+
+    def test_a_frozen_venue_is_authority_not_a_suggestion(self):
+        """Preferring the spec's venue would silently relocate an execution
+        the desk had already committed elsewhere."""
+        with self.assertRaises(ExecutionIdentityRefused):
+            resolve_for_execution("BTC/USD", product=PERP, venue="kraken",
+                                  instrument_id=CONTRACT)
+
+    def test_equity_short_is_not_flattened_to_spot(self):
+        """resolve(symbol) alone answers what a symbol USUALLY means, losing
+        the distinction the caller had already made."""
+        self.assertEqual(
+            resolve_for_execution("AMD", product="EQUITY_SHORT").product,
+            "EQUITY_SHORT")
+
+    def test_crypto_spot_stays_crypto_spot(self):
+        self.assertEqual(
+            resolve_for_execution("BTC/USD", product="CRYPTO_SPOT").product,
+            "CRYPTO_SPOT")
+
+
 if __name__ == "__main__":
     unittest.main()
 

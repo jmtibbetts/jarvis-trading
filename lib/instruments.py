@@ -656,6 +656,14 @@ def resolve_for_execution(symbol: str, *, product: str,
                 f"frozen contract {instrument_id!r} but the venue spec "
                 f"resolves {symbol} to {spec.symbol!r}; refusing rather than "
                 f"choosing one")
+        # A2. The caller's frozen venue is authority too. Preferring the
+        # spec's venue would silently relocate an execution the desk already
+        # committed to a different venue.
+        if venue and spec.venue and venue != spec.venue:
+            raise ExecutionIdentityRefused(
+                f"frozen venue {venue!r} but {spec.symbol} executes at "
+                f"{spec.venue!r}; identity must agree across product, venue "
+                f"and instrument")
         return InstrumentIdentity(
             instrument_id=spec.symbol,
             canonical_symbol=symbol.upper().strip(),
@@ -673,11 +681,22 @@ def resolve_for_execution(symbol: str, *, product: str,
             # Perpetual contracts are indivisible.
             quantity_step=1.0,
             minimum_quantity=1.0,
+            # A1. This IS the exact executable identity; leaving status at its
+            # default would make `executable` False and every downstream
+            # require_executable() refuse a contract that is fully verified.
+            status=VERIFIED,
         )
 
     # Every other product keeps the existing generic behaviour, so no legacy
     # caller changes shape because perpetuals became exact.
-    ident = resolve(symbol)
+    # A3. Hand the frozen product through. `resolve(symbol)` alone answers
+    # what the symbol USUALLY means, so EQUITY_SHORT came back EQUITY_SPOT —
+    # losing the very distinction the caller had already made.
+    ident = resolve(symbol, product=product, venue=venue)
+    if product and ident.product != product:
+        raise ExecutionIdentityRefused(
+            f"frozen product {product!r} but {symbol} resolves to "
+            f"{ident.product!r}")
     if instrument_id and ident.instrument_id != instrument_id:
         raise ExecutionIdentityRefused(
             f"frozen instrument {instrument_id!r} but {symbol} resolves to "

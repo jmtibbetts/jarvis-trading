@@ -1579,3 +1579,84 @@ scheduler OFF.
     operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84)
     scheduler       OFF
     real actions    0
+
+## 24. STOP POINT — B2B CANONICAL EXIT ORCHESTRATOR COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §23.
+
+    main            158923c + this docs commit   clean, pushed
+    tests           3,720 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              158923c GREEN (Actions REST, exact head_sha)
+
+### P0 hardening (done FIRST, red-test-first against fc3754d)
+
+- **P0.1 carry binding**: ExitSettlementFacts carries the HoldingCostQuote's
+  own symbol/product/notional/rate; validator requires symbol+product match
+  and a structurally possible kind (perp=FUNDING, equity short=BORROW,
+  spot=NOT_APPLICABLE); settlement proves notional ==
+  filled x entry_fill x multiplier and interval == settled_at − opened_at.
+  A 10-contract quote can no longer settle a 2-contract exit.
+- **P0.2 idempotency**: same id + other position → EXECUTION_ID_COLLISION;
+  same position + different economics → IDEMPOTENCY_CONFLICT; only a true
+  retry is idempotent. expected_revision deliberately excluded.
+- **P0.3 contract pinning**: execution_market_snapshot takes
+  `instrument_id`, records `requested_instrument_id` (stated ≠ confirmed),
+  Bitnomial refuses EXECUTION_INSTRUMENT_MISMATCH before touching a drifted
+  book, a central post-reader check backstops all readers, and readiness
+  threads the frozen contract in and re-verifies on the way out.
+
+### B2B — lib/canonical_exit.py
+
+`close_canonical_position(position_id, requested_qty | close_fraction,
+exit_reason, trigger_price, decision_price, max_age_s)` — NOT wired to the
+ten production callers. The chain: immutable B1-header snapshot (session
+closed before provider work) → frozen RoutingIdentity
+(PERSISTED_CANONICAL_ENTRY; the position already knows what it is) → exact
+readiness → resolve_for_execution → normalize-DOWN reduction (full-close of
+a fractional remainder refuses as corrupted state) → REDUCE RiskDecision +
+reduce-only OrderPlan (existing types extended: intent/position_id/
+position_side/reduce_only; OrderPlan.check grew a REDUCE branch — no faked
+stop arithmetic, side must reduce) → ExecutionVenue.submit → shared
+execution agreement (`lib/execution_consistency`, re-exported from
+canonical_entry) → exact fee at the ACTUAL fill and EXECUTION side (equity
+regulatory fees are sell-side facts) → one settled_at, explicit hours →
+established carry model (leg qty x entry fill x multiplier) → B2A as the
+only economic mutation. STALE_SETTLEMENT_REVISION returns
+`reprepare_required` — a fill prepared for revision N is never replayed.
+
+Named refusal vocabulary: NOT_CANONICAL_POSITION,
+EXIT_MARKET_DATA_UNAVAILABLE, EXIT_EXACT_INSTRUMENT_UNAVAILABLE,
+EXIT_INVALID_QUANTITY, EXIT_REDUCTION_RISK_REFUSED, EXIT_EXECUTION_REFUSED,
+EXIT_EXECUTION_CONTRADICTION, EXIT_FEE_UNAVAILABLE,
+EXIT_HOLDING_COST_UNAVAILABLE, plus B2A's stale/idempotent/conflict/
+collision set.
+
+### Proofs (tests/test_b2b_canonical_exit.py, 31; P0 regressions, 11)
+
+Long SELLs the bid / short BUYs the ask on a 60k/61k book; the 64,000 stop
+gaps to a 62,500 book and fills THERE, trigger recorded as a trigger, tail
+loss booked; trigger ≠ decision ≠ fill persisted distinct; partial→final
+votes once; 7 × 0.5 → 3 with theoretical 3.5 in provenance; stale/desync/
+halt/closed/legacy refuse by name with zero mutation; contract drift refuses
+before the fill model; config drift cannot change identity; router poison +
+control; favorable marks move reference fields only; corrupt carry
+notional / unavailable carry / unavailable fee / corrupted ExecutionResult /
+instrument swap all leave the position OPEN; a rival settlement stales the
+prepared fill; EVIDENCE_ONLY settles nothing; learning stays PENDING with
+record_trade_outcome poisoned uncalled.
+
+### NEXT = B2C IDEMPOTENT LEARNING PROJECTION
+
+READY_FOR_IDEMPOTENT_LEARNING_PROJECTION: consume PENDING
+PaperRealizedOutcome rows, keyed on outcome id / position_id, mark APPLIED
+once — then caller routing, then (much later) scheduler. NOT Pass B
+complete; ten exit callers untouched; `_refuse_legacy_close()` PERMANENT.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84;
+                    all three ledger tables truthfully ABSENT)
+    scheduler       OFF
+    real actions    0

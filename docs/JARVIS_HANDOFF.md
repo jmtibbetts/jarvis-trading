@@ -1483,3 +1483,99 @@ legs); each B2 exit leg checks and increments it atomically.
     operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84)
     scheduler       OFF
     real actions    0
+
+## 23. STOP POINT — B2A EXIT SETTLEMENT CORE COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §22.
+
+    main            5676454 + this docs commit   clean, pushed
+    tests           3,678 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              5676454 GREEN (Actions REST, exact head_sha)
+
+### What closed
+
+The FINANCIAL half of canonical exit, deliberately without the market-facing
+orchestrator: `lib/canonical_settlement.settle_prepared_exit(facts)` takes an
+exit execution that has ALREADY been established and answers "what may the
+account book mutate?" — provable end to end without a provider, quote
+stream, or venue.
+
+- **`lib/holding_cost_authority.py`** — carry grew a type. HoldingCostQuote
+  either establishes an amount with provenance or refuses (UNAVAILABLE,
+  amount None — never zero: zero is six facts wearing one number). Funding
+  is a SIGNED TRANSFER (longs pay positive, shorts receive; no abs());
+  perp quality is LATEST_RATE_EXTRAPOLATED even off a "measured" snapshot —
+  a rate measurement is not an interval measurement; DEFAULT_BASELINE /
+  MEASURED_BORROW_RATE / DEFAULT_GENERAL_COLLATERAL / DEFAULT_HARD_TO_BORROW
+  / NOT_APPLICABLE complete the vocabulary. Version holding_cost_v1.
+- **The contracts**: frozen identity (header's symbol/product/venue/
+  instrument only — no router/resolver/config at settlement); unit basis
+  immutable; side must REDUCE (long SELLs, short BUYs — never inferred from
+  P&L); `expected_revision` is the concurrency authority
+  (STALE_SETTLEMENT_REVISION; a re-prepare is a NEW authorization);
+  execution_id idempotent (IDEMPOTENT_ALREADY_SETTLED, zero mutation);
+  fills cannot exceed remaining; PARTIAL vs FINAL is DERIVED; scaled_out is
+  not accounting authority.
+- **Margin release is return of capital.** Proportional on partials; FINAL
+  releases ALL remaining margin (dust dies). Sealing invariants: exit legs
+  must total original_quantity and released margin must total
+  committed_margin, or the final settlement rolls back.
+- **realized_pnl audited and pinned (§27)**: legacy is cumulative-as-
+  realized in lockstep with paper_trades. Canonical: each exit leg accrues
+  its net when it settles; the ENTRY FEE accrues at FINAL — so a completed
+  position's Δrealized_pnl == canonical net == the ONE aggregate
+  PaperTrade.realized_pnl.
+- **One final truth**: `realized_outcome.build_from_settlement()` — gross is
+  SUM of exit-leg gross (ledger authority; VWAP is display; decision VWAP is
+  None if ANY leg lacks one); fees map by basis with the entry fee ONCE;
+  returns on COMMITTED MARGIN (`return_pct_basis="MARGIN"`); R on header
+  initial risk. Persisted as `paper_realized_outcomes` (UNIQUE position_id),
+  stamped **outcome_v2_settlement** (v1 rows never relabelled),
+  `learning_state=PENDING` — `record_trade_outcome()` is NOT called; it is
+  not an idempotency boundary, and a learning failure must never unwind a
+  correct exit. One aggregate PaperTrade per POSITION on FINAL (loss-streak
+  guard, morning brief, learning history read that table). Counters vote
+  once, on NET.
+- **Schema**: leg exit facts (exit_reason; trigger_price ≠ decision_price ≠
+  fill_price, never collapsed; holding type/source/quality/version;
+  remaining qty/margin after), header final links (final_execution_id,
+  realized_outcome_id), composite (position_id, settlement_revision) index —
+  ordered ledger reads walk it with no sort — and revision-ordered
+  reconstruction (timestamps are not a concurrency authority).
+
+Proof: `tests/test_b2a_exit_settlement.py` (28) + `tests/
+test_holding_cost_authority.py` (13); 26 red against pre-B2A code. Long and
+short direct proofs exact at 1e-9 (the short RECEIVES positive funding — the
+sign class that once burned this codebase is pinned); partial→final and
+2/3/5 partials with per-leg carry (4 contracts pay 8h, 6 pay 24h — never 10
+twice, never 4 free); rollback matrix; EVIDENCE_ONLY / legacy / hybrid
+refusals; the poisoned-world proof (fee authority, risk engine, resolvers,
+router, readiness, venue, fill model, funding lookup all explode — prepared
+facts still settle) with a live-poison control.
+
+### Production-copy migration proof
+
+On the operator copy: all four economic tables value-identical over original
+columns; three ledger tables created EMPTY; B2A columns present; double
+init_db idempotent; integrity ok. Operator DB untouched (sha `bcb94dcc…`
+before and after; fingerprint reports all three ledger tables ABSENT,
+truthfully).
+
+### NEXT = B2B CANONICAL EXIT ORCHESTRATOR
+
+READY_FOR_CANONICAL_EXIT_ORCHESTRATOR. The market-facing
+`lib/canonical_exit.py` comes next: read the immutable position snapshot,
+close the session, do market readiness / execution / fee quote /
+holding-cost quote, then hand `ExitSettlementFacts` to this core. After
+that: the idempotent learning projection (keyed on PaperRealizedOutcome,
+PENDING→APPLIED), then caller routing. NOT Pass B complete; the ten exit
+callers still reach the legacy leaves; `_refuse_legacy_close()` PERMANENT;
+scheduler OFF.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84)
+    scheduler       OFF
+    real actions    0

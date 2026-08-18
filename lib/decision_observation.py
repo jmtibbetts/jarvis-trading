@@ -312,7 +312,7 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
           edge_threshold_r=None, gross_expected_r=None,
           estimated_cost_r=None, venue_data_failure=False,
           decision_at=None, execution_state=None,
-          edge=None, edge_gate_role=None) -> dict:
+          edge=None, edge_gate_role=None, routing_identity=None) -> dict:
     """Assemble the row from the artifacts the decision used. No re-deriving.
 
     Every argument is an object the decision already produced. Where one is
@@ -476,6 +476,42 @@ def build(*, signal, ready=None, authorization=None, fee_quote=None,
         row["expectancy_raw_sample"] = int(raw) if raw is not None else None
     row["edge_gate_role"] = edge_gate_role or (
         EDGE_DIAGNOSTIC if edge is not None else EDGE_NOT_EVALUATED)
+
+    # ── THE FROZEN T0 IDENTITY WINS ──────────────────────────────────────
+    #
+    # These four fields used to come only from `ready`, and a decision that
+    # ended before readiness — every AI rejection — wrote them NULL. That was
+    # 95 of 95 live observations, and it is why 9,622 BTC/USD samples could
+    # not be joined to the decisions sitting beside them.
+    if routing_identity is not None:
+        ri = routing_identity
+        # Readiness, when present, CONFIRMS the identity. It does not get to
+        # change it: a decision made about a perpetual cannot be recorded as
+        # spot because a later stage resolved differently.
+        if ready is not None:
+            ri.assert_agrees_with(
+                product=getattr(ready, "product", None),
+                venue=getattr(ready, "venue", None),
+                instrument_id=getattr(ready, "instrument_id", None),
+                where="execution_readiness")
+        if ri.asset_class:
+            row["asset_class"] = ri.asset_class
+        if ri.product:
+            row["product"] = ri.product
+        if ri.venue:
+            row["venue"] = ri.venue
+        if ri.instrument_id:
+            row["instrument_id"] = ri.instrument_id
+        prov = row.get("provenance")
+        import json as _json
+        doc = {}
+        if prov:
+            try:
+                doc = _json.loads(prov)
+            except (TypeError, ValueError):
+                doc = {}
+        doc["routing_identity"] = ri.as_dict()
+        row["provenance"] = _json.dumps(doc)
     return row
 
 

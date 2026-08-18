@@ -50,8 +50,8 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
                              source: str | None = None,
                              venue_failure: bool = False,
                              edge=None, edge_gate_role: str | None = None,
-                             execution_state: str | None = None
-                             ) -> str | None:
+                             execution_state: str | None = None,
+                             routing_identity=None) -> str | None:
     """Persist the ONE observation for a candidate that ends here.
 
     Returns the observation id, or None if it could not be recorded. Never
@@ -70,7 +70,8 @@ def observe_terminal_refusal(signal: dict, *, decision: str, reason: str,
             decision_price=decision_price, gates=dict(gates or {}),
             source=src, venue_data_failure=venue_failure,
             execution_state=execution_state or DO.EXEC_NOT_APPLICABLE,
-            edge=edge, edge_gate_role=edge_gate_role)
+            edge=edge, edge_gate_role=edge_gate_role,
+            routing_identity=routing_identity)
         return DO.record(row)
     except Exception as e:                    # never break the cycle
         logger.warning("[DecisionFunnel] could not record %s refusal for %s: %s",

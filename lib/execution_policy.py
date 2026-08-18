@@ -130,6 +130,22 @@ def classify_asset_class(symbol: str, asset_class: str | None = None) -> str:
     return "unknown"
 
 
+def explicit_signal_product(signal: dict | None) -> str | None:
+    """The product the SIGNAL itself states, or None.
+
+    One authority for the question, because `resolve_product` and the
+    routing-identity provenance must not read different keys and then
+    disagree about whether the product was chosen or defaulted.
+    """
+    if not signal:
+        return None
+    for key in ("product", "expression_product"):
+        v = signal.get(key)
+        if v:
+            return str(v)
+    return None
+
+
 def resolve_product(symbol: str, asset_class: str | None = None, *,
                     signal: dict | None = None) -> str | None:
     """WHICH PRODUCT this thesis is being expressed as, or None.

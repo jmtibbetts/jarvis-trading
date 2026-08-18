@@ -881,6 +881,14 @@ def _get_pending_signals(db) -> list:
             "asset_symbol":   sym,
             "asset_name":     s.asset_name or sym,
             "asset_class":    s.asset_class or ("Futures" if is_futures else "Equity"),
+            # ROUTING TRUTH, DELIBERATELY NOT THE DISPLAY FALLBACK ABOVE.
+            # That fallback labels anything non-futures "Equity" — harmless
+            # as a label, fatal as routing identity: an unknown crypto symbol
+            # would freeze as EQUITY_SPOT instead of honestly resolving to
+            # UNRESOLVED. Only a STORED class or a genuine futures
+            # determination is authoritative here.
+            "routing_asset_class_hint": (
+                s.asset_class or ("Futures" if is_futures else None)),
             "direction":      s.direction or "Long",
             "paper_direction": paper_dir,
             "paper_mode":     True,
@@ -1030,6 +1038,7 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
     """
     from lib import decision_funnel as DF
     from lib import decision_observation as DO_CONST
+    from lib import routing_identity as RI
     from lib import runtime_mode as RM
     from lib.canonical_entry import open_canonical_position
 
@@ -1084,6 +1093,13 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
         # calling it BINDING would report EDGE as the cause of refusals it
         # never caused. Adding it as a gate would also change FULL_VIRTUAL
         # behaviour, which C0 is explicitly not allowed to do.
+        # THE FROZEN T0 IDENTITY, resolved ONCE before any branch can end
+        # this candidate. Every route below carries this same object, so an
+        # AI rejection now records the product it was about exactly as a
+        # settled trade does — which is the whole defect being closed.
+        identity = RI.resolve_execution_identity(
+            sym, sig.get("routing_asset_class_hint"), signal=sig)
+
         edge, edge_role = None, DO_CONST.EDGE_NOT_EVALUATED
         try:
             from lib.gate import decide as _decide
@@ -1099,7 +1115,8 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
             # the thesis is still evaluated rather than filtered away.
             DF.observe_terminal_refusal(
                 sig, decision="ABSTAIN", reason=DF.ALREADY_OPEN,
-                decision_price=None, edge=edge, edge_gate_role=edge_role)
+                decision_price=None, edge=edge, edge_gate_role=edge_role,
+                routing_identity=identity)
             continue
 
         price = _get_current_price(sym, prices) or sig.get("entry_price") or 0.0
@@ -1111,7 +1128,8 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
             DF.observe_terminal_refusal(
                 sig, decision="ABSTAIN", reason=DF.NO_DECISION_PRICE,
                 decision_price=None, venue_failure=True,
-                edge=edge, edge_gate_role=edge_role)
+                edge=edge, edge_gate_role=edge_role,
+                routing_identity=identity)
             skipped_no_price += 1
             continue
 
@@ -1128,6 +1146,7 @@ def evaluate_pending_candidates(prices: dict, *, auto_trade_enabled: bool = True
             DF.observe_terminal_refusal(
                 sig, decision="NO_TRADE", reason=DF.AI_REJECTED_ENTRY,
                 decision_price=price, edge=edge, edge_gate_role=edge_role,
+                routing_identity=identity,
                 gates={"ai_entry_review": "FAIL"})
             skipped_ai += 1
             continue

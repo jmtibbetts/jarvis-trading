@@ -104,11 +104,14 @@ class RoutingIdentity:
                 "resolver_version": self.resolver_version}
 
     def assert_agrees_with(self, *, product=None, venue=None,
-                           asset_class=None, where: str = "readiness") -> None:
+                           asset_class=None, instrument_id=None,
+                           where: str = "readiness") -> None:
         """Later stages may CONFIRM this identity. They may not change it."""
         for name, mine, theirs in (("product", self.product, product),
                                    ("venue", self.venue, venue),
-                                   ("asset_class", self.asset_class, asset_class)):
+                                   ("asset_class", self.asset_class, asset_class),
+                                   ("instrument_id", self.instrument_id,
+                                    instrument_id)):
             if mine and theirs and str(mine) != str(theirs):
                 raise RoutingIdentityConflict(
                     f"{where} says {name}={theirs!r} but the decision was "
@@ -149,11 +152,12 @@ def resolve_execution_identity(symbol: str, asset_class: str | None = None, *,
     # than guessed from the answer.
     source = UNRESOLVED
     if product:
-        explicit = bool(signal and (signal.get("product")
-                                    or (signal.get("expression") or {}).get("product")
-                                    if isinstance(signal.get("expression"), dict)
-                                    else signal.get("product")))
-        if explicit:
+        # PROVENANCE MUST READ THE SAME INPUTS AS THE DECISION. An earlier
+        # draft checked signal["expression"]["product"] while resolve_product
+        # actually honours signal["expression_product"], so a product chosen
+        # explicitly would have been reported as DESK_CONFIG — routing truth
+        # and provenance truth disagreeing about the same row.
+        if EP.explicit_signal_product(signal):
             source = SIGNAL_EXPLICIT
         elif klass == "crypto":
             source = DESK_CONFIG

@@ -165,6 +165,15 @@ class RiskDecision:
     quantity_unit: str | None = None         # COINS | CONTRACTS | SHARES
     multiplier: float | None = None          # units of the base per 1 qty
 
+    # WHAT THIS DECISION AUTHORIZES (B2B). OPEN authorizes new exposure and
+    # is everything the fields above have always meant. REDUCE authorizes
+    # shrinking an EXISTING position — qty is the maximum reduction, and
+    # position_id/position_side name exactly which exposure may shrink. Not
+    # a parallel type: one decision vocabulary, one gate.
+    intent: str = "OPEN"                     # OPEN | REDUCE
+    position_id: str | None = None
+    position_side: str | None = None         # long | short
+
     @classmethod
     def rejection(cls, reason: str) -> "RiskDecision":
         return cls(allowed_risk_usd=0.0, stop_distance=0.0, qty=0.0,
@@ -202,6 +211,14 @@ class OrderPlan:
     instrument_id: str | None = None         # e.g. PBTCUCZ50
     quantity_unit: str | None = None         # COINS | CONTRACTS | SHARES
     multiplier: float | None = None          # units of the base per 1 qty
+
+    # WHAT THIS ORDER DOES (B2B). An OPEN plan takes exposure; a REDUCE plan
+    # gives it back, and says exactly whose. reduce_only is the venue-facing
+    # statement of the same intent.
+    intent: str = "OPEN"                     # OPEN | REDUCE
+    position_id: str | None = None
+    position_side: str | None = None         # long | short
+    reduce_only: bool = False
 
     def check(self, risk: RiskDecision, tol: float = 1e-6) -> "RiskGateVerdict":
         """THE LAST GATE. Prove this order stays inside what was approved.
@@ -260,6 +277,17 @@ class OrderPlan:
         from lib.trade_side import parse_side_strict
         if parse_side_strict(self.side) is None:
             fails.append(f"side {self.side!r} is not a canonical long/short")
+
+        # ── REDUCE is its own gate (B2B). An exit does not have a stop to
+        # widen — running the entry's stop-risk arithmetic against it would
+        # either fake a stop or refuse every reduction. What a reduction
+        # must prove instead: both objects agree they are REDUCING, they
+        # name the SAME position, the plan's execution side actually shrinks
+        # that position, and nothing enlarges quantity or swaps the basis.
+        # Neither side of a mixed pair passes: an OPEN plan against a REDUCE
+        # decision is as wrong as the reverse.
+        if risk.intent == "REDUCE" or self.intent == "REDUCE":
+            return self._check_reduce(risk, fails, tol)
 
         # 4. The approved ceilings.
         if self.qty > risk.qty + tol:
@@ -369,6 +397,74 @@ class OrderPlan:
             multiplier = None
 
         return self._verdict_from(fails, risk, stop_distance, multiplier, tol)
+
+    def _check_reduce(self, risk, fails, tol):
+        """The reduction gate — still the LAST gate, not a waiver of it.
+
+        `risk.qty` is the maximum authorized reduction; position_id and
+        position_side name the only exposure allowed to shrink. Execution
+        side must reduce it: the plan-side vocabulary is long=BUY,
+        short=SELL, so a LONG position exits with plan.side "short" and a
+        SHORT with plan.side "long". Anything else ADDS exposure.
+        """
+        import math
+
+        if risk.intent != "REDUCE" or self.intent != "REDUCE":
+            fails.append(f"intent mismatch: plan is {self.intent!r}, "
+                         f"decision is {risk.intent!r} — a reduction and an "
+                         f"opening cannot authorize each other")
+        if not self.reduce_only:
+            fails.append("a REDUCE plan must be reduce_only")
+        if not risk.position_id or self.position_id != risk.position_id:
+            fails.append(f"position mismatch: plan reduces "
+                         f"{self.position_id!r}, decision authorized "
+                         f"{risk.position_id!r}")
+        if risk.position_side not in ("long", "short") \
+                or self.position_side != risk.position_side:
+            fails.append(f"position side mismatch: plan says "
+                         f"{self.position_side!r}, decision says "
+                         f"{risk.position_side!r}")
+        if fails:
+            return RiskGateVerdict(False, tuple(fails))
+
+        if self.qty > risk.qty + tol:
+            fails.append(f"reduction {self.qty} exceeds the authorized "
+                         f"maximum {risk.qty}")
+
+        # The execution side must SHRINK the named position.
+        required = "short" if risk.position_side == "long" else "long"
+        if self.side != required:
+            fails.append(
+                f"a {risk.position_side} position is reduced by "
+                f"{'SELLING' if required == 'short' else 'BUYING'} "
+                f"(plan side {required!r}); plan side {self.side!r} would "
+                f"ADD exposure")
+
+        # One basis. The decision must state it validly (a canonical
+        # reduction always does), and the plan must agree exactly.
+        try:
+            stated = float(risk.multiplier)
+        except (TypeError, ValueError):
+            stated = None
+        if not (isinstance(risk.quantity_unit, str)
+                and risk.quantity_unit.strip()) or stated is None \
+                or not math.isfinite(stated) or stated <= 0:
+            fails.append(
+                f"a REDUCE decision must state a valid unit basis; got "
+                f"{risk.quantity_unit!r} x {risk.multiplier!r}")
+        else:
+            if self.quantity_unit != risk.quantity_unit:
+                fails.append(f"unit mismatch: plan {self.quantity_unit!r}, "
+                             f"decision {risk.quantity_unit!r}")
+            try:
+                pm = float(self.multiplier)
+            except (TypeError, ValueError):
+                pm = None
+            if pm is None or abs(pm - stated) > 1e-12 * max(1.0, abs(stated)):
+                fails.append(f"multiplier mismatch: plan "
+                             f"{self.multiplier!r}, decision {stated!r}")
+
+        return RiskGateVerdict(not fails, tuple(fails))
 
     def _verdict_from(self, fails, risk, stop_distance, multiplier, tol):
         """The stop-risk ceiling, priced through whichever multiplier the

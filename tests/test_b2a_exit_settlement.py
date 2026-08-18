@@ -86,6 +86,18 @@ class _B2AHarness(unittest.TestCase):
                 PaperPosition.symbol == "BTC/USD").delete()
             db.commit()
 
+        # And AFTER each test too: refusal tests deliberately leave open
+        # positions, and an open BTC/USD position consumes the shared test
+        # book's concentration headroom for every later entry test.
+        def _close_leftovers():
+            with get_db() as db:
+                db.query(PaperPosition).filter(
+                    PaperPosition.symbol == "BTC/USD",
+                    PaperPosition.status == "Open").update(
+                    {"status": "Closed"})
+                db.commit()
+        self.addCleanup(_close_leftovers)
+
     # ── state readers ─────────────────────────────────────────────────────
     def _portfolio(self):
         from app.database import PaperPortfolio, get_db
@@ -831,3 +843,225 @@ class StructuralDefenseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HoldingQuoteIsBoundToItsLegTests(_B2AHarness):
+    """P0.1 — a carry quote prices ONE exposure over ONE interval. A quote
+    for 10 contracts handed to a 2-contract exit is not a smaller charge,
+    it is a charge for a different position, and settlement must refuse it
+    rather than book whatever dollar figure arrived."""
+
+    def _mismatched(self, header, pos, **quote_over):
+        """Facts whose holding quote deliberately disagrees."""
+        filled, fill_price = 2.0, 64_700.0
+        fee = FA.leg_fee("BTC/USD", notional=filled * fill_price * 0.01,
+                         price=fill_price, product=PR.CRYPTO_PERP,
+                         venue=BP.KRAKEN_US_VENUE, maker=False,
+                         exact_contract_count=filled,
+                         execution_instrument=_pbtc(),
+                         actual_fill_price=fill_price)
+        quote = dict(symbol="BTC/USD", product=PR.CRYPTO_PERP,
+                     notional_usd=filled * header.actual_entry_fill * 0.01,
+                     hours_held=8.0, is_short=False,
+                     funding_rate_8h=self.FUNDING_8H)
+        quote.update(quote_over)
+        hold = HC.holding_cost(quote.pop("symbol"), **quote)
+        settled_at = (datetime.fromisoformat(str(header.opened_at))
+                      + timedelta(hours=8.0)).isoformat()
+        return CS.exit_facts(
+            position_id=header.position_id, expected_revision=0,
+            execution_id=f"exit-hb-{next(_seq)}",
+            symbol=header.symbol, product=header.product,
+            venue=header.venue, instrument_id=header.instrument_id,
+            position_side="long", execution_side="sell",
+            requested_qty=filled, filled_qty=filled,
+            quantity_unit="CONTRACTS", multiplier=0.01,
+            fill_price=fill_price, fee_quote=fee, holding_quote=hold,
+            settled_at=settled_at, exit_reason=CS.SCALE_OUT)
+
+    def _refused(self, facts):
+        before = self._portfolio()
+        res = CS.settle_prepared_exit(facts)
+        self.assertFalse(res.get("ok"), res)
+        self.assertEqual(res["error"], CS.EXIT_VALIDATION_FAILED)
+        self.assertEqual(self._portfolio(), before)
+        return res
+
+    def test_a_ten_contract_quote_cannot_settle_a_two_contract_exit(self):
+        pos, header = self._enter()
+        facts = self._mismatched(
+            header, pos,
+            notional_usd=10 * header.actual_entry_fill * 0.01)
+        res = self._refused(facts)
+        _, header2, legs, _, _ = self._state(pos.id)
+        self.assertEqual(header2.settlement_revision, 0)
+        self.assertEqual([l.kind for l in legs], ["ENTRY"])
+
+    def test_a_quote_for_another_symbol_is_refused(self):
+        pos, header = self._enter()
+        facts = self._mismatched(header, pos, symbol="ETH/USD")
+        self._refused(facts)
+
+    def test_a_quote_for_another_product_is_refused(self):
+        pos, header = self._enter()
+        # A spot quote is an established zero — for a PERPETUAL that zero is
+        # structurally impossible, not established.
+        facts = self._mismatched(header, pos, product="CRYPTO_SPOT")
+        self._refused(facts)
+
+    def test_a_quote_for_the_wrong_interval_is_refused(self):
+        pos, header = self._enter()
+        # Quote priced for 24h; the leg settles at opened_at + 8h.
+        facts = self._mismatched(header, pos, hours_held=24.0)
+        self._refused(facts)
+
+
+class IdempotencyIsSameEconomicEventTests(_B2AHarness):
+    """P0.2 — same execution id means same economic event, or it means a
+    defect. Only the first is idempotent."""
+
+    def _settle_partial(self, header, pos, execution_id,
+                        fill_price=64_700.0, **over):
+        facts, _, _ = self._exit_facts(header, pos, filled=2.0,
+                                       fill_price=fill_price,
+                                       execution_id=execution_id,
+                                       exit_reason=CS.SCALE_OUT, **over)
+        return CS.settle_prepared_exit(facts), facts
+
+    def test_a_true_retry_is_idempotent(self):
+        pos, header = self._enter()
+        first, facts = self._settle_partial(header, pos, "exit-p02-a")
+        self.assertTrue(first.get("ok"), first)
+        again = CS.settle_prepared_exit(facts)
+        self.assertTrue(again.get("ok"))
+        self.assertEqual(again["result"], CS.IDEMPOTENT_ALREADY_SETTLED)
+
+    def test_the_same_id_on_another_position_is_a_collision(self):
+        pos_a, header_a = self._enter()
+        first, _ = self._settle_partial(header_a, pos_a, "exit-p02-b")
+        self.assertTrue(first.get("ok"), first)
+        # A second position (delete the first so the symbol frees up).
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            db.query(PaperPosition).filter(
+                PaperPosition.id == pos_a.id).update({"status": "Closed"})
+            db.commit()
+        pos_b, header_b = self._enter()
+        before = self._portfolio()
+        res, _ = self._settle_partial(header_b, pos_b, "exit-p02-b")
+        self.assertFalse(res.get("ok"),
+                         "an execution-id collision settled as idempotent")
+        self.assertEqual(res["error"], CS.EXECUTION_ID_COLLISION)
+        self.assertEqual(self._portfolio(), before)
+        _, hb, legs_b, _, _ = self._state(pos_b.id)
+        self.assertEqual(hb.settlement_revision, 0)
+        self.assertEqual([l.kind for l in legs_b], ["ENTRY"])
+
+    def test_the_same_id_with_a_different_fill_is_a_conflict(self):
+        pos, header = self._enter()
+        first, facts = self._settle_partial(header, pos, "exit-p02-c")
+        self.assertTrue(first.get("ok"), first)
+        p1, h1, *_ = self._state(pos.id)[:2]
+        before = self._portfolio()
+        res, _ = self._settle_partial(h1, p1, "exit-p02-c",
+                                      fill_price=65_500.0,
+                                      expected_revision=1)
+        self.assertFalse(res.get("ok"),
+                         "a different fill under the same id settled")
+        self.assertEqual(res["error"], CS.IDEMPOTENCY_CONFLICT)
+        self.assertEqual(self._portfolio(), before)
+
+    def test_the_same_id_with_a_different_quantity_is_a_conflict(self):
+        pos, header = self._enter()
+        first, facts = self._settle_partial(header, pos, "exit-p02-d")
+        self.assertTrue(first.get("ok"), first)
+        p1, h1, *_ = self._state(pos.id)[:2]
+        before = self._portfolio()
+        f2, _, _ = self._exit_facts(h1, p1, filled=3.0,
+                                    fill_price=64_700.0,
+                                    execution_id="exit-p02-d",
+                                    expected_revision=1,
+                                    exit_reason=CS.SCALE_OUT)
+        res = CS.settle_prepared_exit(f2)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res["error"], CS.IDEMPOTENCY_CONFLICT)
+        self.assertEqual(self._portfolio(), before)
+
+
+class FrozenContractReachesTheMarketReaderTests(_B2AHarness):
+    """P0.3 — the market reader must CONFIRM the frozen contract, not
+    coincidentally agree with it."""
+
+    def _frozen_identity(self):
+        from lib.routing_identity import RoutingIdentity
+        return RoutingIdentity(symbol="BTC/USD", asset_class="crypto",
+                               product=PR.CRYPTO_PERP,
+                               venue=BP.KRAKEN_US_VENUE,
+                               instrument_id=PERP_SYM)
+
+    def test_readiness_threads_the_frozen_instrument_into_the_snapshot(self):
+        """Behavioral: the exact PBTCUCZ50 arrives at the snapshot call."""
+        from lib import execution_policy as POL
+        from lib import execution_snapshot as ES
+        seen = {}
+        real = ES.execution_market_snapshot
+
+        def recording(symbol, venue, **kw):
+            seen.update(kw)
+            return real(symbol, venue, **kw)
+        with patch.object(ES, "execution_market_snapshot", recording):
+            r = POL.execution_readiness("BTC/USD", "crypto",
+                                        routing_identity=self._frozen_identity())
+        self.assertTrue(r.ok, f"{r.reason}: {r.detail}")
+        self.assertEqual(seen.get("instrument_id"), PERP_SYM,
+                         "the frozen contract never reached the reader")
+        self.assertEqual(r.snapshot.instrument_id, PERP_SYM)
+        self.assertEqual(r.snapshot.provenance["requested_instrument_id"],
+                         PERP_SYM)
+
+    def test_contract_drift_refuses_before_the_book_prices_anything(self):
+        """Frozen PBTCUCZ50, resolver claims another contract: refuse, and
+        never read the other contract's book."""
+        from lib import bitnomial_products as BP2
+        from lib import execution_policy as POL
+
+        real = BP2.resolve
+
+        class Drifted:
+            pass
+
+        def drifted(symbol):
+            spec = real(symbol)
+            # A different currently-selected contract for the same base.
+            d = Drifted()
+            for name in dir(spec):
+                if not name.startswith("_"):
+                    try:
+                        setattr(d, name, getattr(spec, name))
+                    except AttributeError:
+                        pass
+            d.symbol = "PBTCUCZ99"
+            return d
+
+        book_read = {"n": 0}
+        real_top = MD.latest_top
+
+        def counting_top(sym):
+            book_read["n"] += 1
+            return real_top(sym)
+
+        with patch.object(BP2, "resolve", drifted), \
+             patch.object(MD, "latest_top", counting_top):
+            r = POL.execution_readiness("BTC/USD", "crypto",
+                                        routing_identity=self._frozen_identity())
+        self.assertFalse(r.ok)
+        self.assertEqual(r.reason, "EXECUTION_INSTRUMENT_MISMATCH")
+        self.assertEqual(book_read["n"], 0,
+                         "the other contract's book was read anyway")
+
+    def test_a_legacy_call_without_identity_is_unchanged(self):
+        from lib import execution_policy as POL
+        r = POL.execution_readiness("BTC/USD", "crypto",
+                                    signal={"product": PR.CRYPTO_PERP})
+        self.assertTrue(r.ok, f"{r.reason}: {r.detail}")
+        self.assertNotIn("requested_instrument_id", r.snapshot.provenance)

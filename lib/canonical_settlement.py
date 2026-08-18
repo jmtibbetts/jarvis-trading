@@ -83,6 +83,22 @@ NOT_CANONICAL_SETTLEMENT_POSITION = "NOT_CANONICAL_SETTLEMENT_POSITION"
 STALE_SETTLEMENT_REVISION = "STALE_SETTLEMENT_REVISION"
 IDEMPOTENT_ALREADY_SETTLED = "IDEMPOTENT_ALREADY_SETTLED"
 EXIT_VALIDATION_FAILED = "EXIT_SETTLEMENT_VALIDATION_FAILED"
+# Same execution id, different position — an id collision, not a retry.
+EXECUTION_ID_COLLISION = "EXECUTION_ID_COLLISION"
+# Same execution id, same position, DIFFERENT economic facts. A retry
+# describes the same event or it is not a retry.
+IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+
+# What carry mechanism each product is ALLOWED to be charged under. A
+# CRYPTO_PERP quote claiming NOT_APPLICABLE is not an established zero — it
+# is a structurally impossible zero, and it refuses.
+_EXPECTED_HOLDING_KIND = {
+    "CRYPTO_PERP": "FUNDING",
+    "EQUITY_SHORT": "BORROW",
+    "CRYPTO_SPOT": "NOT_APPLICABLE",
+    "EQUITY_SPOT": "NOT_APPLICABLE",
+    "ETF_SPOT": "NOT_APPLICABLE",
+}
 
 _REP_TOL = 1e-9
 
@@ -138,12 +154,19 @@ class ExitSettlementFacts:
     fee_notional_usd: float | None = None
 
     # Holding cost — the HoldingCostQuote's facts, flattened. Signed: a
-    # negative amount is carry RECEIVED.
+    # negative amount is carry RECEIVED. The quote's OWN identity travels
+    # too (P0.1): a quote that priced a different symbol, product, exposure
+    # or interval is a charge for a different position, and without these
+    # fields settlement could not tell.
     holding_cost_usd: float = 0.0
     holding_cost_kind: str | None = None
     holding_cost_source: str | None = None
     holding_cost_quality: str | None = None
     holding_cost_version: str | None = None
+    holding_cost_symbol: str | None = None
+    holding_cost_product: str | None = None
+    holding_cost_notional_usd: float | None = None
+    holding_cost_rate: float | None = None
     hours_held: float | None = None
 
     spread_attribution_usd: float = 0.0
@@ -209,6 +232,11 @@ def exit_facts(*, position_id: str, expected_revision: int, execution_id: str,
         holding_cost_source=holding_quote.source,
         holding_cost_quality=holding_quote.quality,
         holding_cost_version=holding_quote.version,
+        # FROM the quote, never rederived — these are what binding checks.
+        holding_cost_symbol=holding_quote.symbol,
+        holding_cost_product=holding_quote.product,
+        holding_cost_notional_usd=holding_quote.notional_usd,
+        holding_cost_rate=holding_quote.rate,
         hours_held=holding_quote.hours_held,
         spread_attribution_usd=float(spread_attribution_usd),
         slippage_attribution_usd=float(slippage_attribution_usd),
@@ -324,6 +352,25 @@ def validate_exit_settlement_facts(facts: ExitSettlementFacts) -> None:
             "holding cost quality is UNAVAILABLE — an unavailable carry is "
             "not zero, and settling it as zero records free carry")
 
+    # ── P0.1: the quote must have priced THIS exit's exposure ───────────
+    if f.holding_cost_symbol is not None \
+            and str(f.holding_cost_symbol).upper() != str(f.symbol).upper():
+        raise ExitValidationError(
+            f"the holding quote priced {f.holding_cost_symbol!r} but this "
+            f"exit settles {f.symbol!r} — a carry charge for a different "
+            f"symbol is a charge for a different position")
+    if f.holding_cost_product is not None \
+            and str(f.holding_cost_product).upper() != str(f.product).upper():
+        raise ExitValidationError(
+            f"the holding quote priced product {f.holding_cost_product!r} "
+            f"but this exit settles {f.product!r}")
+    expected_kind = _EXPECTED_HOLDING_KIND.get(str(f.product).upper())
+    if expected_kind is not None and f.holding_cost_kind != expected_kind:
+        raise ExitValidationError(
+            f"a {f.product} position's carry mechanism is {expected_kind}, "
+            f"but the quote says {f.holding_cost_kind!r} — a structurally "
+            f"impossible zero is not an established zero")
+
 
 def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
     """THE financial mutation boundary for canonical exits.
@@ -350,10 +397,60 @@ def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
 
     f = facts
     with get_db() as db:
-        # ── Idempotency FIRST: a retry is not another exit (§20) ─────────
+        # ── Idempotency FIRST — and idempotent means SAME ECONOMIC EVENT
+        # (P0.2), not merely same id. Same id on another position is a
+        # collision; same id with different economics is a conflict; only a
+        # true retry — the already-settled leg describing this exact
+        # execution — succeeds without mutation. expected_revision is
+        # deliberately NOT compared: a legitimate retry naturally arrives
+        # after the revision advanced.
         prior = db.query(PaperSettlementLeg).filter(
             PaperSettlementLeg.execution_id == f.execution_id).first()
         if prior is not None:
+            if prior.position_id != f.position_id:
+                return {"ok": False, "error": EXECUTION_ID_COLLISION,
+                        "detail": (f"execution {f.execution_id} already "
+                                   f"settled into position "
+                                   f"{prior.position_id}, not "
+                                   f"{f.position_id} — one execution id "
+                                   f"names one economic event")}
+            diffs = []
+            for name, prior_v, new_v, numeric in (
+                    ("symbol", prior.symbol, f.symbol, False),
+                    ("product", prior.product, f.product, False),
+                    ("venue", prior.venue, f.venue, False),
+                    ("instrument_id", prior.instrument_id,
+                     f.instrument_id, False),
+                    ("execution_side", prior.execution_side,
+                     f.execution_side, False),
+                    ("quantity_unit", prior.quantity_unit,
+                     f.quantity_unit, False),
+                    ("exit_reason", prior.exit_reason, f.exit_reason, False),
+                    ("holding_cost_type", prior.holding_cost_type,
+                     f.holding_cost_kind, False),
+                    ("requested_qty", prior.requested_qty,
+                     f.requested_qty, True),
+                    ("filled_qty", prior.filled_qty, f.filled_qty, True),
+                    ("multiplier", prior.multiplier, f.multiplier, True),
+                    ("fill_price", prior.fill_price, f.fill_price, True),
+                    ("explicit_fee_usd", prior.explicit_fee_usd,
+                     f.fee_usd, True),
+                    ("holding_cost_usd", prior.holding_cost_usd,
+                     f.holding_cost_usd, True)):
+                if numeric:
+                    same = (prior_v is not None and new_v is not None
+                            and _close_enough(float(prior_v), float(new_v)))
+                else:
+                    same = prior_v == new_v
+                if not same:
+                    diffs.append(f"{name}: settled {prior_v!r}, "
+                                 f"retry claims {new_v!r}")
+            if diffs:
+                return {"ok": False, "error": IDEMPOTENCY_CONFLICT,
+                        "detail": ("the same execution id arrived with "
+                                   "different economic facts — a retry "
+                                   "describes the same event or it is not "
+                                   "a retry (" + "; ".join(diffs) + ")")}
             return {"ok": True, "idempotent": True,
                     "result": IDEMPOTENT_ALREADY_SETTLED,
                     "position_id": prior.position_id,
@@ -425,6 +522,45 @@ def settle_prepared_exit(facts: ExitSettlementFacts) -> dict:
                                f"ledger is at {header.settlement_revision} — "
                                f"another settlement won; re-preparing is a "
                                f"NEW economic authorization, not a retry")}
+
+        # ── P0.1: the carry quote is bound to THIS leg's exposure and
+        # interval — checkable only here, where the entry fill and the
+        # opened_at timestamp live. A quote whose notional or interval
+        # describes a different exposure refuses; its dollar amount is
+        # never booked anyway.
+        if f.holding_cost_kind in ("FUNDING", "BORROW"):
+            expected_notional = (float(f.filled_qty)
+                                 * float(header.actual_entry_fill)
+                                 * float(header.multiplier))
+            if f.holding_cost_notional_usd is None or not _close_enough(
+                    float(f.holding_cost_notional_usd), expected_notional,
+                    1e-6):
+                return {"ok": False, "error": EXIT_VALIDATION_FAILED,
+                        "detail": (f"the holding quote priced "
+                                   f"${f.holding_cost_notional_usd!r} of "
+                                   f"exposure but this leg closes "
+                                   f"{f.filled_qty:g} x "
+                                   f"{header.actual_entry_fill:g} x "
+                                   f"{header.multiplier:g} = "
+                                   f"${expected_notional:,.6f} — a carry "
+                                   f"charge for a different exposure")}
+            try:
+                from datetime import datetime as _dt
+                t0 = _dt.fromisoformat(str(header.opened_at))
+                t1 = _dt.fromisoformat(str(f.settled_at))
+                expected_hours = (t1 - t0).total_seconds() / 3600.0
+            except (TypeError, ValueError) as e:
+                return {"ok": False, "error": EXIT_VALIDATION_FAILED,
+                        "detail": f"cannot establish the holding interval: "
+                                  f"{e}"}
+            if f.hours_held is None or abs(float(f.hours_held)
+                                           - expected_hours) > 1.0 / 3600.0:
+                return {"ok": False, "error": EXIT_VALIDATION_FAILED,
+                        "detail": (f"the holding quote priced "
+                                   f"{f.hours_held!r} hours but this leg "
+                                   f"settles {expected_hours:.6f} hours "
+                                   f"after entry — one interval, one "
+                                   f"charge")}
 
         # ── Quantity can only shrink (§21) ────────────────────────────────
         q_before = float(pos.qty)

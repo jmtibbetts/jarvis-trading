@@ -67,6 +67,9 @@ UNKNOWN_PRODUCT           = "UNKNOWN_PRODUCT"
 # spot book is not an approximation — it is a different instrument.
 NO_EXECUTABLE_PERP_QUOTE  = "NO_EXECUTABLE_PERP_QUOTE"
 NO_EXECUTABLE_PRODUCT_QUOTE = "NO_EXECUTABLE_PRODUCT_QUOTE"
+# The FROZEN contract and the venue's current resolution disagree. Never a
+# roll to perform silently — a settlement identity nobody authorized (P0.3).
+EXECUTION_INSTRUMENT_MISMATCH = "EXECUTION_INSTRUMENT_MISMATCH"
 # Derivatives sessions are scheduled and can halt. A closed market is not a
 # data outage and not a losing thesis — it is a time of day.
 MARKET_NOT_OPEN           = "MARKET_NOT_OPEN"
@@ -366,8 +369,22 @@ def execution_readiness(symbol: str, asset_class: str | None = None, *,
                   if product == PR.CRYPTO_PERP else {})
     else:
         kwargs = {"max_age_s": max_age_s}
+    # P0.3: a FROZEN identity's contract travels INTO the market reader, so
+    # the reader can confirm it is pricing that contract's book and not
+    # whatever today's resolution happens to select. Legacy callers (no
+    # routing_identity) keep the original behaviour.
+    if routing_identity is not None and instrument:
+        kwargs["instrument_id"] = instrument
     snap = ES.execution_market_snapshot(symbol, venue, product=product, **kwargs)
     if snap.status == ES.AVAILABLE:
+        # An AVAILABLE snapshot for a frozen contract must have CONFIRMED
+        # that contract — stated-by-caller is not confirmed-by-reader.
+        if (routing_identity is not None and instrument
+                and snap.instrument_id and snap.instrument_id != instrument):
+            return _refuse(
+                EXECUTION_INSTRUMENT_MISMATCH,
+                f"frozen instrument {instrument!r} but the venue snapshot "
+                f"confirmed {snap.instrument_id!r}")
         return ExecutionReadiness(True, venue, product, snapshot=snap,
                                   asset_class=ac, instrument=instrument)
 

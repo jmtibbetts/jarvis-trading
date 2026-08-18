@@ -369,6 +369,20 @@ def _from_bitnomial_perp(symbol: str,
         snap.provenance["refusal"] = prod.reason
         return snap
 
+    # P0.3: THE FROZEN CONTRACT IS THE ONLY CONTRACT — checked BEFORE the
+    # book may price anything. If the caller froze PBTC_A and the current
+    # underlying resolution selects PBTC_B, that is not a roll to perform,
+    # it is a settlement identity nobody authorized. Refuse.
+    requested = snap.provenance.get("requested_instrument_id")
+    if requested and prod.symbol != requested:
+        snap.status = UNAVAILABLE
+        snap.reason = (f"frozen contract {requested!r} but the venue "
+                       f"currently resolves {symbol} to {prod.symbol!r}; "
+                       f"refusing rather than pricing another contract's "
+                       f"book")
+        snap.provenance["refusal"] = "EXECUTION_INSTRUMENT_MISMATCH"
+        return snap
+
     # THE CONTRACT IS THE INSTRUMENT IDENTITY, and it belongs on the typed
     # field rather than only in provenance.  was declared on
     # the snapshot and assigned by NO reader, so every consumer read None:
@@ -516,6 +530,7 @@ def products_for(venue: str) -> frozenset:
 
 def execution_market_snapshot(symbol: str, venue: str, *,
                               product: str | None = None,
+                              instrument_id: str | None = None,
                               max_age_s: float = DEFAULT_MAX_AGE_S
                               ) -> ExecutionMarketSnapshot:
     """The executable state of `venue` for `symbol`, or a stated refusal.
@@ -523,10 +538,20 @@ def execution_market_snapshot(symbol: str, venue: str, *,
     Never falls back to another venue. A caller that cannot price a fill
     from this must refuse the fill — that is a VENUE failure, not a bad
     thesis, and the two must stay distinguishable in the learning set.
+
+    `instrument_id` is the FROZEN contract the caller has already committed
+    to (P0.3). It is recorded as `requested_instrument_id` — separately from
+    the reader-confirmed `snap.instrument_id`, so nobody can mistake "the
+    caller stated it" for "the reader confirmed it" — and a reader that
+    resolves a DIFFERENT contract refuses rather than pricing the wrong
+    book. The architecture must not depend on the coincidence that today's
+    resolution happens to equal yesterday's frozen one.
     """
     v = (venue or "").strip().lower()
     snap = ExecutionMarketSnapshot(venue=v, symbol=symbol, product=product,
                                    received_at=_now_iso())
+    if instrument_id:
+        snap.provenance["requested_instrument_id"] = str(instrument_id)
     reader = _READERS.get(v)
     if reader is None:
         snap.status = UNAVAILABLE
@@ -557,6 +582,19 @@ def execution_market_snapshot(symbol: str, venue: str, *,
         snap.status = UNAVAILABLE
         snap.reason = f"{type(e).__name__}: {e}"
         logger.debug("[ExecSnap] %s/%s unavailable: %s", v, symbol, e)
+        return snap
+
+    # THE READER MUST CONFIRM THE FROZEN CONTRACT, whichever reader ran. The
+    # Bitnomial path refuses before touching the book; this central check is
+    # the backstop for every other reader that stamps an instrument.
+    requested = snap.provenance.get("requested_instrument_id")
+    if requested and snap.instrument_id and snap.instrument_id != requested:
+        snap.status = UNAVAILABLE
+        snap.reason = (f"the frozen instrument is {requested!r} but this "
+                       f"venue resolves {snap.instrument_id!r}; pricing the "
+                       f"other contract would settle an identity nobody "
+                       f"authorized")
+        snap.provenance["refusal"] = "EXECUTION_INSTRUMENT_MISMATCH"
         return snap
 
     snap.provenance.setdefault("venue_authority", v)

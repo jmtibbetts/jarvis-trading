@@ -79,6 +79,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# The frozen product/venue/instrument do not describe one executable
+# instrument, so there are no units to trade in. A CAPABILITY refusal, not a
+# venue outage — it must not land against the thesis.
+NO_EXECUTABLE_INSTRUMENT_IDENTITY = "NO_EXECUTABLE_INSTRUMENT_IDENTITY"
+
+
 def open_canonical_position(signal: dict, *, decision_price: float | None = None,
                             max_age_s: float | None = None,
                             edge=None, edge_gate_role=None,
@@ -100,6 +106,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     from lib import execution_policy as POL
     from lib import execution_venue as EV
     from lib import fee_authority as FA
+    from lib import instruments as INST
     from lib import venues as V
     from lib import virtual_orders as VO
     from lib.decision_types import OrderPlan
@@ -183,6 +190,30 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     gates["executable_quote"] = "PASS"
     gates["capability"] = "PASS"
 
+    # ── THE EXACT EXECUTION INSTRUMENT, RESOLVED ONCE ────────────────────
+    #
+    # Readiness has just frozen product/venue/instrument. Without handing the
+    # exact instrument down the chain, `virtual_orders` re-resolves the bare
+    # symbol and a frozen perpetual silently becomes CRYPTO_SPOT in COINS at
+    # multiplier 1.0 while provenance records PBTCUCZ50. For a contract sized
+    # at 0.01 BTC that is a hundredfold error in exposure, fees and P&L.
+    #
+    # Resolved here and carried forward: compute once, never re-derive.
+    try:
+        execution_instrument = INST.resolve_for_execution(
+            symbol, product=ready.product, venue=ready.venue,
+            instrument_id=getattr(ready, "instrument", None))
+    except INST.ExecutionIdentityRefused as e:
+        logger.info("[CanonicalEntry] %s has no exact executable instrument: %s",
+                    symbol, e)
+        gates["execution_instrument"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=NO_EXECUTABLE_INSTRUMENT_IDENTITY,
+                 ready=ready, venue_failure=False)
+        return {"error": NO_EXECUTABLE_INSTRUMENT_IDENTITY, "detail": str(e),
+                "venue": ready.venue, "product": ready.product,
+                "venue_failure": False, "opened": False}
+    gates["execution_instrument"] = "PASS"
+
     snap = ready.snapshot
     quote = VO.Quote(bid=snap.bid, ask=snap.ask, as_of=snap.venue_event_at,
                      source=snap.source)
@@ -209,7 +240,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
             leverage=float(auth.leverage), product=ready.product)
         return EV.submit(plan, venue_family=EV.VIRTUAL_CEX,
                          risk=auth.risk_decision(), product=ready.product,
-                         venue=ready.venue, quote=quote)
+                         venue=ready.venue, quote=quote,
+                         instrument=execution_instrument)
 
     def _refuse_submission(sub, authorization=None):
         """A venue refusal is a RESULT, and it is about the order, not the

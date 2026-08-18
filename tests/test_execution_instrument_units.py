@@ -108,3 +108,66 @@ class VenueBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanonicalEntryActuallyCarriesItTests(unittest.TestCase):
+    """A parameter existing proves nothing. The CALL GRAPH must carry it.
+
+    This project has now shipped four defects of the shape "signature exists,
+    body exists, caller never passes the value": the conflict guard reading a
+    field that was never populated, the funnel signature missing its
+    parameter, snapshot.instrument_id assigned by no reader, and this one —
+    canonical_entry never calling resolve_for_execution at all.
+    """
+
+    def test_canonical_entry_resolves_the_exact_instrument(self):
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path("lib/canonical_entry.py").read_text())
+        called = {n.func.attr for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Attribute)}
+        self.assertIn("resolve_for_execution", called)
+
+    def test_it_passes_a_non_null_instrument_to_the_venue(self):
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path("lib/canonical_entry.py").read_text())
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "submit"):
+                kws = {k.arg: k.value for k in n.keywords}
+                self.assertIn("instrument", kws,
+                              "EV.submit called without the exact instrument")
+                # and it must be the resolved object, not a literal None
+                self.assertNotIsInstance(kws["instrument"], ast.Constant)
+                return
+        self.fail("no EV.submit call found in canonical_entry")
+
+    def test_the_fill_model_does_not_re_resolve_when_given_an_instrument(self):
+        """The behavioural half: with an exact instrument supplied,
+        virtual_orders must not consult the generic resolver at all."""
+        from lib import instruments as INST
+        from lib import virtual_orders as VO
+
+        exact = INST.resolve_for_execution(
+            "BTC/USD", product=PERP, venue=VENUE, instrument_id=CONTRACT)
+
+        real = INST.resolve
+        def explode(*a, **k):
+            raise AssertionError(
+                "generic instruments.resolve() was called while an exact "
+                "execution instrument was supplied")
+        INST.resolve = explode
+        try:
+            order = VO.VirtualOrder(symbol="BTC/USD", side="long",
+                                    quantity=3.0, order_type="market")
+            quote = VO.Quote(bid=64000.0, ask=64010.0, as_of=None,
+                             source="test")
+            res = VO.execute_market(order, quote, instrument=exact)
+        finally:
+            INST.resolve = real
+
+        # ExecutionResult carries the UNITS, which is what settlement needs.
+        self.assertEqual(res.quantity_unit, "CONTRACTS")
+        self.assertAlmostEqual(res.multiplier, 0.01)

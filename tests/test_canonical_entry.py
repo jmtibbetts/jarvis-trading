@@ -464,6 +464,15 @@ class PerpFillsNeedPerpQuotesTests(unittest.TestCase):
 
     PERP = dict(SIGNAL, product="CRYPTO_PERP")
 
+    def setUp(self):
+        """The perpetual book registry is PROCESS-GLOBAL, so a test file that
+        seeds one leaks into any test that expects none. These cases are
+        about what happens with NO perpetual book available, and that has to
+        be true regardless of what ran first."""
+        from lib import bitnomial_market_data as MD
+        MD.reset_books()
+        self.addCleanup(MD.reset_books)
+
     def _attempt(self, signal):
         captured = {}
         with _kraken(99.90, 100.10), \

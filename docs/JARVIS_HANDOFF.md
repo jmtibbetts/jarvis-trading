@@ -1192,3 +1192,108 @@ checks found none of them. What worked every time was making the OLD path
 raise and proving the new one survives. Prefer that over asserting a
 signature or a source string exists.
 
+
+## 20. STOP POINT — B0.2 SIZING CORE COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §19.
+
+    main            e5eeaff   clean, pushed
+    branch          b02-sizing-tripwire, rebased and merged, now equal to main
+    tests on main   3,549 passed / 16 skipped / TRUE exit 0 / offline identical
+
+### What closed
+
+The 100x seam. Execution has spoken `PBTCUCZ50` / `CONTRACTS` / multiplier
+**0.01** since 8b17781; sizing still derived units from the bare symbol and
+spoke generic BTC coins at 1.0. Risk and execution now share one basis.
+
+- **`instruments.normalize_quantity_down(qty, instrument)`** — ONE shrink-only
+  authority. `Decimal` + `ROUND_FLOOR`, ratio quantised at 1e-9 first so a
+  decimal 3 that is binary 2.9999999999999996 floors to 3, not 2. Asserts
+  against its own output rather than clamping. A minimum is an ELIGIBILITY
+  FLOOR: 0.94 contracts is none, never one.
+- **`solve_position(..., execution_instrument=None)`** — when supplied it is
+  the authority for multiplier, unit, step and minimum, and
+  `get_spec()` / `is_futures()` are not consulted at all. `None` preserves
+  legacy exactly.
+- **Every shrinking constraint re-normalises and recomputes** — initial solve,
+  notional cap, cash cap, manual `margin_override`. The cash cap no longer
+  sets `margin = cash_cap`: it bounds the notional, the quantity floors, and
+  the margin is what that quantity costs. 2 contracts cost 1280.00 against a
+  1747.20 ceiling, and landing below the cap is correct.
+- **Quantity model stayed separate from margin model.** PBTC is discrete but
+  does NOT take the CME fixed-margin path; discreteness gates on the
+  instrument's own step, never on `is_futures(symbol)`.
+- **The basis travels.** `RiskDecision` carries `quantity_unit` / `multiplier`;
+  `prepare_entry` and `canonical_entry` thread the instrument through, and
+  both canonical sizing passes share ONE object.
+
+### Two seams the perp suite found, and they are the same shape
+
+Both were a stage RE-DERIVING a basis that had already been established —
+which is the defect pattern of this whole phase, one stage later:
+
+1. `OrderPlan.check` re-resolved the multiplier from the bare symbol and read
+   **$99,400.00 against an approved $994.00** — exactly 100.0 — refusing every
+   perpetual order it had itself approved. It now prices the order in the
+   units the risk was approved in, but ONLY when a basis was stated; legacy
+   decisions still resolve, and still fail closed on unknown units.
+2. `EntryAuthorization.risk_quantum` read the CONTINUOUS 1e-6 quantity step
+   for an instrument that rounds to one contract. Re-pricing a 3-lot at a fill
+   further from the stop cannot answer "hold slightly less" — only 3 or 2
+   exist — so $966.00 -> $981.57 on an unchanged size was refused. The budget
+   is still enforced exactly in `solve_position`; the quantum only ever
+   governed the precision of the comparison.
+
+### Tests
+
+`tests/test_executable_quantity_sizing.py` — the 14 tripwire tests, calibrated
+first. Four of them had been failing on the tripwire's OWN mistakes
+(`d.quantity` vs `qty`, an invented `loss_at_stop`, a missing `free_cash`, an
+invented `cash_cap_usd`). Each would have been "fixed" by widening the
+production API to match the test; fixing the test kept one canonical field,
+one arithmetic truth and one cash API. Load-bearing results:
+
+    0.94 theoretical      REJECTED
+    2.94                  2
+    notional cap 3.7      3
+    cash cap 2.73         2, margin 1280.00 < cap 1747.20
+
+`tests/test_sizing_call_graph.py` — the half the tripwire cannot reach: that
+the REAL chain carries the object. It poisons `get_spec` to 999.0 and proves
+the exact answer does not move, **plus a control proving the same poison DOES
+move the legacy answer** — without which that silence would be vacuous. All
+nine fail against the pre-implementation `lib/`.
+
+### Exact next steps
+
+1. Unit basis onward through `OrderPlan` -> `ExecutionResult` agreement.
+   `OrderPlan` still has no quantity-unit field of its own; `check` now
+   borrows the decision's.
+2. The exact executed per-contract fee.
+3. Then B1's entry settlement ledger, then `canonical_exit`.
+
+### Do not
+
+- Build `canonical_exit` or reroute the ten exit callers yet.
+- Weaken `_refuse_legacy_close()` — PERMANENT.
+- Migrate the operator DB, start a new evidence epoch, or turn the scheduler
+  on.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, boundary 2026-08-18T07:53:21Z unchanged
+    runtime mode    EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (mtime 2026-08-17 15:38)
+    scheduler       OFF (no app process running)
+    real actions    0
+
+### A note on trees
+
+The canonical working tree is the WSL one, `~/jarvis-trading`, and it is where
+the collector runs and where the 3,549/16 baseline is measured. The Windows
+checkout at `C:\jarvis-trading-ai-python` shares the same remote but has its
+own stale `data/`. Running app-importing code there OUTSIDE pytest opens that
+tree's own database — harmless to live state, but `conftest.py`'s redirect
+only protects code run UNDER pytest. Use pytest, or a read-only connection.

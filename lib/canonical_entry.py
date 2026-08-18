@@ -155,10 +155,17 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     gates["side_parse"] = "PASS"
 
     # ── 1. May this be filled at all, and by whom? ───────────────────────
-    # The frozen T0 identity is authoritative here: the display
-    # asset_class on a paper signal can say "Equity" when no class was
-    # stored, and that must not outrank what the decision was about.
-    ready = POL.execution_readiness(symbol, asset_class, signal=signal,
+    # THE DISPLAY FALLBACK IS NOT ROUTING TRUTH. The paper candidate dict
+    # carries `asset_class` for display and labels anything non-futures
+    # "Equity" when nothing was stored. Handing that in as an independent
+    # class would compare a legitimately frozen crypto identity against
+    # "Equity" and raise a conflict for a decision that was never wrong —
+    # the guard firing on the display field rather than on a real
+    # disagreement. When an identity is frozen, IT supplies the class.
+    readiness_asset_class = (routing_identity.asset_class
+                             if routing_identity is not None else asset_class)
+    ready = POL.execution_readiness(symbol, readiness_asset_class,
+                                    signal=signal,
                                     routing_identity=routing_identity,
                                     **({} if max_age_s is None else
                                        {"max_age_s": max_age_s}))

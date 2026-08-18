@@ -288,3 +288,37 @@ class ReadinessConsumesFrozenIdentityTests(unittest.TestCase):
                                         routing_identity=ident)
         self.assertEqual(r.product, "CRYPTO_PERP")
         self.assertNotEqual(r.product, "CRYPTO_SPOT")
+
+
+class DisplayAssetClassIsNotRoutingTruthTests(unittest.TestCase):
+    """The paper dict labels anything non-futures "Equity" for display.
+
+    Handing that to readiness as an independent class would make the conflict
+    guard fire on the DISPLAY field rather than on a real disagreement —
+    refusing a correctly-frozen crypto decision for cosmetic reasons.
+    """
+
+    def test_canonical_entry_uses_the_frozen_class_not_the_display_one(self):
+        import pathlib
+        src = pathlib.Path("lib/canonical_entry.py").read_text()
+        self.assertIn("readiness_asset_class", src)
+        self.assertIn("routing_identity.asset_class", src)
+        self.assertNotIn(
+            "POL.execution_readiness(symbol, asset_class, signal=signal,", src)
+
+    def test_a_crypto_identity_survives_an_equity_display_label(self):
+        from lib import execution_policy as EP
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        # exactly the legacy shape: display says Equity, identity says crypto
+        r = EP.execution_readiness("BTC/USD", ident.asset_class,
+                                   signal={"asset_class": "Equity"},
+                                   routing_identity=ident)
+        self.assertEqual(r.product, "CRYPTO_PERP")
+        self.assertEqual(r.asset_class, "crypto")
+
+    def test_a_genuine_disagreement_still_conflicts(self):
+        """The guard must stay live for real authoritative disagreement."""
+        from lib import execution_policy as EP
+        ident = RI.resolve_execution_identity("BTC/USD", "crypto")
+        with self.assertRaises(RI.RoutingIdentityConflict):
+            EP.execution_readiness("BTC/USD", "equity", routing_identity=ident)

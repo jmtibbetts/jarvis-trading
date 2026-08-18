@@ -85,6 +85,52 @@ def _now() -> str:
 NO_EXECUTABLE_INSTRUMENT_IDENTITY = "NO_EXECUTABLE_INSTRUMENT_IDENTITY"
 
 
+def execution_disagreement(plan, execution) -> str | None:
+    """Where the ExecutionResult contradicts the plan that produced it (B0).
+
+    Returns a human-readable description of the FIRST disagreement, or None
+    when the two describe one order. Checked before economic settlement:
+    a contradiction here is not a fill to record, it is a stage that
+    re-derived quantity semantics on its own — and the answer to that is
+    refusal, never patching the result until it fits.
+
+    Quantities may only relate downward (a venue may shrink, never enlarge);
+    unit and multiplier must be THE SAME FACT on both objects wherever the
+    plan states them. The multiplier tolerance is representation-only.
+    """
+    import math as _math
+
+    req = float(execution.requested_quantity or 0.0)
+    filled = float(execution.filled_quantity or 0.0)
+    plan_qty = float(plan.qty)
+    if not (_math.isfinite(req) and _math.isfinite(filled)):
+        return (f"execution quantities are not finite "
+                f"(requested {execution.requested_quantity!r}, filled "
+                f"{execution.filled_quantity!r})")
+    if req > plan_qty + 1e-9:
+        return (f"execution requested {req:g} against a plan of "
+                f"{plan_qty:g} — a venue may shrink an order, never "
+                f"enlarge one")
+    if filled > req + 1e-9:
+        return (f"execution filled {filled:g} of a requested {req:g} — "
+                f"a fill larger than its own order is not a fill")
+    plan_unit = getattr(plan, "quantity_unit", None)
+    if plan_unit is not None and execution.quantity_unit != plan_unit:
+        return (f"the plan counts {plan_unit!r} but the execution settled "
+                f"in {execution.quantity_unit!r}")
+    plan_mult = getattr(plan, "multiplier", None)
+    if plan_mult is not None:
+        try:
+            em = float(execution.multiplier)
+        except (TypeError, ValueError):
+            em = float("nan")
+        if not _math.isfinite(em) or abs(em - float(plan_mult)) > \
+                1e-12 * max(1.0, abs(float(plan_mult))):
+            return (f"the plan's multiplier is {plan_mult!r} but the "
+                    f"execution's is {execution.multiplier!r}")
+    return None
+
+
 def open_canonical_position(signal: dict, *, decision_price: float | None = None,
                             max_age_s: float | None = None,
                             edge=None, edge_gate_role=None,
@@ -237,11 +283,23 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
             order_type="market", qty=float(auth.qty),
             entry=float(auth.reference_price), initial_stop=float(auth.stop),
             target=float(auth.target), notional=float(auth.notional),
-            leverage=float(auth.leverage), product=ready.product)
-        return EV.submit(plan, venue_family=EV.VIRTUAL_CEX,
-                         risk=auth.risk_decision(), product=ready.product,
-                         venue=ready.venue, quote=quote,
-                         instrument=execution_instrument)
+            leverage=float(auth.leverage), product=ready.product,
+            # THE PLAN CARRIES ITS OWN BASIS, from the identity resolved once
+            # above — never re-resolved here. product+symbol names a family;
+            # instrument_id names the contract the quantity is counted in,
+            # and settlement must not have to reconstruct that from ambient
+            # state.
+            instrument_id=execution_instrument.instrument_id,
+            quantity_unit=execution_instrument.quantity_unit,
+            multiplier=float(execution_instrument.multiplier or 1.0))
+        sub = EV.submit(plan, venue_family=EV.VIRTUAL_CEX,
+                        risk=auth.risk_decision(), product=ready.product,
+                        venue=ready.venue, quote=quote,
+                        instrument=execution_instrument)
+        # The PLAN travels back with the submission, because settlement must
+        # prove the execution agrees with the plan that produced it — and
+        # "the plan" is this exact object, not a reconstruction.
+        return sub, plan
 
     def _refuse_submission(sub, authorization=None):
         """A venue refusal is a RESULT, and it is about the order, not the
@@ -274,7 +332,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
 
     # ── 3. EXECUTE THE AUTHORIZED QUANTITY. BUY lifts the ask, SELL hits
     #      the bid, and the result describes THIS order. ──────────────────
-    submission = _submit(authorized)
+    submission, plan = _submit(authorized)
     if not submission.accepted:
         return _refuse_submission(submission, authorized)
 
@@ -317,7 +375,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         logger.info("[CanonicalEntry] %s re-submitting %.8g -> %.8g units "
                     "after the fill at %.8g repriced the risk",
                     symbol, authorized.qty, final.qty, fill)
-        submission = _submit(final)
+        submission, plan = _submit(final)
         if not submission.accepted:
             return _refuse_submission(submission, final)
         execution = submission.execution
@@ -352,8 +410,26 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "venue_failure": False, "opened": False}
 
     # FAIL CLOSED. The position about to be written must be the order that
-    # was actually simulated — if those two ever disagree, the attribution
-    # is fiction and no position is worth writing.
+    # was actually simulated — the execution must agree with THE PLAN that
+    # produced it about quantity, unit and multiplier, and the fill must not
+    # exceed the request. Any disagreement here means some stage re-derived
+    # a basis on its own, and a persisted document carrying, say, PBTCUCZ50
+    # with COINS would poison every downstream reader that trusts it. The
+    # ExecutionResult is never patched to fit; the entry is refused.
+    disagreement = execution_disagreement(plan, execution)
+    if disagreement:
+        logger.error("[CanonicalEntry] %s refusing to settle: %s",
+                     symbol, disagreement)
+        gates["execution_matches_plan"] = "FAIL"
+        _observe(DO.NO_TRADE, reason=REJECTED_BY_EXECUTION, ready=ready,
+                 authorization=final)
+        return {"error": REJECTED_BY_EXECUTION, "detail": disagreement,
+                "venue": ready.venue, "product": ready.product,
+                "asset_class": ready.asset_class,
+                "venue_failure": False, "opened": False}
+    gates["execution_matches_plan"] = "PASS"
+
+    # And the same fail-closed stance one object earlier: the authorization.
     if abs(float(execution.filled_quantity) - float(final.qty)) > 1e-9:
         logger.error("[CanonicalEntry] %s refusing to settle: executed %s "
                      "units but authorization holds %s",
@@ -374,11 +450,28 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # close. Under the per-leg model the entry leg is priced from what
     # actually filled and debited now, so `fees` stays 0 and the close path
     # cannot bill the same economics twice.
-    fee_quote = FA.leg_fee(symbol, notional=float(final.notional),
+    #
+    # PRICED FROM THE EXECUTION THAT SURVIVED, IN ITS OWN UNITS. `execution`
+    # here is the final one — after any post-fill repricing and smaller
+    # resubmission — so a 3-lot that repriced down to 2 pays fees on 2. The
+    # notional is the EXECUTED notional (filled x fill x multiplier), not
+    # the authorization's reference-priced one: the fee describes the trade
+    # that happened, and any percentage-of-notional sanity downstream must
+    # divide by the same denominator. For CONTRACTS the exact filled count
+    # goes in as historical fact — the planning round-up is for forecasts.
+    executed_qty = float(execution.filled_quantity)
+    executed_notional = (executed_qty * fill
+                         * float(execution.multiplier or 1.0))
+    in_contracts = execution.quantity_unit == "CONTRACTS"
+    fee_quote = FA.leg_fee(symbol, notional=executed_notional,
                            price=fill, product=ready.product,
                            venue=ready.venue, side=venue_side,
                            # A market order crosses the book; it is a TAKER.
-                           maker=False)
+                           maker=False,
+                           exact_contract_count=(executed_qty if in_contracts
+                                                 else None),
+                           execution_instrument=execution_instrument,
+                           actual_fill_price=fill)
     if not fee_quote.ok or fee_quote.fee_usd is None:
         # FAIL CLOSED. Settling anyway would debit nothing and stamp a
         # position as per_leg_v2 while charging it nothing at all — a free
@@ -407,8 +500,12 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # the underlying, mixes denominators and kills trades that are
     # comfortably viable — rejecting a profitable trade is simulator error
     # too. This only catches the instrument that could never pay for itself.
+    # I5. The numerator is the exact execution fee, so the denominator is
+    # the exact EXECUTED notional from the same ExecutionResult — dividing
+    # by the stale pre-fill authorization notional would compare two
+    # different trades.
     round_trip_pct = (2.0 * float(fee_quote.fee_usd)
-                      / abs(float(final.notional))) * 100.0
+                      / abs(executed_notional)) * 100.0
     if round_trip_pct > V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL:
         logger.warning("[CanonicalEntry] %s refused: round trip is %.2f%% of "
                        "notional (limit %.2f%%)", symbol, round_trip_pct,
@@ -419,7 +516,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                  ready=ready, authorization=final, fee_quote=fee_quote)
         return {"error": FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
                 "detail": (f"${fee_quote.fee_usd:,.2f} per side on "
-                           f"${abs(final.notional):,.2f} of notional is a "
+                           f"${abs(executed_notional):,.2f} of executed "
+                           f"notional is a "
                            f"{round_trip_pct:.2f}% round trip, above the "
                            f"{V.MAX_VIABLE_FEE_PCT_OF_NOTIONAL:g}% ceiling; a "
                            f"per-contract cost does not dilute with size, so "
@@ -622,6 +720,9 @@ def build_provenance(*, signal, ready, snap, execution,
         "entry_fee_basis": fee.fee_basis,
         "entry_fee_rate": fee.rate,
         "entry_fee_contract_count": fee.contract_count,
+        # Whether that count is a settled fact or a rounded-up forecast —
+        # a different question from how trustworthy the schedule is.
+        "entry_fee_contract_count_basis": fee.contract_count_basis,
         "entry_fee_source": fee.source,
         "cost_model_fee_quality": fee.quality,
         "cost_model_fee_is_measured": fee.is_measured,
@@ -651,9 +752,15 @@ def build_provenance(*, signal, ready, snap, execution,
         # settled at whatever sizing produced, and nothing recorded the
         # discrepancy because nothing recorded the quantity.
         "authorized_quantity": authorized_qty,
+        "requested_quantity": execution.requested_quantity,
         "filled_quantity": execution.filled_quantity,
         "quantity_unit": execution.quantity_unit,
         "multiplier": execution.multiplier,
+        # The notional OF THE EXECUTION — filled x fill x multiplier — so a
+        # reader never has to reconstruct it from generic coin semantics.
+        "executed_notional_usd": (float(execution.filled_quantity or 0.0)
+                                  * float(execution.fill_price or 0.0)
+                                  * float(execution.multiplier or 1.0)),
         "spread_attribution_usd": execution.spread_cost_usd,
         "slippage_attribution_usd": execution.slippage_usd,
         "impact_attribution_usd": 0.0,

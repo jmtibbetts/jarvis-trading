@@ -447,7 +447,11 @@ class TheEntryLegIsPricedBeforeItSettlesTests(unittest.TestCase):
         src = inspect.getsource(CE.open_canonical_position)
         gate = src[src.index("CATASTROPHIC-PRODUCT GATE"):
                    src.index("FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,")]
-        self.assertIn("final.notional", gate)
+        # B0 moved the denominator from the authorization's reference-priced
+        # notional to the EXECUTED notional — still a notional, same
+        # ExecutionResult as the fee's numerator. The invariant this test
+        # exists for is unchanged: never margin, never loss-at-stop.
+        self.assertIn("executed_notional", gate)
         self.assertNotIn("final.margin", gate)
         self.assertNotIn("loss_at_stop", gate)
 

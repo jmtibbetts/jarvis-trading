@@ -55,6 +55,10 @@ REFUSED_CAPABILITY = "REFUSED_VENUE_CAPABILITY"
 REFUSED_RISK = "REFUSED_EXCEEDS_RISK"
 REFUSED_NO_ADAPTER = "REFUSED_NO_ADAPTER"
 REFUSED_NOT_IMPLEMENTED = "REFUSED_NOT_IMPLEMENTED"
+# The plan and the exact instrument it will be filled as disagree about what
+# one unit IS. Not adjudicated — the fill model must never get to pick which
+# side's arithmetic wins (B0).
+REFUSED_UNIT_BASIS = "REFUSED_UNIT_BASIS_MISMATCH"
 
 
 @dataclass
@@ -93,6 +97,42 @@ class ExecutionVenue:
         raise NotImplementedError
 
 
+def _plan_instrument_mismatch(plan, instrument) -> str | None:
+    """The disagreements a fill model must never adjudicate (B0).
+
+    Compared only where BOTH sides state a value — a legacy plan with no
+    basis meets no instrument claim, and an instrument-less legacy submit
+    meets no plan claim, so neither changes behaviour. Where both speak,
+    they must say the same thing: unit, contract identity, and multiplier
+    (to representation tolerance only — a float round-trip, never a
+    different contract size).
+    """
+    if instrument is None or plan is None:
+        return None
+    plan_unit = getattr(plan, "quantity_unit", None)
+    inst_unit = getattr(instrument, "quantity_unit", None)
+    if plan_unit and inst_unit and plan_unit != inst_unit:
+        return (f"the plan counts {plan_unit!r} but {getattr(instrument, 'instrument_id', '?')} "
+                f"fills in {inst_unit!r}")
+    plan_iid = getattr(plan, "instrument_id", None)
+    inst_iid = getattr(instrument, "instrument_id", None)
+    if plan_iid and inst_iid and plan_iid != inst_iid:
+        return (f"the plan was built for {plan_iid!r} but the supplied "
+                f"execution identity is {inst_iid!r}")
+    plan_mult = getattr(plan, "multiplier", None)
+    inst_mult = getattr(instrument, "multiplier", None)
+    if plan_mult is not None and inst_mult is not None:
+        try:
+            pm, im = float(plan_mult), float(inst_mult)
+        except (TypeError, ValueError):
+            return (f"unreadable multiplier on the plan ({plan_mult!r}) or "
+                    f"the instrument ({inst_mult!r})")
+        if abs(pm - im) > 1e-12 * max(1.0, abs(im)):
+            return (f"the plan's multiplier {pm!r} is not the instrument's "
+                    f"{im!r}")
+    return None
+
+
 class VirtualCexAdapter(ExecutionVenue):
     """Simulated broker/exchange. Fills come from lib/virtual_orders."""
 
@@ -109,12 +149,26 @@ class VirtualCexAdapter(ExecutionVenue):
         from lib.virtual_orders import (LIMIT, MARKET, VirtualOrder,
                                         execute_limit, execute_market)
 
+        # A PLAN THAT STATES ITS BASIS MUST AGREE WITH THE INSTRUMENT IT IS
+        # ABOUT TO BE FILLED AS — checked HERE, before the fill model runs,
+        # because virtual_orders must never be the party that decides which
+        # of two stated bases wins. A plan in CONTRACTS handed an identity in
+        # COINS is a 100x disagreement wearing the same number.
+        mismatch = _plan_instrument_mismatch(plan, instrument)
+        if mismatch:
+            return VenueSubmission(False, self.family, REFUSED_UNIT_BASIS,
+                                   mismatch)
+
         order = VirtualOrder(
             symbol=plan.symbol, side=plan.side, quantity=plan.qty,
             order_type=(LIMIT if str(plan.order_type).lower() == "limit"
                         else MARKET),
             limit_price=(plan.entry if str(plan.order_type).lower() == "limit"
-                         else None))
+                         else None),
+            # The unit travels WITH the order, so an ExecutionResult can be
+            # audited against what was requested, not only against what the
+            # instrument implied.
+            quantity_unit=getattr(plan, "quantity_unit", None))
 
         if order.order_type == LIMIT:
             if not bar:

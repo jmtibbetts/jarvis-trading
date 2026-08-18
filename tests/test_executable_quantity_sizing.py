@@ -93,6 +93,56 @@ class NormalizerContractTests(unittest.TestCase):
         self.assertAlmostEqual(self._norm(1.2349, spot), 1.2349)
 
 
+class NormalizerIsStrictlyShrinkOnlyTests(unittest.TestCase):
+    """The boundary may never be crossed UPWARD, however near it the input.
+
+    The first implementation quantised qty/step at 1e-9 (HALF_EVEN) before
+    flooring, to be kind to binary floats that sit a hair under a decimal
+    integer. Kindness at an authorization boundary is enlargement:
+    0.9999999996 contracts became 1 — a position where risk had approved
+    none. The normaliser cannot know that a just-under float "really meant"
+    the integer; only upstream arithmetic provenance could establish that,
+    and if upstream produces just-under values for mathematically exact
+    amounts, UPSTREAM is what gets fixed. The capital boundary never
+    guesses upward.
+    """
+
+    def _norm(self, qty, inst=None):
+        from lib.instruments import normalize_quantity_down
+        return normalize_quantity_down(qty, inst or _pbtc())
+
+    def test_a_hair_under_one_contract_is_zero_not_one(self):
+        self.assertEqual(self._norm(0.9999999996), 0)
+
+    def test_a_hair_under_two_is_one(self):
+        self.assertEqual(self._norm(1.9999999996), 1)
+
+    def test_a_hair_under_three_is_two(self):
+        self.assertEqual(self._norm(2.9999999996), 2)
+
+    def test_an_exactly_legal_integer_is_untouched(self):
+        for q in (1.0, 2.0, 3.0, 7.0):
+            self.assertEqual(self._norm(q), q)
+
+    def test_a_fractional_step_never_rounds_up_across_a_boundary(self):
+        class MilliStep:
+            quantity_step = 0.001
+            instrument_id = "MILLI"
+        m = MilliStep()
+        # A hair under the next legal millistep must stay on this one.
+        self.assertEqual(self._norm(1.2349999999996, m), 1.234)
+        self.assertEqual(self._norm(0.0009999999996, m), 0.0)
+        # And an exactly legal value survives.
+        self.assertEqual(self._norm(1.234, m), 1.234)
+
+    def test_result_never_exceeds_input_strictly(self):
+        """No tolerance. result <= input as floats, for every case."""
+        for q in (0.9999999996, 1.9999999996, 2.9999999996,
+                  2.9999999999999996, 0.94, 1.0, 1.999, 2.94, 3.0,
+                  7.0, 7.0000001):
+            self.assertLessEqual(self._norm(q), q, f"enlarged {q!r}")
+
+
 class ContractNativeRiskTests(unittest.TestCase):
     """Sizing must use the exact contract, not the generic symbol."""
 
@@ -125,6 +175,64 @@ class ContractNativeRiskTests(unittest.TestCase):
         self.assertAlmostEqual(d.notional, 2 * 64000.0 * 0.01, places=6)
         self.assertAlmostEqual(actual_loss_at_stop(d), 2 * 100.0 * 0.01,
                                places=6)
+
+
+class ExactBudgetBoundaryTests(unittest.TestCase):
+    """The exact path's budget check is arithmetic, not economic.
+
+    The legacy revalidation allows loss <= budget * 1.0001 — four decimal
+    places of forgiveness that exist because legacy quantities are rounded
+    by display-adjacent code the engine does not control. The exact path
+    controls every digit of its own quantity, so its tolerance is for FLOAT
+    REPRESENTATION only, and must be far too small to ever admit another
+    quantity step. Otherwise a broken upstream that enlarged the quantity by
+    a hair would produce a contract the budget cannot afford, and the final
+    guard — the one that exists for exactly that failure — would wave it
+    through as rounding.
+    """
+
+    def _solve(self, **kw):
+        from lib import risk_engine
+        base = dict(symbol="BTC/USD", entry=64000.0, stop=63900.0,
+                    execution_instrument=_pbtc())
+        base.update(UNBOUNDED)
+        base.update(kw)
+        return risk_engine.solve_position(**base)
+
+    def test_a_budget_of_exactly_n_contracts_buys_n(self):
+        # stop distance 100 x mult 0.01 = 1.00 risk per contract
+        d = self._solve(risk_budget_usd=2.0)
+        self.assertFalse(d.rejected)
+        self.assertEqual(d.qty, 2)
+
+    def test_a_budget_a_hair_below_n_contracts_buys_n_minus_one(self):
+        d = self._solve(risk_budget_usd=2.0 - 1e-6)
+        self.assertFalse(d.rejected)
+        self.assertEqual(d.qty, 1)
+
+    def test_an_enlargement_inside_the_legacy_tolerance_is_refused(self):
+        """Simulate the broken normaliser this guard exists for: a quantity
+        enlarged so the loss exceeds budget by 0.002% — comfortably inside
+        the legacy 0.01% forgiveness. The exact path must refuse it anyway;
+        a guard that only fires on errors larger than a whole contract's
+        risk fires only when it is no longer needed."""
+        from unittest.mock import patch
+        from lib import instruments as INST
+        from lib import risk_engine
+
+        real = INST.normalize_quantity_down
+
+        def enlarging(qty, instrument):
+            return real(qty, instrument) + 2e-5   # broken: crosses no step,
+                                                  # but exceeds the budget
+        with patch.object(INST, "normalize_quantity_down", enlarging):
+            d = risk_engine.solve_position(
+                symbol="BTC/USD", entry=64000.0, stop=63900.0,
+                risk_budget_usd=1.0, execution_instrument=_pbtc(),
+                **UNBOUNDED)
+        self.assertTrue(d.rejected,
+                        f"loss {getattr(d, 'qty', '?')} x 1.00 exceeded the "
+                        f"$1.00 budget and was approved anyway: {d}")
 
 
 class ConstraintsOnlyShrinkTests(unittest.TestCase):

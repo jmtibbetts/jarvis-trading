@@ -59,6 +59,20 @@ ESTIMATED_PERP = "ESTIMATED_PERP"
 UNAVAILABLE = "UNAVAILABLE"
 
 FEE_AUTHORITY_UNAVAILABLE = "FEE_AUTHORITY_UNAVAILABLE"
+# The execution facts handed in contradict each other — the filled count,
+# fill price and multiplier do not multiply to the notional supplied. A fee
+# computed from contradictory facts would be authoritative-looking fiction.
+EXECUTION_UNIT_MISMATCH = "EXECUTION_UNIT_MISMATCH"
+
+# HOW THE CONTRACT COUNT WAS ESTABLISHED — a different fact from schedule
+# quality. The exchange schedule can be authoritative in both cases; what
+# differs is whether the count is a conservative forecast or a settled fact.
+#   PLANNING_ROUND_UP  a pre-trade estimate; rounds UP so the cost is never
+#                      understated. Correct for planning, wrong for history.
+#   EXECUTED_EXACT     the count that actually filled. Historical fact —
+#                      never rounded in either direction.
+PLANNING_ROUND_UP = "PLANNING_ROUND_UP"
+EXECUTED_EXACT = "EXECUTED_EXACT"
 
 # Qualities that are measurements rather than stand-ins. Anything outside
 # this set must never be pooled into calibration as though it were observed.
@@ -78,6 +92,7 @@ class FeeQuote:
     fee_basis: str | None = None
     rate: float | None = None              # fraction of notional, when applicable
     contract_count: float | None = None
+    contract_count_basis: str | None = None  # PLANNING_ROUND_UP | EXECUTED_EXACT
     contract_size: float | None = None
     notional_usd: float | None = None
     venue: str | None = None
@@ -124,12 +139,28 @@ def _region(explicit: str | None = None) -> str:
 
 def leg_fee(symbol: str, *, notional: float, price: float, product: str,
             venue: str | None = None, maker: bool = False,
-            side: str | None = None, region: str | None = None) -> FeeQuote:
+            side: str | None = None, region: str | None = None,
+            exact_contract_count: float | None = None,
+            execution_instrument=None,
+            actual_fill_price: float | None = None) -> FeeQuote:
     """The cost of ONE leg, in dollars, for THIS product.
 
     Dispatch is on PRODUCT and nothing else. Not on leverage — a perpetual
     at 1x is still a perpetual — and never by falling through from one
     product's schedule into another's.
+
+    PLANNING AND EXECUTION ARE DIFFERENT QUESTIONS. Without the exact
+    arguments this prices a PLAN: per-contract counts are reconstructed
+    from notional and rounded UP, because a forecast must never understate
+    a cost. With `exact_contract_count` (and, for auditability,
+    `execution_instrument` and `actual_fill_price`) it prices an EXECUTION:
+    the count is the number of contracts that actually filled, used exactly
+    — no ceil, no floor, no reconstruction from notional — and the quote
+    says which kind it is in `contract_count_basis`. When the fill price
+    and instrument are supplied, the notional must agree with
+    count x price x multiplier or the quote REFUSES with
+    EXECUTION_UNIT_MISMATCH: a fee derived from contradictory execution
+    facts is not a measurement of anything.
     """
     from lib import product_router as PR
 
@@ -146,7 +177,10 @@ def leg_fee(symbol: str, *, notional: float, price: float, product: str,
             **common)
 
     if prod == PR.CRYPTO_PERP:
-        return _perp_leg_fee(symbol, price=price, **common)
+        return _perp_leg_fee(symbol, price=price,
+                             exact_contract_count=exact_contract_count,
+                             execution_instrument=execution_instrument,
+                             actual_fill_price=actual_fill_price, **common)
     if prod == PR.CRYPTO_SPOT:
         return _crypto_spot_leg_fee(symbol, **common)
     if prod in (PR.EQUITY_SPOT, PR.ETF_SPOT, PR.EQUITY_SHORT):
@@ -161,7 +195,9 @@ def leg_fee(symbol: str, *, notional: float, price: float, product: str,
 
 def _perp_leg_fee(symbol: str, *, price: float, notional_usd: float,
                   venue: str | None, product: str, region: str,
-                  maker: bool) -> FeeQuote:
+                  maker: bool, exact_contract_count: float | None = None,
+                  execution_instrument=None,
+                  actual_fill_price: float | None = None) -> FeeQuote:
     """A PERPETUAL, priced as a perpetual. Never as spot, under any failure.
 
     Three bases, in descending order of authority, and the spot schedule is
@@ -187,6 +223,50 @@ def _perp_leg_fee(symbol: str, *, price: float, notional_usd: float,
     # well would bill the explicit US derivatives venue on the international
     # ladder whenever VENUE_REGION happened to be unset.
     if V.us_perp_venue_applies(venue):
+        # THE EXECUTED-EXACT PATH. The caller states how many contracts
+        # ACTUALLY FILLED, so nothing is reconstructed and nothing rounds:
+        # 2 contracts cost 2 x per-side, exactly. Guarded by the one
+        # consistency check that can catch a unit confusion here — the
+        # count, the fill price and the multiplier must multiply back to
+        # the notional the caller says was executed.
+        if exact_contract_count is not None:
+            count = float(exact_contract_count)
+            if not (count > 0) or count != float(int(count)):
+                return _unavailable(
+                    EXECUTION_UNIT_MISMATCH,
+                    f"an executed contract count must be a positive whole "
+                    f"number of contracts; got {exact_contract_count!r}",
+                    **common)
+            spec = V.us_perp_spec(symbol, venue) or {}
+            mult = None
+            if execution_instrument is not None:
+                mult = float(getattr(execution_instrument, "multiplier", 0)
+                             or 0) or None
+            if mult is None and spec.get("contract_size"):
+                mult = float(spec["contract_size"])
+            if mult is not None and actual_fill_price:
+                expected = count * float(actual_fill_price) * mult
+                if abs(expected - notional_usd) > 1e-6 * max(1.0, expected):
+                    return _unavailable(
+                        EXECUTION_UNIT_MISMATCH,
+                        f"executed notional ${notional_usd:,.6f} does not "
+                        f"equal {count:g} contracts x "
+                        f"${float(actual_fill_price):,.2f} x {mult:g} = "
+                        f"${expected:,.6f}; refusing to price a fee from "
+                        f"contradictory execution facts",
+                        **common)
+            per_side = float(spec.get("fee_per_contract_per_side",
+                                      V.US_PERPETUAL_FEE_PER_SIDE))
+            return FeeQuote(
+                ok=True, fee_usd=count * per_side,
+                fee_basis=PER_CONTRACT, rate=None,
+                contract_count=count,
+                contract_count_basis=EXECUTED_EXACT,
+                contract_size=float(spec["contract_size"]) if spec.get("contract_size") else mult,
+                source="US perpetual rulebook per-contract schedule, at the "
+                       "executed contract count",
+                quality=EXCHANGE_SCHEDULE, **common)
+
         # PLANNING COUNT. us_perp_contracts rounds UP, which overstates the
         # fee — the safe direction for a cost estimate, and the wrong one
         # for an executable quantity. See executable_contracts().
@@ -199,6 +279,7 @@ def _perp_leg_fee(symbol: str, *, price: float, notional_usd: float,
                 ok=True, fee_usd=contracts * per_side,
                 fee_basis=PER_CONTRACT, rate=None,
                 contract_count=contracts,
+                contract_count_basis=PLANNING_ROUND_UP,
                 contract_size=float(spec["contract_size"]) if spec.get("contract_size") else None,
                 source=why, quality=EXCHANGE_SCHEDULE, **common)
 

@@ -263,7 +263,21 @@ def solve_position(*, entry: float, stop: float, risk_budget_usd: float,
     # Revalidate: constraints only shrink, so the loss can never exceed the
     # budget — if it somehow does, that is a bug worth crashing loudly on
     # in tests and refusing on in production.
-    if loss_at_stop > budget * 1.0001:
+    #
+    # TWO TOLERANCES, BECAUSE THE TWO PATHS CONTROL DIFFERENT AMOUNTS OF
+    # THEIR OWN ARITHMETIC. Legacy quantities pass through display-adjacent
+    # rounding this engine does not own, so legacy keeps its historical
+    # 0.01% economic forgiveness. The exact path computed every digit of its
+    # own quantity, so the only legitimate excess is float representation —
+    # parts per billion — and the tolerance must stay far below one quantity
+    # step's risk. A guard that forgives 0.01% would approve precisely the
+    # enlarged-by-a-hair quantity it exists to refuse, firing only on errors
+    # already larger than a contract.
+    if exact:
+        budget_bound = budget + 1e-9 * max(1.0, budget)
+    else:
+        budget_bound = budget * 1.0001
+    if loss_at_stop > budget_bound:
         return RiskDecision.rejection(
             f"internal: loss_at_stop ${loss_at_stop:,.2f} exceeds budget "
             f"${budget:,.2f} — refusing")

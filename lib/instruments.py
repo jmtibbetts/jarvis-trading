@@ -732,11 +732,20 @@ def normalize_quantity_down(qty: float, instrument: "InstrumentIdentity") -> flo
 
     Decimal and ROUND_FLOOR rather than `int(qty / step)`, because binary
     floats do not represent decimal steps: `0.1 * 3` is 0.30000000000000004,
-    and a step of 0.001 applied in binary drifts by a unit at the tail. The
-    ratio is quantised at 1e-9 first so that a quantity which is exactly 3
-    in decimal but 2.9999999999999996 in binary floors to 3 and not to 2 —
-    the one place where a tiny upward correction is correct, and it is
-    bounded by the assertion below.
+    and a step of 0.001 applied in binary drifts by a unit at the tail.
+
+    THERE IS NO UPWARD FORGIVENESS, NOT EVEN AT THE LAST DECIMAL PLACE. The
+    first version quantised the ratio at 1e-9 before flooring, to rescue a
+    binary 2.9999999999999996 that "really meant" 3 — and thereby also
+    rescued 0.9999999996, which really meant LESS THAN ONE, into a contract
+    risk had never approved. This function is an authorization boundary and
+    a float carries no provenance: it cannot distinguish an exact amount
+    dented by representation from an amount that is genuinely just short.
+    Upstream arithmetic that produces just-under values for mathematically
+    exact quantities is upstream's defect to fix; the boundary itself only
+    ever moves DOWN. (Values that survive `str()` round-tripping — every
+    exactly-representable decimal, like 3.0 or 1.234 — floor to themselves,
+    so nothing legitimate is lost.)
 
     A missing or zero `quantity_step` means the instrument is continuous
     (coins, fractional shares) and the quantity is returned unchanged. A
@@ -744,7 +753,7 @@ def normalize_quantity_down(qty: float, instrument: "InstrumentIdentity") -> flo
     and malformed metadata must not become executable.
     """
     import math
-    from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+    from decimal import Decimal, ROUND_FLOOR, localcontext
 
     try:
         q = float(qty)
@@ -781,18 +790,17 @@ def normalize_quantity_down(qty: float, instrument: "InstrumentIdentity") -> flo
     with localcontext() as ctx:
         ctx.prec = 50
         d_q, d_step = Decimal(str(q)), Decimal(str(step))
-        ratio = d_q / d_step
-        try:
-            ratio = ratio.quantize(Decimal("1e-9"), rounding=ROUND_HALF_EVEN)
-        except InvalidOperation:
-            pass                                  # already coarser than 1e-9
-        units = ratio.to_integral_value(rounding=ROUND_FLOOR)
+        units = (d_q / d_step).to_integral_value(rounding=ROUND_FLOOR)
         result = float(units * d_step)
 
-    # The normaliser policing ITSELF. If this ever trips, the arithmetic
-    # above is broken and the right answer is a loud crash, not a silent
-    # clamp — clamping would hide exactly the defect worth finding.
-    if result > q + 1e-9 * max(1.0, step):
+    # The normaliser policing ITSELF, STRICTLY. `units * d_step` cannot
+    # exceed Decimal(str(q)) by construction, float() is monotone on
+    # Decimals, and float(Decimal(str(q))) round-trips to q exactly — so
+    # `result <= q` holds as pure floats with no tolerance at all. If this
+    # ever trips, the arithmetic above is broken and the right answer is a
+    # loud crash, not a silent clamp — clamping would hide exactly the
+    # defect worth finding.
+    if result > q:
         raise AssertionError(
             f"normalize_quantity_down ENLARGED {q!r} to {result!r} at step "
             f"{step!r} — shrink-only was violated")

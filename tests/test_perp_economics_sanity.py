@@ -120,7 +120,10 @@ class TheCatastrophicGateUsesNotionalNotMarginTests(unittest.TestCase):
         src = inspect.getsource(CE.open_canonical_position)
         gate = src[src.index("CATASTROPHIC-PRODUCT GATE"):
                    src.index("FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,")]
-        self.assertIn("final.notional", gate)
+        # B0: the denominator became the EXECUTED notional — the same
+        # ExecutionResult the fee's numerator came from. Still a notional;
+        # the invariant this pin protects is "never margin".
+        self.assertIn("executed_notional", gate)
         self.assertNotIn("final.margin", gate)
 
     def test_a_genuinely_absurd_product_still_fails(self):

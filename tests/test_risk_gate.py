@@ -212,3 +212,124 @@ class TheVerdictSaysWhy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AStatedBasisMustBeValidOrTheGateRefuses(unittest.TestCase):
+    """B0 — stated-but-broken never falls back to guessing.
+
+    A RiskDecision that STATES a unit basis has claimed authority over what
+    one quantity-unit is. If that claim is internally broken — a zero,
+    non-finite or missing multiplier, or a multiplier with no unit — the one
+    thing the gate must not do is quietly re-resolve the bare symbol and
+    substitute a generic basis: that swaps an explicit (wrong) claim for an
+    implicit (different) one, and the gate ends up pricing risk in units
+    NEITHER side stated. Stated -> validate and use. Unstated -> resolve.
+    Stated-but-broken -> REFUSE.
+    """
+
+    def _approved(self, unit="CONTRACTS", mult=0.01):
+        return RiskDecision(allowed_risk_usd=100.0, stop_distance=1.0,
+                            qty=10.0, notional=1000.0, margin=500.0,
+                            leverage=2.0, quantity_unit=unit,
+                            multiplier=mult)
+
+    def test_a_zero_multiplier_refuses(self):
+        v = plan(qty=1.0, notional=100.0).check(self._approved(mult=0.0))
+        self.assertFalse(v.ok)
+        self.assertIn("basis", v.reason)
+
+    def test_a_negative_multiplier_refuses(self):
+        self.assertFalse(plan().check(self._approved(mult=-0.01)).ok)
+
+    def test_a_nan_multiplier_refuses(self):
+        v = plan().check(self._approved(mult=float("nan")))
+        self.assertFalse(v.ok)
+        self.assertIn("basis", v.reason)
+
+    def test_an_infinite_multiplier_refuses(self):
+        self.assertFalse(plan().check(self._approved(mult=math.inf)).ok)
+
+    def test_a_unit_with_no_multiplier_refuses(self):
+        v = plan().check(self._approved(mult=None))
+        self.assertFalse(v.ok)
+        self.assertIn("basis", v.reason)
+
+    def test_a_multiplier_with_no_unit_refuses(self):
+        """Half a basis is not a basis. Pinned as REFUSE rather than
+        interpreted, so nobody later 'helpfully' infers the unit."""
+        v = plan().check(self._approved(unit=None, mult=0.01))
+        self.assertFalse(v.ok)
+        self.assertIn("basis", v.reason)
+
+    def test_an_empty_string_unit_refuses(self):
+        self.assertFalse(plan().check(self._approved(unit="")).ok)
+
+    def test_a_broken_basis_never_reaches_generic_resolution(self):
+        """The failure mode this class exists for: the fallback itself.
+        Make generic resolution explode; a stated-but-broken basis must
+        refuse WITHOUT ever consulting it."""
+        from unittest.mock import patch
+        from lib import instruments as INST
+
+        def explode(*a, **k):
+            raise AssertionError("generic resolve() consulted for a plan "
+                                 "whose decision STATED a basis")
+        with patch.object(INST, "resolve", explode):
+            v = plan().check(self._approved(mult=float("nan")))
+        self.assertFalse(v.ok)
+
+    def test_a_valid_stated_basis_still_passes(self):
+        d = self._approved()          # CONTRACTS / 0.01
+        v = plan(qty=10.0, notional=1000.0).check(d)
+        self.assertTrue(v.ok, v.reason)
+
+    def test_an_unstated_basis_still_resolves_as_before(self):
+        """The legacy control: both None -> the existing symbol resolution
+        runs, and still fails closed on unknown units."""
+        v = plan(qty=10.0, notional=1000.0).check(APPROVED)
+        self.assertTrue(v.ok, v.reason)
+
+
+class ThePlanAndTheApprovalMustSpeakOneBasis(unittest.TestCase):
+    """B0/D2 — when both objects state a basis, a mismatch is a refusal.
+
+    A plan counting CONTRACTS against an approval counting COINS is not a
+    disagreement for the gate to adjudicate: choosing either side silently
+    re-prices the other's arithmetic by the multiplier ratio — 100x for
+    PBTC. The gate refuses and names both sides.
+    """
+
+    def _risk(self, unit="CONTRACTS", mult=0.01):
+        return RiskDecision(allowed_risk_usd=100.0, stop_distance=1.0,
+                            qty=10.0, notional=1000.0, margin=500.0,
+                            leverage=2.0, quantity_unit=unit,
+                            multiplier=mult)
+
+    def _plan(self, unit="CONTRACTS", mult=0.01, **over):
+        return plan(quantity_unit=unit, multiplier=mult,
+                    instrument_id="PBTCUCZ50", **over)
+
+    def test_matching_bases_pass(self):
+        v = self._plan().check(self._risk())
+        self.assertTrue(v.ok, v.reason)
+
+    def test_a_unit_disagreement_refuses(self):
+        v = self._plan(unit="COINS").check(self._risk(unit="CONTRACTS"))
+        self.assertFalse(v.ok)
+        self.assertIn("mismatch", v.reason)
+
+    def test_a_multiplier_disagreement_refuses(self):
+        v = self._plan(mult=1.0).check(self._risk(mult=0.01))
+        self.assertFalse(v.ok)
+        self.assertIn("mismatch", v.reason)
+
+    def test_a_float_roundtrip_of_the_same_multiplier_still_passes(self):
+        """The tolerance absorbs representation, never a different size."""
+        v = self._plan(mult=float("0.01")).check(self._risk(mult=1e-2))
+        self.assertTrue(v.ok, v.reason)
+
+    def test_a_basisless_plan_against_a_stated_approval_still_passes(self):
+        """A legacy plan states nothing, so there is nothing to disagree
+        with — the approval's own stated basis prices the risk."""
+        v = plan().check(self._risk())
+        self.assertTrue(v.ok, v.reason)

@@ -191,6 +191,18 @@ class OrderPlan:
     estimated_fees: float | None = None
     estimated_spread_pct: float | None = None
 
+    # THE PLAN'S OWN EXECUTION BASIS (B0). `product` plus a visible symbol is
+    # not sufficient for an exact derivative — "BTC/USD, CRYPTO_PERP" names a
+    # family, PBTCUCZ50 names the contract whose unit the quantity is counted
+    # in. Carried on the plan so exit and settlement code can preserve the
+    # exact identity without reconstructing it from ambient state, and so the
+    # gate can prove the plan and the approval speak the same units. Optional
+    # with None defaults: legacy callers are source-compatible and keep
+    # symbol-resolution semantics.
+    instrument_id: str | None = None         # e.g. PBTCUCZ50
+    quantity_unit: str | None = None         # COINS | CONTRACTS | SHARES
+    multiplier: float | None = None          # units of the base per 1 qty
+
     def check(self, risk: RiskDecision, tol: float = 1e-6) -> "RiskGateVerdict":
         """THE LAST GATE. Prove this order stays inside what was approved.
 
@@ -275,17 +287,65 @@ class OrderPlan:
         # and refused every perpetual order: $99,400.00 against an approved
         # $994.00, which is exactly 100.0.
         #
-        # Nothing is loosened here. When the decision does not state a basis
-        # (every legacy caller), the resolution below runs exactly as before,
-        # including its fail-closed refusal for unspecced instruments.
-        if risk.multiplier is not None:
+        # STATED-BUT-BROKEN IS A REFUSAL, NEVER A FALLBACK. The first version
+        # used a stated multiplier only when it validated, and otherwise fell
+        # through to generic resolution — swapping an explicit wrong claim
+        # for an implicit different one, so the order would be priced in
+        # units NEITHER side stated. Three cases, one rule each:
+        #
+        #     stated & valid    -> use it (both halves present: a non-empty
+        #                          unit AND a finite positive multiplier)
+        #     stated & broken   -> REFUSE, without consulting resolution
+        #     unstated (legacy) -> resolve below, exactly as before,
+        #                          including the fail-closed refusal for
+        #                          instruments whose units are unknown
+        if risk.quantity_unit is not None or risk.multiplier is not None:
+            basis_faults = []
+            if not (isinstance(risk.quantity_unit, str)
+                    and risk.quantity_unit.strip()):
+                basis_faults.append(
+                    f"quantity_unit {risk.quantity_unit!r} is not a "
+                    f"non-empty unit name")
             try:
                 stated = float(risk.multiplier)
             except (TypeError, ValueError):
                 stated = None
-            if stated is not None and math.isfinite(stated) and stated > 0:
-                return self._verdict_from(
-                    fails, risk, stop_distance, stated, tol)
+            if stated is None or not math.isfinite(stated) or stated <= 0:
+                basis_faults.append(
+                    f"multiplier {risk.multiplier!r} is not a finite "
+                    f"positive number")
+            if basis_faults:
+                fails.append(
+                    "the risk decision STATED a unit basis and that basis is "
+                    "invalid (" + "; ".join(basis_faults) + ") — refusing "
+                    "rather than substituting a generic one")
+                return RiskGateVerdict(False, tuple(fails))
+
+            # WHEN THE PLAN ALSO STATES A BASIS, THE TWO MUST BE ONE. A plan
+            # counting CONTRACTS against an approval counting COINS is not a
+            # disagreement to adjudicate — choosing either side silently
+            # re-prices the other's arithmetic — so a mismatch refuses. The
+            # multiplier tolerance is representation-only: it can absorb a
+            # float round-trip, never a different contract size.
+            if self.quantity_unit is not None or self.multiplier is not None:
+                if self.quantity_unit != risk.quantity_unit:
+                    fails.append(
+                        f"unit-basis mismatch: the plan counts "
+                        f"{self.quantity_unit!r} but the approval counted "
+                        f"{risk.quantity_unit!r}")
+                try:
+                    plan_mult = float(self.multiplier)
+                except (TypeError, ValueError):
+                    plan_mult = None
+                if (plan_mult is None or not math.isfinite(plan_mult)
+                        or abs(plan_mult - stated) > 1e-12 * max(1.0, abs(stated))):
+                    fails.append(
+                        f"unit-basis mismatch: the plan's multiplier "
+                        f"{self.multiplier!r} is not the approved {stated!r}")
+                if fails:
+                    return RiskGateVerdict(False, tuple(fails))
+
+            return self._verdict_from(fails, risk, stop_distance, stated, tol)
 
         try:
             from lib.instruments import resolve

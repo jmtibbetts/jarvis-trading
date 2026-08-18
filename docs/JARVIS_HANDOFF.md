@@ -890,3 +890,87 @@ collection is paused rather than left running.
 **Resuming is not a matter of waiting.** The next window of work is the P0
 routing-identity fix described in section 15; until product identity is
 recorded at T0, every additional observation is another unresolvable row.
+
+---
+
+## 17. Routing identity and exact-contract evidence — both closed
+
+### The two defects, in the order they had to be fixed
+
+**Product identity was NULL on every prospective observation.**
+`decision_observation.build()` read product/venue/asset_class/instrument only
+from `ExecutionReadiness`, and the evidence funnel terminates at AI rejection
+— three gates earlier. So `ready` was None and all four wrote NULL: 95 of 95
+rows, 125 INSUFFICIENT_DATA against zero COMPLETE, while thousands of BTC
+samples sat in the same database covering those very intervals.
+
+`lib/routing_identity.py` now resolves a frozen `RoutingIdentity` ONCE per
+candidate, before any branch can end it, from the classification authorities
+already in `execution_policy`. It reads no market data — identity asks *what
+product is this*, readiness asks *can it execute now*, and collapsing them is
+why calling readiness earlier was the wrong fix. Proven natively on BOTH
+verdict classes, which matters because a miss on one would have split the
+dataset by verdict rather than emptying it visibly.
+
+**The snapshot declared `instrument_id` and no reader ever assigned it.** The
+perp reader put the contract in `provenance` instead, so 153,946 samples were
+written with a NULL contract. Making the resolver require the instrument
+first would have made BTC match zero samples forever — producer before
+consumer.
+
+### Boundaries — evidence facts, not commit timestamps
+
+    INSTRUMENT_STAMP_BOUNDARY          2026-08-18T11:52:00Z
+    STRICT_INSTRUMENT_LOOKUP_BOUNDARY  2026-08-18T12:38:14Z
+
+The 153,946 pre-stamp samples remain exactly as collected. No backfill, no
+inference from today's mappings. They simply cannot serve as exact-contract
+evidence.
+
+### Strict contract isolation, all eight seams
+
+`requires_exact_instrument(CRYPTO_PERP) -> True` in one authority, consulted
+by `note_quote`/`_LAST`, `record_sample`, `samples_between`, `range_over`,
+`checkpoint_at`, `instruments_pending`, `collect_once` and `resolve_outcome`.
+For these products a NULL instrument means the contract is UNKNOWN — never
+"any contract". `Sample`, `RangeEvidence` and `Checkpoint` each carry
+`instrument_id` so a proof can assert what was consumed rather than trusting
+an upstream WHERE clause.
+
+Versions: `range_collector_v3_instrument_key`,
+`decision_outcome_observer_v2_instrument_key`. Terminal resolution now writes
+the version of the resolver that made the CLAIM — `observer_version` is
+stamped at scheduling, so a v1-scheduled row resolved by v2 would otherwise
+credit v1 with a judgement it never made.
+
+Query plans measured on real data: the existing `ix_quote_sample_window`
+still serves both exact queries, 5,672 rows in 0.005ms. **No index added.**
+
+### The 15m control case — keep it
+
+Observation `90e90a0b5e520101f52c49151029e03b` (BTC/USD, CRYPTO_PERP,
+kraken_derivatives_us, PBTCUCZ50, decision_at 11:52:04Z) had its 15m horizon
+resolve COMPLETE under v1 at 12:07:50Z, from genuinely correct
+PBTCUCZ50-only evidence — and v1 never filtered by contract. It was right by
+accident, because nothing else was in that window.
+
+**Left untouched on purpose.** It is the clearest demonstration in the
+repository that accidentally correct and enforced-correct produce identical
+output, and only one of them survives a second contract appearing. Classify
+it `PRE_STRICT_INSTRUMENT_RESOLUTION`; it is not the acceptance proof.
+
+### Live state
+
+Collector RUNNING, campaign FORWARD_EVIDENCE_20260818T075321Z, original
+activation boundary unchanged, one epoch. Scheduler OFF, real orders zero,
+transfers zero. Operator DB untouched.
+
+### Still open
+
+- Operator DB immutability: content verified identical via read-only open,
+  byte hash differed, **cause unproven**. Needs the structural /proc check
+  and deterministic row fingerprints.
+- Phase C analytics — blocked on nothing now except an accepted BTC outcome.
+- The 95 pre-fix observations keep NULL routing identity; historical repair
+  was deliberately deferred and must not use today's config as proof.
+

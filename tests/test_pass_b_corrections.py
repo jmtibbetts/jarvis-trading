@@ -1235,24 +1235,65 @@ class StructuralGuardsTests(unittest.TestCase):
 
     def test_f8_no_production_code_calls_the_hard_reset_for_cutover(self):
         """D1 — an epoch cutover must never be implemented by deleting one
-        side of the ledger. The ONE production reference is the explicit
-        `hard=true` API branch, which now refuses a canonical book."""
+        side of the ledger. The ONE production caller is the explicit
+        `hard=true` API branch, which now refuses a canonical book.
+
+        AST, not prose. A comment saying "deliberately NOT
+        reset_paper_portfolio()" is the opposite of a violation, and a text
+        search cannot tell the difference.
+        """
+        import ast
         import pathlib
-        import re
         root = pathlib.Path(__file__).resolve().parent.parent
+        names = {"reset_paper_portfolio"}
         hits = []
         for path in root.rglob("*.py"):
             rel = path.relative_to(root).as_posix()
-            if rel.startswith(("tests/", ".venv/")) or "site-packages" in rel:
+            if rel.startswith((".venv/", "tests/")) or "site-packages" in rel:
                 continue
-            for n, line in enumerate(
-                    path.read_text(encoding="utf-8", errors="ignore")
-                        .splitlines(), 1):
-                if re.search(r"\breset_paper_portfolio\b", line) and \
-                        "soft_reset_paper_portfolio" not in line:
-                    hits.append(f"{rel}:{n}: {line.strip()}")
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8",
+                                                errors="ignore"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        if alias.name in names:
+                            hits.append(f"{rel}:{node.lineno}: import")
+                elif isinstance(node, ast.Call):
+                    fn = (getattr(node.func, "id", None)
+                          or getattr(node.func, "attr", None))
+                    if fn in names:
+                        hits.append(f"{rel}:{node.lineno}: call")
+                elif isinstance(node, ast.FunctionDef) and node.name in names:
+                    hits.append(f"{rel}:{node.lineno}: def")
         allowed = ("lib/paper_engine.py", "app/routers/trading.py")
         for h in hits:
             self.assertTrue(h.startswith(allowed),
-                            f"unexpected hard-reset caller: {h}")
-        self.assertTrue(hits, "the search found nothing — it is broken")
+                            f"unexpected hard-reset reference: {h}")
+        self.assertTrue(hits, "the search matched nothing — it is broken")
+
+    def test_f8b_the_cutover_tooling_does_not_reference_the_resets(self):
+        """The same claim from the other side: the dry-run tool and its
+        child never import or call either reset. A cutover archives the old
+        database and creates a new one."""
+        import ast
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        names = {"reset_paper_portfolio", "soft_reset_paper_portfolio"}
+        for rel in ("scripts/canonical_epoch_dry_run.py",
+                    "scripts/canonical_epoch_child.py"):
+            path = root / rel
+            if not path.exists():
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        self.assertNotIn(alias.name, names,
+                                         f"{rel} imports {alias.name}")
+                if isinstance(node, ast.Call):
+                    fn = (getattr(node.func, "id", None)
+                          or getattr(node.func, "attr", None))
+                    self.assertNotIn(fn, names, f"{rel} calls {fn}()")

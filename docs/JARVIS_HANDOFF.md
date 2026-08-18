@@ -1660,3 +1660,91 @@ complete; ten exit callers untouched; `_refuse_legacy_close()` PERMANENT.
                     all three ledger tables truthfully ABSENT)
     scheduler       OFF
     real actions    0
+
+## 25. STOP POINT — B2C IDEMPOTENT LEARNING PROJECTION COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §24.
+
+    main            710c14f + this docs commit   clean, pushed
+    tests           3,751 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              710c14f GREEN (Actions REST, exact head_sha)
+
+### P0 — the mutable position is subordinate to its ledger
+
+`validate_position_projection()` proves PaperPosition still agrees with
+what the ledger says exposure MUST be (header facts at revision 0; the
+latest exit leg's persisted remaining-state afterwards), including
+lifecycle coherence. Enforced INDEPENDENTLY at both boundaries: B2B refuses
+drift before preparing an order, B2A before mutating money
+(`CANONICAL_POSITION_PROJECTION_MISMATCH`). A header revision naming no leg
+refuses. `(position_id, settlement_revision)` is now a DATABASE UNIQUE
+index (`uq_psl_position_revision`, idempotent bootstrap replacing the
+B1-era non-unique composite; refuses loudly over pre-constraint duplicates
+rather than repairing history).
+
+### B2C — lib/canonical_learning.py
+
+`apply_realized_outcome(outcome_id)`: PENDING → APPLIED, exactly once.
+`record_trade_outcome()` is NOT the boundary (fresh row ids, wall-clock
+exit times, today's epoch, no return basis, callable twice) and remains
+untouched for legacy callers. The projector copies persisted truth under
+validation:
+
+- one truth, one id: `trade_outcomes.id == canonical_outcome_id ==
+  PaperRealizedOutcome.id`; partial UNIQUE index
+  `uq_trade_outcomes_canonical` (NULL-exempt — 21,194 legacy rows
+  untouched) is the race backstop, and a mid-flight rival is VERIFIED,
+  never assumed
+- quantity travels WITH its unit and multiplier (CONTRACTS / 0.01 /
+  PBTCUCZ50); `pnl_pct` = `net_return_pct` WITH `return_pct_basis=MARGIN`
+  (never `net_r*100`); `engine_epoch` is the PERSISTED epoch (pinned
+  against a flipped runtime epoch); `entered_at/exited_at/hold` are the
+  persisted trade times (pinned by projecting a T0/T1/60min trade later;
+  `projected_at` is its own field)
+- eligibility + header + PaperTrade cross-checks precede everything;
+  corrupt truth → FAILED_PERMANENT with the violated invariant, and it is
+  NOT auto-retried even after repair
+- ONE deterministic transaction: insert + tier-3/4 (persisted entry
+  evidence only) + tier-2 accuracy DERIVED on the caller's connection
+  (`_refresh_signal_accuracy_conn`) + the APPLIED marker; failure rolls all
+  of it back, then FAILED_RETRYABLE in a separate tiny transaction, and the
+  retry succeeds; the financial hash across everything is bit-identical
+- APPLIED without a projection is LEARNING_STATE_CORRUPT; PENDING beside an
+  agreeing row heals without re-applying aggregates; a disagreeing row is
+  LEARNING_RECOVERY_AMBIGUOUS
+- entry-metadata field map AUDITED: timeframe from the decision-frozen
+  observation (fallback signal row); confidence/score/reasoning from the
+  signal row; entry TA profile and market regime are NOT persisted → tiers
+  3/4 SKIP for canonical outcomes today, never recomputed from the current
+  world (poisoned-present proof: resolvers, builders, fee/carry
+  authorities, market snapshot, record_trade_outcome and the Tier-5 audit
+  all explode — projection succeeds)
+- Tier 5 stays OUT of APPLIED; B2B does not auto-call learning;
+  `apply_pending_realized_outcomes(limit)` is a bounded, oldest-first,
+  claim-free recovery sweep (no zombie states)
+
+Schema: fourteen canonical columns on trade_outcomes, added idempotently in
+BOTH schema authorities, NULL on every legacy row. Production-copy proof:
+21,194 rows value-identical over original columns; all new columns present
+and entirely NULL; both unique indexes present; double init_db idempotent;
+integrity ok.
+
+Proof: `tests/test_b2c_canonical_learning.py` (24; 21 red pre-B2C) + 7 P0
+regressions in the B2A suite (6 red first).
+
+### NEXT = CANONICAL EXIT CALLER ROUTING
+
+READY_FOR_CANONICAL_EXIT_CALLER_ROUTING: decide how the ten audited exit
+callers dispatch canonical positions to `close_canonical_position`, and how
+the learning projector is invoked/retried after settlement. NOT Pass B
+complete; `_refuse_legacy_close()` PERMANENT until routing lands; scheduler
+stays OFF; operator DB stays unmigrated.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (sha bcb94dcc…, cash 63550.84,
+                    trade_outcomes 21,194 hash 74cadca1…)
+    scheduler       OFF
+    real actions    0

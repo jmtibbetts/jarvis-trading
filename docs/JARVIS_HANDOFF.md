@@ -759,24 +759,32 @@ Verdicts are cadence-aware: STARTING / HEALTHY / RUNNING_LONG / STALE /
 DEGRADED / FAILED / NEVER_RAN, with NEVER_RAN being the exact starvation
 signature.
 
-### THE SERVICE UNIT IS MOVED ASIDE — RESTORE IT FIRST
+### Restoring the collector — install the REPO unit, never a stale one
 
-It restarted itself once while the operator was on a hotspot. `is-enabled`
-was `disabled` and `NRestarts=0`, so the likely trigger is that
-`systemctl --user reset-failed` on a `Restart=on-failure` unit released a
-queued restart job. **Hazard worth remembering: `reset-failed` is not inert
-on a unit with a restart policy.**
+The service unexpectedly started once while the operator intended it stopped.
+`systemctl --user reset-failed` on a then-`Restart=on-failure` unit releasing a
+queued restart job is the **suspected** trigger; that was never causally
+proven, and the observed fact alone — it started when it should not have —
+is enough to justify the policy. The committed unit is now `Restart=no`, so
+an operator stop stays stopped and a crash is visible in status rather than
+being papered over by a silent restart.
 
-`systemctl --user mask` refused (the unit file exists), so the unit was moved
-instead and cannot now be loaded at all:
+**The restore trap, and why it no longer exists.** An earlier draft of this
+section said to restore the collector by moving a `.DISABLED_HOTSPOT` copy
+back into place. That copy predated the policy change and still carried
+`Restart=on-failure`, so following those words would have quietly
+reintroduced the very behaviour the change removed. The stale file is gone —
+the controlled restart installed the repository unit over it — and the
+correct procedure installs from the repo, which is the only copy under
+version control:
 
-    ~/.config/systemd/user/jarvis-evidence.service.DISABLED_HOTSPOT
-
-TO RESTORE, when primary internet is back:
-
-    mv ~/.config/systemd/user/jarvis-evidence.service.DISABLED_HOTSPOT \
-       ~/.config/systemd/user/jarvis-evidence.service
+    install -m 0644 \
+      /home/nullcode/jarvis-trading/scripts/jarvis-evidence.service \
+      ~/.config/systemd/user/jarvis-evidence.service
     systemctl --user daemon-reload
+    systemctl --user start jarvis-evidence
+
+Never reinstate a moved-aside unit without reading its `Restart=` line first.
 
 Consider changing `Restart=on-failure` to `Restart=no` for an evidence
 daemon: an operator stop should stay stopped, and a genuine crash is better
@@ -793,3 +801,68 @@ market refresh · 5.  must exit WITHOUT timeout/SIGKILL
 
 Deliberate: context, not blockers. It is mostly local work and must not
 require the collector to run; the 45 real rows are read-only fixtures.
+
+---
+
+## 15. BLOCKING DEFECT FOUND BEFORE PHASE C — product identity is NULL
+
+**Measured 2026-08-18 against the live campaign, 85 prospective observations:**
+
+    product NULL   85 / 85
+    venue   NULL   85 / 85
+
+Every prospective DecisionObservation is being written without the product
+and venue it was decided on. The consequence is already visible in the
+outcome table:
+
+    outcome rows            255
+    PENDING                 140
+    INSUFFICIENT_DATA       115
+    COMPLETE                  0
+
+Zero. Not a small number — none, across every symbol and every horizon that
+has come due so far.
+
+**This is not a data-volume problem, and waiting will not fix it.** The
+forward evidence is present and plentiful: BTC/USD alone has **9,622 quote
+samples** in `instrument_quote_samples` covering the exact intervals those
+horizons span. The resolver cannot use them, because a forward outcome is
+resolved through the product-correct authority and the observation does not
+say which product it is. So the evidence sits beside a decision that cannot
+be matched to it.
+
+**Why this matters more than it looks.** Phase C built on this population
+would run, pass its own tests, and report:
+
+    usable MFE/MAE      0 / 85
+    chronology          0 / 85
+    product grouping    everything in one NULL bucket
+
+— which reads as "analytics verified, sample still small" when the truth is
+"the pipeline cannot produce a usable outcome at all". A green analytics
+layer over a population that can never resolve is exactly the kind of
+false-confidence artifact this project keeps removing. **Phase C must not be
+built on top of this until it is fixed.**
+
+**Where to look.** `decision_funnel.observe_terminal_refusal` and the
+canonical-entry `_observe` both call `decision_observation.build(...)`, which
+fills product/venue from `ready`/`authorization` artifacts. The evidence-only
+path terminates BEFORE readiness is computed for most candidates — AI
+rejection happens first — so those fields were never populated. The decision
+knows its symbol and its intended side; product identity has to come from
+`lib.product_router` at T0 rather than from an artifact the path never
+reaches.
+
+**Also note the population itself:** the live decisions are AMD, NVDA, PLTR,
+BTC/USD and NEAR/USD. Only BTC/USD is a Bitnomial perpetual with collected
+quote evidence. Equities have no range collector, and NEAR/USD is not a
+listed US perpetual, so even after product identity is fixed those symbols
+will resolve to INSUFFICIENT_DATA honestly rather than COMPLETE. Forward
+outcome coverage is therefore bounded by which instruments the collector
+actually samples — a scope question worth deciding deliberately before
+reading anything into the coverage numbers.
+
+**NEXT TASK IS THIS, NOT PHASE C:** populate product/venue on prospective
+observations at T0, verify a BTC/USD horizon resolves to COMPLETE against the
+9,622 samples already collected, then build Phase C on a population that can
+actually answer.

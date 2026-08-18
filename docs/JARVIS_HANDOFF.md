@@ -722,27 +722,29 @@ nonetheless exposed and are now fixed.
 
 ### DEFECT 1 — epoch minted per process (already fired 3x)
 
- regenerated
+`os.environ.setdefault("JARVIS_EVIDENCE_EPOCH", epoch_name(now))` regenerated
 identity on every start; three restarts produced three epochs. Identity now
-lives in  inside the evidence DB — created once, read
-after. A new campaign takes a deliberate  call, and new
-epochs are forced distinct (second-resolution names would otherwise merge two
-campaigns started in the same second). Proven live: restart kept the epoch and
-boundary, observations grew 32 to 36, rows == distinct ids.
+lives in the `evidence_campaign` table inside the evidence DB — created once,
+read after. A new campaign takes a deliberate `start_new_campaign()` call, and
+new epochs are forced distinct (second-resolution names would otherwise merge
+two campaigns started in the same second). Proven live: restart kept the epoch
+and boundary, observations grew 32 to 36, rows == distinct ids.
 
 ### DEFECT 2 — SIGTERM ignored, systemd escalated to SIGKILL
 
-Observed twice (). **The audit corrected two assumptions:**
-concurrency is already SEQUENTIAL (, plain nested loop) so no
-semaphore was warranted, and provider calls are already bounded by
- at 12s. The real defect was only cancellation: ~157
-symbols x 6 timeframes with no stop check, each ending in an uninterruptible
-.
+Observed twice (`Result=timeout`). **The audit corrected two of my own
+assumptions:** concurrency is already SEQUENTIAL (`max_workers=1`, plain
+nested loop) so no semaphore was warranted, and provider calls are already
+bounded by `_call_with_timeout` at 12s. The real defect was only
+cancellation: ~157 symbols x 6 timeframes with no stop check, each iteration
+ending in an uninterruptible `time.sleep`.
 
-Fixed:  take , checked
-per symbol and per timeframe, with the rate-limit pause as
-. The collector passes its OWN . 
-preserves existing behaviour for the scheduler. Shutdown now joins producers
+Fixed: `fetch_market_data.run` and `_warm_ohlcv_cache` take `cancel_event`,
+checked per symbol and per timeframe, with the rate-limit pause becoming
+`cancel_event.wait()` so it can be woken. The collector passes its OWN
+`_stop` — one cancellation authority, not a second that could disagree.
+`cancel_event=None` preserves existing behaviour for the scheduler and every
+other caller. Shutdown now joins producers
 BEFORE tearing down the runtimes (stopping them under a live worker was its
 own latent bug), bounded at 20s, and a stuck worker is reported as DEGRADED
 rather than silently called clean.

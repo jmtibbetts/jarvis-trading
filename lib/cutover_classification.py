@@ -132,6 +132,13 @@ _HISTORY = {
     "telegram_deliveries": "delivery log",
     "telegram_callbacks": "delivery log",
     "intelligence_ingestion_runs": "ingestion history",
+    # Present in the CURRENT schema but not in the pre-cutover legacy
+    # source, so the first cutover never had to classify them. Classified
+    # now, because the next run happens against a book that HAS them and an
+    # unclassified table refuses.
+    "instrument_quote_samples": "observed venue quotes — market history",
+    "decision_observations": "forward-evidence decision record",
+    "decision_observation_outcomes": "forward-evidence decision outcomes",
 }
 
 # ── Caches and ephemera ──────────────────────────────────────────────────

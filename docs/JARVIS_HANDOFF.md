@@ -540,77 +540,110 @@ the ~0.50R threshold.** Then Execution Pass B. Scheduler stays OFF.
 
 ---
 
-## 11. Phase C0 — decision funnel (PARTIAL, green, NOT yet activated)
+## 11. Phase C0 — decision funnel COMPLETE (green, CI f777595)
 
-    online 3,379 passed / 16 skipped  TRUE exit 0
+    5e68fc1  C0.1 audit + C0.2 reconciliation + EVIDENCE_ONLY semantics
+    f777595  C0.3 T0 edge artifact + C0.4 last two funnel holes
 
-### C0.1 — THE FUNNEL AUDIT, AND THE HOLE IT FOUND
+    online 3,394 passed / 16 skipped  TRUE exit 0 · offline identical
+    CI     32110664372 — all five green
 
-**`DecisionObservation` is built in exactly ONE place:**
-`canonical_entry.open_canonical_position`. Everything terminating before that
-call left NOTHING behind. In `jobs/paper_trading.run()` two such paths were
-live, both immediately before the canonical call:
+### C0.1 — THE FUNNEL HOLE
 
-    no usable price   ->  skipped_no_price += 1 ; continue
-    AI rejected       ->  skipped_ai       += 1 ; continue   <- the serious one
+`DecisionObservation` is built in exactly ONE place,
+`canonical_entry.open_canonical_position`, so anything terminating earlier
+left NOTHING. Four such paths existed in `jobs/paper_trading.run()`:
 
-The AI path discarded the single richest decision-quality signal the desk
-has. This is the original failure reproduced one layer earlier —
-`candidate -> NO_TRADE -> forgotten`, the shape that left 11,775 historical
-rejections unanswerable.
+    no usable price          -> counted, discarded
+    AI rejected              -> counted, discarded   <- the serious one
+    symbol already open      -> pre-filtered out before the loop body
+    auto_trade_enabled=False -> candidate list emptied entirely
 
-**FIXED:** `lib/decision_funnel.observe_terminal_refusal()` writes ONE
-observation at each terminal path (`NO_DECISION_PRICE` as ABSTAIN +
-`venue_data_failure`; `AI_REJECTED_ENTRY` as NO_TRADE). One row per event,
-not one per gate; the unique `observation_id` index makes retries idempotent;
-it never raises into the paper cycle. An AST test asserts the job actually
-calls it, so the wiring cannot rot into a helper nobody invokes.
+All four now produce exactly ONE observation via `lib/decision_funnel`. One
+row per market event, never one per gate; the unique `observation_id` index
+makes retries idempotent; recording never raises into the paper cycle. AST
+tests assert the job really calls it and that the deleted pre-filter has not
+come back.
 
-**STILL UNOBSERVED (known, not closed):** the `open_syms` pre-filter drops
-candidates for symbols already open before the loop body runs, so an
-ACCOUNT_STATE refusal still leaves no row; and `auto_trade_enabled=False`
-skips evaluation entirely.
+### C0.2 — SEE §6. THERE IS NO 0.50R THRESHOLD.
 
-### C0.3 — MeasuredEdge threading: NOT DONE
+`expectancy.MIN_NET_R = 0.05R` is the live NET floor after costs; ~0.50R was
+a modelled ROUND-TRIP COST. Tests pin both, including that no module defines
+a 0.50R threshold.
 
-`canonical_entry` fills NO edge fields — `gross_expected_r`,
-`estimated_cost_r`, `expected_net_r`, `edge_threshold_r`,
-`distance_to_threshold_r` are ALL still NULL on every row.
-`decision_funnel._edge_fields()` accepts a `MeasuredEdge` and maps it, but
-nothing passes one yet. **Threshold research (C10) is impossible until this
-lands** — there are no stored T0 edge values to research.
+### C0.3 — THE T0 EDGE ARTIFACT
 
-### C0.6 — EVIDENCE_ONLY SEMANTICS: DONE
+**The audit found something worse than an unpersisted artifact: the paper
+path called NO edge gate at all** — no `gate.decide`, no
+`expectancy.evaluate` — so every edge column was NULL because the number had
+never been computed there.
 
-    source     FORWARD_EVIDENCE_ONLY   (NOT in FORWARD_EXECUTED_SOURCES, so
-                                       the calibration predicate excludes it
-                                       by construction, not by a new rule)
-    lifecycle  EXECUTION_SUPPRESSED    terminal; never upgrades to SETTLED
+Now measured ONCE per candidate at T0, and the SAME object goes to whichever
+terminal route it takes (funnel refusal or canonical entry). Compute once,
+carry forward, persist once.
 
-Deliberately NOT `SETTLEMENT_FAILED` — nothing failed, execution was not
-permitted, and that word would write a policy choice into the evidence as
-though it were a defect.
+**DIAGNOSTIC, not BINDING.** This path has never used the edge gate to
+refuse, so `edge_gate_role` records the role and a test asserts a diagnostic
+edge is never reported as the binding EDGE constraint. Making it binding
+would have changed FULL_VIRTUAL behaviour, which C0 may not do.
 
-`lib/runtime_mode.py`: `EVIDENCE_ONLY` / `FULL_VIRTUAL` (default
-FULL_VIRTUAL, so existing callers and the whole suite keep their meaning).
-**The guard lives at the MUTATION, not the caller** — `prepare_entry`,
-`settle_position_entry`, `close_paper_position` and
-`partial_close_paper_position` each call `forbid_economic_mutation()` and
-raise in EVIDENCE_ONLY. An AST test asserts each guards itself, so a new
-caller inherits protection instead of having to remember it.
+**The threshold travels with the measurement.** `expectancy.evaluate` returns
+`threshold_used`; `MeasuredEdge` carries it. A stored decision says what bar
+it was judged against — reading the module constant later answers a different
+question and is the temporal drift Phase C exists to avoid.
 
-### NOT ACTIVATED — and why
+**Stored, not reconstructed.** `expected_net_r` was previously derived as
+gross − cost whenever both were present, which disagrees with the number the
+decision used the moment the cost model moves. The typed artifact now wins;
+derivation survives only as a fallback for old callers. New columns:
+`net_expected_r_lower`, `robust`, `robust_distance_to_threshold_r`,
+`edge_gate_role`, `expectancy_verdict/bucket/sample/raw_sample`.
 
-Evidence-only collection is **NOT** started. C0 is incomplete: C0.3 is
-missing, the paths above are open, and the full terminal-path funnel test
-(C0.5) is not written. Activating now would accumulate a dataset with known
-holes and no stored edge values — the selection bias this phase exists to
-prevent.
+### C0.4 — ACCOUNT STATE IS NOT A THESIS VERDICT
 
-### NEXT, IN ORDER
+Already-open is an explicit ACCOUNT_STATE branch in FULL_VIRTUAL; in
+EVIDENCE_ONLY the thesis is still evaluated, so the 667 legacy positions
+cannot act as a hidden filter on a clean prospective epoch.
+`auto_trade_enabled=False` records AUTO_TRADE_DISABLED in FULL_VIRTUAL and
+does not suppress research in EVIDENCE_ONLY — **"do not trade" is not "do not
+think."**
 
-1. C0.3 — thread `MeasuredEdge` through `canonical_entry` AND the funnel.
-2. Close the `open_syms` / auto-trade-disabled paths.
-3. C0.5 — full terminal-path funnel test.
-4. Then activate EVIDENCE_ONLY (durable supervision, NOT a Claude subshell).
-5. Then Phase C analytics.
+### C0.6 — MUTATION GUARD (unchanged, preserved)
+
+`lib/runtime_mode.py`: EVIDENCE_ONLY / FULL_VIRTUAL (default FULL_VIRTUAL).
+The guard lives AT the mutation — `prepare_entry`, `settle_position_entry`,
+`close_paper_position`, `partial_close_paper_position` — AST-tested.
+Source `FORWARD_EVIDENCE_ONLY`, terminal lifecycle `EXECUTION_SUPPRESSED`
+(never SETTLEMENT_FAILED — nothing failed).
+
+---
+
+## 12. NEXT: ACTIVATE EVIDENCE_ONLY — authorized, NOT yet done
+
+C0 is complete and CI-green, so activation is now authorized. It was not
+started in this window for context reasons only; there is no correctness
+blocker left. Do NOT skip any of the following:
+
+1. **Forward evidence DB.** `data/forward_evidence.db`, seeded ONCE via the
+   SQLite **backup API** (never `cp` of a live WAL DB) from the operator DB,
+   then `init_db()` on the COPY. Record source path, checksum, timestamps.
+   The operator DB is never opened for writing. This is a SHADOW RESEARCH DB
+   and must never be silently promoted to the canonical active DB.
+2. **Activation boundary.** Mint an evidence epoch and only observe signals
+   at/after `evidence_epoch_started_at` — the seeded copy contains old
+   signals and legacy rows which must NOT be backfilled as prospective.
+3. **Decision-only path.** Do NOT run `jobs.paper_trading.run()` wholesale:
+   it begins with `mark_to_market` and open-position management. Extract the
+   candidate-evaluation half (`evaluate_pending_candidates`) and reuse the
+   SAME functions the trading path uses — same brain, execution suppressed,
+   not a second shadow brain.
+4. **Safe job allow-list** for candidate generation. Never the whole
+   scheduler (it contains execute_signals, position management, brokers).
+5. **Durable service** — user systemd or equivalent. NOT `nohup ... &` in a
+   Claude subshell; that failed twice. Monitor by PID or service status,
+   never `pgrep -f "<literal>"` (it matches the waiter itself).
+6. **Smoke window** 20-30 min: candidates generated, one event/one row,
+   horizons scheduled, short horizons resolving, quote samples growing, and
+   BEFORE/AFTER proof of zero change to PaperPosition / PaperTrade /
+   RealizedOutcome / cash / margin / counters, real orders still 0.
+7. Then LEAVE IT RUNNING and build Phase C while data accumulates.

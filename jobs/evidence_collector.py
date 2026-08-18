@@ -58,6 +58,10 @@ CANDIDATE_INTERVAL_S = float(os.getenv("JARVIS_EVIDENCE_SCAN_S", "300"))
 # execute_signals (broker), manage_positions, guardian, autosim, dex
 # autotrade — anything that can move an economic book or reach a venue with
 # an order. A guard would refuse them; not running them is better.
+# Bounded by one in-flight provider call (ALPACA_READ_TIMEOUT, 12s) plus
+# teardown, so a normal stop lands well inside systemd TimeoutStopSec=30.
+WORKER_JOIN_TIMEOUT_S = float(os.getenv("JARVIS_EVIDENCE_JOIN_S", "20"))
+
 MARKET_INTERVAL_S = float(os.getenv("JARVIS_EVIDENCE_MARKET_S", "900"))    # 15m
 SIGNAL_INTERVAL_S = float(os.getenv("JARVIS_EVIDENCE_SIGNAL_S", "1800"))   # 30m
 
@@ -248,7 +252,10 @@ def _run_safe_job(name: str, fn, stage: str) -> dict:
 
 def _refresh_market() -> None:
     from jobs.fetch_market_data import run as market_run
-    _run_safe_job("market refresh", market_run, STAGE_MARKET)
+    # The SAME stop event the daemon uses — one cancellation authority, not
+    # a second one that could disagree with it.
+    _run_safe_job("market refresh", lambda: market_run(cancel_event=_stop),
+                  STAGE_MARKET)
     _state["market_refreshes"] += 1
     _state["last_market_at"] = _now().isoformat()
 
@@ -385,8 +392,27 @@ def main() -> None:                       # pragma: no cover - daemon entry
                         {k: v for k, v in r.items() if k != "at"})
             _stop.wait(CANDIDATE_INTERVAL_S)
     finally:
-        # Order matters: stop producing, then drain, then stop the feed, so
-        # no observed quote is discarded on the way out.
+        # ORDER MATTERS, AND SO DOES WAITING FOR THE PRODUCERS FIRST.
+        # Tearing down the runtimes while a worker is still mid-refresh
+        # would pull resources out from under it. Joins are bounded: a
+        # worker that will not exit is REPORTED, never waited on forever
+        # and never silently treated as clean.
+        _stop.set()
+        for stage, t in list(_threads.items()):
+            if t is None or not t.is_alive():
+                continue
+            t.join(timeout=WORKER_JOIN_TIMEOUT_S)
+            if t.is_alive():
+                with _stage_lock:
+                    st = dict(_stages.get(stage, {}))
+                logger.warning(
+                    "[EvidenceCollector] worker %s did not exit within %.0fs "
+                    "(in_progress=%s, started_at=%s) — shutdown is DEGRADED",
+                    stage, WORKER_JOIN_TIMEOUT_S,
+                    st.get("in_progress"), st.get("started_at"))
+            else:
+                logger.info("[EvidenceCollector] worker %s exited", stage)
+
         logger.info("[EvidenceCollector] evidence runtime: %s", ER.stop())
         logger.info("[EvidenceCollector] market data: %s", MDR.stop())
         logger.info("[EvidenceCollector] stopped cleanly")

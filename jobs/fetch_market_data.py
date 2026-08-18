@@ -227,7 +227,8 @@ def _apply_equity_session_change(results: dict) -> int:
     return priced
 
 
-def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
+def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client,
+                      cancel_event=None):
     """
     Fetch 1H, 4H, 1D bars for all symbols and store in ohlcv_cache.db.
     This is what signal gen reads from -- no live fetch needed during signal gen.
@@ -254,8 +255,23 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
     def alpaca_fn(sym, tf):
         return _fetch_alpaca_single(sym, tf, stock_client, crypto_client)
 
+    # COOPERATIVE CANCELLATION. This loop is ~157 symbols x 6 timeframes,
+    # each bounded by PER_CALL_TIMEOUT plus a rate-limit pause — twenty-odd
+    # minutes end to end. Nothing in it used to observe a stop request, so a
+    # SIGTERM mid-refresh was simply ignored and systemd escalated to
+    # SIGKILL, which is how a long-running daemon loses buffered writes and
+    # skips orderly teardown. Checking between work items costs nothing and
+    # bounds shutdown to one in-flight call.
+    cancelled = False
+
     for sym in symbols:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
         for tf in timeframes:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
             try:
                 df = _call_with_timeout(alpaca_fn, PER_CALL_TIMEOUT, sym, tf)
                 if df is not None and df is not _SENTINEL and not df.empty:
@@ -303,13 +319,28 @@ def _warm_ohlcv_cache(symbols: list, stock_client, crypto_client):
             except Exception as e:
                 logger.debug(f"[Market] Cache failed {sym}/{tf}: {e}")
                 failed += 1
-            time.sleep(RATE_LIMIT_DELAY)
+            # An interruptible pause. time.sleep() cannot be woken, so a
+            # stop request would otherwise wait out every remaining tick.
+            if cancel_event is not None:
+                if cancel_event.wait(RATE_LIMIT_DELAY):
+                    cancelled = True
+                    break
+            else:
+                time.sleep(RATE_LIMIT_DELAY)
+        if cancelled:
+            break
 
-    logger.info(f"[Market] OHLCV cache warm-up: {success} stored, {failed} failed")
+    if cancelled:
+        logger.info(f"[Market] OHLCV warm-up CANCELLED after {success} stored, "
+                    f"{failed} failed — stop requested")
+    else:
+        logger.info(f"[Market] OHLCV cache warm-up: {success} stored, {failed} failed")
     return success
 
 
-def run():
+def run(cancel_event=None):
+    # `cancel_event=None` keeps every existing caller — the scheduler
+    # included — behaving exactly as before.
     logger.info("[Market] Fetching market data + warming OHLCV cache...")
 
     key, secret, _ = get_alpaca_creds()
@@ -459,7 +490,8 @@ def run():
     try:
         cache_crypto_symbols = crypto_symbols[:CRYPTO_CACHE_LIMIT]
         all_symbols = list(dict.fromkeys(EQUITY_WATCHLIST + cache_crypto_symbols))
-        cached = _warm_ohlcv_cache(all_symbols, stock_client, crypto_client)
+        cached = _warm_ohlcv_cache(all_symbols, stock_client, crypto_client,
+                                   cancel_event=cancel_event)
     except Exception as e:
         logger.error(f"[Market] OHLCV cache warm-up error: {e}")
         cached = 0

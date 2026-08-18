@@ -1297,3 +1297,96 @@ checkout at `C:\jarvis-trading-ai-python` shares the same remote but has its
 own stale `data/`. Running app-importing code there OUTSIDE pytest opens that
 tree's own database — harmless to live state, but `conftest.py`'s redirect
 only protects code run UNDER pytest. Use pytest, or a read-only connection.
+
+## 21. STOP POINT — B0 COMPLETE
+
+**Read this section first if you are continuing Pass B.** It supersedes §20.
+
+    main            380ffc6 + this docs commit   clean, pushed
+    tests           3,593 passed / 16 skipped / TRUE exit 0 / offline identical
+    CI              380ffc6 GREEN (workflow "tests": completed/success,
+                    read from the Actions REST API for the exact SHA;
+                    b631a7a also confirmed green retroactively)
+
+### What closed — B0's completion condition, met
+
+One real canonical PBTC path now proves, in captured production objects:
+
+    RoutingIdentity -> InstrumentIdentity -> RiskDecision ->
+    EntryAuthorization -> OrderPlan -> VirtualOrder -> ExecutionResult ->
+    FeeQuote
+
+all describe ONE economic quantity — whole PBTCUCZ50 contracts at 0.01 —
+no stage can enlarge quantity, no stage can substitute a basis, and the
+execution fee counts the contracts that actually filled.
+
+- **Strict shrink-only.** The normaliser's 1e-9 HALF_EVEN pre-quantize is
+  gone (it rescued 0.9999999996 into a contract risk never approved).
+  `Decimal(str()) + ROUND_FLOOR`, strict `result <= input` assertion with
+  NO tolerance — provable because `units*step <= Decimal(str(q))`, float()
+  is monotone on Decimals, and str() round-trips. §20's "floors to 3, not
+  2" note is superseded: a binary 2.9999999999999996 floors to 2 now, and
+  upstream arithmetic that produces just-under values for exact amounts is
+  upstream's defect to fix. Fuzzed 200k inputs, zero violations.
+- **Exact budget boundary.** loss<=budget keeps the legacy 0.01% economic
+  forgiveness only on the legacy path; the exact path's tolerance is
+  representation-only (1e-9 relative) — pinned by a poisoned normaliser
+  whose hair-sized enlargement the legacy tolerance would have approved.
+- **Stated-but-broken refuses.** OrderPlan.check: stated & valid basis ->
+  used; stated & broken (0/NaN/inf/negative/half-a-basis) -> REFUSE without
+  consulting generic resolution; unstated -> legacy resolution unchanged.
+- **The plan carries its own basis** (instrument_id/quantity_unit/
+  multiplier, from the identity resolved once); the gate requires plan and
+  approval to agree; the adapter refuses plan-vs-instrument disagreement
+  BEFORE execute_market (REFUSED_UNIT_BASIS_MISMATCH); the VirtualOrder
+  carries the unit.
+- **An execution that contradicts its plan never settles.**
+  `execution_disagreement()` runs before economic settlement; injected
+  COINS / multiplier-1.0 / overfill corruptions are each proven refused by
+  the ABSENCE of the settlement call, with an uncorrupted control settling.
+- **The fee counts what filled.** `leg_fee` has an exact-execution path:
+  planning still rounds UP (`contract_count_basis=PLANNING_ROUND_UP`);
+  executed fees take the filled count exactly (`EXECUTED_EXACT`), require
+  count x fill x multiplier == executed notional (else
+  EXECUTION_UNIT_MISMATCH), and canonical_entry prices the execution that
+  SURVIVED post-fill repricing — a forced 3->2 resubmission pays fees on 2.
+  The catastrophic-product gate divides by the executed notional from the
+  same ExecutionResult. Provenance adds requested_quantity,
+  executed_notional_usd and entry_fee_contract_count_basis.
+
+Where the proof lives: `tests/test_b0_execution_basis.py` (20 tests; 10 red
+against the pre-B0-final lib/), plus the strict-normaliser and exact-budget
+classes in `tests/test_executable_quantity_sizing.py` and the stated-basis
+classes in `tests/test_risk_gate.py`. Two source-pin tests were updated for
+the gate's denominator rename (`final.notional` -> `executed_notional`);
+their invariant — never margin, never loss — is unchanged.
+
+### NEXT = B1 ENTRY SETTLEMENT LEDGER
+
+NOT Pass B complete. NOT canonical_exit. NOT caller routing. NOT scheduler.
+
+### Do not
+
+- Weaken `_refuse_legacy_close()` — PERMANENT.
+- Migrate the operator DB, start a new evidence epoch, or turn the
+  scheduler on.
+
+### Live state at this stop point
+
+    collector       RUNNING (pid 244809), campaign FORWARD_EVIDENCE_20260818T075321Z
+    epochs          1, boundary unchanged, EVIDENCE_ONLY
+    operator DB     data/jarvis.db untouched (mtime 2026-08-17 15:38,
+                    md5 2cee5371d9e1505f12c9447230dbc941)
+    scheduler       OFF
+    real actions    0
+
+### CI without gh
+
+`gh` is not installed anywhere, deliberately. The Actions REST API works
+with the repo credential already in the WINDOWS credential manager
+(`git credential fill` — the WSL side has none, which is also why pushes
+hang there):
+
+    GET /repos/jmtibbetts/jarvis-trading/actions/runs?head_sha=<sha>
+
+Never echo the token; feed it straight from `git credential fill` to curl.

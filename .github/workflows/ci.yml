@@ -177,9 +177,15 @@ jobs:
   # green CI that turns red the day an API is slow. This ran on the desk and
   # nowhere else, so CI could not see a regression in it.
   #
-  # `unshare -rn` gives the process a private network namespace with only
-  # loopback — no DNS, no route out. It needs unprivileged user namespaces,
-  # which ubuntu-24.04 runners provide.
+  # HOW THE SANDBOX IS MADE, and why not the way the desk does it. Locally
+  # `unshare -rn` works because WSL permits unprivileged user namespaces.
+  # GitHub-hosted ubuntu-24.04 runners do NOT — AppArmor refuses, with
+  # "write failed /proc/self/uid_map: Operation not permitted". So the
+  # namespace is created with sudo (runners have passwordless sudo) and
+  # privilege is immediately dropped back to the normal user, because a
+  # suite running as root is a different suite: root bypasses file
+  # permission bits, which would quietly weaken any test that asserts a
+  # write is refused.
   offline:
     name: pytest (no network)
     runs-on: ubuntu-24.04
@@ -207,7 +213,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          unshare -rn .venv/bin/python scripts/assert_no_network.py
+          sudo unshare -n runuser -u "$USER" --             .venv/bin/python scripts/assert_no_network.py
 
       - name: Run suite offline
         env:
@@ -216,7 +222,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          unshare -rn .venv/bin/python -m pytest -q 2>&1 | tee offline.log
+          sudo unshare -n runuser -u "$USER" --             .venv/bin/python -m pytest -q 2>&1 | tee offline.log
 
       - name: Sanitised failure summary
         if: failure()

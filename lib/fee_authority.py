@@ -128,6 +128,36 @@ class FeeQuote:
         return d
 
 
+def pricing_context(*, region: str | None = None) -> dict:
+    """Everything OUTSIDE a leg's own facts that decides what it costs.
+
+    A committed fill is priced when settlement runs, which may be after a
+    restart. Its own facts -- quantity, price, instrument, side -- are
+    persisted and immutable, but the SCHEDULE those facts are priced under
+    is process state: the authority's version, and a region that comes from
+    an environment variable. Change either between the fill and the
+    settlement and the same execution costs a different amount.
+
+    So the context is captured with the commitment and compared before a
+    recovered fill is priced. This is deliberately NOT solved by moving the
+    commit boundary until after the fee is known: the boundary belongs at
+    the fill, because that is when the economic fact came into existence.
+    Pricing is downstream of the fact and must be reproducible from it.
+
+    WHICH PART IS LOAD-BEARING, MEASURED RATHER THAN ASSUMED. The VERSION
+    is: revise this authority's rates and every unsettled fill would
+    otherwise be repriced at the new ones. The REGION currently is not --
+    as of fee_authority_v1 no product's schedule differs between `us` and
+    `international`, so changing it alters no price today. It is included
+    anyway because this is the identity of the schedule, not a cache of one
+    computed number, and a region that starts mattering should not do so
+    silently. Comparing identity is cheap; discovering later that it began
+    to matter is not.
+    """
+    return {"fee_authority_version": FEE_AUTHORITY_VERSION,
+            "region": _region(region)}
+
+
 def _unavailable(reason: str, detail: str, **kw) -> FeeQuote:
     return FeeQuote(ok=False, reason=reason, detail=detail,
                     quality=UNAVAILABLE, **kw)

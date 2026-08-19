@@ -71,7 +71,8 @@ def record_commitment(*, execution_id: str, intent_kind: str, symbol: str,
            observation_id: str | None = None,
            market_snapshot: dict | None = None,
            plan_facts: dict | None = None,
-           capability: dict | None = None) -> dict:
+           capability: dict | None = None,
+           fee_context: dict | None = None) -> dict:
     """Record that this virtual fill HAPPENED, before anything derives from it.
 
     Keyed by `execution_id`, which is also settlement's idempotency key, so
@@ -94,6 +95,7 @@ def record_commitment(*, execution_id: str, intent_kind: str, symbol: str,
         market_snapshot_json=json.dumps(market_snapshot or {}, default=str),
         plan_facts_json=json.dumps(plan_facts or {}, default=str),
         capability_json=json.dumps(capability or {}, default=str),
+        fee_context_json=json.dumps(fee_context or {}, default=str),
         state=COMMITTED_PENDING_SETTLEMENT, committed_at=_utc(),
     )
     with get_db() as db:
@@ -172,7 +174,8 @@ def _as_dict(row) -> dict:
     out = {c.name: getattr(row, c.name) for c in row.__table__.columns}
     for key, target in (("market_snapshot_json", "market_snapshot"),
                         ("plan_facts_json", "plan_facts"),
-                        ("capability_json", "capability")):
+                        ("capability_json", "capability"),
+                        ("fee_context_json", "fee_context")):
         try:
             out[target] = json.loads(out.get(key) or "{}")
         except (TypeError, ValueError):

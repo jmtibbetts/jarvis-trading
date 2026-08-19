@@ -3216,6 +3216,11 @@ class VirtualExecutionCommitment(Base):
     market_snapshot_json = Column(Text)
     plan_facts_json      = Column(Text)
     capability_json      = Column(Text)
+    # The fee SCHEDULE in force at the fill -- authority version and region.
+    # A recovered fill is priced after a restart, and both of those are
+    # process state, so they are captured here and compared before pricing
+    # rather than assumed unchanged.
+    fee_context_json     = Column(Text)
 
     state        = Column(String)      # COMMITTED_PENDING_SETTLEMENT|SETTLED|ABANDONED
     committed_at = Column(String)

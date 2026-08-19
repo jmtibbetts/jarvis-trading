@@ -440,3 +440,109 @@ class PartialExitCarryAlgebraTests(_Base):
         self.assertGreater(leg2.hours_held, leg1.hours_held,
                            "the remainder was held longer than the partial, "
                            "so its interval cannot be the shorter one")
+
+
+class FeeReproducibilityAcrossRestartTests(_Base):
+    """P0.9/P0.10 — a recovered fill is priced under the schedule that was
+    in force when it filled, or it is not priced at all.
+
+    The fill's own facts survive a crash. The SCHEDULE does not: the fee
+    authority's version and its region are process state, and the region
+    comes from an environment variable. Recomputing under whatever the new
+    process happens to load would charge yesterday's execution a price it
+    never faced.
+
+    The fix is NOT to delay the commit until the fee is known. The boundary
+    belongs at the fill, because that is when the economic fact came into
+    existence -- the last test here pins that, so a future change cannot
+    "solve" reproducibility by moving it.
+
+    MEASURED: of the two context components, the VERSION is the one that
+    protects money -- revise the authority's rates and every unsettled fill
+    would otherwise be repriced at the new ones. The REGION currently
+    changes no product's fee at all ($3.90/contract on the perp in every
+    region), so the region test below pins that the guard fires on a change
+    of schedule IDENTITY, not that regions price differently today.
+    """
+
+    def _commit_then_recover(self, env=None):
+        from lib import execution_recovery as RECOV
+        pos, header = self._enter()
+        self._commit_a_stop(pos.id)
+        _seed_book(bid=70_000.0, ask=70_100.0)
+        with patch.dict("os.environ", env or {}):
+            return pos, RECOV.recover_pending()
+
+    def test_the_schedule_in_force_at_the_fill_is_persisted(self):
+        from lib import fee_authority as FA
+        pos, header = self._enter()
+        self._commit_a_stop(pos.id)
+        c = self._commitment(pos.id)
+        stored = self._fee_context(c["execution_id"])
+        self.assertEqual(stored, FA.pricing_context(),
+                         "the fill was committed without recording what "
+                         "schedule would price it")
+        self.assertIn("fee_authority_version", stored)
+        self.assertIn("region", stored)
+
+    def _fee_context(self, execution_id):
+        from lib import execution_commitment as EC
+        return (EC.get(execution_id) or {}).get("fee_context")
+
+    def test_an_unchanged_schedule_settles_normally(self):
+        pos, out = self._commit_then_recover()
+        self.assertEqual(out["settled"], 1, out)
+
+    def test_a_changed_region_refuses_rather_than_repricing(self):
+        """VENUE_REGION selects the schedule. If a restart comes back with a
+        different one, the owed settlement must not be priced under it."""
+        pos, out = self._commit_then_recover({"VENUE_REGION": "somewhere-else"})
+        self.assertEqual(out["settled"], 0, out)
+        self.assertEqual(out["abandoned"], 0,
+                         "a real fill was discarded because the process "
+                         "environment changed")
+        self.assertEqual(out["failed"], 1, out)
+        self.assertEqual(out["details"][0]["error"],
+                         "EXIT_FEE_SCHEDULE_CHANGED")
+        # Still owed, so a corrected process can finish it.
+        self.assertEqual(self._commitment(pos.id)["state"],
+                         "COMMITTED_PENDING_SETTLEMENT")
+
+    def test_the_refusal_is_recoverable_once_the_schedule_is_restored(self):
+        from lib import execution_recovery as RECOV
+        pos, out = self._commit_then_recover({"VENUE_REGION": "somewhere-else"})
+        self.assertEqual(out["failed"], 1, out)
+        again = RECOV.recover_pending()          # same process, right schedule
+        self.assertEqual(again["settled"], 1, again)
+
+    def test_the_boundary_is_at_the_fill_not_after_the_fee(self):
+        """P0.10. The fee lookup is the first thing after the boundary, so
+        killing it proves the commit already landed. If a later change moved
+        the commit past the fee to make pricing easy, this goes red."""
+        pos, header = self._enter()
+        self._commit_a_stop(pos.id)
+        c = self._commitment(pos.id)
+        self.assertIsNotNone(
+            c, "the fill was NOT committed before the fee was priced -- the "
+               "boundary has moved, and a crash can once again erase an "
+               "execution that really happened")
+        self.assertEqual(c["state"], "COMMITTED_PENDING_SETTLEMENT")
+
+    def test_a_revised_fee_authority_refuses_to_reprice_an_owed_fill(self):
+        """THE CASE THAT PROTECTS MONEY. The rates are revised while a
+        committed fill is still owed a settlement. That fill faced the old
+        schedule and must not be charged the new one."""
+        from lib import execution_recovery as RECOV
+        from lib import fee_authority as FA
+        pos, header = self._enter()
+        self._commit_a_stop(pos.id)
+        _seed_book(bid=70_000.0, ask=70_100.0)
+
+        with patch.object(FA, "FEE_AUTHORITY_VERSION", "fee_authority_v2"):
+            out = RECOV.recover_pending()
+        self.assertEqual(out["settled"], 0, out)
+        self.assertEqual(out["details"][0]["error"],
+                         "EXIT_FEE_SCHEDULE_CHANGED")
+        self.assertEqual(self._commitment(pos.id)["state"],
+                         "COMMITTED_PENDING_SETTLEMENT",
+                         "the owed fill was discarded instead of held")

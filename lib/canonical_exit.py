@@ -70,6 +70,7 @@ EXIT_REDUCTION_RISK_REFUSED = "EXIT_REDUCTION_RISK_REFUSED"
 EXIT_EXECUTION_REFUSED = "EXIT_EXECUTION_REFUSED"
 EXIT_EXECUTION_CONTRADICTION = "EXIT_EXECUTION_CONTRADICTION"
 EXIT_FEE_UNAVAILABLE = "EXIT_FEE_UNAVAILABLE"
+EXIT_FEE_SCHEDULE_CHANGED = "EXIT_FEE_SCHEDULE_CHANGED"
 EXIT_HOLDING_COST_UNAVAILABLE = "EXIT_HOLDING_COST_UNAVAILABLE"
 
 # How the frozen identity was established — persisted at entry, not chosen
@@ -461,7 +462,8 @@ def close_canonical_position(position_id: str, *,
                          "observed_at": getattr(ready.snapshot, "observed_at",
                                                 None)},
         plan_facts={"qty": float(plan.qty), "side": plan.side,
-                    "instrument_id": plan.instrument_id})
+                    "instrument_id": plan.instrument_id},
+        fee_context=FA.pricing_context())
 
     # ── 7. Exact exit fee, at the ACTUAL fill and EXECUTION side ─────────
     executed_notional = filled * fill * float(execution.multiplier or 1.0)
@@ -607,6 +609,21 @@ def settle_committed_exit(commitment: dict, snap) -> dict:
             snap.symbol, snap.asset_class, snap.product)
     except Exception:                                   # noqa: BLE001
         instrument = None
+
+    # PRICE IT UNDER THE SCHEDULE THAT WAS IN FORCE AT THE FILL. The fill's
+    # own facts are persisted and immutable, but the fee authority's version
+    # and its region come from process state, and a restart can change both.
+    # Recomputing under today's schedule would charge yesterday's execution
+    # a price it never faced -- so if the schedule moved, this refuses
+    # instead of inventing a number, and the commitment stays PENDING so the
+    # owed settlement is neither lost nor guessed at.
+    committed_ctx = commitment.get("fee_context") or {}
+    current_ctx = FA.pricing_context()
+    if committed_ctx and committed_ctx != current_ctx:
+        return {"ok": False, "error": EXIT_FEE_SCHEDULE_CHANGED,
+                "detail": f"the fill was committed under {committed_ctx} but "
+                          f"this process prices under {current_ctx}; a "
+                          f"recovered fill is not repriced"}
 
     executed_notional = filled * fill * multiplier
     in_contracts = commitment.get("quantity_unit") == "CONTRACTS"

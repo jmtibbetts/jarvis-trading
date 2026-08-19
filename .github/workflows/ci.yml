@@ -207,13 +207,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          unshare -rn .venv/bin/python -c 'import socket, sys; ok=False
-          try:
-              socket.create_connection(("1.1.1.1", 53), timeout=5)
-          except OSError:
-              ok=True
-          print("ok  sandbox has no route out" if ok else "REACHED THE NETWORK")
-          sys.exit(0 if ok else 1)'
+          unshare -rn .venv/bin/python scripts/assert_no_network.py
 
       - name: Run suite offline
         env:

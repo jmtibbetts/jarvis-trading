@@ -23,6 +23,23 @@ row and are never re-derived from a later market.
     not committed  ->  no economic fact exists, crash is a clean no-op
     committed      ->  the fact survives, and settlement finishes it
 
+ONE RULE FOR BOTH SIDES OF A TRADE. This was first built for exits, while
+entries still committed at settlement -- and two different definitions of
+"committed" is not a boundary, it is a coin toss about which crashes count.
+The asymmetry favoured the bot: a crash between an entry fill and its
+settlement erased the entry, and the next cycle re-decided against whatever
+the market had become, so a fall in price bought JARVIS a better entry than
+the order actually paid. Entry now commits at its fill and carries the
+authorization that approved it, so recovery HONOURS that approval rather
+than re-deciding size after the fact.
+
+ONLY A CRASH MAY LEAVE A FILL PENDING. Any path that RETURNS has told its
+caller whether the position opened, so it resolves the commitment before it
+goes -- SETTLED or ABANDONED with a reason. A refusal that left a fill
+pending would let recovery later open a position the decision path had
+already declined, while the caller, told "not opened", may have re-decided
+the same signal. Two positions, one intention.
+
 WHY THIS IS ENOUGH HERE, AND WOULD NOT BE AGAINST A REAL VENUE. JARVIS owns
 the virtual execution model, so it can declare its own commit point and be
 certain nothing exists on the other side of it. An external broker can
@@ -111,6 +128,25 @@ def record_commitment(*, execution_id: str, intent_kind: str, symbol: str,
                 instrument_id or "-", side, row["filled_qty"],
                 row["fill_price"], fill_model)
     return row
+
+
+def attach_observation(execution_id: str, observation_id: str) -> bool:
+    """Link the decision observation once it exists.
+
+    The commitment lands at the fill, which is BEFORE the observation is
+    minted. If the process dies after the observation and before
+    settlement, recovery must reuse it rather than mint a second one for
+    the same execution -- one fill, one decision record.
+    """
+    from app.database import VirtualExecutionCommitment, get_db
+    with get_db() as db:
+        row = db.query(VirtualExecutionCommitment).filter(
+            VirtualExecutionCommitment.execution_id == execution_id).first()
+        if row is None:
+            return False
+        row.observation_id = observation_id
+        db.commit()
+    return True
 
 
 def mark_settled(execution_id: str, *, detail: str | None = None) -> bool:

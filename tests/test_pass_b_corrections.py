@@ -262,9 +262,15 @@ class _CanonicalHarness(unittest.TestCase):
     def setUp(self):
         _seed_book()
         self.addCleanup(MD.reset_books)
-        from app.database import PaperPortfolio, PaperPosition, get_db
+        from app.database import (PaperPortfolio, PaperPosition,
+                                  VirtualExecutionCommitment, get_db)
         with get_db() as db:
             db.query(PaperPosition).delete()
+            # Commitments outlive the position they belong to -- that is the
+            # point of them -- and this is a SHARED pytest database, so a
+            # fill left PENDING by another file's simulated crash would be
+            # picked up by this test's recovery sweep and counted as its own.
+            db.query(VirtualExecutionCommitment).delete()
             pf = db.query(PaperPortfolio).first()
             if pf is not None:
                 pf.cash = 100_000.0

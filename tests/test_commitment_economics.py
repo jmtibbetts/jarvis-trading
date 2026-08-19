@@ -27,8 +27,7 @@ class Boom(Exception):
 class _Base(_CanonicalHarness):
 
     def setUp(self):
-        super().setUp()
-        self._clear_commitments()
+        super().setUp()          # clears commitments; see _CanonicalHarness
         self.addCleanup(self._clear_commitments)
         self._starting_book = self._snapshot_book()
 
@@ -546,3 +545,186 @@ class FeeReproducibilityAcrossRestartTests(_Base):
         self.assertEqual(self._commitment(pos.id)["state"],
                          "COMMITTED_PENDING_SETTLEMENT",
                          "the owed fill was discarded instead of held")
+
+
+class TheEntryBoundaryMatchesTheExitBoundaryTests(_Base):
+    """P0.11-P0.14 — one rule for both sides of a trade.
+
+    The exit path committed at the fill; the entry path committed at
+    settlement, and recovery ABANDONED every entry it found. Those two
+    cannot both be the universal rule, and the asymmetry was not harmless:
+    a crash between the entry fill and its settlement erased the entry, and
+    the next cycle re-decided against whatever the market had become. If it
+    had moved down, JARVIS obtained a better entry by crashing -- the same
+    process-timing bias the exit boundary removes, wearing the opposite
+    sign.
+    """
+
+    def _crash_after_entry_commit(self):
+        """Fill an entry, then die before it settles.
+
+        The fee authority is the first thing touched after the entry commit
+        boundary, so poisoning it lands the crash in exactly the window that
+        used to erase the entry.
+        """
+        from lib import canonical_entry as CE
+        from lib import fee_authority as FA
+        from tests.test_pass_b_corrections import _signal, _spot_feed
+        _seed_book()
+        with patch.object(FA, "leg_fee", side_effect=Boom("crash")):
+            with _spot_feed():
+                try:
+                    CE.open_canonical_position(_signal(),
+                                               decision_price=64_400.0)
+                except Boom:
+                    pass
+
+    def _entry_commitments(self):
+        from app.database import VirtualExecutionCommitment, get_db
+        with get_db() as db:
+            rows = db.query(VirtualExecutionCommitment).filter(
+                VirtualExecutionCommitment.intent_kind == "ENTRY").all()
+            return [{"execution_id": r.execution_id, "state": r.state,
+                     "filled_qty": r.filled_qty, "fill_price": r.fill_price,
+                     "position_id": r.position_id} for r in rows]
+
+    def _open_positions(self):
+        from app.database import PaperPosition, get_db
+        with get_db() as db:
+            return [p.id for p in db.query(PaperPosition).filter(
+                PaperPosition.status == "Open").all()]
+
+    # ── Case A: the fill is committed before anything derives from it ────
+    def test_the_entry_fill_is_committed_before_the_crash(self):
+        self._crash_after_entry_commit()
+        rows = self._entry_commitments()
+        self.assertEqual(len(rows), 1,
+                         "the entry fill was never committed, so a crash "
+                         "erases an execution that really happened")
+        self.assertEqual(rows[0]["state"], "COMMITTED_PENDING_SETTLEMENT")
+        self.assertGreater(rows[0]["fill_price"], 0.0)
+        # Nothing economic yet: the boundary is the fill, not the position.
+        self.assertEqual(self._open_positions(), [],
+                         "a position exists for an unsettled entry")
+
+    # ── Case B: recovery opens it at the ORIGINAL fill ───────────────────
+    def test_recovery_opens_the_position_at_the_committed_fill(self):
+        from lib import execution_recovery as RECOV
+        self._crash_after_entry_commit()
+        committed = self._entry_commitments()[0]
+
+        # The market runs away before JARVIS comes back.
+        _seed_book(bid=70_000.0, ask=70_100.0)
+        out = RECOV.recover_pending()
+        self.assertEqual(out["abandoned"], 0,
+                         "a real entry fill was discarded, which is what the "
+                         "old ENTRY_RECOVERY_NOT_IMPLEMENTED branch did")
+        self.assertEqual(out["settled"], 1, out)
+
+        open_ids = self._open_positions()
+        self.assertEqual(len(open_ids), 1, "recovery opened no position")
+        pos, header, legs, _ = self._state(open_ids[0])
+        self.assertAlmostEqual(float(header.actual_entry_fill),
+                               committed["fill_price"], places=8,
+                               msg="the entry settled at the RECOVERED "
+                                   "market -- a crash bought at a better "
+                                   "price than the order actually paid")
+        self.assertAlmostEqual(float(pos.qty), committed["filled_qty"],
+                               places=8)
+        self.assertEqual([l.kind for l in legs], ["ENTRY"])
+
+    def test_the_recovered_position_is_canonical_and_exitable(self):
+        """A recovered entry that is not canonical is worse than none: the
+        fail-closed exit guard would route it down the legacy path."""
+        from lib import canonical_entry as CE
+        from lib import execution_recovery as RECOV
+        from app.database import PaperPosition, get_db
+        self._crash_after_entry_commit()
+        _seed_book(bid=70_000.0, ask=70_100.0)
+        RECOV.recover_pending()
+
+        pid = self._open_positions()[0]
+        with get_db() as db:
+            pos = db.query(PaperPosition).filter(
+                PaperPosition.id == pid).first()
+            db.expunge_all()
+        self.assertTrue(CE.is_canonical(pos),
+                        "the recovered position is not canonical, so the "
+                        "exit guard would send it down the legacy path")
+
+    # ── Case C: settle exactly once, however many sweeps run ─────────────
+    def test_recovery_is_idempotent_and_opens_one_position(self):
+        from lib import execution_recovery as RECOV
+        self._crash_after_entry_commit()
+        _seed_book(bid=70_000.0, ask=70_100.0)
+        first = RECOV.recover_pending()
+        second = RECOV.recover_pending()
+        self.assertEqual(first["settled"], 1, first)
+        self.assertEqual(second["found"], 0, "the entry settled twice")
+        self.assertEqual(len(self._open_positions()), 1,
+                         "recovery opened a second position for one fill")
+        self.assertEqual([r["state"] for r in self._entry_commitments()],
+                         ["SETTLED"])
+
+    def test_an_uninterrupted_entry_leaves_a_settled_commitment(self):
+        pos, header = self._enter()
+        rows = self._entry_commitments()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "SETTLED",
+                         "the happy path left an entry commitment dangling")
+
+    def test_an_owed_entry_is_never_abandoned_for_a_transient_reason(self):
+        """A fill that really happened is owed a settlement. 'We could not
+        price it today' is not the same fact as 'it must never settle'."""
+        from lib import execution_recovery as RECOV
+        self._crash_after_entry_commit()
+        _seed_book(bid=70_000.0, ask=70_100.0)
+        with patch.dict("os.environ", {"VENUE_REGION": "somewhere-else"}):
+            out = RECOV.recover_pending()
+        self.assertEqual(out["abandoned"], 0, out)
+        self.assertEqual(out["failed"], 1, out)
+        self.assertEqual(self._entry_commitments()[0]["state"],
+                         "COMMITTED_PENDING_SETTLEMENT")
+        # And a corrected process still finishes it.
+        self.assertEqual(RECOV.recover_pending()["settled"], 1)
+
+
+class OnlyACrashMayLeaveAFillPendingTests(unittest.TestCase):
+    """The invariant that makes the entry boundary meaningful.
+
+    A path that RETURNS has told its caller whether the position opened. If
+    it returns a refusal while leaving the commitment PENDING, recovery will
+    later open a position the decision path already declined -- and the
+    caller, having been told "not opened", may have re-decided the same
+    signal in the meantime. Two positions, one intention.
+
+    So: every return between the commit boundary and settlement resolves the
+    commitment. Only a crash -- which returns nothing to anyone -- may leave
+    a fill owed. This is checked structurally because it is an invariant
+    about EVERY path, including ones no test happens to exercise.
+    """
+
+    def test_every_returning_path_after_the_commit_resolves_it(self):
+        import re
+        from pathlib import Path
+        src = Path("lib/canonical_entry.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+        start = next(i for i, l in enumerate(lines)
+                     if "entry_execution_id = _execution_id()" in l)
+        end = next(i for i, l in enumerate(lines)
+                   if "result = settle_position_entry(" in l)
+        self.assertLess(start, end, "the commit boundary moved after "
+                                    "settlement, which inverts the rule")
+
+        unresolved = []
+        for i in range(start, end):
+            if not re.match(r"\s*return\b", lines[i]):
+                continue
+            window = "\n".join(lines[max(start, i - 12):i])
+            if "EC.mark_abandoned(entry_execution_id" not in window:
+                unresolved.append(f"L{i + 1}: {lines[i].strip()[:70]}")
+        self.assertEqual(
+            unresolved, [],
+            "these paths tell the caller the entry did not open but leave "
+            "the commitment PENDING, so recovery would open it anyway:\n  "
+            + "\n  ".join(unresolved))

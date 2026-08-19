@@ -70,6 +70,7 @@ from lib.engine_epoch import ENGINE_EPOCH as CANONICAL_ENGINE_EPOCH
 # Canonical refusal reasons that are ABOUT THE ORDER rather than the venue.
 UNFILLED = "UNFILLED"
 REJECTED_BY_EXECUTION = "REJECTED_BY_EXECUTION"
+ENTRY_FEE_UNAVAILABLE = "ENTRY_FEE_UNAVAILABLE"
 # The instrument costs more to trade than it can plausibly return, at any
 # size. A property of the PRODUCT, not a verdict on the thesis.
 FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL = "FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL"
@@ -120,6 +121,7 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     from lib import venues as V
     from lib import virtual_orders as VO
     from lib.decision_types import OrderPlan
+    from lib import execution_commitment as EC
     from lib.paper_engine import prepare_entry, settle_position_entry
     from lib.trade_side import SHORT, parse_side_strict
 
@@ -465,6 +467,65 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                 "venue": ready.venue, "product": ready.product,
                 "venue_failure": False, "opened": False}
 
+    # ── 4b. THE ENTRY COMMIT BOUNDARY ────────────────────────────────────
+    # The fill is final here: it agreed with the plan and with the
+    # authorization, and nothing economic has been derived from it yet. From
+    # this line on it is a FACT, and a crash must not unmake it.
+    #
+    # ENTRY AND EXIT NOW HAVE ONE RULE. Until this existed the exit path
+    # committed at the fill while the entry path committed at settlement,
+    # and the two cannot both be the universal rule. The asymmetry was not
+    # harmless: a crash between the entry fill and its settlement erased the
+    # entry completely, and the next cycle re-decided against whatever the
+    # market had become. If it had moved down, JARVIS obtained a better
+    # entry by crashing. That is the same process-timing bias the exit
+    # boundary exists to remove, wearing the opposite sign.
+    #
+    # WHAT THIS BOUNDARY DOES NOT COVER, STATED PLAINLY. The post-fill
+    # revalidation above may discard a first fill and re-submit smaller, so
+    # a crash inside THAT window still leaves nothing. The first fill is
+    # provisional BY CONSTRUCTION in this model -- the engine re-authorizes
+    # and re-executes rather than settling it -- so it is not yet the fill
+    # any settlement would use. Against a real venue that would be wrong and
+    # would need an exchange order id, which is the same limit already
+    # recorded for exits.
+    entry_execution_id = _execution_id()
+    EC.record_commitment(
+        execution_id=entry_execution_id, intent_kind=EC.ENTRY,
+        symbol=symbol, product=ready.product, venue=ready.venue,
+        instrument_id=ready.instrument, side=venue_side,
+        requested_qty=float(execution.requested_quantity),
+        filled_qty=float(execution.filled_quantity), fill_price=fill,
+        quantity_unit=execution.quantity_unit,
+        multiplier=float(execution.multiplier or 1.0),
+        fill_model=execution.fill_model or "UNKNOWN",
+        fill_model_version=getattr(execution, "fill_model_version", None)
+        or VO.FILL_MODEL_VERSION,
+        market_snapshot={"bid_at_submit": snap.bid, "ask_at_submit": snap.ask},
+        # EVERYTHING SETTLEMENT WILL NEED, so recovery never re-runs the risk
+        # engine. Re-deciding size after the fact would be reconstructing an
+        # authorization rather than honouring the one that approved the order.
+        plan_facts={"authorization": _authorization_facts(final),
+                    # The decision record is minted AFTER this boundary, so
+                    # a crash in between leaves a real fill with no
+                    # observation. These are what DO.build needs to mint the
+                    # same one rather than a degraded stand-in.
+                    "decision_facts": {
+                        "signal": dict(signal),
+                        "decision_price": decision_price,
+                        "gates": dict(gates),
+                        "decision_at": decision_at,
+                        "edge": edge, "edge_gate_role": edge_gate_role,
+                        "routing_identity": routing_identity},
+                    "provenance_inputs": _provenance_inputs(
+                        signal=signal, ready=ready, snap=snap,
+                        execution=execution, decision_price=decision_price,
+                        authorized_qty=float(authorized.qty),
+                        capability=capability)},
+        capability=(capability.as_provenance()
+                    if capability is not None else None),
+        fee_context=FA.pricing_context())
+
     # ── 5. PRICE THE ENTRY LEG. One leg, at the executed size and price. ──
     # A2. Settlement previously wrote sizing["round_trip_fees"] — a DEFERRED
     # round-trip ESTIMATE, computed before the order existed and charged at
@@ -503,6 +564,13 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         _observe(DO.NO_TRADE,
                  reason=fee_quote.reason or FA.FEE_AUTHORITY_UNAVAILABLE,
                  ready=ready, authorization=final)
+        # THE CALLER IS BEING TOLD THIS DID NOT OPEN, so the commitment
+        # must not outlive the answer. Only a CRASH may leave a fill
+        # pending -- a path that returns has already decided.
+
+        EC.mark_abandoned(entry_execution_id,
+                          reason=str(fee_quote.reason
+                                     or ENTRY_FEE_UNAVAILABLE))
         return {"error": fee_quote.reason or FA.FEE_AUTHORITY_UNAVAILABLE,
                 "detail": fee_quote.detail,
                 "venue": ready.venue, "product": ready.product,
@@ -535,6 +603,12 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         gates["catastrophic_product"] = "FAIL"
         _observe(DO.NO_TRADE, reason=FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
                  ready=ready, authorization=final, fee_quote=fee_quote)
+        # THE CALLER IS BEING TOLD THIS DID NOT OPEN, so the commitment
+        # must not outlive the answer. Only a CRASH may leave a fill
+        # pending -- a path that returns has already decided.
+
+        EC.mark_abandoned(entry_execution_id,
+                          reason=FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL)
         return {"error": FEE_EXCEEDS_VIABLE_SHARE_OF_NOTIONAL,
                 "detail": (f"${fee_quote.fee_usd:,.2f} per side on "
                            f"${abs(executed_notional):,.2f} of executed "
@@ -561,7 +635,6 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     # so the observation's `execution_id` was silently always NULL and the
     # causal chain decision -> execution -> position had a hole in the
     # middle.
-    entry_execution_id = _execution_id()
     provenance = build_provenance(signal=signal, ready=ready, snap=snap,
                                   execution=execution,
                                   decision_price=decision_price,
@@ -578,6 +651,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                               fee_quote=fee_quote,
                               execution_id=entry_execution_id,
                               execution_state=DO.EXEC_SIMULATED_FILLED)
+    # One fill, one decision record: link it now so a crash before
+    # settlement does not make recovery mint a second observation.
+    if observation_id:
+        EC.attach_observation(entry_execution_id, observation_id)
 
     # FAIL CLOSED. A CANONICAL POSITION MUST NOT EXIST WITHOUT THE DECISION
     # RECORD THAT AUTHORIZED IT.
@@ -591,6 +668,12 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     if not observation_id:
         logger.error("[CanonicalEntry] %s refusing to settle: the decision "
                      "observation could not be persisted", symbol)
+        # THE CALLER IS BEING TOLD THIS DID NOT OPEN, so the commitment
+        # must not outlive the answer. Only a CRASH may leave a fill
+        # pending -- a path that returns has already decided.
+
+        EC.mark_abandoned(entry_execution_id,
+                          reason=DECISION_OBSERVATION_PERSIST_FAILED)
         return {"error": DECISION_OBSERVATION_PERSIST_FAILED,
                 "detail": ("the trade was authorized but its decision record "
                            "could not be written; settling anyway would put a "
@@ -619,6 +702,10 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                      symbol, e, exc_info=True)
         DO.finalise_failed_settlement(observation_id,
                                     "SETTLEMENT_TRANSACTION_ROLLED_BACK")
+        # The transaction unwound completely -- no position, no margin, no
+        # fee -- so nothing is owed and nothing is left to recover.
+        EC.mark_abandoned(entry_execution_id,
+                          reason="SETTLEMENT_TRANSACTION_ROLLED_BACK")
         return {"error": "SETTLEMENT_ROLLED_BACK", "detail": str(e),
                 "venue": ready.venue, "product": ready.product,
                 "asset_class": ready.asset_class,
@@ -635,8 +722,14 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         # transaction with the settlement that refused.
         DO.finalise_failed_settlement(observation_id,
                                     _settlement_failure_reason(result))
+        # A DECIDED refusal, not a crash: a duplicate open, a full book, the
+        # deployment cap or insufficient cash. Retrying settles nothing, so
+        # the commitment is closed rather than left for recovery to chew on.
+        EC.mark_abandoned(entry_execution_id,
+                          reason=_settlement_failure_reason(result))
         return result
 
+    EC.mark_settled(entry_execution_id)
     result["observation_id"] = observation_id
 
     # THE REAL CONTRACT IS {"ok": True, "position": {"id": ...}}.
@@ -699,6 +792,98 @@ def _sizing_reason(prep: dict) -> str:
     if "insufficient" in err:
         return "INSUFFICIENT_CASH"
     return "RISK_SIZING_REJECTED"
+
+
+def _authorization_facts(auth) -> dict:
+    """The approved size and its reasoning, flattened for storage.
+
+    Stored so a settlement that runs after a restart honours the SAME
+    authorization the order went out under. Re-running the risk engine at
+    recovery would size against a different equity and a different book --
+    a second approval wearing the first one's fill.
+    """
+    import dataclasses
+    return dataclasses.asdict(auth)
+
+
+def _rebuild_authorization(facts: dict):
+    from lib.paper_engine import EntryAuthorization
+    return EntryAuthorization(**facts)
+
+
+# The scalars build_provenance reads off the live objects. Captured at the
+# commit so recovery can call the SAME builder rather than a second one --
+# two provenance builders would drift, and provenance is what makes a
+# position canonical.
+_READY_FIELDS = ("venue", "asset_class", "product", "instrument")
+_SNAP_FIELDS = ("symbol", "bid", "ask", "source", "venue_event_at",
+                "age_ms", "status")
+_EXECUTION_FIELDS = ("fill_price", "filled_quantity", "requested_quantity",
+                     "quantity_unit", "multiplier", "spread_cost_usd",
+                     "slippage_usd", "fill_model")
+
+
+def _provenance_inputs(*, signal, ready, snap, execution, decision_price,
+                       authorized_qty, capability) -> dict:
+    return {
+        "signal": {"id": signal.get("id"),
+                   "signal_id": signal.get("signal_id")},
+        "ready": {f: getattr(ready, f, None) for f in _READY_FIELDS},
+        "snap": {f: getattr(snap, f, None) for f in _SNAP_FIELDS},
+        "execution": {f: getattr(execution, f, None)
+                      for f in _EXECUTION_FIELDS},
+        "decision_price": decision_price,
+        "authorized_qty": authorized_qty,
+        "capability": (capability.as_provenance()
+                       if capability is not None else None),
+    }
+
+
+class _Replayed:
+    """A frozen stand-in for a live object, carrying only what provenance
+    reads. It exists so recovery goes through build_provenance unchanged."""
+
+    def __init__(self, fields: dict):
+        for k, v in (fields or {}).items():
+            setattr(self, k, v)
+
+
+class _ReplayedCapability:
+    def __init__(self, doc):
+        self._doc = doc
+
+    def as_provenance(self):
+        return self._doc
+
+
+def _replay_observation(decision_facts: dict, *, ready, authorization,
+                        fee_quote, execution_id):
+    """Mint the decision record for a recovered entry.
+
+    Goes through DO.build/DO.record like the live path, from the context
+    captured at the fill -- a recovered position must not carry a thinner
+    audit trail than an uninterrupted one.
+    """
+    from lib import decision_observation as DO
+    try:
+        row = DO.build(
+            signal=decision_facts.get("signal") or {}, ready=ready,
+            authorization=authorization, fee_quote=fee_quote,
+            decision=DO.TRADE, binding_reason=None,
+            decision_price=decision_facts.get("decision_price"),
+            gates=dict(decision_facts.get("gates") or {}),
+            venue_data_failure=False, position_id=None,
+            decision_at=decision_facts.get("decision_at"),
+            execution_id=execution_id,
+            edge=decision_facts.get("edge"),
+            edge_gate_role=decision_facts.get("edge_gate_role"),
+            routing_identity=decision_facts.get("routing_identity"),
+            execution_state=DO.EXEC_SIMULATED_FILLED)
+        return DO.record(row)
+    except Exception as e:                              # noqa: BLE001
+        logger.error("[CanonicalEntry] could not rebuild the decision "
+                     "observation for %s: %s", execution_id, e, exc_info=True)
+        return None
 
 
 def build_provenance(*, signal, ready, snap, execution,
@@ -861,3 +1046,101 @@ def provenance_of(position) -> dict | None:
         return json.loads(raw) if isinstance(raw, str) else dict(raw)
     except Exception:
         return None
+
+
+def settle_committed_entry(commitment: dict) -> dict:
+    """Finish an ENTRY that was committed before the process died.
+
+    THE FILL IS THE COMMITTED FILL. Quantity, price, instrument and model
+    all come from the persisted row, and the authorization is the one the
+    order actually went out under -- rebuilt, never re-decided. Re-running
+    the risk engine here would size against a different equity and a
+    different book, producing a second approval wearing the first one's
+    fill.
+
+    The market is not consulted. An entry that filled at 64,735 must not
+    become an entry at 61,000 because a restart happened in between; that
+    is the same rewriting-of-history the exit boundary refuses, with the
+    opposite sign.
+    """
+    from lib import execution_commitment as EC
+    from lib import fee_authority as FA
+    from lib import instruments as INST
+    from lib.paper_engine import settle_position_entry
+
+    facts = commitment.get("plan_facts") or {}
+    auth_facts = facts.get("authorization")
+    inputs = facts.get("provenance_inputs")
+    if not auth_facts or not inputs:
+        return {"ok": False, "error": "ENTRY_AUTHORIZATION_NOT_PERSISTED",
+                "detail": "the commitment carries no authorization, so the "
+                          "only way to settle it would be to re-decide the "
+                          "size after the fact"}
+
+    # Same schedule or no pricing -- see fee_authority.pricing_context.
+    committed_ctx = commitment.get("fee_context") or {}
+    current_ctx = FA.pricing_context()
+    if committed_ctx and committed_ctx != current_ctx:
+        return {"ok": False, "error": "ENTRY_FEE_SCHEDULE_CHANGED",
+                "detail": f"committed under {committed_ctx}, this process "
+                          f"prices under {current_ctx}"}
+
+    final = _rebuild_authorization(auth_facts)
+    ready = _Replayed(inputs.get("ready"))
+    snap = _Replayed(inputs.get("snap"))
+    execution = _Replayed(inputs.get("execution"))
+    capability = _ReplayedCapability(inputs.get("capability"))
+
+    fill = float(commitment["fill_price"])
+    filled = float(commitment["filled_qty"])
+    multiplier = float(commitment.get("multiplier") or 1.0)
+    in_contracts = commitment.get("quantity_unit") == "CONTRACTS"
+
+    instrument = None
+    try:
+        instrument = INST.resolve_for_execution(
+            snap.symbol, ready.asset_class, ready.product)
+    except Exception:                                   # noqa: BLE001
+        instrument = None
+
+    fee_quote = FA.leg_fee(
+        snap.symbol, notional=filled * fill * multiplier, price=fill,
+        product=ready.product, venue=ready.venue,
+        side=commitment.get("side"), maker=False,
+        exact_contract_count=filled if in_contracts else None,
+        execution_instrument=instrument, actual_fill_price=fill)
+    if not fee_quote.ok or fee_quote.fee_usd is None:
+        return {"ok": False, "error": ENTRY_FEE_UNAVAILABLE,
+                "detail": f"{fee_quote.reason}: {fee_quote.detail}"}
+
+    provenance = build_provenance(
+        signal=inputs.get("signal") or {}, ready=ready, snap=snap,
+        execution=execution, decision_price=inputs.get("decision_price"),
+        authorized_qty=inputs.get("authorized_qty"), fee_quote=fee_quote,
+        entry_execution_id=commitment["execution_id"], capability=capability)
+    # RECORDED AS A RECOVERY, so nothing downstream mistakes it for an
+    # original settlement. The fill is the committed fill; only the costs
+    # were computed when the process came back.
+    provenance["recovered_from_commitment"] = True
+    provenance["committed_at"] = commitment.get("committed_at")
+
+    observation_id = commitment.get("observation_id")
+    if not observation_id:
+        # The crash landed before the decision record existed. Mint it from
+        # the context captured at the fill, so the recovered position has
+        # the SAME audit trail an uninterrupted one would have.
+        observation_id = _replay_observation(
+            facts.get("decision_facts") or {}, ready=ready, authorization=final,
+            fee_quote=fee_quote, execution_id=commitment["execution_id"])
+        if observation_id:
+            EC.attach_observation(commitment["execution_id"], observation_id)
+    if not observation_id:
+        return {"ok": False, "error": "ENTRY_DECISION_RECORD_UNAVAILABLE",
+                "detail": "a canonical position must not exist without the "
+                          "decision record that authorized it"}
+
+    return settle_position_entry(
+        final, fill_price=fill, execution_provenance=provenance,
+        canonical_entry_fee_usd=float(fee_quote.fee_usd),
+        observation_id=observation_id,
+        execution_id=commitment["execution_id"])

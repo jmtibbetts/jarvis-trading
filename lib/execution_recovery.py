@@ -26,6 +26,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Entry refusals that will never resolve, so the commitment is closed rather
+# than retried forever. Everything NOT named here stays PENDING: a fill that
+# really happened is owed a settlement, and "we could not price it today" is
+# not the same fact as "it must never be settled".
+TERMINAL_ENTRY_REFUSALS = frozenset({
+    "ENTRY_AUTHORIZATION_NOT_PERSISTED",
+    "ENTRY_DECISION_RECORD_UNAVAILABLE",
+})
+
 
 def recover_pending(limit: int = 50) -> dict:
     """Settle every committed fill that never finished.
@@ -66,17 +75,13 @@ def _settle_one(row: dict) -> dict:
 
     kind = row.get("intent_kind")
     if kind == EC.ENTRY:
-        # Entry commitment recovery is not implemented: entry settlement
-        # needs the full authorization context, and inventing it from a
-        # commitment row would be reconstructing risk after the fact. The
-        # entry boundary is therefore settlement itself — see the module
-        # note in lib/execution_commitment — so an ENTRY row here means the
-        # boundary moved without this path being updated.
-        EC.mark_abandoned(row["execution_id"],
-                          reason="ENTRY_RECOVERY_NOT_IMPLEMENTED")
-        return {"bucket": "abandoned",
-                "detail": {"execution_id": row["execution_id"],
-                           "reason": "ENTRY_RECOVERY_NOT_IMPLEMENTED"}}
+        # ONE RULE FOR BOTH SIDES. This branch used to ABANDON every entry,
+        # on the reasoning that entry settlement needs an authorization a
+        # commitment row could not carry. That made the entry boundary
+        # settlement while the exit boundary was the fill -- and those two
+        # cannot both be the universal rule. The authorization is now
+        # persisted WITH the fill, so it is honoured rather than re-decided.
+        return _settle_committed_entry(row)
 
     position_id = row.get("position_id")
     if not position_id:
@@ -156,6 +161,40 @@ def _settle_one(row: dict) -> dict:
             "detail": {"execution_id": row["execution_id"],
                        "error": result.get("error"),
                        "detail": result.get("detail")}}
+
+
+def _settle_committed_entry(row: dict) -> dict:
+    """An ENTRY that survived a crash, settled from its own facts."""
+    from lib import canonical_entry as CE
+    from lib import execution_commitment as EC
+
+    logger.info("[Recovery] settling committed ENTRY %s at its ORIGINAL fill "
+                "%.8f x %.8f (not the current market)",
+                row["execution_id"], row["filled_qty"], row["fill_price"])
+    result = CE.settle_committed_entry(row)
+    if result.get("ok"):
+        EC.mark_settled(row["execution_id"])
+        return {"bucket": "settled",
+                "detail": {"execution_id": row["execution_id"],
+                           "position_id": (result.get("position") or {}).get("id"),
+                           "fill_price": row["fill_price"],
+                           "filled_qty": row["filled_qty"]}}
+
+    error = str(result.get("error") or "ENTRY_SETTLEMENT_FAILED")
+    if error in TERMINAL_ENTRY_REFUSALS:
+        # A DECIDED refusal that a retry cannot change: the authorization
+        # itself is unusable, or the book has moved somewhere this fill can
+        # never land. Anything else -- a missing fee schedule, a changed
+        # pricing context, a transient failure -- stays PENDING so a
+        # corrected process finishes what is genuinely owed.
+        EC.mark_abandoned(row["execution_id"], reason=error)
+        return {"bucket": "abandoned",
+                "detail": {"execution_id": row["execution_id"],
+                           "reason": error,
+                           "detail": result.get("detail")}}
+    return {"bucket": "failed",
+            "detail": {"execution_id": row["execution_id"],
+                       "error": error, "detail": result.get("detail")}}
 
 
 def _existing_leg(execution_id: str):

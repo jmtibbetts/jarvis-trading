@@ -121,6 +121,21 @@ async def lifespan(app_: FastAPI):
     except Exception as e:                                  # noqa: BLE001
         logger.warning("[Runtime] self-check unavailable: %s", e)
 
+    # COMMITTED FILLS OUTLIVE THE PROCESS THAT MADE THEM. If a previous
+    # run died between the venue returning a fill and settlement persisting
+    # it, that execution is owed its economics at ITS OWN price — not at
+    # whatever the market has since become.
+    try:
+        from lib.execution_recovery import recover_pending
+        _rec = recover_pending()
+        if _rec.get("found"):
+            logger.warning("[Server] recovered %d committed execution(s): "
+                           "%d settled, %d abandoned, %d still failing",
+                           _rec["found"], _rec["settled"], _rec["abandoned"],
+                           _rec["failed"])
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[Server] execution recovery unavailable: %s", e)
+
     try:
         from lib.wallet_registry import bootstrap as wallet_bootstrap
         logger.info(f"[Server] Wallet registry bootstrap — {wallet_bootstrap()}")

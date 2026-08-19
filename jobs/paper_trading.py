@@ -1321,6 +1321,20 @@ def run():
     from lib.canonical_entry import open_canonical_position
     from lib.paper_engine import mark_to_market, get_paper_summary
 
+    # ── Step 0: finish anything a crash left committed ────────────────────
+    # Before marking or managing anything, settle fills that already
+    # happened. Skipping this would let the next management decision be made
+    # against a position whose exit is already an economic fact.
+    try:
+        from lib.execution_recovery import recover_pending
+        recovered = recover_pending()
+        if recovered.get("found"):
+            logger.warning("[PaperTrading] recovered %d committed "
+                           "execution(s) before managing: %s",
+                           recovered["found"], recovered)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[PaperTrading] execution recovery failed: %s", e)
+
     # ── Step 1: Mark-to-market ────────────────────────────────────────────────
     prices = _get_all_prices()
     logger.info(f"[PaperTrading] Price cache: {len(prices)} symbols loaded")

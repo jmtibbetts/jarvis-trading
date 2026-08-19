@@ -77,6 +77,7 @@ _ECONOMIC = {
     "paper_position_settlements": "B1 entry ledger (absent pre-migration)",
     "paper_settlement_legs": "B1/B2 settlement legs (absent pre-migration)",
     "paper_realized_outcomes": "B2A realized outcomes (absent pre-migration)",
+    "virtual_execution_commitments": "committed virtual fills — economic",
     "auto_sim_portfolios": "a separate ORM economy, still economic history",
     "auto_sim_positions": "a separate ORM economy, still economic history",
     "auto_sim_trades": "a separate ORM economy, still economic history",

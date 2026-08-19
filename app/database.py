@@ -3173,6 +3173,61 @@ class LunarCrushObservation(Base):
     )
 
 
+class VirtualExecutionCommitment(Base):
+    """A virtual fill that has HAPPENED, recorded before anything derives
+    from it.
+
+    Between the venue returning a fill and settlement persisting it, the
+    execution used to exist only in RAM — so a process death anywhere in
+    that window erased it and the next cycle re-decided against a different
+    market. Symmetric erasure of winners and losers rules out directional
+    bias; it does not rule out PROCESS-TIMING bias, and a book whose history
+    depends on whether Python died is still wrong.
+
+    Keyed by `execution_id`, which is also settlement's idempotency key, so
+    a replay cannot become a second fill.
+    """
+    __tablename__ = "virtual_execution_commitments"
+
+    execution_id = Column(String, primary_key=True)
+    intent_kind  = Column(String)      # ENTRY | EXIT | PARTIAL_EXIT
+    position_id  = Column(String)
+
+    symbol        = Column(String)
+    product       = Column(String)
+    venue         = Column(String)
+    instrument_id = Column(String)
+    side          = Column(String)
+
+    # THE FILL, exactly as it was determined. Settlement reads these; it
+    # never re-prices from a later market.
+    requested_qty = Column(Float)
+    filled_qty    = Column(Float)
+    fill_price    = Column(Float)
+    quantity_unit = Column(String)
+    multiplier    = Column(Float)
+
+    fill_model         = Column(String)
+    fill_model_version = Column(String)
+
+    expected_revision = Column(Integer)
+    observation_id    = Column(String)
+
+    market_snapshot_json = Column(Text)
+    plan_facts_json      = Column(Text)
+    capability_json      = Column(Text)
+
+    state        = Column(String)      # COMMITTED_PENDING_SETTLEMENT|SETTLED|ABANDONED
+    committed_at = Column(String)
+    settled_at   = Column(String)
+    detail       = Column(Text)
+
+    __table_args__ = (
+        Index("ix_commitment_state", "state", "committed_at"),
+        Index("ix_commitment_position", "position_id"),
+    )
+
+
 class ProviderHealth(Base):
     """Is this provider capability working, and how would anyone know?
 

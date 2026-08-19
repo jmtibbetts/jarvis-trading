@@ -259,6 +259,7 @@ def close_canonical_position(position_id: str, *,
     from lib import canonical_settlement as CS
     from lib import execution_policy as POL
     from lib import execution_venue as EV
+    from lib import execution_commitment as EC
     from lib import fee_authority as FA
     from lib import holding_cost_authority as HCA
     from lib import instruments as INST
@@ -428,6 +429,40 @@ def close_canonical_position(position_id: str, *,
     filled = float(execution.filled_quantity)
     fill = float(execution.fill_price)
 
+    # ── 6b. THE COMMIT BOUNDARY. ────────────────────────────────────────
+    # This fill has HAPPENED. Persist it before anything derives from it,
+    # because everything below — the fee lookup, the carry lookup, the
+    # settlement transaction — is a place the process can die, and until
+    # this row exists such a death erases the execution entirely and lets
+    # the next cycle re-decide against a different market. A stop that
+    # triggered at 61,000 and vanished because Python crashed, leaving a
+    # position that later closed at 70,000, has had its history rewritten
+    # by an operating-system event.
+    #
+    # The id is minted HERE rather than at step 9, so the thing that is
+    # committed and the thing that settles are the same identity.
+    exit_execution_id = _execution_event_id()
+    EC.record_commitment(
+        execution_id=exit_execution_id,
+        intent_kind=(EC.PARTIAL_EXIT if filled < remaining - 1e-12
+                     else EC.EXIT),
+        position_id=snap.position_id, symbol=snap.symbol,
+        product=snap.product, venue=snap.venue,
+        instrument_id=snap.instrument_id, side=plan.side,
+        requested_qty=float(plan.qty), filled_qty=filled, fill_price=fill,
+        quantity_unit=execution.quantity_unit,
+        multiplier=float(execution.multiplier or 1.0),
+        fill_model=getattr(execution, "fill_model", None) or "UNKNOWN",
+        fill_model_version=getattr(execution, "fill_model_version", None)
+        or VO.FILL_MODEL_VERSION,
+        expected_revision=snap.settlement_revision,
+        market_snapshot={"bid_at_submit": ready.snapshot.bid,
+                         "ask_at_submit": ready.snapshot.ask,
+                         "observed_at": getattr(ready.snapshot, "observed_at",
+                                                None)},
+        plan_facts={"qty": float(plan.qty), "side": plan.side,
+                    "instrument_id": plan.instrument_id})
+
     # ── 7. Exact exit fee, at the ACTUAL fill and EXECUTION side ─────────
     executed_notional = filled * fill * float(execution.multiplier or 1.0)
     in_contracts = execution.quantity_unit == "CONTRACTS"
@@ -467,8 +502,9 @@ def close_canonical_position(position_id: str, *,
         return _refuse(EXIT_HOLDING_COST_UNAVAILABLE,
                        f"{holding_quote.reason}: {holding_quote.detail}")
 
-    # ── 9. One execution event, one id — minted the same way entry's is ──
-    exit_execution_id = _execution_event_id()
+    # ── 9. The execution id was minted at the COMMIT BOUNDARY above, so
+    #      the fill that was committed and the fill that settles are the
+    #      same identity — settlement's idempotency key IS the commitment.
 
     try:
         facts = CS.exit_facts(
@@ -516,6 +552,14 @@ def close_canonical_position(position_id: str, *,
 
     # ── 10. B2A is the only economic mutation ────────────────────────────
     result = CS.settle_prepared_exit(facts)
+    # The committed fill is now durable economics. Mark it so recovery does
+    # not try to settle it twice; a stale revision means another settlement
+    # already won and this fill describes a state that no longer exists.
+    if result.get("ok"):
+        EC.mark_settled(exit_execution_id)
+    elif result.get("error") == CS.STALE_SETTLEMENT_REVISION:
+        EC.mark_abandoned(exit_execution_id,
+                          reason=CS.STALE_SETTLEMENT_REVISION)
     if result.get("ok"):
         result.setdefault("execution_id", exit_execution_id)
         result["fill_price"] = fill
@@ -527,4 +571,114 @@ def close_canonical_position(position_id: str, *,
         # carry, id — and it is the CALLER's decision, never an auto-retry
         # that reuses this fill against a state it was not prepared for.
         result["reprepare_required"] = True
+    return result
+
+
+def settle_committed_exit(commitment: dict, snap) -> dict:
+    """Settle a fill that was COMMITTED before the process died.
+
+    THE ORIGINAL FILL, NOT THE CURRENT MARKET. Quantity, price, instrument
+    and model all come from the persisted commitment. No venue is consulted
+    and no trigger is re-evaluated: a stop that fired at 61,000 must not
+    settle at 70,000 because a restart happened in between.
+
+    Costs are still computed here rather than stored, but they are computed
+    FROM the committed fill — the fee from its notional and side, the carry
+    over entry -> now. Carry legitimately grows while the position remains
+    open, because the position genuinely was open for that time; the FILL is
+    what must not move.
+    """
+    from datetime import datetime
+
+    from lib import canonical_settlement as CS
+    from lib import execution_commitment as EC
+    from lib import fee_authority as FA
+    from lib import holding_cost_authority as HCA
+    from lib import instruments as INST
+
+    filled = float(commitment["filled_qty"])
+    fill = float(commitment["fill_price"])
+    multiplier = float(commitment.get("multiplier") or snap.multiplier or 1.0)
+    exit_side = "sell" if snap.position_side == "long" else "buy"
+
+    instrument = None
+    try:
+        instrument = INST.resolve_for_execution(
+            snap.symbol, snap.asset_class, snap.product)
+    except Exception:                                   # noqa: BLE001
+        instrument = None
+
+    executed_notional = filled * fill * multiplier
+    in_contracts = commitment.get("quantity_unit") == "CONTRACTS"
+    fee_quote = FA.leg_fee(
+        snap.symbol, notional=executed_notional, price=fill,
+        product=snap.product, venue=snap.venue, side=exit_side, maker=False,
+        exact_contract_count=filled if in_contracts else None,
+        execution_instrument=instrument, actual_fill_price=fill)
+    if not fee_quote.ok or fee_quote.fee_usd is None:
+        return {"ok": False, "error": EXIT_FEE_UNAVAILABLE,
+                "detail": f"{fee_quote.reason}: {fee_quote.detail}"}
+
+    settled_at = _now_iso()
+    try:
+        t0 = datetime.fromisoformat(snap.opened_at)
+        t1 = datetime.fromisoformat(settled_at)
+        hours = (t1 - t0).total_seconds() / 3600.0
+    except (TypeError, ValueError) as e:
+        return {"ok": False, "error": EXIT_HOLDING_COST_UNAVAILABLE,
+                "detail": f"cannot establish the holding interval: {e}"}
+    if hours < 0:
+        return {"ok": False, "error": EXIT_HOLDING_COST_UNAVAILABLE,
+                "detail": f"negative holding interval ({hours:.6f}h)"}
+
+    holding_notional = filled * snap.actual_entry_fill * snap.multiplier
+    holding_quote = HCA.holding_cost(
+        snap.symbol, product=snap.product, notional_usd=holding_notional,
+        hours_held=hours, is_short=(snap.position_side == "short"))
+    if not holding_quote.ok or holding_quote.amount_usd is None:
+        return {"ok": False, "error": EXIT_HOLDING_COST_UNAVAILABLE,
+                "detail": f"{holding_quote.reason}: {holding_quote.detail}"}
+
+    plan_facts = commitment.get("plan_facts") or {}
+    try:
+        facts = CS.exit_facts(
+            position_id=snap.position_id,
+            expected_revision=snap.settlement_revision,
+            execution_id=commitment["execution_id"],
+            symbol=snap.symbol, product=snap.product, venue=snap.venue,
+            instrument_id=snap.instrument_id,
+            position_side=snap.position_side, execution_side=exit_side,
+            requested_qty=float(commitment.get("requested_qty") or filled),
+            filled_qty=filled,
+            quantity_unit=snap.quantity_unit, multiplier=snap.multiplier,
+            fill_price=fill, fee_quote=fee_quote,
+            holding_quote=holding_quote, settled_at=settled_at,
+            exit_reason=(commitment.get("exit_reason")
+                         or plan_facts.get("exit_reason")
+                         or VOLUNTARY_EXIT),
+            trigger_price=plan_facts.get("trigger_price"),
+            decision_exit_price=plan_facts.get("decision_price"),
+            spread_attribution_usd=0.0,
+            slippage_attribution_usd=0.0,
+            impact_attribution_usd=0.0,
+            fill_model=commitment.get("fill_model") or "UNKNOWN",
+            provenance={
+                "exit_execution_id": commitment["execution_id"],
+                "identity_source": PERSISTED_CANONICAL_ENTRY,
+                # THIS SETTLEMENT IS A RECOVERY. Recorded so nothing later
+                # mistakes an original settlement for a replayed one: the
+                # fill is the committed fill, and the costs were computed
+                # when the process came back.
+                "recovered_from_commitment": True,
+                "committed_at": commitment.get("committed_at"),
+                "market_snapshot_at_commit": commitment.get(
+                    "market_snapshot"),
+                "fill_model_version": commitment.get("fill_model_version"),
+            })
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "EXIT_FACTS_INVALID", "detail": str(e)}
+
+    result = CS.settle_prepared_exit(facts)
+    if result.get("ok"):
+        EC.mark_settled(commitment["execution_id"], detail="recovered")
     return result

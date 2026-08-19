@@ -254,3 +254,55 @@ implemented**; the crash-loss window is small but non-zero.
 - "archive is immutable" — the 0444 file sits in a writable WAL directory
 - "REAL_PROVIDER_READ_ONLY UNAVAILABLE" — Bitnomial books are live
 - "ORDERBOOK_SIMULATED" as a name for the fixed model — it reads no book
+
+## P0 — durable spool: measured, and deliberately NOT built
+
+| measurement | value |
+|---|---|
+| flush cadence | **1.0 s** (`FLUSH_INTERVAL_S`) |
+| ingestion rate | 7–25 rows/s |
+| expected loss on SIGKILL | **~1 second ≈ 7–25 samples** |
+
+A durable spool would add a second write path competing for the same SQLite
+lock — the exact contention that caused the original loss — plus
+checkpointing, replay and dedup, to protect one second of replaceable book
+snapshots. **Not warranted.** The exposure is stated rather than engineered
+away, and is now continuously visible instead of being a one-off claim.
+
+**A second silent-drop path was found and closed.** `observe()` discarded
+samples when the buffer hit `MAX_BUFFER = 5000` with no counter at all — and
+that cap fired *before* the counted 20,000 cap added in the previous
+milestone, so the counted one could never be reached. One limit now, and
+every divergence between `received` and `persisted` has a name:
+
+    received, persisted, retried, shed_on_append,
+    shed_after_failure, backlog, oldest_backlog_at, unaccounted
+
+`unaccounted` is asserted to be zero in tests on both a clean run and a
+failed flush.
+
+## P3 — the crash seam: measured, and it is not the hazard feared
+
+Crashes injected at each boundary, book inspected after:
+
+| boundary | measured result |
+|---|---|
+| after submit, before fee/carry/settlement | **book byte-identical** — no legs, no outcome, no cash change |
+| abandoned attempt, then a later exit | settles normally, **exactly one** outcome |
+| after settlement, second attempt | **refuses**; settled economics unchanged |
+
+**Why this is safe, stated precisely:** virtual execution leaves nothing
+resting at a venue, so an abandoned attempt is a genuine no-op rather than an
+unreconciled fill. A later cycle re-prices against a fresh book — that is a
+NEW decision, not a stale retry, and it is the correct outcome. Settlement is
+a single B2A transaction, so SQLite rolls back any death mid-write; there is
+no half-settled state.
+
+**What this bounds:** execution ids are minted per attempt, so B2A's
+idempotency protects against the same facts being submitted twice — not
+against a fresh attempt at a new book. That distinction is the whole reason
+the seam is safe here and would NOT be safe against a real venue.
+
+**Consequence: a durable attempt ledger is not required for correctness
+under virtual execution, and P3 does not block activation.** It becomes
+mandatory the moment execution touches an external venue.

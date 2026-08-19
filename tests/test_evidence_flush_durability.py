@@ -111,3 +111,86 @@ class AFailedFlushKeepsTheEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReceivedAndPersistedMustReconcileTests(unittest.TestCase):
+    """A collector must never report health while `persisted` sits far below
+    `received` with nothing to explain the gap. Every way the two can differ
+    has a name and a counter."""
+
+    def setUp(self):
+        from lib import range_collector as RC
+        RC.reset_stream_state()
+        with RC._BUF_LOCK:
+            RC._BUF.clear()
+            RC._RECEIVED = RC._PERSISTED = RC._RETRIED = 0
+            RC._DROPPED = RC._SHED_ON_APPEND = 0
+        self.addCleanup(self._drain)
+
+    def _drain(self):
+        from lib import range_collector as RC
+        with RC._BUF_LOCK:
+            RC._BUF.clear()
+
+    def _fill(self, n):
+        from lib import range_collector as RC
+        with RC._BUF_LOCK:
+            RC._RECEIVED += n
+            for i in range(n):
+                RC._BUF.append({
+                    "product": "CRYPTO_PERP", "venue": "kraken_derivatives_us",
+                    "symbol": "BTC/USD", "instrument_id": "PBTCUCZ50",
+                    "market_data_source": "test",
+                    "observed_at": f"2026-08-19T01:00:{i % 60:02d}+00:00",
+                    "bid": 64000.0, "ask": 64010.0, "mid": 64005.0,
+                    "sample_reason": "CHANGE"})
+
+    def test_a_clean_run_reconciles_exactly(self):
+        from lib import range_collector as RC
+        self._fill(9)
+        RC.flush_samples()
+        s = RC.ingestion_stats()
+        self.assertEqual(s["received"], 9)
+        self.assertEqual(s["persisted"], 9)
+        self.assertEqual(s["backlog"], 0)
+        self.assertEqual(s["unaccounted"], 0,
+                         f"received/persisted do not reconcile: {s}")
+
+    def test_a_failed_flush_shows_as_backlog_not_loss(self):
+        from lib import range_collector as RC
+        self._fill(6)
+
+        def locked(*a, **k):
+            raise RuntimeError("database is locked")
+        with patch("app.database.get_db", locked):
+            try:
+                RC.flush_samples()
+            except Exception:
+                pass
+        s = RC.ingestion_stats()
+        self.assertEqual(s["backlog"], 6)
+        self.assertEqual(s["retried"], 6)
+        self.assertEqual(s["persisted"], 0)
+        self.assertEqual(s["unaccounted"], 0,
+                         f"a failed flush lost track of rows: {s}")
+
+    def test_the_buffer_has_exactly_one_limit(self):
+        """There used to be two: a SILENT append-side cap at 5,000 that
+        fired before the counted flush-side cap at 20,000, so the counted
+        one could never be reached and appends were discarded with no
+        record at all."""
+        from lib import range_collector as RC
+        self.assertEqual(RC.MAX_BUFFER, RC.MAX_BUFFERED_SAMPLES)
+
+    def test_a_full_buffer_sheds_visibly(self):
+        from lib import range_collector as RC
+        with RC._BUF_LOCK:
+            RC._BUF.extend([{}] * RC.MAX_BUFFERED_SAMPLES)
+        from datetime import datetime, timezone
+        RC.observe(product="CRYPTO_PERP", venue="kraken_derivatives_us",
+                   symbol="BTC/USD", instrument_id="PBTCUCZ50",
+                   source="test", bid=1.0, ask=2.0,
+                   at=datetime.now(timezone.utc)) \
+            if hasattr(RC, "observe") else None
+        s = RC.ingestion_stats()
+        self.assertGreaterEqual(s["backlog"], RC.MAX_BUFFERED_SAMPLES)

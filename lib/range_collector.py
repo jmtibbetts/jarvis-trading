@@ -174,7 +174,11 @@ def _should_record(prev_bid, prev_ask, prev_at, bid, ask, at,
 _LAST: dict = {}
 _BUF: list = []
 _BUF_LOCK = threading.Lock()
-MAX_BUFFER = 5000
+# ONE limit, not two. This used to be a separate, SILENT cap at
+# 5,000 that fired before the counted one and discarded samples
+# with no record. Retained as an alias so existing importers
+# see the same single number.
+MAX_BUFFER = 20_000
 
 
 def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
@@ -200,14 +204,25 @@ def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
     if reason is None:
         return None
     _LAST[key] = (bid, ask, at)
+    global _RECEIVED, _SHED_ON_APPEND
     with _BUF_LOCK:
-        if len(_BUF) < MAX_BUFFER:
+        _RECEIVED += 1
+        if len(_BUF) < MAX_BUFFERED_SAMPLES:
             _BUF.append({
                 "product": product, "venue": venue, "symbol": symbol,
                 "instrument_id": instrument_id, "market_data_source": source,
                 "observed_at": at.isoformat(), "bid": bid, "ask": ask,
                 "mid": (bid + ask) / 2.0, "sample_reason": reason,
             })
+        else:
+            # COUNTED, not silent. This used to drop the sample with no
+            # record at all, so `received` and `persisted` could diverge
+            # without anything in the system being able to say why.
+            _SHED_ON_APPEND += 1
+            if _SHED_ON_APPEND % 500 == 1:
+                logger.error("[RangeCollector] buffer full at %d — shed %d "
+                             "sample(s) on append so far",
+                             MAX_BUFFERED_SAMPLES, _SHED_ON_APPEND)
     return reason
 
 
@@ -217,7 +232,43 @@ def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
 # this is roughly ten minutes of buffering.
 MAX_BUFFERED_SAMPLES = 20_000
 
-_DROPPED = 0
+_DROPPED = 0          # shed from the FRONT after a failed write
+_RECEIVED = 0         # observations that passed the change filter
+_PERSISTED = 0        # rows actually committed
+_RETRIED = 0          # rows put back after a failed write
+_SHED_ON_APPEND = 0   # dropped because the buffer was already full
+
+
+def ingestion_stats() -> dict:
+    """Received vs persisted, and every way the two can differ.
+
+    A collector must never be able to report health while `persisted` is far
+    below `received` with nothing to explain the gap. Every divergence here
+    has a name and a counter.
+
+    ON CRASH EXPOSURE: the buffer is RAM. Flush cadence is 1s at a measured
+    7-25 rows/s, so an abrupt kill loses about one second of samples. A
+    durable spool was considered and NOT built: it would add a second write
+    path competing for the same SQLite lock — the very contention that
+    caused the original loss — plus checkpointing and dedup, to save ~1s of
+    replaceable book snapshots.
+    """
+    with _BUF_LOCK:
+        backlog = len(_BUF)
+        oldest = _BUF[0].get("observed_at") if _BUF else None
+    return {
+        "received": _RECEIVED,
+        "persisted": _PERSISTED,
+        "retried": _RETRIED,
+        "shed_on_append": _SHED_ON_APPEND,
+        "shed_after_failure": _DROPPED,
+        "backlog": backlog,
+        "oldest_backlog_at": oldest,
+        "buffer_limit": MAX_BUFFERED_SAMPLES,
+        "flush_interval_s": 1.0,
+        "unaccounted": _RECEIVED - _PERSISTED - _SHED_ON_APPEND
+                       - _DROPPED - backlog,
+    }
 
 
 def dropped_sample_count() -> int:
@@ -241,7 +292,7 @@ def flush_samples() -> int:
     survive a transient error, so the rows are restored to the FRONT of the
     buffer and retried on the next tick.
     """
-    global _DROPPED
+    global _DROPPED, _PERSISTED, _RETRIED
     from app.database import InstrumentQuoteSample, get_db
 
     with _BUF_LOCK:
@@ -253,6 +304,7 @@ def flush_samples() -> int:
             db.bulk_insert_mappings(InstrumentQuoteSample.__mapper__, batch)
     except Exception:
         with _BUF_LOCK:
+            _RETRIED += len(batch)
             # Front, because these are older than anything buffered while
             # the write was in flight, and chronology is the point.
             _BUF[:0] = batch
@@ -267,6 +319,7 @@ def flush_samples() -> int:
                              "dropped %d oldest sample(s), %d total dropped",
                              excess, _DROPPED)
         raise
+    _PERSISTED += len(batch)
     return len(batch)
 
 

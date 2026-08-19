@@ -140,8 +140,8 @@ def read_exit_snapshot(position_id: str) -> CanonicalExitSnapshot | dict:
                 or header.execution_model != EXECUTION_MODEL_CANONICAL
                 or header.engine_epoch != CANONICAL_ENGINE_EPOCH):
             return _refuse(NOT_CANONICAL_POSITION,
-                           f"header models are not the current canonical "
-                           f"set; a hybrid position gets no canonical exit")
+                           "header models are not the current canonical "
+                           "set; a hybrid position gets no canonical exit")
         # P0 (B2C): never prepare an order from a projection that disagrees
         # with its ledger. Settlement re-validates independently — two
         # boundaries, neither trusting the other.
@@ -619,7 +619,17 @@ def settle_committed_exit(commitment: dict, snap) -> dict:
         return {"ok": False, "error": EXIT_FEE_UNAVAILABLE,
                 "detail": f"{fee_quote.reason}: {fee_quote.detail}"}
 
-    settled_at = _now_iso()
+    # THE CARRY STOPS WHEN THE FILL HAPPENED, NOT WHEN THE PROCESS CAME
+    # BACK. This quantity left the position at `committed_at`. If the stop
+    # committed at 12:00:00 and the process was down until 12:45, those 45
+    # minutes are an OPERATIONAL fact, not an economic one — charging carry
+    # for them would let downtime create cost, and the same trade would cost
+    # a different amount depending on how long a restart took.
+    #
+    # `settled_at` is therefore the committed instant too: it is the moment
+    # the economics are dated to, and the recovery wall-clock appears only
+    # in provenance.
+    settled_at = commitment.get("committed_at") or _now_iso()
     try:
         t0 = datetime.fromisoformat(snap.opened_at)
         t1 = datetime.fromisoformat(settled_at)
@@ -671,6 +681,10 @@ def settle_committed_exit(commitment: dict, snap) -> dict:
                 # when the process came back.
                 "recovered_from_commitment": True,
                 "committed_at": commitment.get("committed_at"),
+                # Operational only. The ECONOMICS are dated to committed_at
+                # above; this says when the process got round to finishing
+                # them, and must never be used as a cost boundary.
+                "recovered_at": _now_iso(),
                 "market_snapshot_at_commit": commitment.get(
                     "market_snapshot"),
                 "fill_model_version": commitment.get("fill_model_version"),

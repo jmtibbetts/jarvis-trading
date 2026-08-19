@@ -85,6 +85,36 @@ def _settle_one(row: dict) -> dict:
                 "detail": {"execution_id": row["execution_id"],
                            "reason": "NO_POSITION_ID"}}
 
+    # DID THIS EXACT FILL ALREADY SETTLE? Ask BEFORE looking at revisions.
+    #
+    # There is a seam between `settle_prepared_exit` committing and
+    # `mark_settled` running. A crash in that window leaves a PENDING
+    # commitment whose economics are already in the ledger and whose
+    # position has moved on — which looks exactly like a lost race. Calling
+    # that ABANDONED would label a successfully settled fill as one that
+    # never became economics, purely because Python died before a status
+    # flag changed.
+    #
+    # Settlement keys its legs on execution_id, so the ledger can answer
+    # this directly.
+    settled_leg = _existing_leg(row["execution_id"])
+    if settled_leg is not None:
+        mismatch = _facts_disagree(row, settled_leg)
+        if mismatch:
+            # The same execution id maps to different economics. That is
+            # corruption or an id collision, not a recovery case, and
+            # silently marking it SETTLED would bless it.
+            raise RuntimeError(
+                f"COMMITTED_FACTS_DISAGREE_WITH_SETTLEMENT for "
+                f"{row['execution_id']}: {mismatch}")
+        EC.mark_settled(row["execution_id"],
+                        detail="settlement already existed; only the "
+                               "bookkeeping flag was lost")
+        return {"bucket": "settled",
+                "detail": {"execution_id": row["execution_id"],
+                           "position_id": position_id,
+                           "already_settled": True}}
+
     # If the position already moved past this revision, another settlement
     # won the race and this fill describes a state that no longer exists.
     from lib.canonical_exit import read_exit_snapshot
@@ -126,3 +156,44 @@ def _settle_one(row: dict) -> dict:
             "detail": {"execution_id": row["execution_id"],
                        "error": result.get("error"),
                        "detail": result.get("detail")}}
+
+
+def _existing_leg(execution_id: str):
+    """The settlement leg for this exact execution, if one exists."""
+    from app.database import PaperSettlementLeg, get_db
+    with get_db() as db:
+        leg = db.query(PaperSettlementLeg).filter(
+            PaperSettlementLeg.execution_id == execution_id).first()
+        if leg is None:
+            return None
+        return {"position_id": leg.position_id, "kind": leg.kind,
+                "filled_qty": leg.filled_qty, "fill_price": leg.fill_price,
+                "instrument_id": getattr(leg, "instrument_id", None)}
+
+
+def _facts_disagree(commitment: dict, leg: dict) -> str | None:
+    """Do the committed facts and the settled facts describe one trade?
+
+    Checked rather than assumed: an execution id that maps to different
+    economics means corruption or a collision, and that must fail loudly
+    instead of being tidied away as a successful recovery.
+    """
+    checks = (
+        ("position_id", commitment.get("position_id"), leg.get("position_id")),
+        ("filled_qty", commitment.get("filled_qty"), leg.get("filled_qty")),
+        ("fill_price", commitment.get("fill_price"), leg.get("fill_price")),
+    )
+    problems = []
+    for name, a, b in checks:
+        if a is None or b is None:
+            continue
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            if abs(float(a) - float(b)) > 1e-9 * max(1.0, abs(float(a))):
+                problems.append(f"{name}: committed {a!r} vs settled {b!r}")
+        elif str(a) != str(b):
+            problems.append(f"{name}: committed {a!r} vs settled {b!r}")
+    instrument = commitment.get("instrument_id")
+    if instrument and leg.get("instrument_id")             and instrument != leg["instrument_id"]:
+        problems.append(f"instrument_id: committed {instrument!r} vs settled "
+                        f"{leg['instrument_id']!r}")
+    return "; ".join(problems) or None

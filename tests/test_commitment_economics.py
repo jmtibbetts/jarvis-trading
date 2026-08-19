@@ -298,3 +298,145 @@ class CommittedNumbersRoundTripExactlyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialExitCarryAlgebraTests(_Base):
+    """P0.3 — quantity that has LEFT stops accruing; quantity that stayed
+    keeps accruing, and a crash changes neither.
+
+    The position opens at T0. Part of it exits at T1 and the rest at T3.
+    The carry owed is therefore
+
+        leg 1:  exited_qty_1  x  (T1 - T0)
+        leg 2:  exited_qty_2  x  (T3 - T0)
+
+    NOT the whole position over the whole life, and not the remainder
+    measured from the partial. Both legs here are settled through the
+    recovery path, which is what makes T1 and T3 exactly controllable —
+    and simultaneously proves a crash between the partial fill and its
+    settlement does not disturb the algebra.
+    """
+    OPENED_HOURS_AGO = 10.0
+    T1_HOURS_AGO = 6.0          # the partial fill  -> 4h held
+    T3_HOURS_AGO = 1.0          # the final fill    -> 9h held
+
+    def _crash_after_partial_commit(self, pid, qty, bid=64_700.0,
+                                    ask=64_800.0):
+        from lib import exit_dispatch as ED
+        from lib import fee_authority as FA
+        _seed_book(bid=bid, ask=ask)
+        with patch.object(FA, "leg_fee", side_effect=Boom("crash")):
+            try:
+                ED.request_position_partial_exit(
+                    pid, requested_qty=qty, caller_price=bid,
+                    caller_reason="scale_out_tp1", caller_source="PAPER_TP1")
+            except Boom:
+                pass
+
+    def _pending_commitment(self, pid):
+        """The UNFINISHED one. A split exit leaves several commitments on
+        one position, so `first()` would return an already-settled row."""
+        from app.database import VirtualExecutionCommitment, get_db
+        with get_db() as db:
+            r = db.query(VirtualExecutionCommitment).filter(
+                VirtualExecutionCommitment.position_id == pid,
+                VirtualExecutionCommitment.state
+                == "COMMITTED_PENDING_SETTLEMENT").first()
+            return None if r is None else {"execution_id": r.execution_id,
+                                           "state": r.state}
+
+    def _recover_at(self, pid, when):
+        """Settle the pending commitment as though it had been filled at
+        `when`. Every anchor in this test derives from ONE captured instant,
+        so the intervals are exact rather than a few milliseconds off."""
+        from lib import execution_recovery as RECOV
+        c = self._pending_commitment(pid)
+        self.assertIsNotNone(c, "nothing was committed")
+        self._set_committed_at(c["execution_id"], when.isoformat())
+        out = RECOV.recover_pending()
+        self.assertEqual(out["settled"], 1, out)
+        return c["execution_id"]
+
+    def _leg_by_execution(self, execution_id):
+        from app.database import PaperSettlementLeg, get_db
+        with get_db() as db:
+            leg = db.query(PaperSettlementLeg).filter(
+                PaperSettlementLeg.execution_id == execution_id).first()
+            db.expunge_all()
+            return leg
+
+    def _run_split_exit(self):
+        pos, header = self._enter()
+        now = datetime.now(timezone.utc)
+        t0 = now - timedelta(hours=self.OPENED_HOURS_AGO)
+        t1 = now - timedelta(hours=self.T1_HOURS_AGO)
+        t3 = now - timedelta(hours=self.T3_HOURS_AGO)
+        self._set_opened_at(pos.id, t0)
+        original = float(pos.qty)
+        first = float(int(original // 2))
+        self.assertGreater(first, 0.0, "the fixture opened too small a "
+                                       "position to split")
+
+        self._crash_after_partial_commit(pos.id, first)
+        leg1 = self._leg_by_execution(self._recover_at(pos.id, t1))
+
+        pos_mid, _, _, _ = self._state(pos.id)
+        self.assertEqual(pos_mid.status, "Open",
+                         "a partial exit closed the position")
+        remaining = float(pos_mid.qty)
+
+        self._crash_a_final_exit(pos.id)
+        leg2 = self._leg_by_execution(self._recover_at(pos.id, t3))
+        return leg1, leg2, original, first, remaining
+
+    def _crash_a_final_exit(self, pid, bid=64_700.0, ask=64_800.0):
+        from lib import exit_dispatch as ED
+        from lib import fee_authority as FA
+        _seed_book(bid=bid, ask=ask)
+        with patch.object(FA, "leg_fee", side_effect=Boom("crash")):
+            try:
+                ED.request_position_exit(pid, caller_price=bid,
+                                         caller_reason="manual",
+                                         caller_source="API_MANUAL")
+            except Boom:
+                pass
+
+    def test_each_leg_is_charged_for_its_own_interval(self):
+        leg1, leg2, original, first, remaining = self._run_split_exit()
+        self.assertAlmostEqual(
+            leg1.hours_held, self.OPENED_HOURS_AGO - self.T1_HOURS_AGO,
+            places=6, msg="the partial was not charged T0 -> T1")
+        self.assertAlmostEqual(
+            leg2.hours_held, self.OPENED_HOURS_AGO - self.T3_HOURS_AGO,
+            places=6,
+            msg="the remainder was charged from the partial, not from the "
+                "open — it was held the whole time")
+
+    def test_the_quantity_that_left_stops_accruing(self):
+        """The economic claim. Carry is proportional to qty x hours at one
+        rate, so the two legs must agree on that rate — which they can only
+        do if leg 2 is charged on the REMAINDER, not on the whole position.
+        """
+        leg1, leg2, original, first, remaining = self._run_split_exit()
+        self.assertAlmostEqual(first + remaining, original, places=8,
+                               msg="the split lost or invented quantity")
+        rate1 = leg1.holding_cost_usd / (leg1.filled_qty * leg1.hours_held)
+        rate2 = leg2.holding_cost_usd / (leg2.filled_qty * leg2.hours_held)
+        self.assertAlmostEqual(
+            rate1, rate2, places=10,
+            msg=f"the legs disagree on the carry rate, so one was charged "
+                f"on the wrong quantity: leg1={leg1.filled_qty}x"
+                f"{leg1.hours_held}h={leg1.holding_cost_usd}, "
+                f"leg2={leg2.filled_qty}x{leg2.hours_held}h="
+                f"{leg2.holding_cost_usd}")
+        # And state it absolutely, so a uniformly wrong pair cannot pass.
+        self.assertAlmostEqual(float(leg1.filled_qty), first, places=8)
+        self.assertAlmostEqual(float(leg2.filled_qty), remaining, places=8)
+
+    def test_the_partial_did_not_move_the_positions_start(self):
+        """If a partial reset opened_at, the remainder's carry would be
+        silently forgiven for the first stretch of its life."""
+        leg1, leg2, original, first, remaining = self._run_split_exit()
+        self.assertGreater(leg2.hours_held, leg1.hours_held,
+                           "the remainder was held longer than the partial, "
+                           "so its interval cannot be the shorter one")

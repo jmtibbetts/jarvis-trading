@@ -147,3 +147,107 @@ class TheEpochHasExactlyOneDefinitionTests(unittest.TestCase):
         src = inspect.getsource(engine_epoch)
         self.assertNotIn("FORWARD_EVIDENCE", src)
         self.assertNotIn("campaign", src.lower())
+
+
+class TheOutcomeIsActuallyCONSUMEDTests(unittest.TestCase):
+    """`learning_state = APPLIED` is not proof of learning.
+
+    The projection can stamp an outcome perfectly and every consumer can
+    still drop it — each applies its own filters, joins and sample floors on
+    top of the epoch match. This asks the REAL consumers whether the row
+    reached them, which is the only question that matters.
+    """
+
+    SYMBOL = "BTC/USD"
+
+    def setUp(self):
+        from app.database import TradeOutcome, TradingSignal, get_db
+        from lib.engine_epoch import ENGINE_EPOCH
+        from app.database import new_id
+        self.epoch = ENGINE_EPOCH
+        self.sig_id = new_id()
+        with get_db() as db:
+            db.query(TradeOutcome).delete()
+            db.add(TradingSignal(
+                id=self.sig_id, asset_symbol=self.SYMBOL, asset_class="Crypto",
+                direction="Long", timeframe="4H", confidence=70.0,
+                composite_score=70.0, entry_price=64_000.0,
+                stop_loss=63_000.0, target_price=66_000.0,
+                strategy="momentum", status="Executed"))
+            # Exactly the shape lib/canonical_learning projects: the
+            # PERSISTED epoch that produced the economics.
+            for i in range(3):
+                db.add(TradeOutcome(
+                    id=new_id(), signal_id=self.sig_id, symbol=self.SYMBOL,
+                    direction="Long", asset_class="Crypto", timeframe="4H",
+                    entry_price=64_000.0,
+                    exit_price=66_000.0, pnl_pct=3.1, outcome="win",
+                    engine_epoch=self.epoch, outcome_source="live",
+                    entered_at="2026-08-18T00:00:00+00:00",
+                    exited_at="2026-08-18T04:00:00+00:00"))
+            db.commit()
+
+    def tearDown(self):
+        from app.database import TradeOutcome, TradingSignal, get_db
+        with get_db() as db:
+            db.query(TradeOutcome).delete()
+            db.query(TradingSignal).filter(
+                TradingSignal.id == self.sig_id).delete()
+            db.commit()
+
+    def test_calibration_counts_it(self):
+        from lib import calibration
+        calibration.build_table(force=True)
+        s = calibration.summary()
+        self.assertGreaterEqual(
+            s.get("sample") or 0, 3,
+            "calibration did not see the canonical outcomes — the book "
+            f"would learn nothing while reporting APPLIED: {s}")
+
+    def test_expectancy_counts_it(self):
+        from lib import expectancy
+        table = expectancy.build_table(force=True)
+        # The all-buckets cell is keyed by the empty tuple pair.
+        overall = table.get(((), ())) or {}
+        total = overall.get("n") or overall.get("total") or 0
+        self.assertGreaterEqual(
+            total, 3, f"expectancy did not see the canonical outcomes: "
+                      f"overall={overall}")
+        # And it bucketed them by their real basis, not into "unknown" —
+        # canonical_learning freezes asset_class from the settlement header
+        # and takes timeframe from the decision observation precisely so
+        # these buckets mean something.
+        keyed = [k for k in table
+                 if isinstance(k, tuple) and len(k) == 2
+                 and "Crypto".lower() in str(k[1]).lower()]
+        self.assertTrue(keyed, f"outcomes were not bucketed by asset class: "
+                               f"{list(table)[:6]}")
+
+    def test_the_paper_jobs_historical_edge_counts_it(self):
+        """The gate that decides whether the book has stopped bootstrapping."""
+        from jobs.paper_trading import _observed_outcome_count
+        self.assertGreaterEqual(
+            _observed_outcome_count(), 3,
+            "the paper job's own evidence count does not see canonical "
+            "outcomes")
+
+    def test_a_prior_epoch_outcome_is_not_counted(self):
+        """The control. Without it, a consumer that ignores the epoch filter
+        entirely would pass every test above."""
+        from app.database import TradeOutcome, get_db, new_id
+        from jobs.paper_trading import _observed_outcome_count
+        with get_db() as db:
+            db.query(TradeOutcome).delete()
+            db.add(TradeOutcome(
+                id=new_id(), signal_id=self.sig_id, symbol=self.SYMBOL,
+                direction="Long", asset_class="Crypto", timeframe="4H",
+                entry_price=64_000.0, exit_price=66_000.0,
+                pnl_pct=3.1, outcome="win",
+                engine_epoch="2026-08-13",          # the retired machine
+                outcome_source="live",
+                entered_at="2026-08-18T00:00:00+00:00",
+                exited_at="2026-08-18T04:00:00+00:00"))
+            db.commit()
+        self.assertEqual(_observed_outcome_count(), 0,
+                         "an outcome from a retired epoch was counted as "
+                         "evidence about the current machine")

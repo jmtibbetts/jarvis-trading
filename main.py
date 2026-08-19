@@ -106,11 +106,37 @@ async def lifespan(app_: FastAPI):
     # for dev/debug instances that must never fetch data or place orders.
     if os.getenv("JARVIS_DISABLE_SCHEDULER") == "1":
         logger.warning("[Server] Scheduler DISABLED (JARVIS_DISABLE_SCHEDULER=1) — UI/API only")
+        app.state.scheduler_lease = None
     else:
-        from app.scheduler import create_scheduler
-        scheduler = create_scheduler()
-        scheduler.start()
-        logger.info("[Server] APScheduler started — jobs firing immediately")
+        # ONE ECONOMIC SCHEDULER PER BOOK. Two processes against the same
+        # database would both open entries, both manage the same positions
+        # and both project learning — silently, because APScheduler's
+        # max_instances is a per-PROCESS guard. The second process still
+        # serves the API; it simply does not act.
+        from datetime import datetime as _dt, timezone as _tz
+
+        from lib import scheduler_lease as SL
+        lease = SL.acquire(now_iso=_dt.now(_tz.utc).isoformat())
+        app.state.scheduler_lease = lease
+        if lease.granted:
+            from app.scheduler import create_scheduler
+            scheduler = create_scheduler()
+            scheduler.start()
+            logger.info("[Server] APScheduler started — jobs firing immediately")
+        elif lease.state == SL.STANDBY:
+            owner = lease.owner or {}
+            logger.warning(
+                "[Server] Scheduler STANDBY — pid %s on %s already owns the "
+                "economic scheduler for this database. Serving API/UI only; "
+                "this process will not trade.",
+                owner.get("pid"), owner.get("host"))
+        else:
+            # The guard itself could not run. Say so loudly and do NOT act:
+            # an unprovable claim to exclusivity is not a claim.
+            logger.error(
+                "[Server] Scheduler NOT started — ownership could not be "
+                "established (%s). Refusing to run economic jobs without "
+                "proof that nothing else is.", lease.detail)
 
     # Crypto L2 order book streams (Binance + Coinbase, free public WS feeds).
     # Unlike APScheduler jobs these are long-lived connections, so they're

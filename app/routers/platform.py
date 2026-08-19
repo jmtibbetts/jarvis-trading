@@ -277,7 +277,31 @@ def get_error_rate(window_minutes: int = 15):
 
 
 @router.get("/jobs/status")
-def jobs_status(): return job_status
+def jobs_status():
+    """Per-job state, plus WHO OWNS the economic scheduler.
+
+    A desk cannot tell "nothing qualified" from "this process is not the one
+    trading" if ownership is invisible. Two processes against one book both
+    used to start schedulers silently; now the second stands by, and this is
+    where an operator sees that.
+    """
+    import os as _os
+
+    from lib import scheduler_lease as SL
+    owner = SL.current_owner()
+    if _os.getenv("JARVIS_DISABLE_SCHEDULER") == "1":
+        role = "DISABLED"
+    elif owner and owner.get("pid") == _os.getpid():
+        role = "OWNER"
+    elif owner:
+        role = "STANDBY"
+    else:
+        role = "UNCLAIMED"
+    return {"jobs": job_status,
+            "scheduler": {"role": role, "owner": owner,
+                          "disabled_by_env":
+                              _os.getenv("JARVIS_DISABLE_SCHEDULER") == "1"},
+            **job_status}
 
 
 @router.get("/system/trading-status")

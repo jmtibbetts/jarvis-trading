@@ -211,16 +211,62 @@ def note_quote(*, symbol: str, product: str, venue: str, bid, ask,
     return reason
 
 
+# A database that is briefly locked must not cost us evidence; a database
+# that is down for hours must not cost us the process. Between those two,
+# this is how many samples may wait in memory. At the observed ~25 rows/s
+# this is roughly ten minutes of buffering.
+MAX_BUFFERED_SAMPLES = 20_000
+
+_DROPPED = 0
+
+
+def dropped_sample_count() -> int:
+    """Samples that were genuinely discarded, counted rather than forgotten.
+
+    A silent drop and a reported drop are different failures. This is the
+    reported one.
+    """
+    return _DROPPED
+
+
 def flush_samples() -> int:
-    """Write buffered observations. Returns rows written."""
+    """Write buffered observations. Returns rows written.
+
+    ON FAILURE THE BATCH GOES BACK. This used to drain the buffer BEFORE
+    the insert, so a transient "database is locked" — routine under WAL with
+    a high-rate writer and 31 scheduler jobs — destroyed the batch
+    permanently while the caller logged a warning and moved on. Measured in
+    production: two failures in 35 minutes, ~100 Bitnomial quote samples
+    gone. Paid evidence that cannot be re-fetched is exactly what must
+    survive a transient error, so the rows are restored to the FRONT of the
+    buffer and retried on the next tick.
+    """
+    global _DROPPED
     from app.database import InstrumentQuoteSample, get_db
 
     with _BUF_LOCK:
         if not _BUF:
             return 0
         batch, _BUF[:] = list(_BUF), []
-    with get_db() as db:
-        db.bulk_insert_mappings(InstrumentQuoteSample.__mapper__, batch)
+    try:
+        with get_db() as db:
+            db.bulk_insert_mappings(InstrumentQuoteSample.__mapper__, batch)
+    except Exception:
+        with _BUF_LOCK:
+            # Front, because these are older than anything buffered while
+            # the write was in flight, and chronology is the point.
+            _BUF[:0] = batch
+            excess = len(_BUF) - MAX_BUFFERED_SAMPLES
+            if excess > 0:
+                # Shed the OLDEST: if the database has been unreachable long
+                # enough to overflow, recent market state is worth more than
+                # stale market state.
+                del _BUF[:excess]
+                _DROPPED += excess
+                logger.error("[RangeCollector] evidence buffer full — "
+                             "dropped %d oldest sample(s), %d total dropped",
+                             excess, _DROPPED)
+        raise
     return len(batch)
 
 

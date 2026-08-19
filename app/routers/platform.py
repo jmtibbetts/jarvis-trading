@@ -304,6 +304,41 @@ def jobs_status():
             **job_status}
 
 
+@router.get("/providers/health")
+def providers_health():
+    """Every provider capability, its status, freshness and quota.
+
+    Exists so nobody has to SSH in and hand-probe. A 429 on Massive and a
+    402 on LunarCrush both went unnoticed for want of exactly this — the
+    only health table in the system covered the 43 RSS feeds and no paid
+    API at all.
+
+    Contains no credentials: error text is sanitised before it is stored.
+    """
+    from lib import provider_health as PH
+    rows = PH.snapshot()
+    actionable = [r for r in rows if r.get("actionable")]
+    by_status = {}
+    for r in rows:
+        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+    return {
+        "providers": rows,
+        "counts": by_status,
+        "actionable": actionable,
+        "tracked": len(rows),
+        "statuses": list(PH.STATUSES),
+    }
+
+
+@router.get("/providers/health/{provider}")
+def provider_health_detail(provider: str):
+    from lib import provider_health as PH
+    rows = [r for r in PH.snapshot() if r["provider"] == provider]
+    if not rows:
+        raise HTTPException(404, f"no health records for {provider!r}")
+    return {"provider": provider, "capabilities": rows}
+
+
 @router.get("/system/trading-status")
 def get_trading_status():
     """Global kill-switch state. When live_trading_enabled is False, execute_signals

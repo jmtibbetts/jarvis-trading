@@ -63,6 +63,7 @@ _COLLECTION = {
     "wallet_discovery": "Helius wallet discovery",
     "wallet_activity": "Helius wallet activity observation",
     "feature_snapshots": "freeze the feature vector behind a decision",
+    "social_sentiment": "LunarCrush social/sentiment observations",
 }
 
 # ── Derive from what was collected; write conclusions, never money ───────

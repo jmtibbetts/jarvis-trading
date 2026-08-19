@@ -3122,6 +3122,91 @@ class InstrumentQuoteSample(Base):
     )
 
 
+class LunarCrushObservation(Base):
+    """Social/sentiment evidence, kept as the PROVIDER's own construct.
+
+    Deliberately its own table rather than folded into
+    `psychology_snapshots` or `token_activity_snapshots`. A galaxy_score is
+    a LunarCrush model output, not a market measurement, and putting it in a
+    table whose other rows mean "observed market sentiment" would make it
+    indistinguishable from one later. The metric names here are the
+    provider's names, on purpose.
+
+    METRICS ARE JSON because the provider's metric set changes with the plan
+    and the API version. Pinning each to a column would force a migration
+    every time LunarCrush adds a field, and — worse — would tempt a writer
+    to store 0 for a metric the plan does not include. Absent stays absent.
+    """
+    __tablename__ = "lunarcrush_observations"
+
+    id = Column(String, primary_key=True)
+
+    provider    = Column(String)      # always "lunarcrush"
+    api_version = Column(String)      # "v4"
+    endpoint    = Column(String)      # which call produced it
+
+    provider_asset_id = Column(String)
+    symbol = Column(String)
+    name   = Column(String)
+
+    provider_at = Column(String)      # the provider's own timestamp
+    received_at = Column(String)      # when this desk received it
+    persisted_at = Column(String)
+
+    metrics_json = Column(Text)       # the provider's metric names, verbatim
+    ingestion_run_id = Column(String)
+
+    __table_args__ = (
+        Index("ix_lunarcrush_symbol_time", "symbol", "received_at"),
+    )
+
+
+class ProviderHealth(Base):
+    """Is this provider capability working, and how would anyone know?
+
+    `intelligence_source_health` covers the 43 RSS feeds and nothing else,
+    so every paid API had no health record at all — which is how a 429 on
+    Massive and a 402 on LunarCrush both went unnoticed while the
+    subscriptions were being paid for.
+
+    KEYED BY (PROVIDER, CAPABILITY) because health is not a property of a
+    provider. Kraken's public market data can be healthy while its private
+    trading capability is deliberately disabled, and one verdict for both
+    would be false either way.
+
+    NO SECRETS. `error_detail` is sanitised before it is written — provider
+    errors quote request URLs, and that is exactly where API keys live.
+    """
+    __tablename__ = "provider_health"
+
+    provider   = Column(String, primary_key=True)
+    capability = Column(String, primary_key=True)
+
+    status          = Column(String)
+    last_attempt_at = Column(String)
+    last_success_at = Column(String)
+    last_failure_at = Column(String)
+    last_data_at    = Column(String)   # when rows last actually arrived
+    provider_data_at = Column(String)  # the provider's own timestamp
+
+    latency_ms       = Column(Float)
+    last_http_status = Column(Integer)
+    last_rows        = Column(Integer)
+
+    success_count        = Column(Integer, default=0)
+    failure_count        = Column(Integer, default=0)
+    consecutive_failures = Column(Integer, default=0)
+
+    rate_limit_remaining = Column(Integer)
+    rate_limit_limit     = Column(Integer)
+    rate_limit_reset_at  = Column(String)
+    minute_remaining     = Column(String)
+
+    error_detail = Column(Text)        # sanitised
+    detail       = Column(String)
+    updated_at   = Column(String)
+
+
 class CandidateSignal(Base):
     """Every setup the system CONSIDERED — including the ones it refused.
 

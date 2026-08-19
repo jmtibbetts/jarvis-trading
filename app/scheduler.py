@@ -566,6 +566,7 @@ def create_scheduler(*, economic: bool = True) -> BackgroundScheduler:
     from jobs.fetch_ipo_filings import run as ipo_run
     from jobs.collect_postmortems import run as postmortem_run
     from jobs.fetch_crypto_derivatives import run as crypto_derivatives_run
+    from jobs.fetch_social_sentiment import run as social_run
 
     now = datetime.now(timezone.utc)
 
@@ -704,6 +705,14 @@ def create_scheduler(*, economic: bool = True) -> BackgroundScheduler:
     # Crypto derivatives (funding/OI/long-short ratio/liquidations) every 10 min —
     # free OKX public REST, no LLM. 10 min balances freshness against OKX's rate
     # limits across a 5-symbol watchlist x 4 endpoints per run.
+    # LunarCrush social/sentiment. HOURLY because the key allows 100
+    # requests/day: one coins/list call covers the whole universe, so this
+    # spends ~24 of 100 and leaves room for diagnostics.
+    sched.add_job(make_job_runner('social_sentiment', social_run),
+                  'interval', hours=1, id='social_sentiment',
+                  next_run_time=now + timedelta(minutes=2),
+                  replace_existing=True, max_instances=1)
+
     sched.add_job(make_job_runner('crypto_derivatives', crypto_derivatives_run),
                   'interval', minutes=10, id='crypto_derivatives',
                   next_run_time=now + timedelta(minutes=2, seconds=30),

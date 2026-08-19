@@ -77,9 +77,33 @@ path confusion. None implicate the engine. PostgreSQL/Timescale is recorded
 as a future option **if** evidence scale later demands it — not now, and not
 without measurement.
 
-## The stale Windows tree
+## The stale Windows tree — read this before touching it
 
-`C:\jarvis-trading-ai-python` exists and is used for editing and running the
-test suite. It is **not** a runtime: it holds no active database, no
-scheduler lease, and no service points at it. Development there is fine;
-operation is not.
+`C:\jarvis-trading-ai-python` is used for editing and running the test
+suite. It is **not** a runtime, and it is **not** to be deleted casually,
+because it contains a third economy that is neither of the two you know
+about:
+
+| copy | positions | trades | cash |
+|---|---|---|---|
+| active canonical book (ext4) | 0 | 0 | 100,000.00 |
+| legacy archive (ext4, `0444`) | 667 | 654* | 63,550.8371643338 |
+| **Windows tree `data/jarvis.db`** | **652** | **654** | **74,426.6869165943** |
+
+\* legacy archive trades: 664.
+
+That Windows copy is a **pre-cutover snapshot mutated by Windows test runs**
+— last written 2026-08-18 08:12, before the canonical epoch cutover. It is
+not the archive, not the dormant original, and not the active book.
+
+**Proven non-authoritative**, 2026-08-19:
+
+- `0` processes hold any of its `.db` files
+- the live runtime's open descriptors are entirely ext4 under
+  `~/jarvis-trading/data`
+- no service, env var or config resolves into `/mnt/c`
+- the live process carries no `JARVIS_DB_PATH` at all
+
+It is left exactly as found — not migrated, not deleted, not mutated. If it
+is ever removed, remove it *deliberately*, knowing it is a distinct
+historical snapshot and not a duplicate of anything preserved elsewhere.

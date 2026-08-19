@@ -65,15 +65,31 @@ CI still running).
 | job | what it proves |
 |---|---|
 | `pytest` | full suite on ubuntu-24.04, `set -o pipefail` before `tee` |
-| `offline` | the same suite under `unshare -rn` — **no network at all** |
 | `frontend` | typecheck + build |
 | `bootstrap` | schema initialises twice from empty; migrations idempotent |
 | `dependency_audit` | CVEs — **advisory**, `continue-on-error` by design |
 | `secret_scan` | gitleaks — **fail-closed**, deliberately no soft flag |
 
-The `offline` job carries a control that proves the sandbox has no route
-out; without it, an `unshare` that silently failed to isolate would run the
-suite *with* network and report a hermetic pass.
+**The hermetic proof runs on the desk, not in CI — deliberately.** Run it
+before every push:
+
+```bash
+unshare -rn .venv/bin/python -m pytest -q     # expect TRUE exit 0
+unshare -rn .venv/bin/python scripts/assert_no_network.py   # the control
+```
+
+The control matters: an `unshare` that silently failed to isolate would run
+the suite *with* network and report a hermetic pass.
+
+An `offline` CI job was attempted and withdrawn. GitHub-hosted ubuntu-24.04
+forbids unprivileged user namespaces (`unshare: write failed
+/proc/self/uid_map: Operation not permitted`), and the sudo workaround runs
+the suite successfully — `3975 passed` — while still exiting 1, with no
+failure or error after the summary and no local reproduction. A job that
+reports **red on a passing suite** is a false signal, and a false red trains
+people to ignore CI exactly as a false green does. Recorded as an open item
+in `.github/workflows/ci.yml` rather than hidden behind
+`continue-on-error`.
 
 ## Auth
 

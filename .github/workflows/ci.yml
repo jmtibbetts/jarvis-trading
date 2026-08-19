@@ -190,11 +190,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt
+      # Through the SAME fail-closed installer every other job uses. A bare
+      # `pip install -r requirements.txt` is forbidden here and pinned by
+      # tests/test_dependency_bootstrap.py, so that no job can quietly build
+      # its environment a second way.
+      - name: Create the repository virtualenv
+        run: python -m venv .venv
+
+      - name: Install dependencies (fail-closed)
+        run: .venv/bin/python scripts/install_dependencies.py --with-test
 
       # A CONTROL. Without it, an unshare that silently failed to isolate
       # would run the suite WITH network and report a hermetic pass — the
@@ -203,15 +207,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          unshare -rn .venv/bin/python - <<'PY'
-          import socket, sys
+          unshare -rn .venv/bin/python -c 'import socket, sys; ok=False
           try:
               socket.create_connection(("1.1.1.1", 53), timeout=5)
           except OSError:
-              print("ok  sandbox has no route out")
-              sys.exit(0)
-          sys.exit("the offline sandbox still reached the network")
-          PY
+              ok=True
+          print("ok  sandbox has no route out" if ok else "REACHED THE NETWORK")
+          sys.exit(0 if ok else 1)'
 
       - name: Run suite offline
         env:

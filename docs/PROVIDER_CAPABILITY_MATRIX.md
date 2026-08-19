@@ -24,7 +24,7 @@ Probed 2026-08-19 ~04:37 UTC from the canonical WSL tree.
 | **Tavily / MCP** | web research | **WORKING** | tool list returned |
 | **LM Studio** | local inference | **WORKING** | discovery fell through `127.0.0.1` → WSL gateway `172.31.48.1`; generating with `google/gemma-4-26b-a4b-qat` |
 | **Massive** | equity aggregates | **RATE_LIMITED** | HTTP 429, "too many 429 error responses" |
-| **LunarCrush** | — | **CONFIGURED_NO_IMPLEMENTATION** | credential present, **zero code references anywhere** |
+| **LunarCrush** | social/sentiment (v4) | **PAYMENT_REQUIRED** | now implemented; every endpoint returns HTTP 402 *"You must have an active Individual or higher subscription"*. Credential is valid — headers decrement 100→95 |
 | **Stocklake** | — | via `lib/mcp_client` only | no direct module |
 | **Alpaca** | broker | **MUTATING_FORBIDDEN** | `execute`/`positions`/`guardian` behind an opt-in that is OFF; not registered |
 | **Kraken** (private) | account/orders | **MUTATING_FORBIDDEN** | `lib/kraken_account`; no collection caller |
@@ -32,23 +32,45 @@ Probed 2026-08-19 ~04:37 UTC from the canonical WSL tree.
 
 ## Two findings worth acting on
 
-**LunarCrush is paid and has never been implemented.** The credential exists
-in `.env`; a repository-wide search finds no reference to it in any module,
-job, test or document. It is not "broken" and not "idle" — nothing was ever
-written to call it. Either build a consumer or drop the subscription.
+**LunarCrush: the consumer is now built; the subscription is not active.**
+It previously had zero code references anywhere. It now has a v4 client, an
+observations table, an hourly COLLECTION job and health telemetry — and it
+collects nothing, because every endpoint answers:
 
-**Massive is rate-limited.** Its aggregates endpoint returns 429 under the
-current call pattern. That is a real utilisation problem, not an outage:
-capacity is being spent faster than the plan allows, so the data is missing
-precisely when a job wants it.
+    HTTP 402  {"error": "You must have an active Individual or higher
+                         subscription to use this endpoint."}
+
+The credential is **valid**: the service recognises it and returns
+rate-limit headers that decrement on each call (100/day, 4/min; 95 left
+after probing). This is neither an auth failure nor an outage, and no retry
+or backoff can change it — **only the account owner can**. Recorded as
+`PAYMENT_REQUIRED` so it never reads as a bug to chase. The moment the plan
+is active, collection starts with no further work.
+
+**ACTION REQUIRED (external):** activate an Individual-or-higher LunarCrush
+plan, or drop the subscription.
+
+**Massive is rate-limited, but not by a polling loop.** Its aggregates
+endpoint returned 429 to a manual probe. Re-measured against the running
+service: Massive is called **zero** times on a schedule — its only callers
+are `lib/signal_verification` and two on-demand `intel` routes. It already
+has a 5-req/min budget and a 300 s cache. So the 429 reflects an exhausted
+plan allowance rather than a runaway caller, and the correct fix is quota
+awareness and 429 state (now available through `provider_health`) rather
+than more retries. Left as measured; not yet re-verified after a quota
+reset.
 
 ## Health telemetry gap
 
-`intelligence_source_health` tracks **only the 43 RSS news feeds** (42
-healthy; "Micron Newsroom" returns 403). None of the paid API providers has
-a health record, so nothing in the running system can answer "is TwelveData
-authenticating?" or "is Massive rate-limited?" without a manual probe like
-this one. The statuses above were obtained by hand.
+**Closed.** `intelligence_source_health` still covers only the 43 RSS feeds,
+but `provider_health` now exists alongside it — keyed by (provider,
+capability), with distinct statuses, quota, freshness and sanitised errors,
+exposed at `GET /api/providers/health`. LunarCrush is the first live
+citizen, reporting `PAYMENT_REQUIRED` with 95 daily requests remaining.
+
+Remaining work: the other providers still record health only when something
+calls them, so the table fills in as each capability is exercised. A
+periodic capability heartbeat would make the surface complete.
 
 ## Mutation safety
 

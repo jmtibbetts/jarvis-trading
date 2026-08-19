@@ -171,6 +171,81 @@ jobs:
           path: pytest.log
           retention-days: 7
 
+  # ── The hermetic proof, which CI was NOT making ────────────────────────
+  # The suite is expected to pass with NO network at all. A test that
+  # quietly reaches a provider is not hermetic, and the failure mode is a
+  # green CI that turns red the day an API is slow. This ran on the desk and
+  # nowhere else, so CI could not see a regression in it.
+  #
+  # `unshare -rn` gives the process a private network namespace with only
+  # loopback — no DNS, no route out. It needs unprivileged user namespaces,
+  # which ubuntu-24.04 runners provide.
+  offline:
+    name: pytest (no network)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      # A CONTROL. Without it, an unshare that silently failed to isolate
+      # would run the suite WITH network and report a hermetic pass — the
+      # exact shape of a check that reports without protecting.
+      - name: Prove the sandbox has no route out
+        shell: bash
+        run: |
+          set -o pipefail
+          unshare -rn .venv/bin/python - <<'PY'
+          import socket, sys
+          try:
+              socket.create_connection(("1.1.1.1", 53), timeout=5)
+          except OSError:
+              print("ok  sandbox has no route out")
+              sys.exit(0)
+          sys.exit("the offline sandbox still reached the network")
+          PY
+
+      - name: Run suite offline
+        env:
+          JARVIS_DISABLE_SCHEDULER: "1"
+          JARVIS_PLATFORM_MODE: "VIRTUAL_ONLY"
+        shell: bash
+        run: |
+          set -o pipefail
+          unshare -rn .venv/bin/python -m pytest -q 2>&1 | tee offline.log
+
+      - name: Sanitised failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### offline pytest failed on ubuntu-24.04"
+            echo ""
+            echo "Failing tests:"
+            echo '```'
+            grep -E "^(FAILED|ERROR) " offline.log | sed -E 's/ - .*$//' | head -40 || echo "(none parsed)"
+            echo '```'
+            echo ""
+            echo "A failure here means a test reached the network, or the"
+            echo "suite genuinely regressed. The full log is an artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-log
+          path: offline.log
+          retention-days: 7
+
   # ── The frontend is part of the product ────────────────────────────────
   frontend:
     name: frontend typecheck + build

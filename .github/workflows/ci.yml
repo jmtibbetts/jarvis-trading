@@ -213,7 +213,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          sudo unshare -n runuser -u "$USER" --             .venv/bin/python scripts/assert_no_network.py
+          sudo unshare -n sudo -u "$USER" -H             .venv/bin/python scripts/assert_no_network.py
 
       - name: Run suite offline
         env:
@@ -222,7 +222,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          sudo unshare -n runuser -u "$USER" --             .venv/bin/python -m pytest -q 2>&1 | tee offline.log
+          # PYTEST'S OWN STATUS IS THE VERDICT. The privilege-drop wrapper
+          # sits between us and the suite, and its exit code is not the
+          # suite's — an earlier run reported failure while the log said
+          # "3975 passed". So the status is written from inside the sandbox
+          # and read back out here.
+          sudo unshare -n sudo -u "$USER" -H bash -c             '.venv/bin/python -m pytest -q; echo $? > .offline_status'             2>&1 | tee offline.log
+          status="$(cat .offline_status 2>/dev/null || echo 1)"
+          echo "pytest exit status inside the sandbox: $status"
+          exit "$status"
 
       - name: Sanitised failure summary
         if: failure()

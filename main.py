@@ -119,10 +119,20 @@ async def lifespan(app_: FastAPI):
         lease = SL.acquire(now_iso=_dt.now(_tz.utc).isoformat())
         app.state.scheduler_lease = lease
         if lease.granted:
+            # LOOKING AND ACTING ARE DIFFERENT PERMISSIONS. In EVIDENCE_ONLY
+            # the COLLECTION and ANALYSIS jobs still run — that is what the
+            # data subscriptions are for — while everything that could move
+            # the book is withheld. Switching trading off used to switch
+            # every paid feed off with it.
+            from lib import runtime_mode as _RM
+            economic = _RM.current_mode() != _RM.EVIDENCE_ONLY
             from app.scheduler import create_scheduler
-            scheduler = create_scheduler()
+            scheduler = create_scheduler(economic=economic)
             scheduler.start()
-            logger.info("[Server] APScheduler started — jobs firing immediately")
+            logger.info(
+                "[Server] APScheduler started — mode=%s, economic jobs %s",
+                _RM.current_mode(),
+                "ENABLED" if economic else "WITHHELD (collection continues)")
         elif lease.state == SL.STANDBY:
             owner = lease.owner or {}
             logger.warning(

@@ -493,7 +493,45 @@ Respond ONLY with valid JSON:
         logger.error(f"[Guardian] Error: {e}", exc_info=True)
 
 
-def create_scheduler() -> BackgroundScheduler:
+class _CapabilityFilteredScheduler:
+    """Registers only the jobs this runtime is allowed to run.
+
+    A thin proxy rather than 37 edited call sites: the registration list
+    stays one readable block, and the POLICY lives in lib/job_capability
+    where it can be read and tested on its own. Everything else on the
+    scheduler passes straight through.
+    """
+
+    def __init__(self, sched, allowed, *, on_skip=None):
+        self._sched = sched
+        self._allowed = frozenset(allowed)
+        self._on_skip = on_skip
+        self.registered: list[str] = []
+        self.skipped: list[tuple[str, str]] = []
+
+    def add_job(self, *args, **kwargs):
+        from lib import job_capability as JC
+        job_id = kwargs.get("id")
+        cap = JC.capability_of(job_id) if job_id else JC.ECONOMIC
+        if cap not in self._allowed:
+            self.skipped.append((job_id or "<unnamed>", cap))
+            if self._on_skip:
+                self._on_skip(job_id, cap)
+            return None
+        self.registered.append(job_id or "<unnamed>")
+        return self._sched.add_job(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._sched, name)
+
+
+def create_scheduler(*, economic: bool = True) -> BackgroundScheduler:
+    """Build the scheduler for this runtime.
+
+    `economic=False` registers COLLECTION and ANALYSIS jobs only — the
+    EVIDENCE_ONLY shape. Switching trading off used to switch every paid
+    data feed off with it; looking and acting are different permissions.
+    """
     load_persisted_job_status()  # 'last run' survives restarts — see docstring
     executors = {'default': _DaemonThreadPoolExecutor(max_workers=10)}
     # job_defaults are the fix for "jobs only run when triggered manually":
@@ -504,10 +542,13 @@ def create_scheduler() -> BackgroundScheduler:
     # happened constantly. Now: late jobs run late (up to 10 min) instead of
     # not at all, coalesce collapses a backlog into one run, and the pool is
     # larger.
-    sched = BackgroundScheduler(
+    _real = BackgroundScheduler(
         executors=executors, timezone='UTC',
         job_defaults={'misfire_grace_time': 600, 'coalesce': True},
     )
+    from lib import job_capability as JC
+    sched = _CapabilityFilteredScheduler(
+        _real, JC.allowed_capabilities(economic=economic))
 
     from jobs.fetch_market_data import run as market_run
     from jobs.fetch_threat_news import run as threats_run
@@ -897,7 +938,15 @@ def create_scheduler() -> BackgroundScheduler:
         "[Scheduler] v2.2 — startup sequenced: data pipeline T+0s → LLM tasks T+3min → "
         "execute T+4min → guardian T+3.5min | scanner: crypto T+8min / futures T+10min"
     )
-    return sched
+    if sched.skipped:
+        logger.warning(
+            "[Scheduler] %d job(s) withheld (runtime may not act): %s",
+            len(sched.skipped),
+            ", ".join(f"{j}[{c}]" for j, c in sched.skipped))
+    logger.info("[Scheduler] %d job(s) registered — economic=%s",
+                len(sched.registered), economic)
+    return sched._sched
+
 
 
 

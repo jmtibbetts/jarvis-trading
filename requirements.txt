@@ -48,3 +48,4 @@ yfinance>=0.2.40
 
 # Phase 5 cryptofeed prototype (Windows: order_book needs vendor/patches/order_book-1.0.1-msvc.patch)
 cryptofeed==2.5.0
+pyflakes>=3.0        # undefined-name guard (tests/test_no_undefined_names.py)

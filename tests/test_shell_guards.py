@@ -67,6 +67,21 @@ class TheLibraryRefusesMisuseTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required for the shell guards")
 class TheRepositoryIsDerivedNeverInheritedTests(unittest.TestCase):
+    """These compare a shell-derived path against a Python-derived one.
+
+    On Windows the two are genuinely different spellings of the same
+    directory — Git Bash answers `/c/jarvis-trading-ai-python`, pathlib
+    answers `C:\jarvis-trading-ai-python` — so the comparison cannot hold
+    there and says nothing about the guard. This is a REAL platform
+    difference, unlike the encoding failures elsewhere in this suite, so it
+    is declared rather than papered over. The guard itself is exercised on
+    Linux, which is where the scripts run.
+    """
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("shell and pathlib spell the same path differently "
+                          "on Windows; the guard runs on Linux")
 
     def test_it_resolves_to_the_repository(self):
         r = run_snippet('printf "%s" "$JARVIS_ROOT"')

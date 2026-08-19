@@ -29,6 +29,10 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                      # import cost stays at zero
+    from lib.decision_types import TradeDecision
 
 logger = logging.getLogger(__name__)
 

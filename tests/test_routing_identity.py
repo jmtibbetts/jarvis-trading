@@ -59,7 +59,7 @@ class ResolutionTests(unittest.TestCase):
         # AST, not text: the module DOCSTRING legitimately names
         # execution_readiness while explaining why it is kept separate, and a
         # substring scan would fail on the explanation rather than the code.
-        tree = ast.parse(pathlib.Path("lib/routing_identity.py").read_text())
+        tree = ast.parse(pathlib.Path("lib/routing_identity.py").read_text(encoding="utf-8"))
         banned = {"execution_snapshot", "kraken_stream",
                   "bitnomial_market_data", "range_collector"}
         imported = set()
@@ -110,7 +110,7 @@ class ConflictGuardTests(unittest.TestCase):
     def test_build_reads_the_attribute_that_actually_exists(self):
         """Regression: getattr(ready, 'instrument_id') was always None."""
         import pathlib
-        src = pathlib.Path("lib/decision_observation.py").read_text()
+        src = pathlib.Path("lib/decision_observation.py").read_text(encoding="utf-8")
         self.assertIn('getattr(ready, "instrument", None)', src)
         self.assertNotIn('instrument_id=getattr(ready, "instrument_id"', src)
 
@@ -179,7 +179,7 @@ class WiringTests(unittest.TestCase):
     def test_every_funnel_call_in_the_job_passes_routing_identity(self):
         import ast
         import pathlib
-        tree = ast.parse(pathlib.Path("jobs/paper_trading.py").read_text())
+        tree = ast.parse(pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8"))
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
@@ -194,7 +194,7 @@ class WiringTests(unittest.TestCase):
     def test_canonical_entry_receives_the_frozen_identity(self):
         import ast
         import pathlib
-        tree = ast.parse(pathlib.Path("jobs/paper_trading.py").read_text())
+        tree = ast.parse(pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8"))
         for n in ast.walk(tree):
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == "open_canonical_position"):
@@ -205,7 +205,7 @@ class WiringTests(unittest.TestCase):
     def test_the_display_fallback_is_not_routing_truth(self):
         """A missing class must not freeze unknown crypto as EQUITY_SPOT."""
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         self.assertIn("routing_asset_class_hint", src)
         self.assertIn('s.asset_class or ("Futures" if is_futures else None)', src)
 
@@ -300,7 +300,7 @@ class DisplayAssetClassIsNotRoutingTruthTests(unittest.TestCase):
 
     def test_canonical_entry_uses_the_frozen_class_not_the_display_one(self):
         import pathlib
-        src = pathlib.Path("lib/canonical_entry.py").read_text()
+        src = pathlib.Path("lib/canonical_entry.py").read_text(encoding="utf-8")
         self.assertIn("readiness_asset_class", src)
         self.assertIn("routing_identity.asset_class", src)
         self.assertNotIn(
@@ -335,7 +335,7 @@ class SnapshotStampsInstrumentTests(unittest.TestCase):
     def test_the_perp_reader_assigns_the_contract(self):
         import ast
         import pathlib
-        tree = ast.parse(pathlib.Path("lib/execution_snapshot.py").read_text())
+        tree = ast.parse(pathlib.Path("lib/execution_snapshot.py").read_text(encoding="utf-8"))
         assigns = [n for n in ast.walk(tree)
                    if isinstance(n, ast.Assign)
                    for t in n.targets
@@ -344,5 +344,5 @@ class SnapshotStampsInstrumentTests(unittest.TestCase):
 
     def test_the_collector_forwards_it(self):
         import pathlib
-        src = pathlib.Path("lib/market_data_runtime.py").read_text()
+        src = pathlib.Path("lib/market_data_runtime.py").read_text(encoding="utf-8")
         self.assertIn("instrument_id=snap.instrument_id", src)

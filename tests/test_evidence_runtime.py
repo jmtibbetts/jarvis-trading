@@ -208,7 +208,7 @@ class EvidenceRuntimeTests(unittest.TestCase):
         """AST, not promise: no trading import exists in this module."""
         import ast
         import pathlib
-        src = pathlib.Path("lib/evidence_runtime.py").read_text()
+        src = pathlib.Path("lib/evidence_runtime.py").read_text(encoding="utf-8")
         banned = {"paper_engine", "virtual_orders", "execution_venue",
                   "canonical_entry", "paper_settlement", "learning_engine",
                   "alpaca_client", "kraken_account"}
@@ -260,7 +260,7 @@ class RetentionPolicyTests(unittest.TestCase):
         import pathlib
         import re
         for p in pathlib.Path("jobs").glob("*.py"):
-            src = p.read_text()
+            src = p.read_text(encoding="utf-8")
             self.assertIsNone(
                 re.search(r"delete\(\).*InstrumentQuoteSample|"
                           r"InstrumentQuoteSample.*\.delete\(\)", src),

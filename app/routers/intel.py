@@ -1058,6 +1058,12 @@ def ask_analyst(body: dict):
     except Exception:
         pass
     try:
+        # Imported HERE, and locally, for two reasons: it lives in the
+        # trading router (importing it at module scope would be circular),
+        # and it was previously not imported at all — so this whole block
+        # raised NameError into the bare `except: pass` below and the
+        # analyst silently never saw the book it was being asked about.
+        from app.routers.trading import get_portfolio_risk
         risk = get_portfolio_risk()
         context_blocks["portfolio"] = {
             "positions": risk.get("positions"),
@@ -1869,12 +1875,12 @@ def analyze(body: AnalyzeRequest):
                 _biases=[(d.get("bias") or "").lower() for d in ta.values()
                          if isinstance(d,dict) and not d.get("error")]
                 raw=llm.call(prompt, task="signal_generation", mode=llm.AUTO,
-                             context={"symbol": sym,
+                             context={"symbol": _sym,
                                       # both directions represented = the
                                       # timeframes disagree with each other
                                       "contradiction_count": min(_biases.count("bullish"),
                                                                  _biases.count("bearish")) * 2},
-                             symbol=sym, max_tokens=800, temperature=0.1)
+                             symbol=_sym, max_tokens=800, temperature=0.1)
                 parsed=parse_json(raw)
                 signal=parsed[0] if isinstance(parsed,list) else parsed
 
@@ -1906,7 +1912,7 @@ def analyze(body: AnalyzeRequest):
                                 "Re-issue the JSON with a direction that MATCHES the timeframe "
                                 "biases (Short for a bearish chart), with entry/target/stop "
                                 "consistent with that direction.",
-                                task="contradiction_review", mode=llm.DEEP, symbol=sym,
+                                task="contradiction_review", mode=llm.DEEP, symbol=_sym,
                                 max_tokens=800, temperature=0.1)
                             retry = parse_json(retry_raw)
                             retry = retry[0] if isinstance(retry, list) else retry

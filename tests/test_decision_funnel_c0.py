@@ -83,7 +83,7 @@ class FunnelCoverageTests(unittest.TestCase):
         """AST: the wiring exists, not merely the helper."""
         import ast
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         calls = [n for n in ast.walk(ast.parse(src))
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
@@ -116,7 +116,7 @@ class EvidenceOnlySemanticsTests(unittest.TestCase):
         """AST: each economic entry point calls the guard itself."""
         import ast
         import pathlib
-        tree = ast.parse(pathlib.Path("lib/paper_engine.py").read_text())
+        tree = ast.parse(pathlib.Path("lib/paper_engine.py").read_text(encoding="utf-8"))
         need = {"prepare_entry", "settle_position_entry",
                 "close_paper_position", "partial_close_paper_position"}
         for node in ast.walk(tree):
@@ -285,7 +285,7 @@ class T0EdgeArtifactTests(unittest.TestCase):
 
     def test_the_edge_mapping_exists_in_exactly_one_place(self):
         import pathlib
-        src = pathlib.Path("lib/decision_funnel.py").read_text()
+        src = pathlib.Path("lib/decision_funnel.py").read_text(encoding="utf-8")
         self.assertNotIn("def _edge_fields", src)
 
 
@@ -301,7 +301,7 @@ class RemainingFunnelHoleTests(unittest.TestCase):
     def test_the_silent_open_symbol_prefilter_is_gone(self):
         """The list comprehension that deleted already-open candidates."""
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         self.assertNotIn("not in open_syms]", src)
 
     def test_already_open_is_account_state_not_a_thesis_verdict(self):
@@ -315,20 +315,20 @@ class RemainingFunnelHoleTests(unittest.TestCase):
         """667 legacy positions must not filter a clean research epoch."""
         import ast
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         self.assertIn("if sym in open_syms and not RM.is_evidence_only():", src)
         ast.parse(src)
 
     def test_auto_trade_disabled_leaves_evidence_in_full_virtual(self):
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         self.assertIn("AUTO_TRADE_DISABLED", src)
         self.assertIn("if not auto_trade_enabled and not _evidence_only:", src)
 
     def test_do_not_trade_does_not_mean_do_not_think(self):
         """In EVIDENCE_ONLY the economic switch must not empty the list."""
         import pathlib
-        src = pathlib.Path("jobs/paper_trading.py").read_text()
+        src = pathlib.Path("jobs/paper_trading.py").read_text(encoding="utf-8")
         self.assertNotIn(
             "sig_list = _get_pending_signals(db) if auto_trade_enabled else []",
             src)

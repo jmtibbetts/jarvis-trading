@@ -1353,7 +1353,16 @@ def run():
 
     r = evaluate_pending_candidates(prices,
                                     auto_trade_enabled=auto_trade_enabled)
+    # READ THE RESULT. These counts are the job's only explanation of why it
+    # opened nothing, and they live in the returned dict — they are NOT
+    # locals of this function. Referencing them as bare names raised
+    # NameError at the summary line on EVERY run, after entries had already
+    # been executed: the loop mutated the book and then reported failure.
     executed = r["executed"]
+    skipped_ai = r.get("ai_rejected", 0)
+    skipped_no_price = r.get("no_price", 0)
+    skipped_no_execution = r.get("no_execution", 0)
+    candidates_seen = r.get("evaluated", 0)
 
     # ── Step 4: Summary ───────────────────────────────────────────────────────
     summary = get_paper_summary()
@@ -1369,9 +1378,11 @@ def run():
         "ok": True,
         "mtm": mtm,
         "position_management": mgmt,
+        "candidates_evaluated": candidates_seen,
         "new_positions": executed,
         "ai_rejected": skipped_ai,
         "skipped_no_price": skipped_no_price,
+        "skipped_no_execution": skipped_no_execution,
         "summary": port,
     }
 

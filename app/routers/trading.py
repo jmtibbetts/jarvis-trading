@@ -307,6 +307,7 @@ def reverse_signal(signal_id: str, body: ReverseSignalRequest):
         )
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    from lib.alpaca_client import normalize_symbol
     _, is_crypto_sym = normalize_symbol(sig_dict["asset_symbol"] or "")
     new_id_val = str(uuid.uuid4())
     with get_db() as db:
@@ -1126,27 +1127,85 @@ def get_paper_summary_route():
     except Exception as e:
         raise HTTPException(500, str(e))
 
+MARKET_PRICE_UNAVAILABLE = "MARKET_PRICE_UNAVAILABLE"
+
+
+def _usable_reference_price(value) -> float | None:
+    """A price you may SIZE against, or None.
+
+    Rejects None, non-numerics, NaN, the infinities, zero and negatives.
+    Zero is deliberately refused rather than treated as absent: zero is a
+    PRICE and missing is not, and `float(x or 0)` conflates them — which
+    would size a position against nothing.
+    """
+    import math
+    try:
+        px = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(px) or px <= 0:
+        return None
+    return px
+
+
 @router.post("/paper/open")
 def paper_open(body: PaperOpenRequest):
-    """Manually open a paper position."""
+    """Manually open a paper position, through the canonical door.
+
+    THE CALLER'S PRICE IS A DECISION REFERENCE, NOT A FILL. This used to
+    call `open_paper_position`, whose own docstring says "whatever it is
+    handed becomes the fill ... precisely the mark-as-fill behaviour
+    `lib/canonical_entry` exists to replace." In the canonical epoch that
+    quietly created positions with no settlement header — a second economy,
+    priced by whoever called the API, inside the book that is supposed to be
+    canonical. It now routes exactly where the automated loop routes, and
+    the execution market remains the fill authority.
+
+    A MISSING REFERENCE PRICE IS ORDINARY. `market_assets` crosses a cutover
+    without its transient market columns by design, so a fresh book has NULL
+    prices until the feed repopulates them. That is expected operational
+    state and returns a named 400 — not a 500, and never a silent 0.0.
+    """
     try:
-        from lib.paper_engine import open_paper_position
         from app.database import MarketAsset
-        price = body.entry_price
-        if not price:
+        from lib.canonical_entry import open_canonical_position
+
+        price = None
+        source = None
+        if body.entry_price is not None:
+            price = _usable_reference_price(body.entry_price)
+            if price is None:
+                raise HTTPException(
+                    400, f"{MARKET_PRICE_UNAVAILABLE}: the supplied "
+                         f"entry_price {body.entry_price!r} is not a usable "
+                         f"price")
+            source = "caller"
+        else:
             with get_db() as db:
-                a = db.query(MarketAsset).filter(MarketAsset.symbol == body.symbol).first()
-                if a: price = float(a.price)
-        if not price:
-            raise HTTPException(400, f"No price available for {body.symbol}")
+                a = db.query(MarketAsset).filter(
+                    MarketAsset.symbol == body.symbol).first()
+                stored = a.price if a is not None else None
+            price = _usable_reference_price(stored)
+            source = "market_assets"
+            if price is None:
+                raise HTTPException(
+                    400, f"{MARKET_PRICE_UNAVAILABLE}: no usable reference "
+                         f"price for {body.symbol} (stored value "
+                         f"{stored!r}). Supply entry_price, or wait for the "
+                         f"market feed to populate it.")
+
         signal = {
-            "id": body.signal_id, "asset_symbol": body.symbol, "asset_class": body.asset_class,
-            "paper_direction": body.paper_direction, "direction": body.paper_direction,
-            "entry_price": price, "target_price": body.target_price, "stop_loss": body.stop_loss,
+            "id": body.signal_id, "asset_symbol": body.symbol,
+            "asset_class": body.asset_class,
+            "paper_direction": body.paper_direction,
+            "direction": body.paper_direction,
+            "entry_price": price, "target_price": body.target_price,
+            "stop_loss": body.stop_loss,
         }
-        result = open_paper_position(signal, current_price=price)
-        if "error" in result:
-            raise HTTPException(400, result["error"])
+        result = open_canonical_position(signal, decision_price=price)
+        if not result.get("ok") or result.get("error"):
+            raise HTTPException(400, str(result.get("error") or result))
+        result["decision_price_source"] = source
         return result
     except HTTPException: raise
     except Exception as e:

@@ -178,3 +178,79 @@ Honest list — none of these are claimed as verified:
     real orders       0
     transfers         0
     active book       zero economic rows, cash 100,000
+
+---
+
+# Milestone: fill-model evidence and evidence durability
+
+## Bitnomial book semantics — PROVEN
+
+| fact | value | how |
+|---|---|---|
+| quantity unit | **CONTRACTS** | official spec states `volume`, `open_interest`, `block_volume` in contracts; corroborated across three different multipliers |
+| price encoding | integer ticks | `price_usd = raw × price_increment` — PBTC 5.0, PETH 0.2, PSOL 0.01 |
+| visible depth | **top 10 levels only** | docs: *"Level updates are NOT sent when a level goes out of scope"* — visible depth is a FLOOR, deepest levels can be stale |
+| snapshots | every ~10 s | self-heals a desynced book quickly |
+| sequencing | `ack_id` only | **no `sequence_id` field exists**, contrary to the doc's advice to use one |
+
+Measured over 587 live frames: **0 backward acks**, 272 repeated (one
+`ack_id` is an atomic batch — correctly applied), 183 gapped (expected).
+
+Contract sizes differ per product — **0.01 BTC, 0.5 ETH, 5.0 SOL** — which
+is exactly why PBTC behaviour must never stand in for generic support.
+
+## The 0.21% slippage — provenance resolved
+
+**Category B, not C. It is NOT circular.** Traced to
+`lib/execution_recorder`, called from `jobs/execute_signals` (`record_intent`)
+and `jobs/manage_positions` (`record_fill`) — both Alpaca broker jobs. Those
+50 fills are external broker observations, not simulator output.
+
+The real objection is sharper: they were **equity and crypto-spot fills at a
+retail broker**, now used as the assumption for **contract perpetuals on
+Bitnomial**, applied as a flat percentage that does not move with order size.
+
+## Champion/challenger, measured on the live book
+
+`TOP_OF_BOOK_FIXED_SLIPPAGE_V1` (current behaviour, truthfully renamed — it
+never reads depth) versus `DEPTH_VWAP_V1`:
+
+| product | side | qty | fixed | depth |
+|---|---|---|---|---|
+| PBTC | BUY | 1–50 | 21.0 bps, filled | **0.0 bps**, filled |
+| PBTC | BUY | 1000 | 21.0 bps, **filled 1000** | 7.4 bps, **filled 252 of 1000** |
+| PETH | BUY | 200 | 21.0 bps, filled 200 | **92.6 bps**, filled 149 |
+| PETH | SELL | 200 | 21.0 bps, filled 200 | **291.3 bps**, filled 177 |
+| PSOL | BUY | 200 | 21.0 bps, filled 200 | **336.5 bps**, filled 119 |
+
+Visible depth: PBTC 252/237, PETH 149/177, **PSOL 119/119** contracts.
+
+**The fixed model is wrong in both directions.** It charges ~21 bps on small
+orders that would fill entirely at the touch for nothing, and it reports a
+clean full fill on orders the visible book cannot absorb — PSOL 200 lots at
+21 bps modelled versus **336 bps and only 60% filled** in reality. The thin
+products are far worse than PBTC, so sizing calibrated on BTC would be most
+wrong exactly where it is least tested.
+
+This is precisely "the bot makes money because the simulator is wrong", and
+it is a **blocker for FULL_VIRTUAL activation on ETH/SOL at size**.
+
+No model has been promoted. The active book remains untouched.
+
+## Evidence durability
+
+**Fixed (P0):** `flush_samples()` drained the buffer before the insert, so
+any failure destroyed the batch — measured live, two `database is locked`
+events, ~100 Bitnomial samples permanently lost. Batches now return to the
+front of the buffer and retry; overflow bounded at 20k, shed rows counted.
+
+**Remaining exposure, stated honestly:** the buffer is still RAM. A SIGKILL,
+host reboot or WSL shutdown loses whatever is unflushed — at the observed
+rate roughly one flush interval of samples. A durable spool is **not yet
+implemented**; the crash-loss window is small but non-zero.
+
+## Superseded
+
+- "archive is immutable" — the 0444 file sits in a writable WAL directory
+- "REAL_PROVIDER_READ_ONLY UNAVAILABLE" — Bitnomial books are live
+- "ORDERBOOK_SIMULATED" as a name for the fixed model — it reads no book

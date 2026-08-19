@@ -229,7 +229,47 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                      source=snap.source)
     venue_side = "short" if side == SHORT else "long"
 
-    def _submit(auth):
+    def _capability(auth):
+        """How much of this authorization the visible book supports.
+
+        EXECUTION MAY SHRINK RISK, NEVER ENLARGE IT. The book is consulted
+        AFTER risk has decided, and only to reduce. A ten-level feed is a
+        FLOOR on liquidity, so a shrink says "this much is defensible from
+        what we can see" — never "the rest cannot fill", which the feed
+        cannot know.
+
+        The plan is pre-shrunk rather than submitted whole and partially
+        filled, because partial ENTRY economics are not represented
+        end-to-end: a settlement whose filled quantity differs from its plan
+        would have to re-derive margin, stops and risk basis after the fact.
+        Submitting a quantity that can be completely represented keeps the
+        plan and the settlement describing the same trade.
+        """
+        from lib import execution_capability as ECAP
+        from lib import product_router as PR
+        from lib import bitnomial_market_data as MD
+
+        book = None
+        try:
+            book = MD.latest_top(execution_instrument.instrument_id)
+        except Exception:                               # noqa: BLE001
+            book = None
+        # A DEPTH LADDER IS PUBLISHED ONLY FOR THE PERP VENUE. Equities and
+        # spot pairs price from quotes with no ladder, so the authority
+        # abstains for them instead of refusing a product Bitnomial simply
+        # does not quote.
+        expects_depth = bool(
+            ready.product == PR.CRYPTO_PERP
+            and execution_instrument.instrument_id)
+        return ECAP.assess(
+            side=ECAP.SELL if side == SHORT else ECAP.BUY,
+            risk_authorized_qty=float(auth.qty), book=book,
+            instrument_id=execution_instrument.instrument_id,
+            quantity_unit=execution_instrument.quantity_unit,
+            multiplier=float(execution_instrument.multiplier or 1.0),
+            expects_depth=expects_depth)
+
+    def _submit(auth, capability=None):
         """Offer an authorization to the venue THROUGH THE BOUNDARY.
 
         This used to call `virtual_orders.execute_market()` directly, which
@@ -242,9 +282,14 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
         The plan carries the product from A9, so the capability gate is
         asking about a real product rather than an asset class.
         """
+        submit_qty = float(auth.qty)
+        if capability is not None and capability.final_submittable_qty > 0:
+            # Shrink-only. min() rather than assignment so no future edit
+            # can turn this into a way to grow an order.
+            submit_qty = min(submit_qty, float(capability.final_submittable_qty))
         plan = OrderPlan(
             symbol=symbol, venue=ready.venue, side=venue_side,
-            order_type="market", qty=float(auth.qty),
+            order_type="market", qty=submit_qty,
             entry=float(auth.reference_price), initial_stop=float(auth.stop),
             target=float(auth.target), notional=float(auth.notional),
             leverage=float(auth.leverage), product=ready.product,
@@ -294,9 +339,21 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
     authorized = prep["authorization"]
     gates["risk_sizing"] = "PASS"
 
-    # ── 3. EXECUTE THE AUTHORIZED QUANTITY. BUY lifts the ask, SELL hits
+    # ── 3. WHAT CAN THE VISIBLE BOOK ACTUALLY SUPPORT? ─────────────────
+    # Risk has decided the maximum. The book may only reduce it, and a
+    # reduction is not a claim that the remainder is unfillable — a
+    # ten-level feed cannot know that.
+    capability = _capability(authorized)
+    gates["execution_capability"] = capability.state
+    if not capability.executable:
+        _observe(DO.NO_TRADE, reason=capability.state, ready=ready)
+        return {"ok": False, "opened": False, "venue_failure": False,
+                "error": capability.state, "detail": capability.detail,
+                "capability": capability.as_provenance()}
+
+    # ── 4. EXECUTE THE SUPPORTED QUANTITY. BUY lifts the ask, SELL hits
     #      the bid, and the result describes THIS order. ──────────────────
-    submission, plan = _submit(authorized)
+    submission, plan = _submit(authorized, capability)
     if not submission.accepted:
         return _refuse_submission(submission, authorized)
 
@@ -510,7 +567,8 @@ def open_canonical_position(signal: dict, *, decision_price: float | None = None
                                   decision_price=decision_price,
                                   authorized_qty=authorized.qty,
                                   fee_quote=fee_quote,
-                                  entry_execution_id=entry_execution_id)
+                                  entry_execution_id=entry_execution_id,
+                                  capability=capability)
     gates["fee_authority"] = "PASS"
     gates["catastrophic_product"] = "PASS"
     # WRITTEN BEFORE SETTLEMENT, deliberately. A canonical position must not
@@ -645,7 +703,8 @@ def _sizing_reason(prep: dict) -> str:
 
 def build_provenance(*, signal, ready, snap, execution,
                      decision_price, authorized_qty=None,
-                     fee_quote=None, entry_execution_id=None) -> dict:
+                     fee_quote=None, entry_execution_id=None,
+                     capability=None) -> dict:
     """How this position came to exist. Persisted by settlement, atomically.
 
     One JSON document rather than a dozen columns. NULL provenance means
@@ -696,6 +755,12 @@ def build_provenance(*, signal, ready, snap, execution,
         "entry_execution_id": entry_execution_id or _execution_id(),
         "execution_model": EXECUTION_MODEL_CANONICAL,
         "engine_epoch": CANONICAL_ENGINE_EPOCH,
+        # WHY THE SIZE IS THE SIZE. If the visible book reduced the
+        # risk-authorized quantity, the record says so — and says that the
+        # unexecuted remainder was UNOBSERVABLE, never that it was
+        # unfillable.
+        "execution_capability": (capability.as_provenance()
+                                 if capability is not None else None),
         "source": "VIRTUAL_CEX_AGENT",
         # FOUR IDENTITIES, RECORDED SEPARATELY. `product` used to hold
         # "crypto" — an asset class — so nothing persisted could distinguish a

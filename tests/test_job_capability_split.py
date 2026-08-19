@@ -1,7 +1,7 @@
 """Looking and acting are different permissions.
 
 Turning the scheduler off was the only way to stop JARVIS trading, and it
-also stopped every paid data feed. Helius, LunarCrush, TwelveData, Massive,
+also stopped every paid data feed. Helius, TwelveData, Massive,
 Tavily, FRED, EIA, CoinGecko — all driven by scheduler jobs, all idle for
 days while their subscriptions were being paid for, during exactly the
 period we most wanted market evidence.

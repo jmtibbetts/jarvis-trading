@@ -160,6 +160,15 @@ def acquire(db_path: str | os.PathLike | None = None,
     quietly treated as ACQUIRED.
     """
     path = _lock_path(db_path)
+    # An advisory lock on Windows-backed storage is not a lock you can rely
+    # on — which would silently defeat the single-scheduler guarantee.
+    try:
+        from lib.runtime_paths import assert_linux_native_runtime_path
+        assert_linux_native_runtime_path(path, purpose="the scheduler lease")
+    except ImportError:
+        pass
+    except RuntimeError as exc:
+        return Lease(state=UNAVAILABLE, path=str(path), detail=str(exc))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fh = open(path, "a+", encoding="utf-8")

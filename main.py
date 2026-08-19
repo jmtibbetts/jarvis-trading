@@ -95,6 +95,32 @@ async def lifespan(app_: FastAPI):
     # startup path that never invoked it. Registry bootstrap is idempotent
     # (upsert never downgrades a promotion or overwrites an earned score),
     # so doing it on every boot costs nothing.
+    # ── RUNTIME SELF-CHECK ────────────────────────────────────────────
+    # One machine hosts Windows and Linux; that does not give JARVIS two
+    # runtimes. Say plainly where this one is, and refuse to serve if any
+    # active store sits on Windows-backed storage.
+    try:
+        from lib.runtime_paths import runtime_report
+        _rt = runtime_report()
+        logger.info("[Runtime] %s | repo=%s | python=%s",
+                    _rt["os"], _rt["repo_root"], _rt["python"])
+        for _name, _store in _rt["stores"].items():
+            logger.info("[Runtime]   %-9s %s (%s)", _name,
+                        _store["resolved"], _store["fstype"] or "unknown")
+        if _rt["active_db_windows_backed"]:
+            raise RuntimeError(
+                "NON_CANONICAL_RUNTIME_ENVIRONMENT: active store(s) "
+                f"{_rt['unsafe_stores']} sit on Windows-backed storage. "
+                "JARVIS keeps all active state on Linux-native storage.")
+        logger.info("[Runtime] canonical_runtime_linux=%s "
+                    "active_db_windows_backed=%s",
+                    _rt["canonical_runtime_linux"],
+                    _rt["active_db_windows_backed"])
+    except RuntimeError:
+        raise
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[Runtime] self-check unavailable: %s", e)
+
     try:
         from lib.wallet_registry import bootstrap as wallet_bootstrap
         logger.info(f"[Server] Wallet registry bootstrap — {wallet_bootstrap()}")

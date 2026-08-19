@@ -58,6 +58,18 @@ def _resolve_db_path() -> Path:
 
 
 DB_PATH = _resolve_db_path()
+
+# WINDOWS-BACKED PERSISTENCE IS REFUSED HERE, at the same boundary that
+# already refuses the operator database under pytest — because this is the
+# one place every caller must pass through. SQLite's locking and fsync
+# semantics are weaker through WSL's translation layer to NTFS, and the
+# failure mode is a corrupted book rather than a clean error.
+try:
+    from lib.runtime_paths import assert_linux_native_runtime_path
+    assert_linux_native_runtime_path(DB_PATH,
+                                     purpose="the canonical economic database")
+except ImportError:
+    pass          # very early bootstrap; the startup self-check still runs
 DEFAULT_USER_ID = "local"
 
 engine = create_engine(

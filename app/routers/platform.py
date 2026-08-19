@@ -304,6 +304,17 @@ def jobs_status():
             **job_status}
 
 
+@router.get("/system/runtime")
+def system_runtime():
+    """Where JARVIS is actually running, and on what storage.
+
+    Exists so "is this the Linux runtime or a stray Windows one?" is a
+    question with an answer, rather than something inferred from a log.
+    """
+    from lib.runtime_paths import runtime_report
+    return runtime_report()
+
+
 @router.get("/providers/health")
 def providers_health():
     """Every provider capability, its status, freshness and quota.

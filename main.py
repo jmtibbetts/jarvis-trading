@@ -143,6 +143,41 @@ async def lifespan(app_: FastAPI):
         # A seeding failure must not stop the desk from starting.
         logger.warning(f"[Server] Wallet registry bootstrap failed: {e}")
 
+    # THE POSTURE THIS PROCESS IS ACTUALLY RUNNING, ON ONE LINE.
+    #
+    # Every one of these was previously discoverable only by inference --
+    # reading which script launched the process, or which environment it
+    # inherited. That is how an EVIDENCE_ONLY collector silently came back
+    # as FULL_VIRTUAL after a restart: nothing in the log contradicted it.
+    # A posture that is not written down is a posture nobody can audit.
+    try:
+        from lib.platform_mode import current_mode as _platform_mode
+        from lib import runtime_mode as _RMOD
+        _runtime_explicit = bool(os.getenv("JARVIS_RUNTIME_MODE"))
+        _broker = "configured" if (os.getenv("ALPACA_API_KEY")
+                                   and os.getenv("ALPACA_API_SECRET")) else "absent"
+        try:
+            from app.database import DB_PATH as _DB_PATH
+            _db = str(_DB_PATH)
+        except Exception:                                   # noqa: BLE001
+            _db = os.getenv("JARVIS_DB_PATH", "unknown")
+        import subprocess as _sp
+        try:
+            _sha = _sp.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                                    stderr=_sp.DEVNULL, timeout=5).decode().strip()
+        except Exception:                                   # noqa: BLE001
+            _sha = "unknown"
+        logger.warning(
+            "[Server] RUNTIME POSTURE — platform=%s runtime=%s(%s) "
+            "scheduler=%s broker_connector=%s db=%s sha=%s",
+            _platform_mode(), _RMOD.current_mode(),
+            "explicit" if _runtime_explicit else "INHERITED-DEFAULT",
+            "disabled" if os.getenv("JARVIS_DISABLE_SCHEDULER") == "1" else "ENABLED",
+            _broker, _db, _sha)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("[Server] could not report runtime posture: %s", e)
+
     # JARVIS_DISABLE_SCHEDULER=1 runs the API/UI without any background jobs —
     # for dev/debug instances that must never fetch data or place orders.
     if os.getenv("JARVIS_DISABLE_SCHEDULER") == "1":

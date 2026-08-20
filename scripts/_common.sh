@@ -294,3 +294,73 @@ jarvis_pid_from_file() {
   jarvis_pid_matches "$pid" || return 1
   printf '%s' "$pid"
 }
+
+# jarvis_establish_modes — declare the posture; never inherit it.
+#
+# DEFENCE IN DEPTH, DELIBERATELY REDUNDANT. lib/platform_mode.py already
+# fails CLOSED to VIRTUAL_ONLY, and that boundary stays exactly as it is.
+# This is a SECOND, independent check in front of it, because a library
+# default protects against silence -- it does not protect against a
+# conflicting value that someone or something actually set. An exported
+# JARVIS_PLATFORM_MODE=LIVE_ENABLED in a shell, a unit file, or a stale
+# profile would sail straight past a fail-closed default, because the
+# default never runs when a value is present.
+#
+# The two variables fail in opposite directions and both are checked here:
+#   platform_mode  fails CLOSED (unset -> VIRTUAL_ONLY, safe)
+#   runtime_mode   fails OPEN   (unset -> FULL_VIRTUAL, permits mutation)
+#
+# For every supported launcher the answer is the same: the script NAMES the
+# posture it exists to run. An inherited value that differs is a conflict,
+# not an override -- a process whose posture contradicts the script that
+# started it is the ambiguity this removes, so it dies rather than guessing.
+#
+# Usage: jarvis_establish_modes <PLATFORM_MODE> <RUNTIME_MODE>
+jarvis_establish_modes() {
+  local want_platform="$1" want_runtime="$2"
+
+  case "$want_platform" in
+    VIRTUAL_ONLY|LIVE_SHADOW|LIVE_LIMITED|LIVE_ENABLED) ;;
+    *) die "internal: unknown platform mode requested: $want_platform" ;;
+  esac
+  case "$want_runtime" in
+    FULL_VIRTUAL|EVIDENCE_ONLY) ;;
+    *) die "internal: unknown runtime mode requested: $want_runtime" ;;
+  esac
+
+  _jarvis_fix_mode PLATFORM "$want_platform" "${JARVIS_PLATFORM_MODE:-}" || return 1
+  export JARVIS_PLATFORM_MODE="$want_platform"
+  _jarvis_fix_mode RUNTIME "$want_runtime" "${JARVIS_RUNTIME_MODE:-}" || return 1
+  export JARVIS_RUNTIME_MODE="$want_runtime"
+
+  # Confirm through the LIBRARY, not through the variable just exported.
+  # Reading back the string this function set would only prove this function
+  # can assign a variable; asking the library proves the process will
+  # actually resolve the posture that was declared.
+  local eff_platform eff_runtime
+  eff_platform="$("$PYTHON" -c 'from lib.platform_mode import current_mode; print(current_mode())' 2>/dev/null || echo unknown)"
+  eff_runtime="$("$PYTHON" -c 'from lib.runtime_mode import current_mode; print(current_mode())' 2>/dev/null || echo unknown)"
+  [[ "$eff_platform" == "$want_platform" ]] || die     "platform mode resolved to $eff_platform but $want_platform was declared"
+  [[ "$eff_runtime" == "$want_runtime" ]] || die     "runtime mode resolved to $eff_runtime but $want_runtime was declared"
+
+  ok "platform mode: $eff_platform (declared and confirmed by the library)"
+  ok "runtime mode:  $eff_runtime (declared and confirmed by the library)"
+  if [[ "$eff_platform" != "VIRTUAL_ONLY" ]]; then
+    warn "REAL MONEY IS REACHABLE — platform mode is $eff_platform"
+  fi
+}
+
+# One variable: absent is fine, matching is fine, differing is fatal.
+_jarvis_fix_mode() {
+  local label="$1" want="$2" have="$3"
+  if [[ -z "$have" ]]; then
+    return 0
+  elif [[ "$have" == "$want" ]]; then
+    return 0
+  fi
+  die "JARVIS_${label}_MODE=$have was inherited from the environment, but
+      this launcher runs $want. Refusing to start. A process whose posture
+      disagrees with the script that started it is the ambiguity this check
+      exists to remove — unset the variable, or use the launcher that
+      matches the posture you want."
+}

@@ -93,11 +93,18 @@ else
   info "pass --with-scheduler to enable it deliberately"
 fi
 
-# Platform mode is left to lib/platform_mode.py, which fails closed to
-# VIRTUAL_ONLY. Re-exporting a default here would only create a second place
-# to get it wrong.
+# THE POSTURE THIS LAUNCHER RUNS, NAMED RATHER THAN INHERITED.
+#
+# Platform mode is still left to lib/platform_mode.py, which fails CLOSED to
+# VIRTUAL_ONLY -- re-exporting a default there would only create a second
+# place to get it wrong. Runtime mode is the opposite: it fails OPEN to
+# FULL_VIRTUAL, so silence permits economic mutation. This is the normal
+# runtime, so it says FULL_VIRTUAL out loud and refuses to start if
+# something inherited disagrees.
+step "Mode"
+jarvis_establish_modes VIRTUAL_ONLY FULL_VIRTUAL
+
 step "Starting"
-info "mode:  $(${PYTHON} -c 'from lib.platform_mode import current_mode; print(current_mode())' 2>/dev/null || echo 'unknown')"
 info "bind:  ${JARVIS_BIND_HOST:-127.0.0.1}:$PORT_NUM"
 info "log:   $JARVIS_SERVER_LOG"
 

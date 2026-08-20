@@ -9,9 +9,18 @@ set -euo pipefail
 REPO="/home/nullcode/jarvis-trading"
 cd "$REPO"
 
-# EVIDENCE_ONLY is the whole point: economic mutation raises rather than
-# returning a flag, so a bug cannot quietly open a position.
-export JARVIS_RUNTIME_MODE="EVIDENCE_ONLY"
+# ONE CHECKED PATH FOR BOTH LAUNCHERS. The same helper start_jarvis.sh
+# uses, with the other posture -- so "which modes am I running" has a
+# single implementation and cannot drift between the two entry points.
+#
+# EVIDENCE_ONLY is the whole point here: economic mutation raises rather
+# than returning a flag, so a bug cannot quietly open a position. An
+# inherited FULL_VIRTUAL is a conflict and is fatal, not something to
+# silently overwrite.
+PYTHON="$REPO/.venv/bin/python"
+# shellcheck source=scripts/_common.sh
+source "$REPO/scripts/_common.sh"
+jarvis_establish_modes VIRTUAL_ONLY EVIDENCE_ONLY
 
 # The SHADOW RESEARCH database. Never the operator DB.
 export JARVIS_DB_PATH="$REPO/data/forward_evidence.db"

@@ -13,8 +13,24 @@ def health():
     # Version is served here so a running instance can be identified without
     # guessing from git — run.ps1 -Status and any deploy check can read it.
     from app.version import VERSION
+    # THE POSTURE IS PART OF THE IDENTITY. A running instance that reports
+    # only its version cannot be told apart from an identical build running
+    # a different posture -- which is exactly the confusion that let an
+    # EVIDENCE_ONLY collector come back as FULL_VIRTUAL unnoticed.
+    #
+    # `runtime_mode_explicit` is reported separately from the mode itself
+    # because runtime mode fails OPEN: FULL_VIRTUAL reached by default and
+    # FULL_VIRTUAL chosen deliberately are the same string and very
+    # different facts.
+    import os
+    from lib.platform_mode import current_mode as platform_current
+    from lib.runtime_mode import current_mode as runtime_current
     return {"status": "ok", "version": VERSION,
             "ui_build": _ui_build(),
+            "platform_mode": platform_current(),
+            "runtime_mode": runtime_current(),
+            "runtime_mode_explicit": bool(os.getenv("JARVIS_RUNTIME_MODE")),
+            "scheduler_disabled": os.getenv("JARVIS_DISABLE_SCHEDULER") == "1",
             "time": datetime.now(timezone.utc).isoformat()}
 
 

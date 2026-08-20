@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `76d9afb`.*
+*Last measured: 2026-08-20, at code SHA `8bdfe3f`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       76d9afb6e3cad91ed45e769717f6c5349a732308
+    code SHA       8bdfe3f749756c2af566669eacc1d609bebcd190
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -234,6 +234,74 @@ and can never initialise or replace it.
 Every credit writes balance + `DexFundingEvent` in one transaction, carrying
 authority, actor, amount, asset, reason, policy version, event id, timestamp.
 
+## 8b. DEX ledger authority — which book owns what
+
+TWO STORES, ONE ECONOMIC EVENT.
+
+    dex_wallet    DexBalance / DexFundingEvent
+                  CANONICAL ASSET AUTHORITY for SOL and SPL balances.
+                  Funded only through a sealed FundingGrant (§8).
+    dex_paper     DexPortfolio / DexPosition / DexTrade
+                  CANONICAL P&L / ACCOUNTING VIEW in USD, and the only
+                  path that opens and closes positions today.
+
+They were accidentally split-brained: the wallet was CONSULTED as an
+authority by the autotrade gate, the venue adapter and the exit — "can you
+afford this?" — and then never debited by any production path. The same 5
+SOL could authorise an unlimited number of transactions, because a gate that
+never charges is not a ledger.
+
+**THE ASSET THAT PAYS A COST LOSES THAT ASSET.** Gas is paid in SOL, so
+`dex_wallet.charge_network_fee()` debits the wallet once per leg, joining the
+caller's transaction — the gas debit and the position it pays for are ONE
+economic event. A fee larger than the balance raises `FeeAccountingInvariant`
+rather than clamping; clamping would leave the book richer than reality by
+the shortfall.
+
+**USD ATTRIBUTION IS NOT A SECOND FEE.** Cash falls by the notional alone and
+rises by the proceeds alone. `net_pnl` still subtracts both network legs,
+because that is the USD VALUE of the SOL consumed — one expense in the
+reporting unit, not a second expense.
+
+    fee_settlement = SOL_WALLET          a persisted wallet paid, in SOL
+    fee_settlement = USD_BOOK_NO_WALLET  no wallet exists, so the USD book
+                                         paid — still exactly once
+
+Refusals stay free: the entry checks the fee payer BEFORE committing and
+returns `entry_insufficient_gas`; the exit returns
+`EXIT_PENDING_INSUFFICIENT_GAS`. Rejected-before-chain consumes no SOL;
+failed-after-chain may; success consumes it exactly once.
+
+`settle_swap_success` / `settle_swap_failure` remain the full asset-exchange
+primitives and still have **no production caller** — the USD book performs
+the exchange in its own units and settles only the gas leg in the wallet.
+
+## 8c. Valuation authority — display is not truth
+
+`exit_quote` is the ONE exit pricer, used by settlement AND by valuation, and
+it labels which happened:
+
+    AUTHORIZED_BID            settlement: a measured, authorized network fee
+    STATIC_VALUATION_DEFAULT  valuation: the static constant
+
+**STATIC_VALUATION_DEFAULT is DISPLAY ONLY, and proven so.** Gas is paid from
+the wallet and is not deducted from the pool's output, so moving the static
+constant by four orders of magnitude leaves `equity_executable_usd` and
+`open_value_executable_usd` bit-identical while only the per-row display
+figure moves. `summary()` reaches **no provider at all** — a UI refresh must
+not become a provider storm.
+
+**POOL EXECUTABILITY AND GAS EXECUTABILITY ARE DIFFERENT QUESTIONS.**
+
+    open_value_executable_usd             what the AMM could return
+    gas / gas_blocked                     can the fee payer transact at all
+    executable_after_all_constraints_usd  what is actually reachable today
+    gas_blocked_pool_value_usd            reported, NOT zeroed
+
+The summary's gas view is the STATIC operability floor, labelled
+`STATIC_POLICY_ONLY`; the live fee market is measured at settlement only.
+Blocked is not zero, and UNKNOWN is not zero.
+
 ## 9. Solana dynamic fee authority — WIRED into canonical execution
 
 `lib/solana_fees.py` MEASURES. `lib/solana_fee_policy.py` decides what the
@@ -396,10 +464,17 @@ that never works?** Surfaced on `GET /api/providers/health` under
 `solana_fee_estimator`. Malformed requests escalate on the FIRST occurrence
 (retrying cannot fix them); a single transient blip does not escalate.
 
+**Telemetry may be best-effort; its loss may not be invisible.** The health
+write gives up after 250ms rather than blocking economic execution behind
+SQLite's write lock, and every abandoned write is counted, timestamped and
+attributed per provider — surfaced in the same payload as
+`dropped_health_writes`. A silently vanishing health row is precisely how a
+dead primary comes to look healthy.
+
 ## 11. Tests and CI
 
-    full suite   4,372 passed - 16 skipped - 0 failed, exit code 0 (76d9afb)
-    Ubuntu CI    all six jobs green (run 32393988000)
+    full suite   4,405 passed - 16 skipped - 0 failed, exit code 0 (8bdfe3f)
+    Ubuntu CI    all six jobs green (run 32396589065)
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
 
@@ -415,11 +490,14 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - **The GLOBAL fallback still reports 0.0** while the account-aware form
   reports a non-zero local market. Canonical execution always supplies
   accounts, so this bites only a caller that supplies none.
-- **`dex_paper` (USD book) and `dex_wallet` (SOL ledger) remain two books.**
-  The exit checks the persisted SOL reserve only when a wallet exists — the
-  autonomous path always has one, the manual API path may not — and charges
-  the fee in USD either way. Neither book grants imaginary gas, but they are
-  not yet one ledger.
+- **The USD book still holds token positions in USD, not as SPL balances.**
+  The wallet is the asset authority for SOL and settles every gas leg, but a
+  DEX position is still a `DexPosition` row valued in USD rather than a token
+  balance in `dex_balances`. The two agree on gas and on P&L; they are not
+  yet one representation of the same holding.
+- **USD attribution of a SOL fee uses the caller's `sol_price_usd`.** Whatever
+  price the quote used values the fee. There is no independent SOL valuation
+  authority with its own freshness and source.
 - **Fractional priority-fee estimates are unobserved live** — the quantizer is
   contract-driven and defensive, not empirically calibrated.
 - **BTCC accounting / funding / cross-margin liquidation details remain

@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `d991016`.*
+*Last measured: 2026-08-20, at code SHA `76d9afb`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       d99101624c39a837e8bb349ad57252b089cd9f52
+    code SHA       76d9afb6e3cad91ed45e769717f6c5349a732308
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -238,13 +238,36 @@ authority, actor, amount, asset, reason, policy version, event id, timestamp.
 
 `lib/solana_fees.py` MEASURES. `lib/solana_fee_policy.py` decides what the
 operator will pay. `lib/dex_network_cost.py` is the ONE place canonical DEX
-execution composes the two, and it has real callers:
+execution composes the two, and it has real callers on BOTH sides of a trade:
 
-    dex_autotrade.evaluate_candidate   the expectancy gate
-    dex_paper.open_dex_position        the booked entry (inherits the
-                                       gate's authorized bid)
-    execution_venue.VirtualDexAdapter  before any simulated submission
+    dex_autotrade.evaluate_candidate   the expectancy gate        (entry)
+    dex_paper.open_dex_position        the booked entry, inheriting the
+                                       gate's authorized bid      (entry)
+    execution_venue.VirtualDexAdapter  before simulated submission (entry)
+    dex_paper.close_dex_position       the settled exit           (EXIT)
     dex_wallet.gas_state               reserve = the AUTHORIZED BID
+
+**Entry and exit are symmetric in authority and asymmetric in policy.** An
+exit that measures nothing would teach "expensive to get in, cheap to get
+out" — a market that exists nowhere, flattering exactly the positions a real
+desk finds hardest to close.
+
+    exit action          default priority     ceiling
+    NORMAL_EXIT          HIGH                 0.002  SOL
+    URGENT_EXIT          VERY_HIGH            0.0035 SOL
+    SEVERE_RISK_EXIT     MAX_ACCEPTANCE       0.0035 SOL
+
+`exit_action` is DECLARED by the caller (`URGENT_RISK_EXIT` is an accepted
+alias); an unrecognised one is refused rather than widening a ceiling.
+Measured live 2026-08-20 on the real SOL/USDC pool: a normal exit at HIGH
+cost 77,000 lamports, an urgent exit at VeryHigh cost 2,862,143 — above the
+normal ceiling, inside the emergency one. The asymmetry is load-bearing
+today, not theoretical.
+
+A NORMAL_EXIT fails closed on an unknown fee. A funded wallet that cannot
+pay the authorized bid holds the position `EXIT_PENDING_INSUFFICIENT_GAS`:
+selling the last SOL needed to execute the sale is not an executable exit.
+A refused exit charges nothing and leaves the position open.
 
 Sequence: identify the ACTION -> select an allowed PRIORITY LEVEL -> gather
 real writable-account context -> MEASURE -> AUTHORIZE -> check the persisted
@@ -252,10 +275,18 @@ SOL balance -> only then submit. A NORMAL_ENTRY refuses on an UNKNOWN
 estimate, on a measured fee above policy, on a fee that destroys expected
 edge, on the notional cap, and on insufficient persisted SOL.
 
-**Measurement happens BEFORE any write transaction opens.** Pricing inside
-one held the SQLite write lock across an RPC round trip while the
-provider-health write waited on it for the full 30s busy timeout — a silent
-30s stall, not a visible deadlock.
+**Measurement happens BEFORE any write transaction opens**, and the
+invariant is proven behaviourally: the test's injected estimator performs an
+independent write from a second connection mid-measurement, which can only
+succeed if no write lock is held.
+
+**Health telemetry can never block its caller.** `provider_health.record`
+opens a SECOND connection, so a caller holding the write lock made it wait
+out the engine's 30s busy timeout — a silent stall, not a visible deadlock.
+Fixing the call site was not enough (it recurred from a caller that owned
+the transaction), so the health write now takes a **250ms busy timeout and
+gives up**. Losing a health row is a small honest cost; stalling a fee
+estimate to record one is not.
 
 **Hermetic by construction**: the estimator refuses under pytest unless
 `JARVIS_REAL_PROVIDER_TESTS=1`. Tests inject `fetch=` / `fee_fetch=`.
@@ -272,6 +303,14 @@ provider-health write waited on it for the full 30s busy timeout — a silent
 
 `ExecutionResult` carries all three plus `fee_provenance`. Learning never
 recomputes an execution cost — `RealizedOutcome` stays the authority.
+
+**The network fee is CHARGED, not merely recorded.** It used to be measured,
+stored on the position and reported in `total_costs_usd` while cash fell by
+the notional alone and rose by the proceeds alone — so `net_pnl` omitted both
+network legs and a round trip could report a profit it had not made. Each leg
+is charged exactly once at the moment it is incurred, and the entry and exit
+legs stay separately answerable: merged, they cannot say which half was
+expensive.
 
 ### Priority level and action policy are ORTHOGONAL
 
@@ -359,8 +398,8 @@ that never works?** Surfaced on `GET /api/providers/health` under
 
 ## 11. Tests and CI
 
-    full suite   4,334 passed - 16 skipped - 0 failed, exit code 0 (d991016)
-    Ubuntu CI    all six jobs green (run 32390137574)
+    full suite   4,372 passed - 16 skipped - 0 failed, exit code 0 (76d9afb)
+    Ubuntu CI    all six jobs green (run 32393988000)
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
 
@@ -376,9 +415,11 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - **The GLOBAL fallback still reports 0.0** while the account-aware form
   reports a non-zero local market. Canonical execution always supplies
   accounts, so this bites only a caller that supplies none.
-- **No canonical DEX EXIT path measures fees yet.** The exit action policies
-  (`URGENT_EXIT`, `SEVERE_RISK_EXIT`) are implemented, tested and reachable,
-  but `close_dex_position` does not yet call the fee authority — entries do.
+- **`dex_paper` (USD book) and `dex_wallet` (SOL ledger) remain two books.**
+  The exit checks the persisted SOL reserve only when a wallet exists — the
+  autonomous path always has one, the manual API path may not — and charges
+  the fee in USD either way. Neither book grants imaginary gas, but they are
+  not yet one ledger.
 - **Fractional priority-fee estimates are unobserved live** — the quantizer is
   contract-driven and defensive, not empirically calibrated.
 - **BTCC accounting / funding / cross-margin liquidation details remain
@@ -394,18 +435,25 @@ Never carry a red typecheck or a failing test as "pre-existing".
 
 ## 13. Next phase — NOT STARTED
 
-Phase 6.2 (canonical DEX fee integration) is COMPLETE. Candidates next, in
-no fixed order:
+Phases 6.2 and 6.3 are COMPLETE: DEX entry and exit both measure. Candidates
+next, in no fixed order and none of them started:
 
-- **Wire the EXIT path to the fee authority.** `close_dex_position` still
-  prices its exit without measuring, and the urgent/severe action policies
-  exist for exactly that caller.
-- **A canonical unsigned transaction builder**, which is what would turn
+- **A canonical unsigned transaction builder** — what would turn
   `simulateTransaction` and `getFeeForMessage` from UNKNOWN into measured,
   and 400k CU from an assumption into a number. Needs no signer and no key
   material; building one is not the same as being able to submit.
+- **Reconcile the two DEX books**, so the USD position book and the SOL gas
+  ledger stop being separate economies.
+- **Provider entitlement audit** — what is actually being CONSUMED from
+  already-paid Alpaca/Helius/Kraken access, before any new provider is
+  considered.
+- **Manual Trade Desk** — operator-executed trades on venues without usable
+  execution APIs, linked back to the originating thesis. A missing live
+  execution API is not a defect; manual execution is a first-class mode.
 
-Do not begin UI work. The scheduler stays OFF.
+UI work is ADDITIVE when it comes: the existing Command Center design
+language is kept, not rebuilt. The scheduler stays OFF, and autonomy is
+earned through forward evidence rather than granted because code exists.
 
 ## 14. Working rules
 

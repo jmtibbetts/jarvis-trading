@@ -62,15 +62,41 @@ CacheSession = sessionmaker(bind=cache_engine, autoflush=False, autocommit=False
 
 @contextmanager
 def get_cache_db():
+    """Bar-cache session boundary. Instrumented like the operator one, and
+    equally unable to break its caller.
+
+    NOTE: this engine sets WAL and synchronous=NORMAL but NO busy_timeout,
+    unlike the operator engine which uses 30s. That difference is reported
+    by the observability snapshot rather than silently normalised here --
+    changing a durability or contention setting is not an instrumentation
+    change.
+    """
+    try:
+        from lib.sqlite_observability import observe
+        _obs = observe("ohlcv_cache")
+        _obs.__enter__()
+    except Exception:
+        _obs = None
+
     db = CacheSession()
+    _wrote = False
     try:
         yield db
+        try:
+            _wrote = bool(db.new or db.dirty or db.deleted)
+        except Exception:
+            _wrote = False
         db.commit()
-    except:
+        if _obs is not None:
+            _obs.finish(None, _wrote)
+    except Exception as exc:
         db.rollback()
+        if _obs is not None:
+            _obs.finish(exc, _wrote)
         raise
     finally:
         db.close()
+
 
 class CacheBase(DeclarativeBase):
     pass

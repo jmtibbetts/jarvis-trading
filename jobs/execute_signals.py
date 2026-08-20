@@ -412,6 +412,25 @@ def run():
 
     executed = 0
     now_utc  = datetime.now(timezone.utc)
+    # WARM THE TRADABLE-SYMBOL CACHE BEFORE OPENING THE TRANSACTION.
+    #
+    # get_tradable_crypto_symbols() is memoised in a module-level set, but
+    # the FIRST call performs an Alpaca round-trip. It was reached from
+    # inside the session block below, which also writes (row.paper_mode),
+    # so on a cold cache one HTTP request was held inside an open SQLite
+    # write transaction while every other writer waited on the lock.
+    #
+    # Nothing about the logic changes: the in-block call now always hits a
+    # warm cache. This is the collect-externally / then-persist shape, and
+    # it costs one call that was going to happen anyway.
+    try:
+        from lib.alpaca_client import get_tradable_crypto_symbols as _warm
+        _warm()
+    except Exception as e:                                    # noqa: BLE001
+        # A cold cache is not a reason to skip execution -- the in-block
+        # call will simply pay the round-trip as it did before.
+        logger.debug(f"[Execute] tradable-symbol prewarm skipped: {e}")
+
     with get_db() as db:
         for sig in candidates:
             if executed >= slots or budget < 100:

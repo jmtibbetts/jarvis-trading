@@ -98,12 +98,36 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 @contextmanager
 def get_db() -> Session:
+    """The operator session boundary, and the one place worth measuring.
+
+    Instrumentation is wrapped so it can never reach the caller: observing
+    the desk must not be able to stop it. If lib.sqlite_observability is
+    missing or throws, the session behaves exactly as it did before.
+    """
+    try:
+        from lib.sqlite_observability import observe
+        _obs = observe("jarvis")
+        _obs.__enter__()
+    except Exception:                                    # noqa: BLE001
+        _obs = None
+
     db = SessionLocal()
+    _wrote = False
     try:
         yield db
+        # Asked BEFORE commit, because commit clears them. This is what
+        # separates a write transaction from a read one.
+        try:
+            _wrote = bool(db.new or db.dirty or db.deleted)
+        except Exception:                                # noqa: BLE001
+            _wrote = False
         db.commit()
-    except Exception:
+        if _obs is not None:
+            _obs.finish(None, _wrote)
+    except Exception as exc:
         db.rollback()
+        if _obs is not None:
+            _obs.finish(exc, _wrote)
         raise
     finally:
         db.close()

@@ -686,3 +686,44 @@ def system_version():
         "external_broker_connector_enabled": connector_enabled(),
         "external_account_management_enabled": management_enabled(),
     }
+
+
+@router.get("/system/sqlite")
+def system_sqlite():
+    """SQLite write/lock health for the operator stores.
+
+    Operator/system surface, not general health: it names file paths and
+    engine internals, which belong in an ops view rather than a public
+    liveness probe. No secrets.
+
+    Bounded by construction -- rolling windows in memory, no metrics table.
+    A metrics store that wrote to SQLite in order to observe SQLite would
+    manufacture the contention it claims to detect.
+
+    Anything that cannot be measured reliably reports UNKNOWN rather than
+    zero. In particular `checkpoint_age` is UNKNOWN because reading it
+    requires PRAGMA wal_checkpoint, which performs a checkpoint -- a status
+    endpoint must not mutate what it reports on.
+    """
+    import os
+    from pathlib import Path
+
+    from lib.sqlite_observability import snapshot
+
+    try:
+        from app.database import DB_PATH
+        operator = str(DB_PATH)
+    except Exception:                                    # noqa: BLE001
+        operator = os.getenv("JARVIS_DB_PATH", "")
+
+    data_dir = Path(operator).parent if operator else None
+    paths = {"jarvis": operator}
+    if data_dir:
+        for name, filename in (("ohlcv_cache", "ohlcv_cache.db"),
+                               ("forward_evidence", "forward_evidence.db"),
+                               ("events", "events.db")):
+            candidate = data_dir / filename
+            if candidate.exists():
+                paths[name] = str(candidate)
+
+    return {"sqlite_observability": snapshot(paths)}

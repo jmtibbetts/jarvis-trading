@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 import httpx
 from app.database import get_db, PlatformConfig
+from datetime import datetime as _dt, timezone as _tz
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +590,41 @@ def check_health() -> dict:
     return {'ok': False, 'error': 'Unknown provider'}
 
 
+def record_model_attribution(stats: dict, served, platform=None) -> dict:
+    """Reconcile the model ASKED FOR with the model that ANSWERED.
+
+    Pure and separately callable on purpose: the reconciliation is the part
+    worth testing, and driving the whole HTTP path to reach it would make
+    the test about transport instead.
+
+    WHY THIS EXISTS. LM Studio answers a request for a model it does not
+    have with HTTP 200 and whatever is loaded -- measured here, a request
+    for `definitely/not-a-real-model-xyz` was answered by
+    `google/gemma-4-26b-a4b-qat` with no error of any kind. `stats['model']`
+    was set to the requested id before the call and never corrected, so any
+    per-model outcome comparison built on it was labelling rows with a model
+    that never ran.
+
+    Attribution follows reality. Both identities are kept so the swap stays
+    auditable, and the flag lets a caller with a model contract refuse.
+    A provider that names no model is NOT treated as agreement.
+    """
+    requested = stats.get('requested_model')
+    actual = str(served) if served else None
+    stats['actual_model'] = actual
+    stats['model_substituted'] = bool(actual and requested and actual != requested)
+    if actual:
+        stats['model'] = actual
+    if stats['model_substituted']:
+        stats['model_substitution_at'] = _dt.now(_tz.utc).isoformat()
+        logger.warning(
+            "[LLM] MODEL SUBSTITUTED — requested %r but %r answered (%s). "
+            "Output is attributed to the model that actually generated it; "
+            "a caller requiring a specific model must check "
+            "stats['model_substituted'].", requested, actual, platform)
+    return stats
+
+
 def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
                    temperature: float = 0.15, thinking: bool = True,
                    queue_timeout: float = None,
@@ -627,6 +663,13 @@ def call_lm_studio(prompt: str, system: str = None, max_tokens: int = None,
     cfg['model'] = _resolve_model(cfg)
     effective_max = max_tokens or cfg['max_tokens']
     if stats is not None:
+        # THE MODEL ASKED FOR. Kept distinct from the one that answers:
+        # LM Studio returns HTTP 200 and silently serves whatever is loaded
+        # when the requested model is absent -- measured on this machine,
+        # a request for a nonexistent id was answered by
+        # google/gemma-4-26b-a4b-qat with no error of any kind. Until the
+        # response arrives, `model` is a REQUEST, not an attribution.
+        stats['requested_model'] = cfg['model']
         stats['model'] = cfg['model']
         stats['platform'] = cfg.get('platform')
 
@@ -742,6 +785,8 @@ def _call_openai_compat(prompt: str, system: str, max_tokens: int,
         if served:
             global _last_served_model
             _last_served_model = str(served)
+        if stats is not None:
+            record_model_attribution(stats, served, cfg.get('platform'))
         usage   = data.get('usage') or {}
         tokens  = usage.get('completion_tokens', '?')
         finish  = choice.get('finish_reason', '?')

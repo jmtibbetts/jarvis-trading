@@ -2982,6 +2982,115 @@ class ManualTradeCorrection(Base):
     corrected_at         = Column(String, nullable=False, default=now_iso)
 
 
+class RecommendationCalibrationSample(Base):
+    """One thesis's PREDICTION measured against real venue evidence.
+
+    WHAT THIS IS FOR. Every existing learning aggregate answers "did the
+    trade make money", and that question cannot separate a sound
+    recommendation from good execution. A manually executed trade separates
+    them by construction: JARVIS made the prediction and a PERSON produced
+    the fills. So the honest thing to learn from it is not a win rate — it
+    is PREDICTION ERROR, which is measured, not inferred:
+
+        recommended entry   vs   the price actually paid
+        expected fee        vs   the fee the venue actually charged
+        expected funding    vs   the funding actually settled
+        expected R          vs   the R actually realized
+        recommended venue   vs   the venue actually used
+        recommended side    vs   the side actually taken
+
+    ONE ROW PER THESIS, enforced by UNIQUE. A thesis contributes once no
+    matter how many legs, funding events or corrections it accumulated, and
+    a SECOND manual trade against the same thesis is refused by name rather
+    than silently counted — see lib/recommendation_calibration.
+
+    AGGREGATES ARE RECOMPUTED FROM THESE ROWS, NEVER INCREMENTED. That is
+    what makes a correction safe: re-projecting UPDATES this row in place
+    and every derived number follows, with no counter to unwind. An
+    incremented aggregate could not be revised without double-counting.
+    """
+    __tablename__ = "recommendation_calibration_samples"
+    __table_args__ = (
+        # ONE THESIS DOES NOT VOTE TWICE — as a database fact.
+        UniqueConstraint("thesis_id", name="uq_reccal_thesis"),
+        Index("ix_reccal_venue_product", "venue_actual", "product_actual"),
+        Index("ix_reccal_account", "account_label"),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    thesis_id            = Column(String, nullable=False)
+    manual_trade_id      = Column(String, nullable=False)
+    signal_id            = Column(String)
+    # The evidence population this sample came from. Present so a future
+    # source (a live autonomous fill, say) cannot join by default.
+    population           = Column(String, nullable=False)
+
+    # ── Venue / product / direction: recommended vs actual ───────────────
+    venue_recommended    = Column(String)
+    venue_actual         = Column(String, nullable=False)
+    venue_followed       = Column(Boolean)
+    product_recommended  = Column(String)
+    product_actual       = Column(String, nullable=False)
+    direction_recommended = Column(String)
+    direction_actual     = Column(String, nullable=False)
+    direction_followed   = Column(Boolean)
+    # FOLLOWED_AS_RECOMMENDED | FOLLOWED_DIFFERENT_VENUE | OPPOSED_DIRECTION
+    # | DIRECTION_UNSTATED
+    deviation_class      = Column(String, nullable=False)
+
+    # ── The numeric predictions and what actually happened ───────────────
+    # NULL means the prediction was never made, or the actual was never
+    # evidenced. Neither becomes zero.
+    entry_recommended    = Column(Float)
+    entry_actual         = Column(Float)
+    # Signed so POSITIVE always means WORSE FOR THE TRADE, on both sides:
+    # a long that paid more, a short that sold lower.
+    entry_deviation_bps  = Column(Float)
+
+    expected_fee_usd     = Column(Float)
+    actual_fee_usd       = Column(Float)
+    fee_deviation_usd    = Column(Float)
+    fee_ratio            = Column(Float)
+
+    expected_funding_usd = Column(Float)
+    actual_funding_usd   = Column(Float)
+    funding_deviation_usd = Column(Float)
+
+    expected_cost_usd    = Column(Float)
+    actual_cost_usd      = Column(Float)
+    cost_deviation_usd   = Column(Float)
+
+    expected_r           = Column(Float)
+    realized_r           = Column(Float)
+    r_deviation          = Column(Float)
+
+    # ── Account scoping. THE PROMOTION NORMALIZATION ─────────────────────
+    # VENUE_BASELINE      the account paid the venue's ordinary economics,
+    #                     so its cost error is evidence about the MODEL.
+    # ACCOUNT_PROMOTIONAL a waiver or promotion applied, so its cost error
+    #                     is evidence about THIS ACCOUNT and says nothing
+    #                     about the venue's schedule. Excluded from every
+    #                     venue-scoped cost statistic.
+    account_label        = Column(String, nullable=False)
+    cost_evidence_scope  = Column(String, nullable=False)
+    promotional_capital  = Column(Boolean, nullable=False, default=False)
+
+    outcome              = Column(String)      # WIN | LOSS | BREAKEVEN
+    net_pnl_usd          = Column(Float)
+    confidence           = Column(Float)
+
+    engine_epoch         = Column(String)
+    model_version        = Column(String, nullable=False)
+
+    # ── Supersession, so a correction leaves a trail rather than a hole ──
+    revision             = Column(Integer, nullable=False, default=0)
+    previous_values_json = Column(Text)
+    superseded_at        = Column(String)
+
+    created_at           = Column(String, nullable=False, default=now_iso)
+    updated_at           = Column(String, nullable=False, default=now_iso)
+
+
 class PaperPortfolio(Base):
     """Single-row virtual account state."""
     __tablename__ = "paper_portfolio"

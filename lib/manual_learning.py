@@ -368,10 +368,23 @@ def apply_manual_outcome(trade_id: str) -> dict:
 
     verdict = eligibility(trade)
     if not verdict.eligible:
+        from lib import recommendation_calibration as RC
+
         with engine.begin() as conn:
+            # WITHDRAW THE MEASUREMENT, KEEP THE EVENT. If this trade had
+            # already contributed and its evidence has since been withdrawn,
+            # the calibration sample's inputs are no longer valid and it
+            # must stop counting. The `trade_outcomes` row stays: that a
+            # trade HAPPENED is not un-known by a fee becoming unknown.
+            #
+            # Safe to remove precisely because calibration aggregates are
+            # RECOMPUTED from rows rather than incremented — there is no
+            # counter to unwind.
+            withdrawn = RC.remove_for_trade(conn, trade_id)
             _set_state(conn, trade_id, verdict.verdict, verdict.detail)
         return {"ok": False, "error": MANUAL_LEARNING_BLOCKED,
                 "verdict": verdict.verdict, "detail": verdict.detail,
+                "calibration_withdrawn": withdrawn,
                 "eligibility": verdict.as_dict()}
 
     try:
@@ -424,16 +437,19 @@ def apply_manual_outcome(trade_id: str) -> dict:
             insert_learning_row(conn, projection,
                                 outcome_source=LP.MANUAL_OPERATOR,
                                 projected_at=applied_at)
+            calibration = _contribute_calibration(conn, trade, outcome)
             _set_state(conn, trade_id, APPLIED, None, applied_at)
             return {"ok": True, "reprojected": True,
                     "result": MANUAL_LEARNING_REPROJECTED,
                     "trade_outcome_id": trade_id,
                     "outcome": projection.outcome,
-                    "net_pnl_usd": projection.net_pnl_usd}
+                    "net_pnl_usd": projection.net_pnl_usd,
+                    "calibration": calibration}
 
         insert_learning_row(conn, projection,
                             outcome_source=LP.MANUAL_OPERATOR,
                             projected_at=applied_at)
+        calibration = _contribute_calibration(conn, trade, outcome)
         _set_state(conn, trade_id, APPLIED, None, applied_at)
 
     logger.info("[ManualLearning] applied %s: %s %s %+0.2f USD",
@@ -444,7 +460,33 @@ def apply_manual_outcome(trade_id: str) -> dict:
             "outcome": projection.outcome,
             "net_pnl_usd": projection.net_pnl_usd,
             "outcome_source": LP.MANUAL_OPERATOR,
+            "calibration": calibration,
             "eligibility": verdict.as_dict()}
+
+
+def _contribute_calibration(conn, trade, outcome) -> dict:
+    """The CONSUMER-LEVEL half of the bridge, in the SAME transaction.
+
+    Without this the projection stores a row and moves nothing, which is a
+    canonical evidence repository rather than a learning bridge. With it, an
+    eligible thesis-linked manual outcome changes a real, persisted,
+    queryable calibration — `lib/recommendation_calibration`.
+
+    AN UNLINKED TRADE CONTRIBUTES NOTHING HERE, and that is a refusal with a
+    name rather than an omission: there is no prediction to score, and
+    fabricating one would score the system against a claim it never made.
+    """
+    from lib import recommendation_calibration as RC
+
+    try:
+        sample = RC.build_sample(trade, outcome)
+    except RC.RecommendationCalibrationError as e:
+        # Expected for every independent operator trade. The learning row
+        # still stands; only the PREDICTION comparison is impossible.
+        RC.remove_for_trade(conn, trade.trade_id)
+        return {"contributed": False, "reason": str(e).split(":")[0],
+                "detail": str(e)}
+    return {"contributed": True, **RC.record(conn, sample)}
 
 
 def apply_pending_manual_outcomes(limit: int = 50) -> dict:

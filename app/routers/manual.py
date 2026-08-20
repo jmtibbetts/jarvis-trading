@@ -387,6 +387,27 @@ def manual_learning_population():
     return ML.operator_population()
 
 
+@router.get("/manual/learning/recommendation-calibration")
+def manual_recommendation_calibration(venue: str = None, product: str = None,
+                                      account_label: str = None):
+    """How accurate JARVIS's PREDICTIONS were, against real venue evidence.
+
+    The consumer an eligible thesis-linked manual outcome actually moves.
+    It measures prediction error — recommended vs paid entry, expected vs
+    charged fee, expected vs realized R — never whether JARVIS executes
+    well, because JARVIS did not execute these.
+
+    Cost figures exclude promotional trades unless an account is named: a
+    waived fee is evidence about that account, not about the venue.
+    """
+    from lib import recommendation_calibration as RC
+
+    if venue or product or account_label:
+        return RC.lookup(venue=venue, product=product,
+                         account_label=account_label)
+    return RC.summary()
+
+
 @router.get("/manual/learning/admission")
 def manual_learning_admission():
     """Which evidence populations each learning consumer may pool.

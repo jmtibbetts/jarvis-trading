@@ -112,6 +112,12 @@ _DERIVED = {
     "signal_postmortems": "post-hoc analysis of legacy trades",
     "feature_labels": "labels resolved from legacy outcomes",
     "focus_profiles": "derived per-symbol narrative, regenerable",
+    # Prediction-error measurements taken against the retired engine's
+    # expectations. The MEASUREMENTS were real, but what they measure is
+    # what THAT engine predicted — carrying them forward would let the new
+    # one inherit a verdict on a cost model it does not have.
+    "recommendation_calibration_samples":
+        "prediction error against the retired engine's expectations",
 }
 
 # ── What happened ────────────────────────────────────────────────────────

@@ -194,14 +194,29 @@ def fee_pct(symbol: str, maker: bool = False, venue: str | None = None,
 
 def funding_cost_pct(symbol: str, hold_hours: float,
                      funding_rate_8h: float | None = None,
-                     is_short: bool = False) -> tuple[float, str]:
+                     is_short: bool = False,
+                     product: str | None = None) -> tuple[float, str]:
     """Perpetual funding paid over the expected hold.
 
     Funding is a TRANSFER: longs pay shorts when the rate is positive, and
     shorts pay longs when it is negative. A short with positive funding
     RECEIVES it, so this can legitimately return a negative cost.
+
+    PRODUCT DECIDES, NOT SYMBOL. Funding is a perpetual-contract mechanism.
+    The old symbol test charged funding to ANY crypto symbol — a spot
+    position was billed a perpetual's transfer, which is a fee the product
+    does not have. When the caller names the product, the product-cost
+    profile answers; the symbol heuristic survives only for legacy callers
+    that name nothing, and it now at least means "crypto, possibly a perp"
+    rather than "crypto, therefore a perp".
     """
-    if not is_crypto_symbol(symbol) or not hold_hours or hold_hours <= 0:
+    if product is not None:
+        from lib.product_cost_profile import funding_applies
+        if not funding_applies(product):
+            return 0.0, "not_applicable_for_product"
+    elif not is_crypto_symbol(symbol):
+        return 0.0, "not_applicable"
+    if not hold_hours or hold_hours <= 0:
         return 0.0, "not_applicable"
     source = "measured"
     if funding_rate_8h is None:
@@ -265,6 +280,7 @@ TRADING_DAYS_PER_YEAR = 252
 
 
 def borrow_cost_pct(symbol: str, hold_hours: float, *, is_short: bool,
+                    product: str | None = None,
                     borrow_rate_annual: float | None = None,
                     hard_to_borrow: bool = False) -> tuple[float, str]:
     """Stock-borrow cost over the expected hold, as a fraction of notional.
@@ -273,6 +289,21 @@ def borrow_cost_pct(symbol: str, hold_hours: float, *, is_short: bool,
     shorts are perpetual-swap positions, whose carry is funding — already
     modelled separately, and double-counting it would reject valid trades.
     """
+    # LEVERAGE IS NOT BORROWING, AND NEITHER IS SHORTING A DERIVATIVE.
+    # The old routing charged stock-borrow to any short non-crypto symbol
+    # — which billed a short INDEX FUTURE for shares nobody borrowed. A
+    # futures short holds a contract; the borrow accrual belongs only to
+    # products where real shares (or a real asset) are actually located
+    # and lent. Product answers first; the legacy symbol heuristic now
+    # excludes futures explicitly.
+    if product is not None:
+        from lib.product_cost_profile import borrowing_applies
+        if not borrowing_applies(product, is_short=is_short):
+            return 0.0, "not_applicable_for_product"
+    else:
+        from lib.instruments import is_futures
+        if is_futures(symbol):
+            return 0.0, "not_applicable_derivative"
     if not is_short or is_crypto_symbol(symbol) or not hold_hours or hold_hours <= 0:
         return 0.0, "not_applicable"
     if borrow_rate_annual is None:
@@ -333,9 +364,10 @@ def estimate_costs(symbol: str, entry: float, stop: float, *,
     slip = default_slippage_pct(symbol) if slippage_pct is None else float(slippage_pct)
     slip_cost_pct = abs(slip) * 2.0            # both sides
 
-    fund_pct, fund_src = funding_cost_pct(symbol, hold_hours, funding_rate_8h, is_short)
+    fund_pct, fund_src = funding_cost_pct(symbol, hold_hours, funding_rate_8h,
+                                          is_short, product=product)
     borrow_pct, borrow_src = borrow_cost_pct(
-        symbol, hold_hours, is_short=is_short,
+        symbol, hold_hours, is_short=is_short, product=product,
         borrow_rate_annual=borrow_rate_annual, hard_to_borrow=hard_to_borrow)
 
     total_pct = spread_cost_pct + fee_cost_pct + slip_cost_pct + fund_pct + borrow_pct

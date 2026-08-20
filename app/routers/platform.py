@@ -727,3 +727,120 @@ def system_sqlite():
                 paths[name] = str(candidate)
 
     return {"sqlite_observability": snapshot(paths)}
+
+
+@router.get("/positions/{position_id}/economics")
+def position_economics(position_id: str):
+    """The canonical execution-economics decomposition for one position.
+
+    BACKEND-CALCULATED, BY DESIGN. The frontend renders these numbers; it
+    never derives them, because a UI that recomputes P&L is a second quant
+    engine that will eventually disagree with the ledger. Everything here
+    comes from the settlement legs and the realized outcome — the same
+    rows the portfolio moved on.
+
+    UNKNOWN is a value. An open position has no exit fee yet and a spot
+    product has no liquidation price; both say so instead of showing zero.
+    """
+    from app.database import (PaperPosition, PaperPositionSettlement,
+                              PaperRealizedOutcome, PaperSettlementLeg,
+                              get_db)
+
+    UNKNOWN = "UNKNOWN"
+    with get_db() as db:
+        pos = db.query(PaperPosition).filter(
+            PaperPosition.id == position_id).first()
+        if pos is None:
+            return {"error": "POSITION_NOT_FOUND",
+                    "position_id": position_id}
+        header = db.query(PaperPositionSettlement).filter(
+            PaperPositionSettlement.position_id == position_id).first()
+        legs = (db.query(PaperSettlementLeg)
+                .filter(PaperSettlementLeg.position_id == position_id)
+                .order_by(PaperSettlementLeg.settlement_revision).all())
+        outcome = db.query(PaperRealizedOutcome).filter(
+            PaperRealizedOutcome.position_id == position_id).first()
+
+        entry_legs = [l for l in legs if l.kind == "ENTRY"]
+        exit_legs = [l for l in legs if l.kind in ("PARTIAL_EXIT",
+                                                   "FINAL_EXIT")]
+        entry_fee = (sum(float(l.explicit_fee_usd or 0) for l in entry_legs)
+                     if entry_legs else UNKNOWN)
+        exit_fee = (sum(float(l.explicit_fee_usd or 0) for l in exit_legs)
+                    if exit_legs else UNKNOWN)
+        carry = (sum(float(l.holding_cost_usd or 0) for l in exit_legs)
+                 if exit_legs else UNKNOWN)
+        margin = float(pos.margin_used or 0) or None
+
+        realized = None
+        if outcome is not None:
+            net = float(outcome.net_pnl_usd)
+            realized = {
+                "gross_price_pnl_usd": float(outcome.gross_pnl_usd),
+                "entry_fee_usd": entry_fee,
+                "exit_fee_usd": exit_fee,
+                "spread_attribution_usd":
+                    float(outcome.spread_attribution_usd or 0),
+                "slippage_attribution_usd":
+                    float(outcome.slippage_attribution_usd or 0),
+                "price_impact_attribution_usd":
+                    float(outcome.price_impact_attribution_usd or 0),
+                "attribution_note": "attribution is already inside the "
+                                    "fill prices — informational, never "
+                                    "subtracted a second time",
+                "funding_usd": float(outcome.funding_usd or 0),
+                "borrow_cost_usd": float(outcome.borrow_cost_usd or 0),
+                "commission_usd": float(outcome.commission_usd or 0),
+                "regulatory_fees_usd":
+                    float(outcome.regulatory_fees_usd or 0),
+                "total_cost_usd": round(
+                    float(outcome.gross_pnl_usd) - net, 9),
+                "net_pnl_usd": net,
+                "net_r": (float(outcome.net_r)
+                          if outcome.net_r is not None else UNKNOWN),
+                "return_on_margin_pct": (round(100.0 * net / margin, 4)
+                                         if margin else UNKNOWN),
+                "cost_model_version": outcome.cost_model_version,
+                "outcome_version": outcome.outcome_version,
+            }
+
+        return {
+            "position_id": position_id,
+            "status": pos.status,
+            "symbol": pos.symbol,
+            "product": header.product if header else UNKNOWN,
+            "instrument_id": header.instrument_id if header else UNKNOWN,
+            "quantity_unit": header.quantity_unit if header else UNKNOWN,
+            "multiplier": (float(header.multiplier)
+                           if header else UNKNOWN),
+            "margin_usd": margin if margin is not None else UNKNOWN,
+            # No liquidation engine exists for the virtual book, and a
+            # cross-margin price cannot be derived from entry + leverage
+            # alone (see lib.venue_reconciliation.estimate_cross_liquidation).
+            "liquidation_distance": UNKNOWN,
+            "entry_fee_usd": entry_fee,
+            "estimated_exit_fee_usd": (exit_fee if exit_legs else UNKNOWN),
+            "carry_usd": carry,
+            "legs": [{
+                "kind": l.kind,
+                "settlement_revision": l.settlement_revision,
+                "filled_qty": float(l.filled_qty),
+                "fill_price": float(l.fill_price),
+                "explicit_fee_usd": float(l.explicit_fee_usd or 0),
+                "fee_quality": l.fee_quality,
+                "holding_cost_usd": float(l.holding_cost_usd or 0),
+                "holding_cost_quality": l.holding_cost_quality,
+                "spread_attribution_usd":
+                    float(l.spread_attribution_usd or 0),
+                "slippage_attribution_usd":
+                    float(l.slippage_attribution_usd or 0),
+                "execution_id": l.execution_id,
+                "cost_model": l.cost_model,
+            } for l in legs],
+            "realized": realized,
+            "model_vs_venue_reconciliation": {
+                "status": "NO_REALIZED_VENUE_EVIDENCE",
+                "note": "populated when a completed real-venue lifecycle "
+                        "is reconciled via lib.venue_reconciliation",
+            },
+        }

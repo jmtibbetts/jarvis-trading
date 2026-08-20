@@ -99,6 +99,17 @@ else
   note "node" "$(node --version) at $node_bin"
 fi
 
+# npm is a SEPARATE resolution from node. A Linux node with a Windows npm
+# still installs Windows-built native modules into the Linux tree.
+npm_bin="$(command -v npm 2>/dev/null)"
+if [[ -z "$npm_bin" ]]; then
+  note "npm" "not installed"
+elif [[ "$npm_bin" == /mnt/* ]]; then
+  warn "npm resolves to the WINDOWS binary at $npm_bin — native modules will build for the wrong platform"
+else
+  note "npm" "$(npm --version 2>/dev/null) at $npm_bin"
+fi
+
 step "Compute"
 # THE SUPPORTED COMPUTE MODEL, stated so a reader does not have to infer it
 # from what is missing.
@@ -171,20 +182,59 @@ step "Databases"
 # Sizes and integrity only, and only through a READ-ONLY connection.
 # Opening the operator DB read-write from a probe is how dex_portfolios was
 # destroyed once already.
-for db in jarvis events ohlcv_cache; do
-  f="$JARVIS_ROOT/data/$db.db"
-  if [[ -f "$f" ]]; then
-    size="$(du -h "$f" | cut -f1)"
-    if command -v sqlite3 >/dev/null 2>&1; then
-      mode="$(sqlite3 "file:$f?mode=ro" 'PRAGMA journal_mode;' 2>/dev/null)"
-      note "$db.db" "$size, journal=${mode:-unknown}"
+# forward_evidence.db was MISSING from this list while holding 1.2G of
+# pre-cutover evidence — a store the report did not mention is a store
+# nobody checks. Enumerate every .db in data/ instead of naming a fixed
+# few, so a new store cannot go unreported again.
+shopt -s nullglob
+for f in "$JARVIS_ROOT"/data/*.db; do
+  db="$(basename "$f" .db)"
+  size="$(du -h "$f" | cut -f1)"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    mode="$(sqlite3 "file:$f?mode=ro" 'PRAGMA journal_mode;' 2>/dev/null)"
+    # quick_check, not integrity_check: this is a health report that must
+    # stay fast on a 5G cache. quick_check omits only the index-content
+    # cross-check, and a full run is one command away when it matters.
+    chk="$(sqlite3 "file:$f?mode=ro" 'PRAGMA quick_check(1);' 2>&1 | head -1)"
+    wal=""
+    [[ -f "$f-wal" ]] && wal=", wal=$(du -h "$f-wal" | cut -f1) uncheckpointed"
+    if [[ "$chk" == "ok" ]]; then
+      note "$db.db" "$size, journal=${mode:-unknown}, integrity=ok$wal"
     else
-      note "$db.db" "$size"
+      warn "$db.db INTEGRITY: $chk"
     fi
   else
-    note "$db.db" "absent"
+    note "$db.db" "$size"
   fi
 done
+shopt -u nullglob
+
+step "Mode"
+# WHICH MODE IS A DECISION, NOT A DEFAULT. runtime_mode falls back to
+# FULL_VIRTUAL when JARVIS_RUNTIME_MODE is unset, so an unset variable
+# silently permits economic mutation. Report the resolved value AND
+# whether it was chosen or inherited.
+rm_raw="${JARVIS_RUNTIME_MODE:-}"
+rm_eff="$("$PY" -c 'from lib import runtime_mode as R; print(R.current_mode())' 2>/dev/null || echo unknown)"
+if [[ -z "$rm_raw" ]]; then
+  warn "JARVIS_RUNTIME_MODE is UNSET — resolved to $rm_eff by default, not by decision"
+else
+  note "runtime mode" "$rm_eff (explicitly set)"
+fi
+note "platform mode" "${JARVIS_PLATFORM_MODE:-unset}"
+note "economic jobs" "$([[ "$rm_eff" == "EVIDENCE_ONLY" ]] && echo 'withheld (EVIDENCE_ONLY)' || echo 'PERMITTED')"
+
+step "Network"
+if getent hosts api.kraken.com >/dev/null 2>&1; then
+  note "dns" "resolves"
+else
+  warn "dns cannot resolve api.kraken.com"
+fi
+if curl -sS -o /dev/null -m 8 -w '%{http_code}' https://api.kraken.com/0/public/Time 2>/dev/null | grep -q '^2'; then
+  note "https egress" "ok"
+else
+  warn "https egress failed"
+fi
 
 step "Server"
 mapfile -t PIDS < <(jarvis_pids)

@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `b58078d`.*
+*Last measured: 2026-08-20, at code SHA `373315b`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       b58078d (manual operator learning closure)
+    code SHA       373315b (manual learning bridge, consumer-level)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -391,6 +391,69 @@ cannot answer it, and pooled the number describes neither.
 thesis-linked and independent trades APART. A learning row nothing reads is a
 log, not learning.
 
+### 5c-bis. The CONSUMER that eligible manual evidence actually moves
+
+Storing a labelled row is not learning from it. `lib/recommendation_calibration.py`
+is the consumer an eligible **thesis-linked** manual outcome changes, in the
+SAME transaction as the learning row.
+
+**Why no existing consumer could take it** — traced, not assumed. `calibration`,
+`expectancy`, `signal_accuracy`, `edge_cost_matrix` and `strategy_lifecycle`
+all answer a variant of *"did the trade make money"* from JARVIS's OWN fills;
+`decision_quality` needs a `DecisionObservation` with scheduled forward
+horizons, which a manual trade has neither of (and it has no production caller
+and reads a different store). Feeding a manual trade to any of them attributes
+a person's entry timing, venue choice and exit discipline to the executor
+being measured.
+
+**What a manual trade honestly proves.** It separates prediction from
+execution BY CONSTRUCTION — JARVIS made the claim, someone else produced the
+fills. So the learnable quantity is PREDICTION ERROR, every term measured:
+
+    recommended entry  vs  price actually paid   -> entry_deviation_bps
+    expected fee       vs  fee actually charged  -> fee_deviation / fee_ratio
+    expected funding   vs  funding settled       -> funding_deviation
+    expected R         vs  R actually realized   -> r_deviation
+    recommended venue  vs  venue actually used   -> venue_followed
+    recommended side   vs  side actually taken   -> deviation_class
+
+None of it needs the market path. *"Would the recommendation have hit its
+target?"* DOES need the path, this system does not have it for a manual
+trade, and answering it from two operator fills would be fabrication — so it
+is not answered.
+
+Measured live: recommended 10.00 against a 10.35 fill = **+350bp**; expected
+$0.40 against $6.00 charged = a cost model wrong by **15x**; expected 1.8R
+against 0.96R realized = **−0.84**.
+
+**THE OPPOSED CASE IS RECORDED, NEVER INVERTED.** JARVIS said long, the
+operator went short and made money. Scoring that against the long is tempting
+and unsound: the operator's window is not JARVIS's horizon, so the two claims
+are about different intervals. `OPPOSED_DIRECTION` gets its own counter and is
+never pooled into the followed statistics **in either direction** — tested
+from both sides.
+
+**Promotion normalization, at the smallest honest size.** A declared-absent
+cost is a waiver, so the sample carries `ACCOUNT_PROMOTIONAL` and is excluded
+from every venue-scoped cost figure while remaining in the account-scoped one.
+A promotional zero may teach *"this account paid zero"*; it may never teach
+*"this venue is free"*. Its DIRECTIONAL evidence still counts — the promotion
+changed the fee, not whether the side worked.
+
+**AGGREGATES ARE RECOMPUTED FROM ROWS, NEVER INCREMENTED.** That is what makes
+correction safe: re-projection supersedes ONE row in place (keeping the prior
+learned values in `previous_values_json`) and every derived figure follows,
+with no counter to unwind. A trade that LOSES evidence **withdraws its
+measurement while keeping its event row** — a fee becoming unknown does not
+un-know that the trade happened.
+
+One thesis contributes once (`uq_reccal_thesis`). A second manual trade on the
+same thesis is refused as `REFUSED_THESIS_ALREADY_CONTRIBUTED` — by name, not
+silently. An **unlinked** trade contributes nothing and says
+`REFUSED_NO_RECOMMENDATION`: there is no prediction to score.
+
+    GET /api/manual/learning/recommendation-calibration[?venue=&product=&account_label=]
+
 ### One trade, one row, forever
 
 The learning row's id IS the manual trade id, so `uq_trade_outcomes_canonical`
@@ -719,7 +782,7 @@ dead primary comes to look healthy.
 
 ## 11. Tests and CI
 
-    full suite   4,536 passed - 16 skipped - 0 failed, exit code 0 (b58078d)
+    full suite   4,570 passed - 16 skipped - 0 failed, exit code 0 (373315b)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
@@ -772,11 +835,23 @@ Never carry a red typecheck or a failing test as "pre-existing".
   code computes it. `estimate_cross_liquidation` still returns UNKNOWN for
   every venue, which is correct until a venue's maintenance tiers are
   evidenced.
-- **Manual outcomes are projected but feed NO existing JARVIS statistic.**
-  Deliberate (§5c). Admitting them to cost calibration is the obvious next
-  candidate — real venue costs are the most valuable thing they carry — and
-  it needs promotion NORMALISATION first, or a temporary zero-fee window
-  becomes a global claim about that venue's schedule. Not started.
+- **Manual outcomes feed `recommendation_calibration` and nothing else**
+  (§5c-bis). They remain excluded from every JARVIS-execution statistic, and
+  that exclusion is correct rather than pending: those measure how JARVIS
+  executes, and JARVIS did not execute these.
+- **`recommendation_calibration` is measured but not yet ACTED ON.** Nothing
+  reads it to adjust a fee estimate, a size or a gate. Wiring a measured
+  cost error back into the live cost model changes execution economics and
+  is a separately reviewed step — deliberately not taken here.
+- **UNLINKED manual trades reach no calibration consumer at all.** An
+  explicit consumer-level REFUSAL, not an omission: they carry no
+  prediction, so there is nothing to score without fabricating a thesis.
+  They remain fully visible in `operator_population()`. If operator-skill or
+  execution-economics analytics are wanted, that is a new consumer with its
+  own review.
+- **Directional evidence comes only from FOLLOWED trades.** Opposed trades
+  are counted and never scored. Turning disagreement into evidence needs a
+  horizon-matched comparison this system cannot currently make.
 - **`realized_outcome.finalize` classifies on a bare sign test**, so a
   round trip whose costs cancel its gross to within float noise
   (~1e-14) is recorded as a LOSS rather than BREAKEVEN. Observed while
@@ -822,7 +897,7 @@ next, in no fixed order and none of them started:
   orderbook_stream, td_forex_stream. What is actually CONSUMED from each
   paid tier — Alpaca SIP, OPRA, Helius paid features, Kraken direct — is
   NOT established and is the audit's job.
-- **The Manual Trade Desk BACKEND and its LEARNING CLOSURE are DONE**
+- **The Manual Trade Desk BACKEND and its LEARNING BRIDGE are DONE**
   (§5b, §5c). What is not built: monitoring of open manual positions, the
   UI, and any admission of manual evidence into a JARVIS statistic — the
   last of which needs promotion normalisation first (§12).

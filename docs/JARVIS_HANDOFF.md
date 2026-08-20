@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `571ac14`.*
+*Last measured: 2026-08-20, at code SHA `027d124`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       571ac14 (manual operator execution)
+    code SHA       027d124 (manual operator execution + build identity)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -81,6 +81,23 @@ mismatch after a code-bearing one.
 > whose shape changed in the commit you care about, or compare
 > `ps -o lstart= -p <pid>` against the commit time.
 
+> **THE SAME DEFECT SURVIVED THAT FIX AND WAS CLOSED AGAIN AT `027d124`.**
+> The constant was captured at MODULE import — and the only consumer imported
+> `lib/build_identity` INSIDE the `/system/version` handler, so nothing
+> imported it until a request arrived. It was therefore stamped at the FIRST
+> REQUEST, and any commit made in between became the reported loaded build.
+> Measured: a process started 11:04:51 reported a commit authored 11:08:48 as
+> its own. `main.py` now imports the module at module scope; that import is
+> load-bearing, not tidy-uppable, and `tests/test_build_identity_capture_time.py`
+> pins it. Proven behaviourally: with the repo moved underneath a running
+> server, `loaded` held while `repository_head_commit` moved and
+> `code_matches_repository_head` went False.
+>
+> A related trap that cost 42 red tests: **`import main` inside a test runs
+> `load_dotenv()`** and injects the operator's real `.env` into the whole
+> pytest session, so tests scheduled afterwards see `VENUE_30D_VOLUME_USD`
+> and friends. Load the entrypoint in a SUBPROCESS.
+
 The SPA fallback answers any unmatched path with `index.html` and HTTP
 **200**, so a missing route looks like success until JSON parsing fails.
 Verify the JSON and the expected key, never the status code alone.
@@ -136,6 +153,12 @@ database. There is no escape hatch; `conftest.py` redirects to a temp path.
     dex_positions / dex_trades  0
     legacy positions            0
     legacy trade_outcomes       0
+    manual_trades and its legs / cost events / corrections   0  (see §5b)
+
+Re-measured after a full manual-trade lifecycle was driven through the LIVE
+API against this database: every virtual count above was unchanged and cash
+was still exactly 100000.0. That is the §5b isolation boundary, verified on
+the operator's own store rather than only in a test fixture.
 
 FORWARD REPAIR ONLY. Never restore an old database to make a count match an
 expectation, and never mutate the canonical economy to make a report or a
@@ -586,7 +609,7 @@ dead primary comes to look healthy.
 
 ## 11. Tests and CI
 
-    full suite   4,483 passed - 16 skipped - 0 failed, exit code 0 (571ac14)
+    full suite   4,487 passed - 16 skipped - 0 failed, exit code 0 (027d124)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit

@@ -97,6 +97,15 @@ mismatch after a code-bearing one.
 > `load_dotenv()`** and injects the operator's real `.env` into the whole
 > pytest session, so tests scheduled afterwards see `VENUE_30D_VOLUME_USD`
 > and friends. Load the entrypoint in a SUBPROCESS.
+>
+> **RESIDUAL GAP: a server started from a DIRTY tree names the wrong SHA.**
+> `GIT_HEAD_AT_IMPORT` reads HEAD, and HEAD does not know about uncommitted
+> changes — so a process launched mid-edit reports the LAST COMMIT while
+> running code that is not in any commit. Hit on 2026-08-20: a restart
+> before committing reported `f66cc28` while serving routes that only
+> existed in the working tree. Not a lie the code can detect today. **Start
+> the runtime from a COMMITTED tree** when the reported identity matters,
+> and check `git status --porcelain` if it does not look right.
 
 The SPA fallback answers any unmatched path with `index.html` and HTTP
 **200**, so a missing route looks like success until JSON parsing fails.

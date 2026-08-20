@@ -23,9 +23,25 @@ transcript, or an archive of old prompts. Everything historical lives in
     remote         origin -> github.com/jmtibbetts/jarvis-trading
     code SHA       ac7745079b2508ac400ba6ce981e1a06924e619e
 
-**The Windows checkout at `C:\jarvis-trading-ai-python` is a DEAD rollback
-copy.** Never work there, never push from it, never run `run.ps1` /
-`stop.ps1` / `setup.ps1`, never treat `/mnt/c` as the active repo.
+**Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
+Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
+treat `/mnt/c` as the active repo, never run Windows Python or Node against
+this project.
+
+It is **not** an inert copy, and calling it one gets the danger backwards.
+Measured 2026-08-20: it sits on the SAME lineage, roughly nine commits
+behind (its HEAD `05a3865` is a genuine ancestor of WSL `main`). Because it
+is merely behind rather than divergent, it fast-forwards, builds and mostly
+tests fine — which is exactly what makes mistaking it for the runtime easy.
+Two concrete hazards:
+
+- ~12 tests fail there for PLATFORM reasons alone (shell guards, path/AST
+  checks). They are green on Linux. **Never quote a Windows run as a
+  baseline.**
+- It has its OWN stale `data/`. `conftest.py` redirects the database only
+  under pytest, so a bare `python -c` importing `app.database` opens that
+  tree's real `data/jarvis.db` and runs `create_all` on it. Use pytest, or
+  open read-only: `sqlite3.connect("file:...?mode=ro", uri=True)`.
 
 > **Trap, hit on 2026-08-20.** When driving WSL from a Windows shell as
 > `wsl.exe -d Ubuntu-24.04 -- bash -c '...'`, `$(...)` and `$VAR` inside

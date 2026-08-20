@@ -86,7 +86,12 @@ NO_EVIDENCE_CEILING = 55.0
 # and low assumed reachable — so replay is systematically optimistic and
 # counts for less than an observed result. It bootstraps calibration without
 # pretending to BE live evidence.
-REPLAY_WEIGHT = 0.5
+#
+# WHICH EVIDENCE ENTERS THIS TABLE is decided by lib/learning_population,
+# not by a local `!= "replay"` test. Re-exported here because callers and
+# tests already import it from this module.
+from lib.learning_population import REPLAY_WEIGHT  # noqa: E402
+from lib import learning_population as LP          # noqa: E402
 
 _CACHE: dict = {"built_at": 0.0, "table": None}
 _CACHE_TTL = 300.0
@@ -155,7 +160,13 @@ def build_table(force: bool = False) -> dict:
             won = float(pnl or 0) > 0
         except (TypeError, ValueError):
             continue
-        w = REPLAY_WEIGHT if src == "replay" else 1.0
+        # ALLOWLIST, not "anything that is not a replay". This table
+        # measures JARVIS'S OWN selection, so a trade the operator executed
+        # by hand is excluded — it would arrive at full weight under the
+        # old denylist and quietly improve a win rate JARVIS did not earn.
+        w = LP.weight(src, profile=LP.JARVIS_EXECUTION)
+        if w is None:
+            continue
         total_all += w
         wins_all += w if won else 0.0
         if tf:

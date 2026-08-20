@@ -196,8 +196,15 @@ def _load_rows() -> list[dict]:
         logger.warning(f"[Lifecycle] could not read outcomes: {e}")
         return []
 
+    from lib import learning_population as LP
+
     out = []
     for entry, exit_price, direction, exited_at, src, tf, stop, strategy, sig_id in rows:
+        # Lifecycle promotes and retires JARVIS'S strategies, so it reads
+        # JARVIS's own results. An operator-executed trade would otherwise
+        # arrive with `replay=False` — indistinguishable from a live fill.
+        if not LP.admits(src, profile=LP.JARVIS_EXECUTION):
+            continue
         # R against the stop AS PLACED, matching expectancy (P0.12).
         r = _r_of(entry, placed.get(sig_id) or stop, exit_price, direction)
         if r is None:
@@ -206,7 +213,7 @@ def _load_rows() -> list[dict]:
             "strategy": strategy or "unclassified",
             "timeframe": tf, "exited_at": exited_at,
             "r": max(-3.0, min(10.0, r)),
-            "replay": src == "replay",
+            "replay": src == LP.REPLAY,
         })
     return out
 

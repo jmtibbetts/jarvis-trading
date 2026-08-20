@@ -333,6 +333,73 @@ class ManualCorrection(BaseModel):
     evidence_source: Optional[str] = None
 
 
+@router.get("/manual/learning/eligibility/{trade_id}")
+def manual_learning_eligibility(trade_id: str):
+    """Whether this trade may teach anything, RE-DERIVED from its evidence.
+
+    Deliberately not a read of the stored `learning_state`: that records a
+    past evaluation, and the question here is whether the gate passes NOW.
+    """
+    from lib import manual_learning as ML
+    from lib import manual_trade_store as store
+
+    try:
+        trade = store.get(trade_id)
+    except store.ManualTradeNotFound as e:
+        raise HTTPException(404, str(e))
+    return ML.eligibility(trade).as_dict()
+
+
+@router.post("/manual/learning/apply/{trade_id}")
+def manual_learning_apply(trade_id: str):
+    """Project one closed manual trade into canonical learning, once.
+
+    Idempotent: repeating it neither duplicates the row nor re-votes. A
+    blocked trade returns 200 with the verdict, not an error — being
+    ineligible is a correct outcome of asking, not a failure.
+    """
+    from lib import manual_learning as ML
+
+    res = ML.apply_manual_outcome(trade_id)
+    if res.get("error") == ML.MANUAL_LEARNING_NOT_FOUND:
+        raise HTTPException(404, res.get("detail") or "not found")
+    return res
+
+
+@router.post("/manual/learning/apply-pending")
+def manual_learning_apply_pending(limit: int = 50):
+    """Bounded catch-up over closed manual trades awaiting projection."""
+    from lib import manual_learning as ML
+
+    return ML.apply_pending_manual_outcomes(limit=limit)
+
+
+@router.get("/manual/learning/population")
+def manual_learning_population():
+    """What the operator's OWN executed trades add up to — on their own.
+
+    Reported apart from every JARVIS statistic. Linked and independent
+    trades are tallied separately because they are evidence about different
+    things.
+    """
+    from lib import manual_learning as ML
+
+    return ML.operator_population()
+
+
+@router.get("/manual/learning/admission")
+def manual_learning_admission():
+    """Which evidence populations each learning consumer may pool.
+
+    Surfaced because the answer is a policy decision, not an implementation
+    detail: a reader who cannot see that manual outcomes are excluded from
+    calibration cannot tell whether a win rate describes JARVIS or a person.
+    """
+    from lib import learning_population as LP
+
+    return LP.describe()
+
+
 @router.post("/manual/trades/{trade_id}/corrections")
 def manual_trade_correct(trade_id: str, body: ManualCorrection):
     """Amend a recorded fact, keeping what it used to say.

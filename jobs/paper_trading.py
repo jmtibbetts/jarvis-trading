@@ -37,16 +37,30 @@ BOOTSTRAP_MIN_SCORE = 45.0
 
 
 def _observed_outcome_count() -> int:
-    """Live outcomes in the current epoch. Replayed ones are excluded — a
-    simulation cannot certify that the system is ready to stop bootstrapping."""
+    """FORWARD-OBSERVED outcomes in the current epoch.
+
+    A simulation cannot certify that the system is ready to stop
+    bootstrapping — and neither can a human. This read
+    `outcome_source != "replay"`, which excluded replays and admitted
+    EVERYTHING ELSE; once operator-executed trades reach the learning table
+    that denylist would let a PERSON'S trades certify that the PROGRAM has
+    earned its thresholds. The admitted set is named explicitly now.
+    """
     try:
-        from app.database import get_db, TradeOutcome
+        from sqlalchemy import text
+
+        from app.database import engine
+        from lib import learning_population as LP
         from lib.calibration import CURRENT_EPOCH
-        with get_db() as db:
-            return db.query(TradeOutcome).filter(
-                TradeOutcome.engine_epoch == CURRENT_EPOCH,
-                TradeOutcome.outcome_source != "replay",
-            ).count()
+
+        where, params = LP.sql_filter(
+            "outcome_source", LP.FORWARD_OBSERVED_CERTIFICATION)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                f"SELECT COUNT(*) FROM trade_outcomes "
+                f"WHERE engine_epoch = :epoch AND {where}"),
+                {"epoch": CURRENT_EPOCH, **params}).fetchone()
+        return int(row[0]) if row else 0
     except Exception:
         return 0
 

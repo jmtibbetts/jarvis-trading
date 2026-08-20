@@ -59,6 +59,10 @@ APPLIED = "APPLIED"
 # record is incomplete, so its net result is not trustworthy enough to
 # teach from. Completing the evidence and re-deriving is the remedy.
 BLOCKED_INCOMPLETE_COSTS = "BLOCKED_INCOMPLETE_COSTS"
+# Evidence changed AFTER the outcome was projected into learning. The
+# existing learning row is stale; it is not duplicated, and it is not
+# quietly left standing either. `lib/manual_learning` resolves it.
+PENDING_REPROJECTION = "PENDING_REPROJECTION"
 
 CORRECTION_TARGET_TRADE = "TRADE"
 CORRECTION_TARGET_LEG = "LEG"
@@ -469,15 +473,33 @@ def append_cost_event(trade_id: str, *, kind: str, amount_usd: float,
 
 
 def _rederive(row, trade: mx.ManualTrade) -> dict:
-    """Rebuild the persisted outcome after late evidence changed the facts."""
+    """Rebuild the persisted outcome after late evidence changed the facts.
+
+    IF IT WAS ALREADY PROJECTED, THIS DOES NOT SILENTLY STAND. Leaving the
+    state APPLIED would leave a learning row asserting economics the trade
+    no longer has — the vote cast on numbers that have since been corrected.
+    It becomes PENDING_REPROJECTION instead: fail closed, visible, and
+    resolved by re-running the projection, which revises the single existing
+    row rather than casting a second vote.
+    """
     outcome = mx.realized_outcome(trade)
     row.realized_outcome_json = _json(outcome.as_dict())
     complete = bool(outcome.provenance.get("net_pnl_is_complete"))
-    if row.learning_state != APPLIED:
+    incomplete_detail = (
+        "net P&L is not trustworthy: no evidence for "
+        + ", ".join(trade.unknown_cost_categories()))
+
+    if row.learning_state == APPLIED:
+        row.learning_state = PENDING_REPROJECTION
+        row.learning_error = (
+            "evidence changed after this outcome was projected into "
+            "learning; the existing learning row is stale and must be "
+            "re-projected. It is NOT duplicated — the row is keyed by this "
+            "trade's id."
+            + ("" if complete else f" Also: {incomplete_detail}"))
+    else:
         row.learning_state = PENDING if complete else BLOCKED_INCOMPLETE_COSTS
-        row.learning_error = (None if complete else
-                              "net P&L is not trustworthy: no evidence for "
-                              + ", ".join(trade.unknown_cost_categories()))
+        row.learning_error = None if complete else incomplete_detail
     return outcome.as_dict()
 
 

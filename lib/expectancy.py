@@ -43,7 +43,13 @@ MIN_SAMPLE = 25
 
 # Replayed outcomes assumed perfect fills and that both a bar's high and low
 # were reachable. Real money does not get that.
-REPLAY_WEIGHT = 0.5
+#
+# WHICH EVIDENCE ENTERS THESE BUCKETS is decided by lib/learning_population,
+# not by a local `!= "replay"` test — R buckets size positions, and a trade
+# the operator hand-executed is not evidence about how JARVIS gets filled.
+# Re-exported because callers and tests already import it from here.
+from lib.learning_population import REPLAY_WEIGHT  # noqa: E402
+from lib import learning_population as LP          # noqa: E402
 
 # Buckets are tried most-specific first. Every level after the first is a
 # broader claim, and the result records which one answered.
@@ -173,7 +179,9 @@ def build_table(force: bool = False) -> dict:
         # but letting a single -40R fill dominate an average would make the
         # bucket describe one bad fill instead of the strategy.
         r = max(-3.0, min(10.0, r))
-        w = REPLAY_WEIGHT if src == "replay" else 1.0
+        w = LP.weight(src, profile=LP.JARVIS_EXECUTION)
+        if w is None:
+            continue
         key_values = {
             "strategy": (strategy or "unclassified"),
             "asset_class": (cls or "unknown").lower(),

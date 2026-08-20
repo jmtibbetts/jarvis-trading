@@ -374,6 +374,83 @@ def _learning_row_disagreement(conn, outcome) -> str | None:
     return None
 
 
+def insert_learning_row(conn, p: "CanonicalLearningProjection", *,
+                        outcome_source: str, projected_at: str) -> None:
+    """THE one place a canonical learning row is written. Shared, on purpose.
+
+    Two projectors reach this: the virtual settlement ledger (B2C) and the
+    manual operator desk. They differ in what they are ALLOWED to project
+    and in which aggregates may follow — they must not differ in the SHAPE
+    of the row, or the two populations stop being comparable, which is the
+    entire reason for keeping both.
+
+    `outcome_source` is a REQUIRED KEYWORD with no default. It used to be
+    the literal `'live'` inside the SQL, which is precisely how a second
+    caller ends up silently claiming to be the first.
+    `lib.learning_population` owns that vocabulary and decides which
+    consumer may read which value.
+
+    Writes the ROW and nothing else — no aggregates, no state markers. The
+    caller owns the transaction and decides what else belongs inside it.
+    """
+    from sqlalchemy import text
+
+    from lib import learning_population as LP
+
+    if outcome_source not in LP.POPULATIONS:
+        raise LearningValidationError(
+            f"outcome_source {outcome_source!r} is not a learning "
+            f"population ({', '.join(LP.POPULATIONS)}); an unlabelled row "
+            f"would be pooled by whichever consumer failed to exclude it")
+
+    conn.execute(text("""
+        INSERT INTO trade_outcomes
+        (id, canonical_outcome_id, position_id, signal_id, symbol,
+         asset_class, direction, timeframe, entry_price, exit_price,
+         qty, quantity_unit, multiplier, product, instrument_id,
+         pnl_usd, pnl_pct, return_pct_basis, gross_pnl_usd,
+         explicit_fees_usd, outcome, exit_reason, hold_duration_m,
+         signal_confidence, signal_score, signal_reasoning,
+         ta_summary, market_regime, paper_mode, entered_at,
+         exited_at, projected_at, engine_epoch, outcome_version,
+         execution_model, cost_model_version, settlement_version,
+         outcome_source)
+        VALUES
+        (:id, :cid, :pos, :sig, :sym, :ac, :dir, :tf, :ep, :xp,
+         :qty, :qu, :mult, :prod, :inst, :pnl, :pct, :basis,
+         :gross, :fees, :outcome, :reason, :hold, :conf, :score,
+         :reasoning, :tas, :regime, 1, :opened, :closed,
+         :projected, :epoch, :over, :emodel, :cmodel, :sver,
+         :src)
+    """), {
+        # One final canonical truth, one learning truth: same id.
+        "id": p.canonical_outcome_id,
+        "cid": p.canonical_outcome_id,
+        "pos": p.position_id, "sig": p.signal_id,
+        "sym": p.symbol, "ac": p.asset_class,
+        "dir": p.direction, "tf": p.timeframe,
+        "ep": p.entry_price, "xp": p.exit_price,
+        "qty": p.quantity, "qu": p.quantity_unit,
+        "mult": p.multiplier, "prod": p.product,
+        "inst": p.instrument_id,
+        "pnl": p.net_pnl_usd, "pct": p.net_return_pct,
+        "basis": p.return_pct_basis,
+        "gross": p.gross_pnl_usd, "fees": p.explicit_fees_usd,
+        "outcome": p.outcome, "reason": p.exit_reason,
+        "hold": p.hold_minutes,
+        "conf": p.confidence, "score": p.score,
+        "reasoning": p.reasoning, "tas": p.ta_summary,
+        "regime": p.market_regime,
+        "opened": p.opened_at, "closed": p.closed_at,
+        "projected": projected_at,
+        "epoch": p.engine_epoch,        # PERSISTED, never current
+        "over": p.outcome_version,
+        "emodel": p.execution_model, "cmodel": p.cost_model,
+        "sver": p.settlement_version,
+        "src": outcome_source,
+    })
+
+
 def _set_learning_state(outcome_id: str, state: str, error: str | None):
     """The tiny separate transaction AFTER a rollback (§33). Touches only
     the learning metadata — never financial fields."""
@@ -393,6 +470,7 @@ def apply_realized_outcome(outcome_id: str) -> dict:
     from sqlalchemy.exc import IntegrityError
     from app.database import (PaperPositionSettlement, PaperRealizedOutcome,
                               engine, get_db)
+    from lib import learning_population as LP
 
     with get_db() as db:
         outcome = db.query(PaperRealizedOutcome).filter(
@@ -509,51 +587,11 @@ def apply_realized_outcome(outcome_id: str) -> dict:
     try:
         with engine.begin() as conn:
             p = projection
-            conn.execute(text("""
-                INSERT INTO trade_outcomes
-                (id, canonical_outcome_id, position_id, signal_id, symbol,
-                 asset_class, direction, timeframe, entry_price, exit_price,
-                 qty, quantity_unit, multiplier, product, instrument_id,
-                 pnl_usd, pnl_pct, return_pct_basis, gross_pnl_usd,
-                 explicit_fees_usd, outcome, exit_reason, hold_duration_m,
-                 signal_confidence, signal_score, signal_reasoning,
-                 ta_summary, market_regime, paper_mode, entered_at,
-                 exited_at, projected_at, engine_epoch, outcome_version,
-                 execution_model, cost_model_version, settlement_version,
-                 outcome_source)
-                VALUES
-                (:id, :cid, :pos, :sig, :sym, :ac, :dir, :tf, :ep, :xp,
-                 :qty, :qu, :mult, :prod, :inst, :pnl, :pct, :basis,
-                 :gross, :fees, :outcome, :reason, :hold, :conf, :score,
-                 :reasoning, :tas, :regime, 1, :opened, :closed,
-                 :projected, :epoch, :over, :emodel, :cmodel, :sver,
-                 'live')
-            """), {
-                # One final canonical truth, one learning truth: same id.
-                "id": p.canonical_outcome_id,
-                "cid": p.canonical_outcome_id,
-                "pos": p.position_id, "sig": p.signal_id,
-                "sym": p.symbol, "ac": p.asset_class,
-                "dir": p.direction, "tf": p.timeframe,
-                "ep": p.entry_price, "xp": p.exit_price,
-                "qty": p.quantity, "qu": p.quantity_unit,
-                "mult": p.multiplier, "prod": p.product,
-                "inst": p.instrument_id,
-                "pnl": p.net_pnl_usd, "pct": p.net_return_pct,
-                "basis": p.return_pct_basis,
-                "gross": p.gross_pnl_usd, "fees": p.explicit_fees_usd,
-                "outcome": p.outcome, "reason": p.exit_reason,
-                "hold": p.hold_minutes,
-                "conf": p.confidence, "score": p.score,
-                "reasoning": p.reasoning, "tas": p.ta_summary,
-                "regime": p.market_regime,
-                "opened": p.opened_at, "closed": p.closed_at,
-                "projected": applied_at,
-                "epoch": p.engine_epoch,        # PERSISTED, never current
-                "over": p.outcome_version,
-                "emodel": p.execution_model, "cmodel": p.cost_model,
-                "sver": p.settlement_version,
-            })
+            # THE SHARED WRITER. `live` is stated here rather than baked
+            # into the SQL, so the manual projector cannot inherit this
+            # population by reusing the same statement.
+            insert_learning_row(conn, p, outcome_source=LP.LIVE,
+                                projected_at=applied_at)
 
             # Tier 3/4 — ONLY from persisted entry evidence (§25/§26). No
             # persisted entry TA profile or regime exists for canonical

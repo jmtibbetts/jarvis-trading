@@ -930,10 +930,22 @@ def _refresh_signal_accuracy_conn(symbol: str, asset_class: str,
     retry recomputes instead of double-incrementing."""
     from sqlalchemy import text
 
-    rows = conn.execute(text("""
-        SELECT outcome, pnl_pct, hold_duration_m FROM trade_outcomes
-        WHERE symbol=:sym
-    """), {"sym": symbol}).fetchall()
+    from lib import learning_population as LP
+
+    # THIS AGGREGATE HAD NO SOURCE FILTER AT ALL, and it feeds the win rate
+    # injected into LLM prompts. An operator-executed trade landing here
+    # would tell the model that JARVIS wins more often than it does, on
+    # fills a person chose. Admission is named now, so a new population
+    # cannot join by default.
+    #
+    # Replay's long-standing inclusion here is PRESERVED deliberately:
+    # changing it is a separate decision needing its own evidence, not
+    # something to slip in alongside this one.
+    where, params = LP.sql_filter("outcome_source", LP.JARVIS_EXECUTION)
+    rows = conn.execute(text(
+        f"SELECT outcome, pnl_pct, hold_duration_m FROM trade_outcomes "
+        f"WHERE symbol=:sym AND {where}"),
+        {"sym": symbol, **params}).fetchall()
     if not rows:
         return
 

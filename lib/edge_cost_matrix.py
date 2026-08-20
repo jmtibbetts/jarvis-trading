@@ -298,13 +298,19 @@ def _dex_rows(days: int, memo: _Memo) -> list[dict]:
 
 def _cell(rows: list[dict]) -> dict:
     """One (strategy, product, timeframe, venue) cell, and why it fails."""
-    from lib.expectancy import REPLAY_WEIGHT
+    from lib import learning_population as LP
 
     # Replayed fills assumed perfect execution and that both a bar's high
     # and low were reachable, so they are systematically optimistic and are
-    # weighted below live evidence rather than pooled with it.
-    weights = [REPLAY_WEIGHT if r["outcome_source"] == "replay" else 1.0
-               for r in rows]
+    # weighted below live evidence rather than pooled with it. Admission is
+    # an allowlist (lib/learning_population): an operator-executed trade
+    # carries THAT ACCOUNT'S costs, including any promotion, and must not
+    # price JARVIS's routing decisions.
+    admitted = [(r, LP.weight(r["outcome_source"],
+                              profile=LP.JARVIS_EXECUTION)) for r in rows]
+    admitted = [(r, w) for r, w in admitted if w is not None]
+    rows = [r for r, _ in admitted]
+    weights = [w for _, w in admitted]
     total_w = sum(weights)
     gross = (sum(r["gross_r"] * w for r, w in zip(rows, weights)) / total_w
              if total_w else None)
@@ -330,7 +336,10 @@ def _cell(rows: list[dict]) -> dict:
         limiting, verdict = LIMIT_COST, "UNTRADEABLE"
 
     bases = {r["cost_basis"] for r in rows if r["cost_r"] is not None}
-    n_live = sum(1 for r in rows if r["outcome_source"] != "replay")
+    # LIVE means live, not "not a replay": `rows` is already restricted to
+    # the admitted populations, so this counts the reference population
+    # itself rather than everything that failed to be a replay.
+    n_live = sum(1 for r in rows if r["outcome_source"] != LP.REPLAY)
     # 7,740 samples reads as overwhelming evidence. 7,740 REPLAYED samples
     # and zero live fills is a different claim, and the replay weighting
     # cannot express it — in a cell where every row is a replay the weight

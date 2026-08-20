@@ -27,6 +27,15 @@ transcript, or an archive of old prompts. Everything historical lives in
 copy.** Never work there, never push from it, never run `run.ps1` /
 `stop.ps1` / `setup.ps1`, never treat `/mnt/c` as the active repo.
 
+> **Trap, hit on 2026-08-20.** When driving WSL from a Windows shell as
+> `wsl.exe -d Ubuntu-24.04 -- bash -c '...'`, `$(...)` and `$VAR` inside
+> those single quotes can be expanded by the OUTER Windows shell first — so
+> `$(git rev-parse HEAD)` runs against the DEAD WINDOWS REPO and silently
+> reports its SHA as though it were the runtime's. It produced a plausible
+> wrong SHA that only the reflog disproved. Put no shell substitution in the
+> command string; let the commands run plainly inside WSL and read their
+> stdout.
+
 Canonical process control — use these, do not hand-roll a launch command:
 
     scripts/start_jarvis.sh     scheduler OFF by default; declares the modes

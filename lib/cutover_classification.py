@@ -86,6 +86,20 @@ _ECONOMIC = {
     "dex_trades": "on-chain paper economy",
     "execution_samples": "measured fills — evidence about the old engine",
     "portfolio_snapshots": "equity curve of the retired book",
+    # MANUAL OPERATOR EVIDENCE. Real money at a real venue, which the
+    # retired simulator neither produced nor corrupted — so the case for
+    # carrying these forward is genuinely arguable, unlike everything else
+    # in this block. They are classified ARCHIVE_ONLY_ECONOMIC anyway, in
+    # the fail-safe direction: the archive preserves every row and stays
+    # readable, whereas copying money-bearing rows into a fresh book is
+    # the one mistake a cutover cannot undo. Their thesis links point at
+    # signals that do NOT cross, so copied rows would arrive dangling.
+    # Promoting them to a COPY class is an OPERATOR DECISION, recorded as
+    # an open question in docs/JARVIS_HANDOFF.md rather than made here.
+    "manual_trades": "operator-executed trades — external real money",
+    "manual_trade_legs": "operator-executed fills",
+    "manual_trade_cost_events": "operator-evidenced funding/fees/gas",
+    "manual_trade_corrections": "amendment history of the above",
 }
 
 # ── Conclusions the old machine reached ──────────────────────────────────

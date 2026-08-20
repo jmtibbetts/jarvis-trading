@@ -89,7 +89,9 @@ class SampleCountTests(unittest.TestCase):
                 ArmResult(thesis(symbol="AAPL").thesis_id, AGENT, traded=True)]
         self.assertEqual(sample_count(rows), 2)
 
-    def test_three_arms_on_one_thesis_is_still_one_sample(self):
+    def test_every_arm_on_one_thesis_is_still_one_sample(self):
+        # Deliberately driven by ARMS itself: adding an arm (OPERATOR, when
+        # the manual desk landed) must not be able to inflate the sample.
         t = thesis().thesis_id
         rows = [ArmResult(t, a, traded=True) for a in ARMS]
         self.assertEqual(sample_count(rows), 1)

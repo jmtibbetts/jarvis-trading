@@ -2783,6 +2783,205 @@ class PaperRealizedOutcome(Base):
     trade_outcome_id     = Column(String)
 
 
+# ── MANUAL OPERATOR EXECUTION (manual_execution_v1) ──────────────────────
+# A trade the OPERATOR placed by hand at a real venue this program cannot
+# reach. Deliberately its OWN tables, and deliberately NOT the paper ones.
+#
+# WHY NOT REUSE `paper_positions`. Every reader of the paper book — cash,
+# exposure, the expectancy gate, the equity curve, the settlement ledger —
+# assumes those rows were produced by the simulator with virtual money. A
+# real BTCC perpetual sitting among them would be counted as virtual
+# exposure, drawn on the virtual equity curve, and measured as though the
+# simulator had produced its fills. That is not an integration; it is a
+# contaminated training set.
+#
+# THESE TABLES ARE EVIDENCE, NOT AN ACCOUNT. Nothing here credits or debits
+# `paper_portfolio.cash`, opens a `PaperPosition`, or funds a `DexBalance`.
+# The semantic objects are `lib.manual_execution.ManualTrade` and friends;
+# the names are kept apart on purpose, exactly as PaperPositionSettlement is
+# kept apart from PositionSettlement.
+class ManualTradeRecord(Base):
+    """One manually executed trade. The header; economics live in the legs.
+
+    `execution_mode` is STORED rather than implied by the table name, so a
+    query that filters on it cannot accidentally include these rows by
+    forgetting which table it is reading — and so the value that says
+    "JARVIS did not place this" travels with the row.
+    """
+    __tablename__ = "manual_trades"
+    __table_args__ = (
+        Index("ix_manual_trades_thesis", "thesis_id"),
+        Index("ix_manual_trades_state", "state"),
+        Index("ix_manual_trades_account_venue", "account_label", "venue"),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+
+    # THE MODE. Never inferred; see lib/execution_mode.py.
+    execution_mode       = Column(String, nullable=False)
+
+    account_label        = Column(String, nullable=False, default="default")
+    venue                = Column(String, nullable=False)
+    product              = Column(String, nullable=False)
+    symbol               = Column(String, nullable=False)
+    instrument_id        = Column(String)
+
+    direction            = Column(String, nullable=False)      # long | short
+    quantity_unit        = Column(String, nullable=False)
+    multiplier           = Column(Float, nullable=False, default=1.0)
+
+    state                = Column(String, nullable=False, default="DRAFT")
+    # Bumped by every economic append, so two writers cannot interleave a
+    # leg and a close without one of them noticing.
+    revision             = Column(Integer, nullable=False, default=0)
+
+    opened_at            = Column(String)
+    closed_at            = Column(String)
+
+    leverage             = Column(Float)
+    margin_mode          = Column(String)
+    collateral_usd       = Column(Float)
+    # WHOSE MONEY. Promotional credit is not owned capital and does not
+    # become owned by being recorded here — lib/account_economics.py.
+    collateral_capital_kind = Column(String, nullable=False,
+                                     default="CAPITAL_UNKNOWN")
+
+    stop_used            = Column(Float)
+    targets_used_json    = Column(Text)
+    initial_risk_usd     = Column(Float)
+
+    # ── The JARVIS side, FROZEN at recommendation time ──────────────────
+    # NULL throughout means the operator traded independently. That is a
+    # complete record, not a missing one, and no thesis is invented to
+    # fill it.
+    thesis_id            = Column(String)
+    signal_id            = Column(String)
+    decision_id          = Column(String)
+    # The whole RecommendationSnapshot. Written ONCE at creation and never
+    # updated by any execution path — the recommended entry must not drift
+    # toward the price the operator actually got.
+    recommendation_json  = Column(Text)
+
+    # Costs the operator affirmatively states were not charged. Distinct
+    # from unevidenced: a promotional zero-fee window is a fact.
+    declared_absent_costs_json = Column(Text)
+
+    # What the venue itself said. Preserved as its OWN fact and reconciled
+    # against the component sum, never overwriting it or overwritten by it.
+    operator_reported_realized_pnl_usd = Column(Float)
+    operator_reported_evidence_type    = Column(String)
+
+    evidence_type        = Column(String)
+    evidence_source      = Column(String)
+    notes                = Column(Text)
+
+    # ── Final truth, written once at close ──────────────────────────────
+    realized_outcome_json = Column(Text)
+    # Learning is decoupled exactly as it is for canonical paper outcomes:
+    # a pattern-memory failure must never unwind a correct record.
+    learning_state       = Column(String, nullable=False, default="PENDING")
+    learning_applied_at  = Column(String)
+    learning_error       = Column(Text)
+
+    engine_epoch         = Column(String)
+    version              = Column(String, nullable=False)
+    created_at           = Column(String, nullable=False, default=now_iso)
+    updated_at           = Column(String, nullable=False, default=now_iso)
+
+
+class ManualTradeLeg(Base):
+    """One fill the operator actually got. Never a strategy outcome.
+
+    `fee_usd` is NULLABLE ON PURPOSE. A leg whose fee was not evidenced
+    stores NULL, which makes the trade's net P&L UNKNOWN — a zero here
+    would assert the venue charged nothing and quietly flatter every trade
+    whose paperwork was incomplete.
+    """
+    __tablename__ = "manual_trade_legs"
+    __table_args__ = (
+        Index("ix_manual_legs_trade", "trade_id"),
+        # The ledger's ORDER. Two economic legs at one sequence is a
+        # corrupted history, not a tie to break.
+        Index("uq_manual_legs_trade_sequence", "trade_id", "sequence",
+              unique=True),
+    )
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    trade_id             = Column(String, nullable=False)
+    sequence             = Column(Integer, nullable=False, default=0)
+
+    kind                 = Column(String, nullable=False)  # ENTRY|PARTIAL_EXIT|FINAL_EXIT
+    quantity             = Column(Float, nullable=False)
+    fill_price           = Column(Float, nullable=False)
+    at                   = Column(String, nullable=False)
+
+    fee_usd              = Column(Float)                   # NULL = UNKNOWN
+    liquidity_role       = Column(String)                  # MAKER|TAKER|UNKNOWN
+    decision_price       = Column(Float)
+    venue_order_ref      = Column(String)
+    exit_reason          = Column(String)
+
+    evidence_type        = Column(String)
+    evidence_source      = Column(String)
+    notes                = Column(Text)
+    created_at           = Column(String, nullable=False, default=now_iso)
+
+
+class ManualTradeCostEvent(Base):
+    """Money that moved without a fill: funding, rebates, gas, penalties.
+
+    Not a leg, because it has no price. `amount_usd` is a MAGNITUDE and the
+    direction lives in `kind` — FUNDING_PAID and FUNDING_RECEIVED are
+    different events, so a sign the operator got backwards cannot silently
+    invert a real payment.
+    """
+    __tablename__ = "manual_trade_cost_events"
+    __table_args__ = (Index("ix_manual_cost_events_trade", "trade_id"),)
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    trade_id             = Column(String, nullable=False)
+    kind                 = Column(String, nullable=False)
+    amount_usd           = Column(Float, nullable=False)
+    at                   = Column(String, nullable=False)
+
+    evidence_type        = Column(String)
+    evidence_source      = Column(String)
+    notes                = Column(Text)
+    created_at           = Column(String, nullable=False, default=now_iso)
+
+
+class ManualTradeCorrection(Base):
+    """An amendment, with the value it replaced still readable.
+
+    OPERATORS MISTYPE AND STATEMENTS ARRIVE LATE. Funding settles after the
+    fact, a fee is restated, an entry price was read off the wrong row. All
+    of that is normal and none of it justifies overwriting history in
+    place: a corrected book that cannot show what it used to say cannot be
+    audited, and a reconciliation done against the corrected value can
+    never explain why the original disagreed.
+
+    So a correction is an APPEND. The previous value, the new value, who
+    said so, on what evidence, and when — all preserved.
+    """
+    __tablename__ = "manual_trade_corrections"
+    __table_args__ = (Index("ix_manual_corrections_trade", "trade_id"),)
+
+    id                   = Column(String, primary_key=True, default=new_id)
+    trade_id             = Column(String, nullable=False)
+    target_kind          = Column(String, nullable=False)   # TRADE|LEG|COST_EVENT
+    target_id            = Column(String, nullable=False)
+    field                = Column(String, nullable=False)
+
+    previous_value_json  = Column(Text)
+    new_value_json       = Column(Text)
+
+    reason               = Column(Text, nullable=False)
+    corrected_by         = Column(String, nullable=False)
+    evidence_type        = Column(String)
+    evidence_source      = Column(String)
+    corrected_at         = Column(String, nullable=False, default=now_iso)
+
+
 class PaperPortfolio(Base):
     """Single-row virtual account state."""
     __tablename__ = "paper_portfolio"

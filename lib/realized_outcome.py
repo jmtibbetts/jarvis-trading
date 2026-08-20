@@ -65,10 +65,18 @@ COUNTERFACTUAL = "COUNTERFACTUAL"
 BACKTEST = "BACKTEST"
 LIVE_CEX = "LIVE_CEX"
 LIVE_DEX = "LIVE_DEX"
+# A REAL trade at a REAL venue that THIS PROGRAM DID NOT PLACE. Distinct
+# from LIVE_CEX/LIVE_DEX, which mean the bot submitted with real money, and
+# distinct from the virtual sources, which mean it submitted with fake
+# money. Pooling manual results into either would attribute a human's
+# execution to the executor being measured — the confusion
+# `lib/execution_mode.py` exists to prevent. Learning may read these; it
+# must be able to tell them apart, which is why they get their own name.
+MANUAL_OPERATOR = "MANUAL_OPERATOR"
 
 SOURCES = frozenset({VIRTUAL_CEX_AGENT, VIRTUAL_DEX_AGENT, SHADOW_CEX,
                      SHADOW_DEX, REPLAY, COUNTERFACTUAL, BACKTEST,
-                     LIVE_CEX, LIVE_DEX})
+                     LIVE_CEX, LIVE_DEX, MANUAL_OPERATOR})
 
 # Exit reasons, kept apart because they mean different things about the
 # strategy. A forced liquidation is not a stop.

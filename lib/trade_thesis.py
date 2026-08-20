@@ -60,8 +60,15 @@ BIRTH_BUCKET_MINUTES = 60
 AGENT = "AGENT"                  # what JARVIS actually chose
 SHADOW = "SHADOW"                # standardized control policy
 COUNTERFACTUAL = "COUNTERFACTUAL"  # what a declined thesis would have done
+# THE HUMAN IS A POLICY TOO. What the operator did with the same claim —
+# followed it, sized it differently, took the other side, or declined it.
+# An ARM, not a second thesis: binding the operator's trade to the SAME
+# thesis_id is what keeps `sample_count` honest when one market event is
+# acted on by both the desk and the person running it. A disagreement is
+# the most informative case of all and must not need a thesis of its own.
+OPERATOR = "OPERATOR"
 
-ARMS = frozenset({AGENT, SHADOW, COUNTERFACTUAL})
+ARMS = frozenset({AGENT, SHADOW, COUNTERFACTUAL, OPERATOR})
 
 # Why an arm did not trade. DECLINED is evidence; the others are noise.
 DECLINED = "DECLINED"            # the policy chose not to

@@ -233,8 +233,11 @@ jobs:
       - name: Native modules import
         run: |
           set -euo pipefail
-          .venv/bin/python -c "import order_book; print('order_book', getattr(order_book,'__version__','ok'))"
-          .venv/bin/python -c "import cryptofeed; print('cryptofeed', cryptofeed.__version__)"
+          # Assert the module IMPORTS and its compiled surface is usable.
+          # Not __version__: cryptofeed does not define one, and a gate that
+          # fails on a missing dunder is testing the gate, not the build.
+          .venv/bin/python -c "import order_book; from order_book import OrderBook; OrderBook(); print('order_book ok')"
+          .venv/bin/python -c "import cryptofeed, cryptofeed.defines; print('cryptofeed ok', cryptofeed.__file__)"
 
       # PLATFORM MODE IS THE HARD AUTHORITY: no stale flag, credential,
       # scheduler state or caller argument may reach a real order under

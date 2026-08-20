@@ -10,6 +10,20 @@ from contextlib import asynccontextmanager
 from app.version import VERSION
 from dotenv import load_dotenv
 
+# STAMP THE BUILD IDENTITY NOW, WHILE "NOW" STILL MEANS STARTUP.
+#
+# lib/build_identity captures the loaded commit in a module-level constant,
+# which is only as good as the moment that module is first imported. Its one
+# consumer imported it INSIDE the /system/version handler, so the constant
+# was captured on the FIRST REQUEST rather than at load — and any commit
+# made between startup and that request was then reported as the loaded
+# build. Measured 2026-08-20: a process started at 11:04:51 reported a
+# commit authored at 11:08:48 as its own, which is precisely the false
+# "yes, you are running the new code" the module exists to prevent.
+#
+# THIS IMPORT IS NOT UNUSED. Importing it IS the effect.
+import lib.build_identity  # noqa: F401
+
 load_dotenv()
 
 # ── Logging ────────────────────────────────────────────────────────────────────

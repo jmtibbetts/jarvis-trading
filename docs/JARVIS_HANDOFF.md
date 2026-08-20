@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `ac77450`.*
+*Last measured: 2026-08-20, at code SHA `d991016`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       ac7745079b2508ac400ba6ce981e1a06924e619e
+    code SHA       d99101624c39a837e8bb349ad57252b089cd9f52
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -61,19 +61,29 @@ Canonical process control — use these, do not hand-roll a launch command:
 `start_jarvis.sh` establishes `VIRTUAL_ONLY` / `FULL_VIRTUAL` explicitly and
 sets `JARVIS_DISABLE_SCHEDULER=1` unless `--with-scheduler` is passed.
 
-### Verifying that the running server is not stale
+### Verifying which code the server actually loaded
 
-`GET /api/system/version` reports `backend_commit` by shelling out to
-`git rev-parse HEAD` **at request time, in the repo directory**. It therefore
-reports the REPOSITORY's SHA, not the SHA of the code loaded in the process.
-**It will report agreement even when the running server is stale**, and it
-did exactly that on 2026-08-20. Do not use it as proof.
+`lib/build_identity.py` captures the commit ONCE at import.
+`GET /api/system/version` reports:
 
-Prove the running build BEHAVIOURALLY instead — call an endpoint whose shape
-changed in the commit you care about — or compare the process start time
-(`ps -o lstart= -p <pid>`) against the commit time. Note the SPA fallback
-answers any unmatched path with `index.html` and HTTP **200**, so a missing
-route looks like a success until JSON parsing fails.
+    backend_commit               the LOADED code. Immutable for the process.
+    loaded_backend_commit        the same value, named unambiguously
+    repository_head_commit       live git HEAD; may legitimately differ
+    code_matches_repository_head comparison, or null if either is unknown
+
+A difference is NORMAL after a documentation-only commit and a genuine
+mismatch after a code-bearing one.
+
+> Until 2026-08-20 `backend_commit` shelled out to `git rev-parse HEAD` per
+> request, so it reported the REPOSITORY rather than the loaded code — and
+> told a deploy check that a server running `ae5bab9` was running `ac77450`.
+> If you are ever unsure, the behavioural check still works: call an endpoint
+> whose shape changed in the commit you care about, or compare
+> `ps -o lstart= -p <pid>` against the commit time.
+
+The SPA fallback answers any unmatched path with `index.html` and HTTP
+**200**, so a missing route looks like success until JSON parsing fails.
+Verify the JSON and the expected key, never the status code alone.
 
 ## 2. Posture — currently in force
 
@@ -224,16 +234,72 @@ and can never initialise or replace it.
 Every credit writes balance + `DexFundingEvent` in one transaction, carrying
 authority, actor, amount, asset, reason, policy version, event id, timestamp.
 
-## 9. Solana dynamic fee authority
+## 9. Solana dynamic fee authority — WIRED into canonical execution
 
-`lib/solana_fees.py` measures; `lib/solana_fee_policy.py` decides what the
-operator will pay. They are deliberately separate modules.
+`lib/solana_fees.py` MEASURES. `lib/solana_fee_policy.py` decides what the
+operator will pay. `lib/dex_network_cost.py` is the ONE place canonical DEX
+execution composes the two, and it has real callers:
+
+    dex_autotrade.evaluate_candidate   the expectancy gate
+    dex_paper.open_dex_position        the booked entry (inherits the
+                                       gate's authorized bid)
+    execution_venue.VirtualDexAdapter  before any simulated submission
+    dex_wallet.gas_state               reserve = the AUTHORIZED BID
+
+Sequence: identify the ACTION -> select an allowed PRIORITY LEVEL -> gather
+real writable-account context -> MEASURE -> AUTHORIZE -> check the persisted
+SOL balance -> only then submit. A NORMAL_ENTRY refuses on an UNKNOWN
+estimate, on a measured fee above policy, on a fee that destroys expected
+edge, on the notional cap, and on insufficient persisted SOL.
+
+**Measurement happens BEFORE any write transaction opens.** Pricing inside
+one held the SQLite write lock across an RPC round trip while the
+provider-health write waited on it for the full 30s busy timeout — a silent
+30s stall, not a visible deadlock.
+
+**Hermetic by construction**: the estimator refuses under pytest unless
+`JARVIS_REAL_PROVIDER_TESTS=1`. Tests inject `fetch=` / `fee_fetch=`.
+
+### Three facts, never collapsed
+
+    MEASURED    NetworkFeeEstimate — what the fee market indicated.
+                No policy has touched it; there is no `capped` field.
+    AUTHORIZED  FeeAuthorization — the BID. May sit deliberately below the
+                measurement, and says so via
+                `bid_below_measured_requirement`.
+    ACTUAL      what the chain took. The ONLY one ever charged, exactly
+                once. None means "not established", never zero.
+
+`ExecutionResult` carries all three plus `fee_provenance`. Learning never
+recomputes an execution cost — `RealizedOutcome` stays the authority.
+
+### Priority level and action policy are ORTHOGONAL
+
+`ECONOMY|NORMAL|HIGH|VERY_HIGH|MAX_ACCEPTANCE` answer *how hard to bid*.
+`NORMAL_ENTRY|NORMAL_EXIT|URGENT_EXIT|SEVERE_RISK_EXIT` answer *which
+economics apply*. A HIGH-priority ENTRY gets NORMAL_ENTRY caps. The only
+coupling runs action -> permitted priority levels; a table mapping
+`HIGH -> NORMAL_EXIT` used to run it the wrong way and is gone.
+
+### Authority hierarchy and context
 
     priority fee   1. Helius getPriorityFeeEstimate   (primary)
                    2. getRecentPrioritizationFees     (fallback)
                    3. nothing -> UNKNOWN. Never a constant, never zero.
     base fee       protocol per-signature constant, 5,000 lamports
     compute units  400,000 = DEFAULT_BUDGET_ASSUMPTION (see UNKNOWNs)
+
+Context quality is part of the answer, best first:
+`TRANSACTION_SPECIFIC` -> `LOCAL_ACCOUNT_SET` -> `GLOBAL_ESTIMATE`. The
+writable accounts of a swap (pool, mint, wrapped SOL) reach BOTH the Helius
+primary and the RPC fallback, which are labelled `LOCAL_ACCOUNT_FALLBACK` vs
+`GLOBAL_FALLBACK`.
+
+**A global zero is not proof about a specific transaction.** Measured
+2026-08-20 on the same call at the same moment: the account-aware form
+returned **12.0 micro-lamports/CU**, the accountless form **0.0**. The
+accountless fallback would have bid ZERO priority for a transaction facing a
+real local market.
 
 **`priorityLevel` is CASE-SENSITIVE and Capitalised**: `Low | Medium | High |
 VeryHigh | UnsafeMax`. Lowercase `"high"` returns **-32602 Invalid params**.
@@ -293,8 +359,8 @@ that never works?** Surfaced on `GET /api/providers/health` under
 
 ## 11. Tests and CI
 
-    full suite   4,277 passed - 16 skipped - 0 failed   (at ac77450)
-    Ubuntu CI    all six jobs green (run 32381149191)
+    full suite   4,334 passed - 16 skipped - 0 failed, exit code 0 (d991016)
+    Ubuntu CI    all six jobs green (run 32390137574)
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
 
@@ -307,12 +373,12 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - **`getFeeForMessage` is not yet authoritative**, for the same reason.
 - **400,000 CU remains `DEFAULT_BUDGET_ASSUMPTION`** until measured. It must
   not harden into a measurement.
-- **The fee modules are tested but NOT wired into canonical production DEX
-  execution.** Policy is enforced where it is called; it is not yet called by
-  the execution path. That is Phase 6.2.
-- **`getRecentPrioritizationFees` returned 0.0 across all 150 slots** on
-  2026-08-20. A silent fallback today would bid ZERO priority. Fallback
-  success is not fallback equivalence.
+- **The GLOBAL fallback still reports 0.0** while the account-aware form
+  reports a non-zero local market. Canonical execution always supplies
+  accounts, so this bites only a caller that supplies none.
+- **No canonical DEX EXIT path measures fees yet.** The exit action policies
+  (`URGENT_EXIT`, `SEVERE_RISK_EXIT`) are implemented, tested and reachable,
+  but `close_dex_position` does not yet call the fee authority — entries do.
 - **Fractional priority-fee estimates are unobserved live** — the quantizer is
   contract-driven and defensive, not empirically calibrated.
 - **BTCC accounting / funding / cross-margin liquidation details remain
@@ -326,14 +392,20 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - Execution phases needing a funded Solana keypair are BLOCKED: there is no
   Solana signer in the repo and key material is not handled here.
 
-## 13. Next phase — Phase 6.2, NOT STARTED
+## 13. Next phase — NOT STARTED
 
-**Phase 6.2: canonical DEX fee integration.** Wire `lib/solana_fees` and
-`lib/solana_fee_policy` into the canonical DEX execution path so that measured
-fees and authorised ceilings actually govern execution, rather than being
-correct-but-uncalled.
+Phase 6.2 (canonical DEX fee integration) is COMPLETE. Candidates next, in
+no fixed order:
 
-Do not begin UI work.
+- **Wire the EXIT path to the fee authority.** `close_dex_position` still
+  prices its exit without measuring, and the urgent/severe action policies
+  exist for exactly that caller.
+- **A canonical unsigned transaction builder**, which is what would turn
+  `simulateTransaction` and `getFeeForMessage` from UNKNOWN into measured,
+  and 400k CU from an assumption into a number. Needs no signer and no key
+  material; building one is not the same as being able to submit.
+
+Do not begin UI work. The scheduler stays OFF.
 
 ## 14. Working rules
 

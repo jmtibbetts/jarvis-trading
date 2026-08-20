@@ -170,8 +170,26 @@ def _build_provider_status() -> dict:
     now = _dt.now(_tz.utc)
     providers = []
 
-    def add(name, ok, detail):
-        providers.append({"name": name, "ok": ok, "detail": detail})
+    def add(name, ok, detail, *, probed=True):
+        """CREDENTIAL PRESENT IS NOT ENTITLED — and the payload now says which.
+
+        Every row here except Massive comes from a LIVE call. Massive was
+        reported `ok: True` purely because `MASSIVE_API_KEY` was set, so a
+        revoked, expired or wrong-product key would have gone on rendering a
+        green light indefinitely. It happens to work today (verified
+        2026-08-20 through the `massive` SDK it actually imports), which is
+        precisely why nobody would have noticed.
+
+        `ok` keeps its existing meaning and type, so the HUD is untouched.
+        `probed` and `state` are ADDITIVE, and `state` can never read
+        HEALTHY for something nobody actually called.
+        """
+        providers.append({
+            "name": name, "ok": ok, "detail": detail,
+            "probed": probed,
+            "state": ("HEALTHY" if (probed and ok)
+                      else "DOWN" if probed else "UNPROBED"),
+        })
 
     # LM Studio — live ping (local, 5s timeout)
     try:
@@ -195,8 +213,13 @@ def _build_provider_status() -> dict:
         detail = " ".join(str(e)[:60].split())
         add("Alpaca", False, f"{detail} — creds from {src}")
 
-    # Massive REST — key presence only; a live call would burn the 5/min budget
-    add("Massive", bool(_os.getenv("MASSIVE_API_KEY")), "REST (key set)" if _os.getenv("MASSIVE_API_KEY") else "no key")
+    # Massive REST — NOT PROBED. A live call would burn the 5/min budget, so
+    # this row reports credential PRESENCE and says so rather than implying a
+    # verified connection. `probed=False` keeps `state` out of HEALTHY.
+    _massive_key = bool(_os.getenv("MASSIVE_API_KEY"))
+    add("Massive", _massive_key,
+        "REST key present — NOT PROBED (5/min budget)" if _massive_key
+        else "no key", probed=False)
 
     # CoinGecko — live ping (their documented health endpoint)
     try:

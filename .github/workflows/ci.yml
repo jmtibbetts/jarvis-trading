@@ -199,6 +199,61 @@ jobs:
   # scripts/assert_no_network.py is the control for that local run.
 
   # ── The frontend is part of the product ────────────────────────────────
+  runtime_contract:
+    # THE SAFETY BOUNDARIES, AS A NAMED GATE RATHER THAN BURIED IN THE SUITE.
+    #
+    # These tests already run inside `pytest`, but a green suite of 4,078
+    # says nothing about WHICH invariant broke when it turns red. The four
+    # boundaries below are the ones where a regression means real money or
+    # a silently wrong posture, so they get a job whose failure names
+    # itself in the checks list.
+    name: runtime contract (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Create the repository virtualenv
+        run: python -m venv .venv
+      - name: Install dependencies (fail-closed)
+        run: .venv/bin/python scripts/install_dependencies.py --with-test --with-inference
+
+      # A dependency graph that resolves is not the same as one that AGREES.
+      # pip check catches the version conflicts that import alone will not.
+      - name: pip check
+        run: .venv/bin/python -m pip check
+
+      # THE TWO NATIVE MODULES, ASSERTED SEPARATELY. Both compile from
+      # source and both have failed to build before; an ImportError here
+      # must read as "the native build broke", not as an unrelated test
+      # failure three jobs later.
+      - name: Native modules import
+        run: |
+          set -euo pipefail
+          .venv/bin/python -c "import order_book; print('order_book', getattr(order_book,'__version__','ok'))"
+          .venv/bin/python -c "import cryptofeed; print('cryptofeed', cryptofeed.__version__)"
+
+      # PLATFORM MODE IS THE HARD AUTHORITY: no stale flag, credential,
+      # scheduler state or caller argument may reach a real order under
+      # VIRTUAL_ONLY.
+      - name: VIRTUAL_ONLY blocks real risk-increasing execution
+        run: .venv/bin/python -m pytest -q tests/test_platform_authority.py tests/test_platform_mode.py
+
+      # A launcher declares its posture and never inherits one.
+      - name: Runtime posture is explicit
+        run: .venv/bin/python -m pytest -q tests/test_launcher_posture.py
+
+      # UNKNOWN stays blocked; risk-reducing stays permitted.
+      - name: Scheduler side-effect policy
+        run: .venv/bin/python -m pytest -q tests/test_scheduler_policy.py
+
+      # Tests never touch the operator database.
+      - name: Operator DB isolation
+        run: .venv/bin/python -m pytest -q tests/test_writable_store_isolation.py
+
   frontend:
     name: frontend typecheck + build
     runs-on: ubuntu-24.04

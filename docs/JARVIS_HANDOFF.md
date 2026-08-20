@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `373315b`.*
+*Last measured: 2026-08-20, at code SHA `e2eb266`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       373315b (manual learning bridge, consumer-level)
+    code SHA       e2eb266 (provider entitlement audit)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -780,9 +780,96 @@ attributed per provider — surfaced in the same payload as
 `dropped_health_writes`. A silently vanishing health row is precisely how a
 dead primary comes to look healthy.
 
+## 10b. Provider audit — measured 2026-08-20, read-only
+
+Every result below came from a live READ. No purchase, upgrade, integration
+or refactor; no webhook created, modified or deleted.
+
+**33 keys in `.env`, 13 providers with credentials.** No secret appears here
+or in any test, log or payload.
+
+| provider | credential | verified capability | tier | disposition |
+|---|---|---|---|---|
+| **Helius** | present | RPC health/version/balance/signatures, **DAS** getAsset + getAssetsByOwner, **getPriorityFeeEstimate**, **Enhanced v0** transactions, **Wallet v1 transfers**, webhooks LIST | paid, all probed products entitled | KEEP_PRIMARY |
+| **Alpaca** | present | account, **quotes feed=sip 200**, **options feed=opra 200**, iex, crypto | **PAID CONFIRMED — SIP and OPRA both entitled** | KEEP_PRIMARY |
+| **Kraken** | present | private read-only authenticated, **7/7 scopes granted, 0 missing**; public + futures keyless | direct access confirmed; fee tier taker 0.8 / maker 0.4 at $0 volume | KEEP_PRIMARY |
+| **Massive** | present | `get_previous_close_agg` via the `massive` SDK (pinned 2.8.0) | working | KEEP_SECONDARY |
+| **TwelveData** | present | api_usage + quote | **`plan_category: grow`** | REPAIR_CONFIGURATION (below) |
+| **CoinGecko** | present | demo `/ping` 200 | **DEMO, not Pro** — pro host replies "use api.coingecko.com" | KEEP_SPECIALIZED |
+| **AllRates** | present | `/rate` 200 via Bearer | free tier, 300-request LIFETIME cap | KEEP_SECONDARY |
+| **FRED / EIA / OpenFIGI** | present | series / v2 / v3 mapping, all 200 | free | KEEP_SPECIALIZED |
+| **Tavily / Stocklake** | present | MCP `initialize` 200 | working | KEEP_SPECIALIZED |
+| **LunarCrush** | present | **HTTP 402** | credential VALID, **subscription inactive** | DEFER — do not repurchase without review |
+| **Massive MCP** | n/a | **401 on every auth style** | `mcp.massive.com` wants a JWT; `MASSIVE_API_KEY` is a REST key | REPAIR_CONFIGURATION |
+| Exa / Firecrawl | **absent** | — | in `.env.example` only | DEFER |
+
+### Misconfigurations found (none corrected in place — evidence only)
+
+- **SIX `HELIUS_*` keys in `.env` have ZERO references anywhere** — not in
+  code, tests, docs or `.env.example`: `HELIUS_ACTIVE_WALLET_LIMIT`,
+  `HELIUS_SMART_MONEY_LIMIT`, `HELIUS_MIN_WALLET_TRADES`,
+  `HELIUS_MIN_SMART_MONEY_SCORE`, `HELIUS_MIN_COPY_SCORE`,
+  `HELIUS_DISCOVERY_LOOKBACK_DAYS`. The operator authored six tuning knobs
+  that configure nothing. Conversely five knobs the code DOES read
+  (`HELIUS_PAGE_LIMIT`, `_MAX_PAGES_PER_POLL`, `_BACKFILL_LIMIT`,
+  `_MAX_RETRIES`, `_MIN_CALL_SPACING`) are absent from `.env` and run on
+  defaults.
+- **`TWELVEDATA_RPM=377` contradicts the repo's own mapping.** `lib/twelvedata`
+  documents `8 = Basic, 55 = Grow, 610 = Pro`; the measured plan is `grow`.
+  377 is exactly the `plan_limit` field, so it looks copied from there. The
+  code's own warning applies: an RPM the plan disallows earns 429s. **Not
+  changed** — which figure is right is a question for the provider.
+  UNKNOWN_PENDING_PROVIDER_EVIDENCE.
+- **`mcp_client` maps a REST key onto an MCP endpoint for Massive.** The REST
+  path works; the MCP entry returns 401 every call.
+
+### `WALLET_QUEUE_URL` / `WALLET_QUEUE_SECRET` — the answer is: they do not exist
+
+They appear in **one planning document**
+(`JARVIS_MASTER_UI_UX_HELIUS_WALLET_ALPHA_PROMPT.md` §92) and nowhere else —
+not in `.env`, not in `.env.example`, and read by no code. Nor is
+`HELIUS_WEBHOOK_AUTH_SECRET`. There is no webhook receiver, no queue, no
+gateway, and no worker.
+
+- **They are NOT Helius settings.** That document already says so: Helius
+  authenticates with `HELIUS_API_KEY`; the queue pair was proposed as
+  *internal JARVIS service-to-service* configuration.
+- **Nothing is required, and nothing breaks when they are absent.**
+- **Helius never receives either value.**
+- **JARVIS monitors wallets today WITHOUT them**, by POLLING:
+
+      HELIUS_WATCH_WALLETS -> wallet_activity.collect_once()
+        -> GET api.helius.xyz /v1/wallet/{addr}/transfers  (page<=100)
+        -> parse_transfers (amount, never amountRaw/decimals)
+        -> wallet_observations, idempotent by dedup_key
+        -> wallet_registry / wallet_scoring -> On-Chain Desk
+
+  `lib/wallet_activity` states the reason in its first line: the webhook
+  design was **dropped rather than hardened**, because this machine holds
+  every venue credential and accepts no inbound connection. Polling reaches
+  the same data with no internet-facing host to isolate or patch. Latency is
+  the trade and does not bind — wallet flow is slow context, never entry
+  timing.
+- **A queue is unnecessary at this scale**: 5 watched wallets.
+
+### Observability gaps (reported, not fixed)
+
+- **`provider_health` tracks 2 of 13 providers** — Helius' fee estimator and
+  LunarCrush. `/api/providers/health` is truthful about what it tracks and
+  that is almost nothing. There is also a SECOND health system,
+  `intelligence_source_health`, for news sources.
+- **Failure handling is uneven.** Alpaca distinguishes 401/403/404, Helius
+  401/404/429, LunarCrush 402; TwelveData, Massive and AllRates handle 429
+  only; `crypto_market_data` and `fred_client` distinguish no status at all —
+  they swallow every exception and return `None`/`{}`, which fails closed and
+  never fabricates a zero, but cannot tell "unpaid" from "unreachable".
+- **AllRates fails closed hard and remembers**: a 429 disables it
+  permanently, keyed to a hash of the credential so a new key clears it —
+  the free tier's 300-request cap never resets.
+
 ## 11. Tests and CI
 
-    full suite   4,570 passed - 16 skipped - 0 failed, exit code 0 (373315b)
+    full suite   4,596 passed - 16 skipped - 0 failed, exit code 0 (e2eb266)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
@@ -869,8 +956,13 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - **Host WHEA / `HOST_HARDWARE_UNSTABLE` remains unresolved** unless new
   evidence proves otherwise. It is a host-level concern and is not
   represented anywhere in this repository.
-- `HELIUS_WATCH_WALLETS` is EMPTY, so Wallet Alpha renders NOT CONFIGURED —
-  correct, not broken.
+- ~~`HELIUS_WATCH_WALLETS` is EMPTY~~ **STALE — corrected 2026-08-20.** It
+  holds **5** valid 44-character addresses, and the registry has run: 5 seed,
+  944 candidates, 142 excluded entities, 1,086 rows. The old claim below is
+  kept struck through because it is exactly the sort of line a later session
+  would otherwise trust.
+  (The struck claim continued: "so Wallet Alpha renders NOT CONFIGURED —
+  correct, not broken." It is not correct any more.)
 - Execution phases needing a funded Solana keypair are BLOCKED: there is no
   Solana signer in the repo and key material is not handled here.
 

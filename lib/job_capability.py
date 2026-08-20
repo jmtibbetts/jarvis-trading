@@ -103,6 +103,144 @@ _MAP.update({k: ECONOMIC for k in _ECONOMIC})
 REASONS: dict[str, str] = {**_COLLECTION, **_ANALYSIS, **_ECONOMIC}
 
 
+# ── SIDE-EFFECT CLASS ────────────────────────────────────────────────────
+#
+# WHY A SECOND AXIS. COLLECTION/ANALYSIS/ECONOMIC says which STAGE a job
+# belongs to. It does not say what the job can DO to the world, and those
+# are different questions that an audit kept conflating:
+#
+#   `telegram` is ANALYSIS, but it sends messages to a human.
+#   `guardian` and `positions` were read as virtual, but both mutate a REAL
+#     broker account -- guardian closes positions and cancels orders,
+#     positions writes stop-loss, take-profit and trailing-stop exits.
+#   `execute` opens real exposure, which is categorically different from
+#     the two above even though all three touch the same broker.
+#
+# Classified from the CALL GRAPH, not from names. The distinction that
+# carries the most weight is RISK_INCREASING vs RISK_REDUCING: closing
+# exposure under VIRTUAL_ONLY must stay possible, because refusing to close
+# a real position would trap real capital behind a training-mode flag --
+# the guard becoming the cause of the loss it exists to prevent.
+READ_ONLY_INTERNAL = "READ_ONLY_INTERNAL"
+EXTERNAL_READ_ONLY = "EXTERNAL_READ_ONLY"
+EXTERNAL_NOTIFICATION = "EXTERNAL_NOTIFICATION"
+VIRTUAL_STATE_MUTATING = "VIRTUAL_STATE_MUTATING"
+REAL_ACCOUNT_RISK_REDUCING = "REAL_ACCOUNT_RISK_REDUCING"
+REAL_ACCOUNT_RISK_INCREASING = "REAL_ACCOUNT_RISK_INCREASING"
+UNKNOWN = "UNKNOWN"
+
+SIDE_EFFECT_CLASSES = (
+    READ_ONLY_INTERNAL, EXTERNAL_READ_ONLY, EXTERNAL_NOTIFICATION,
+    VIRTUAL_STATE_MUTATING, REAL_ACCOUNT_RISK_REDUCING,
+    REAL_ACCOUNT_RISK_INCREASING, UNKNOWN,
+)
+
+# Jobs whose class is NOT the default for their capability group. Anything
+# absent inherits from _CLASS_BY_CAPABILITY below.
+_SIDE_EFFECT_OVERRIDES = {
+    # Outbound to a human. Not a mutation, but not read-only either: an
+    # operator woken at 3am by a test run has been affected by it.
+    "telegram": EXTERNAL_NOTIFICATION,
+    "brief_push": EXTERNAL_NOTIFICATION,
+
+    # REAL Alpaca account. Verified by AST over the call graph.
+    #   execute   -> submit_bracket_order  (OPENS exposure)
+    #   guardian  -> close_position, cancel_open_orders_for_symbol
+    #   positions -> stop / target / trailing-stop exits, close, partial close
+    "execute": REAL_ACCOUNT_RISK_INCREASING,
+    "guardian": REAL_ACCOUNT_RISK_REDUCING,
+    "positions": REAL_ACCOUNT_RISK_REDUCING,
+}
+
+_CLASS_BY_CAPABILITY = {
+    COLLECTION: EXTERNAL_READ_ONLY,
+    ANALYSIS: READ_ONLY_INTERNAL,
+    ECONOMIC: VIRTUAL_STATE_MUTATING,
+}
+
+
+def side_effect_class(job_id: str) -> str:
+    """What this job can do to the world.
+
+    UNKNOWN for anything unclassified, and UNKNOWN is never treated as
+    harmless -- see `policy_for`, where it is blocked in every mode.
+    """
+    if job_id in _SIDE_EFFECT_OVERRIDES:
+        return _SIDE_EFFECT_OVERRIDES[job_id]
+    cap = REASONS.get(job_id)
+    if cap is None and job_id not in REASONS:
+        # capability_of raises for unclassified ids; mirror that as UNKNOWN
+        # rather than guessing a stage for it.
+        return UNKNOWN
+    return _CLASS_BY_CAPABILITY.get(capability_of(job_id), UNKNOWN)
+
+
+# Which side-effect classes each runtime mode permits.
+#
+# EXTERNAL_NOTIFICATION is deliberately absent from both: it is allowed only
+# when its own delivery configuration is explicitly enabled, so that a mode
+# switch alone can never start messaging people.
+_ALLOWED_BY_RUNTIME_MODE = {
+    "FULL_VIRTUAL": frozenset({
+        READ_ONLY_INTERNAL, EXTERNAL_READ_ONLY, VIRTUAL_STATE_MUTATING}),
+    # EVIDENCE_ONLY gathers and derives. It must NOT move the virtual book
+    # either -- that is the whole distinction from FULL_VIRTUAL, and if the
+    # two permitted identical job sets the mode would be decorative.
+    "EVIDENCE_ONLY": frozenset({READ_ONLY_INTERNAL, EXTERNAL_READ_ONLY}),
+}
+
+
+def policy_for(job_id: str, *, runtime_mode: str, platform_mode: str,
+               notifications_enabled: bool = False) -> dict:
+    """May this job run, under this posture? Returns the decision AND why.
+
+    Fail-closed in every direction: an unrecognised mode permits nothing, an
+    unclassified job is blocked, and real risk-increasing work is refused
+    unless the platform explicitly permits real money.
+    """
+    cls = side_effect_class(job_id)
+    allowed = _ALLOWED_BY_RUNTIME_MODE.get(runtime_mode)
+
+    if allowed is None:
+        return {"job": job_id, "side_effect_class": cls, "allowed": False,
+                "blocked_reason": f"unrecognised runtime mode {runtime_mode!r}"}
+    if cls == UNKNOWN:
+        return {"job": job_id, "side_effect_class": cls, "allowed": False,
+                "blocked_reason": "unclassified job — UNKNOWN defaults to "
+                                  "BLOCKED rather than being assumed safe"}
+    if cls == REAL_ACCOUNT_RISK_INCREASING:
+        live = platform_mode in ("LIVE_LIMITED", "LIVE_ENABLED")
+        return {"job": job_id, "side_effect_class": cls, "allowed": live,
+                "blocked_reason": None if live else
+                f"platform mode {platform_mode} forbids increasing real "
+                f"exposure"}
+    if cls == REAL_ACCOUNT_RISK_REDUCING:
+        # Permitted under VIRTUAL_ONLY on purpose. See the class comment:
+        # refusing to close real exposure would trap real capital behind a
+        # training flag. Still requires a broker to exist at all.
+        return {"job": job_id, "side_effect_class": cls, "allowed": True,
+                "blocked_reason": None,
+                "note": "risk-reducing actions stay permitted so real "
+                        "exposure can always be closed"}
+    if cls == EXTERNAL_NOTIFICATION:
+        return {"job": job_id, "side_effect_class": cls,
+                "allowed": bool(notifications_enabled),
+                "blocked_reason": None if notifications_enabled else
+                "notification delivery is not explicitly enabled"}
+    return {"job": job_id, "side_effect_class": cls, "allowed": cls in allowed,
+            "blocked_reason": None if cls in allowed else
+            f"{cls} is not permitted in {runtime_mode}"}
+
+
+def policy_matrix(*, runtime_mode: str, platform_mode: str,
+                  notifications_enabled: bool = False) -> list[dict]:
+    """Every known job's decision, for Ops to render."""
+    return [policy_for(j, runtime_mode=runtime_mode,
+                       platform_mode=platform_mode,
+                       notifications_enabled=notifications_enabled)
+            for j in sorted(REASONS)]
+
+
 def capability_of(job_id: str) -> str:
     """What this job is allowed to do. Unknown means ECONOMIC."""
     return _MAP.get(job_id, ECONOMIC)

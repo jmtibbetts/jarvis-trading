@@ -150,9 +150,69 @@ class ExecutionResult:
     reject_reason: str | None = None
     provenance: dict = field(default_factory=dict)
 
+    # ── Canonical identity & venue (P0-5) ────────────────────────────────
+    # EXTENDED IN PLACE, deliberately. The alternative — a second parallel
+    # result type — would mean two lifecycles that drift, which is the
+    # exact disease this phase treats. Every new field defaults, so the
+    # twenty-plus existing constructors keep working unchanged.
+    execution_id: str | None = None
+    order_id: str | None = None
+    signal_id: str | None = None
+    thesis_id: str | None = None
+    environment: str = "VIRTUAL"
+    venue: str | None = None
+    product: str | None = None
+    instrument_id: str | None = None
+
+    # Quantities beyond requested/filled. remaining is DERIVED — see below.
+    accepted_quantity: float | None = None
+
+    # ── Cost decomposition, each charged exactly once, SEPARATELY ────────
+    # PRICE IMPACT IS NOT A FEE. spread/slippage are already inside
+    # fill_price (see the attribution note above); impact is the pool
+    # moving because the trade happened; explicit fees are what a venue
+    # charges by schedule; network fees are what a chain charges to run
+    # the transaction at all. Folding any two together makes the model
+    # unfalsifiable against a real venue statement.
+    price_impact_usd: float | None = None
+    explicit_fees_usd: float | None = None
+    network_fees_usd: float | None = None
+    funding_or_carry_usd: float | None = None
+
+    # ── Lifecycle timestamps. None means "did not happen", never "0". ────
+    submitted_at: str | None = None
+    first_fill_at: str | None = None
+    completed_at: str | None = None
+    unfilled_reason: str | None = None
+
+    venue_cost_model_version: str | None = None
+
     @property
     def filled(self) -> bool:
         return self.state in (FILLED, PARTIALLY_FILLED)
+
+    # ── Canonical aliases. One storage location, many honest names. ─────
+    @property
+    def status(self) -> str:
+        return self.state
+
+    @property
+    def average_fill_price(self) -> float | None:
+        return self.fill_price
+
+    @property
+    def remaining_quantity(self) -> float:
+        """Derived, so it can never disagree with requested - filled."""
+        return max(0.0, float(self.requested_quantity or 0.0)
+                   - float(self.filled_quantity or 0.0))
+
+    @property
+    def decision_price(self) -> float | None:
+        return self.decision_mid
+
+    @property
+    def execution_model_version(self) -> str:
+        return self.fill_model
 
 
 def _sign(side: str | None) -> int | None:

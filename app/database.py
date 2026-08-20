@@ -1530,6 +1530,34 @@ class DexPortfolio(Base):
     updated_at    = Column(String, default=now_iso)
 
 
+class DexBalance(Base):
+    """One asset in the virtual DEX wallet. THE economic authority.
+
+    Balances used to arrive as function arguments (gas_balance_sol=1.0 was
+    a caller default), which let any caller make an impossible trade
+    executable by typing a bigger number. Solvency is now a row, not an
+    opinion.
+
+    `available` is deliberately NOT a column: it is total - reserved,
+    derived at read time, so the three numbers can never disagree with
+    each other. Reserved exists for in-flight trades; a crash between
+    reserve and settle leaves a visible reservation to reconcile rather
+    than a silently respent balance.
+    """
+    __tablename__ = "dex_balances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mint", name="uq_dex_balance_user_mint"),
+    )
+
+    id                = Column(String, primary_key=True, default=new_id)
+    user_id           = Column(String, default=DEFAULT_USER_ID, nullable=False)
+    mint              = Column(String, nullable=False)
+    symbol            = Column(String)
+    total_quantity    = Column(Float, nullable=False, default=0.0)
+    reserved_quantity = Column(Float, nullable=False, default=0.0)
+    updated_at        = Column(String, default=now_iso)
+
+
 class TelegramLinkToken(Base):
     __tablename__ = "telegram_link_tokens"
     id           = Column(String, primary_key=True, default=new_id)

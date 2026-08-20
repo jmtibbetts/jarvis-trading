@@ -211,12 +211,31 @@ class VirtualDexAdapter(ExecutionVenue):
     def submit(self, plan, *, risk=None, reserve_usd=None,
                sol_price_usd: float = 0.0, gas_balance_sol: float = 0.0,
                **kw) -> VenueSubmission:
+        from lib import dex_wallet as DW
         from lib.dex_swap_math import quote_swap, spendable_native
+        from lib.virtual_orders import ExecutionResult
 
-        gas = spendable_native(gas_balance_sol)
-        if not gas["can_transact"]:
+        # THE PERSISTED WALLET IS THE ECONOMIC AUTHORITY (P0-3).
+        #
+        # `gas_balance_sol` used to be believed outright — a caller could
+        # make an impossible trade executable by typing a bigger number.
+        # When a wallet exists, the ledger decides and the caller's figure
+        # is recorded as provenance only. The legacy argument survives
+        # SOLELY for callers running without a wallet (old tests, ad-hoc
+        # probes), where there is no persisted truth for it to override.
+        if DW.initialized():
+            gas = DW.gas_state()
+            gas_authority = "PERSISTED_WALLET"
+            if gas_balance_sol:
+                gas["caller_supplied_ignored"] = float(gas_balance_sol)
+        else:
+            gas = spendable_native(gas_balance_sol)
+            gas_authority = "LEGACY_CALLER_SUPPLIED"
+        if not gas.get("can_transact"):
             return VenueSubmission(False, self.family, "INSUFFICIENT_GAS",
-                                   gas["reason"], provenance={"gas": gas})
+                                   gas.get("reason"),
+                                   provenance={"gas": gas,
+                                               "gas_authority": gas_authority})
         if not reserve_usd:
             return VenueSubmission(
                 False, self.family, REFUSED_NO_ADAPTER,
@@ -229,9 +248,43 @@ class VirtualDexAdapter(ExecutionVenue):
         if not q.get("ok"):
             return VenueSubmission(False, self.family, "NO_ROUTE",
                                    q.get("reason"))
-        return VenueSubmission(True, self.family,
-                               provenance={"quote": q,
-                                           "gas_paid_separately": True})
+
+        # THE SAME CANONICAL RESULT THE CEX ADAPTER RETURNS (P0-5).
+        #
+        # Cost semantics are identical across venues, and the separations
+        # are load-bearing:
+        #   explicit_fees   = the pool's schedule fee (the venue's cut)
+        #   network_fees    = gas, charged by the chain to run the tx
+        #   price_impact    = the pool moving because this trade happened —
+        #                     NOT a fee, and never summed into one
+        #   spread          = None. A pool has no bid/ask; zero would claim
+        #                     a measurement that was never made.
+        received = float(q.get("received_usd") or 0.0)
+        px = float(plan.entry or 0.0)
+        qty_tokens = (received / px) if px > 0 else 0.0
+        avg_price = (notional / qty_tokens) if qty_tokens > 0 else None
+        res = ExecutionResult(
+            state="FILLED", symbol=plan.symbol, side=plan.side,
+            order_type="market",
+            requested_quantity=float(plan.qty or 0.0),
+            filled_quantity=qty_tokens,
+            quantity_unit=getattr(plan, "quantity_unit", None) or "TOKENS",
+            decision_mid=px or None,
+            fill_price=avg_price,
+            venue="VIRTUAL_DEX", product="DEX_SPOT",
+            instrument_id=getattr(plan, "instrument_id", None),
+            price_impact_usd=float(q.get("price_impact_usd") or 0.0),
+            explicit_fees_usd=float(q.get("pool_fee_usd") or 0.0),
+            network_fees_usd=float(q.get("network_fee_usd") or 0.0),
+            price_model="DEX_XYK_POOL",
+            provenance={"quote": q, "gas_authority": gas_authority},
+        )
+        out = VenueSubmission(True, self.family,
+                              provenance={"quote": q,
+                                          "gas_authority": gas_authority,
+                                          "gas_paid_separately": True})
+        out.execution = res
+        return out
 
 
 class KrakenAdapter(ExecutionVenue):

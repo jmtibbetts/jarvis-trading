@@ -203,11 +203,23 @@ class BoundaryIntegrityTests(unittest.TestCase):
             self.assertTrue(r.accepted, f"{fam}: {r.detail}")
 
     def test_the_dex_adapter_enforces_gas(self):
+        """Two authorities, one rule: no gas, no swap.
+
+        With NO persisted wallet the legacy caller argument is honoured
+        (there is nothing for it to override). With a wallet present the
+        LEDGER answers and the caller's number is provenance only — that
+        side is pinned in test_dex_wallet_and_fees.
+        """
+        from app.database import DexBalance, get_db
+        with get_db() as db:
+            db.query(DexBalance).delete()          # force the legacy path
         r = submit(plan(product="DEX_SPOT", symbol="SOL/USDC"),
                    venue_family=VIRTUAL_DEX, risk=risk(),
                    reserve_usd=500_000.0, gas_balance_sol=0.0)
         self.assertFalse(r.accepted)
         self.assertEqual(r.reason, "INSUFFICIENT_GAS")
+        self.assertEqual(r.provenance["gas_authority"],
+                         "LEGACY_CALLER_SUPPLIED")
 
     def test_a_refusal_is_always_a_result_never_an_exception(self):
         for fam in (VIRTUAL_CEX, VIRTUAL_DEX, LIVE_KRAKEN):

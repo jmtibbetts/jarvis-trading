@@ -95,7 +95,25 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float = 0.0,
 
     # GAS FIRST. A wallet that cannot pay for a transaction cannot make
     # one, and discovering that after sizing wastes the whole evaluation.
-    gas = spendable_native(gas_balance_sol)
+    #
+    # THE PERSISTED WALLET IS THE AUTHORITY (P0-3). The gas_balance_sol
+    # argument survives as a legacy shim, but it can only ever SHRINK what
+    # the ledger says — a caller passing a bigger number than the wallet
+    # holds is describing a wallet that does not exist, and believing it
+    # was exactly how an impossible trade became executable.
+    from lib import dex_wallet as DW
+    if DW.initialized():
+        wallet_sol = DW.balance(DW.SOL_MINT)["available"]
+        effective_sol = (min(float(gas_balance_sol), wallet_sol)
+                         if gas_balance_sol else wallet_sol)
+        gas = spendable_native(effective_sol)
+        gas["authority"] = "PERSISTED_WALLET"
+        gas["wallet_available_sol"] = wallet_sol
+        if gas_balance_sol and float(gas_balance_sol) > wallet_sol:
+            gas["caller_exceeded_wallet"] = float(gas_balance_sol)
+    else:
+        gas = spendable_native(gas_balance_sol)
+        gas["authority"] = "LEGACY_CALLER_SUPPLIED"
     if not gas["can_transact"]:
         return {**out, "reason": INSUFFICIENT_GAS, "detail": gas["reason"],
                 "gas": gas}
@@ -158,7 +176,8 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float = 0.0,
 
 
 def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
-             gas_balance_sol: float = 1.0, sol_price_usd: float = 0.0,
+             gas_balance_sol: float | None = None,
+             sol_price_usd: float = 0.0,
              db=None) -> dict:
     """One autonomous pass: surging tokens -> evaluated -> opened.
 
@@ -175,6 +194,14 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
     if not enabled():
         return {**stats, "skipped": "DEX_AUTOTRADE_ENABLED is not set"}
 
+    # The autonomous path OWNS its wallet: it is seeded (idempotently)
+    # before any evaluation, so persisted state is always the authority
+    # here and the legacy shim path below never applies to it. The old
+    # default of gas_balance_sol=1.0 was the exact fictional input P0-3
+    # removes -- autonomous execution now defaults to the ledger.
+    from lib import dex_wallet as DW
+    DW.ensure_wallet()
+
     def _run(session):
         pf = get_portfolio(session)
         cash = cash_usd if cash_usd is not None else float(pf.cash_usd or 0)
@@ -188,7 +215,7 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
             stats["scanned"] += 1
             ev = evaluate_candidate(
                 {**tok, "risk_usd": None},
-                gas_balance_sol=gas_balance_sol,
+                gas_balance_sol=(gas_balance_sol or 0.0),
                 sol_price_usd=sol_price_usd, cash_usd=cash)
             if not ev.get("eligible"):
                 r = ev.get("reason") or "UNKNOWN"

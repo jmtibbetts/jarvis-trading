@@ -7,6 +7,15 @@ from app.routers.common import _build_provider_status, _config_dict, _position_d
 
 router = APIRouter()
 
+# THE COMPATIBILITY AUTHORITY. Frontend and backend deploy separately and
+# their commits are routinely different; the CONTRACT is what must agree.
+# Bump this when a response shape changes in a way a client could break on.
+API_SCHEMA_VERSION = "1.0.0"
+
+# Process start, captured at import so /system/version can report uptime
+# origin without a second source of truth.
+_STARTED_AT = datetime.now(timezone.utc).isoformat()
+
 
 @router.get("/health")
 def health():
@@ -23,6 +32,8 @@ def health():
     # FULL_VIRTUAL chosen deliberately are the same string and very
     # different facts.
     import os
+    from lib.external_account import connector_enabled as _conn
+    from lib.external_account import management_enabled as _mgmt
     from lib.platform_mode import current_mode as platform_current
     from lib.runtime_mode import current_mode as runtime_current
     return {"status": "ok", "version": VERSION,
@@ -31,6 +42,8 @@ def health():
             "runtime_mode": runtime_current(),
             "runtime_mode_explicit": bool(os.getenv("JARVIS_RUNTIME_MODE")),
             "scheduler_disabled": os.getenv("JARVIS_DISABLE_SCHEDULER") == "1",
+            "external_broker_connector_enabled": _conn(),
+            "external_account_management_enabled": _mgmt(),
             "time": datetime.now(timezone.utc).isoformat()}
 
 
@@ -620,3 +633,56 @@ def debug_positions_raw():
     except Exception as e:
         return {"error": str(e)}
 
+
+
+@router.get("/system/version")
+def system_version():
+    """WHICH BUILD, IN WHICH POSTURE, WITH WHICH CAPABILITIES.
+
+    Deliberately NOT a health check. /health answers "is this instance
+    serving"; this answers "what exactly is serving, and what is it allowed
+    to touch". They are different questions and conflating them is how a
+    deploy check ends up green against the wrong build in the wrong mode.
+
+    Every field here is deployment identity or a declared capability. No
+    secrets: the broker fields report whether a connector is ENABLED, never
+    whether a credential exists and never any part of one.
+
+    API SCHEMA VERSION IS THE COMPATIBILITY AUTHORITY, not the commit.
+    Frontend and backend are built and deployed separately and their SHAs
+    are routinely different; requiring them to match would fail every
+    honest deploy. What must agree is the contract.
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    from app.version import VERSION
+    from lib.external_account import connector_enabled, management_enabled
+    from lib.platform_mode import current_mode as platform_current
+    from lib.runtime_mode import current_mode as runtime_current
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo,
+            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+    except Exception:                                    # noqa: BLE001
+        # A container without .git is a normal deployment, not a fault.
+        commit = os.getenv("JARVIS_BUILD_COMMIT") or "unknown"
+
+    return {
+        "app_version": VERSION,
+        "backend_commit": commit,
+        "api_schema_version": API_SCHEMA_VERSION,
+        "started_at": _STARTED_AT,
+        "platform_mode": platform_current(),
+        "runtime_mode": runtime_current(),
+        # Reported separately because runtime mode fails OPEN: FULL_VIRTUAL
+        # reached by default and FULL_VIRTUAL chosen are the same string and
+        # very different facts.
+        "runtime_mode_explicit": bool(os.getenv("JARVIS_RUNTIME_MODE")),
+        "scheduler_enabled": os.getenv("JARVIS_DISABLE_SCHEDULER") != "1",
+        "external_broker_connector_enabled": connector_enabled(),
+        "external_account_management_enabled": management_enabled(),
+    }

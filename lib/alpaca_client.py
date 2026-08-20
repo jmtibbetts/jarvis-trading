@@ -469,6 +469,16 @@ def close_position(symbol: str):
     NOTE: percentage="1" was a bug — Alpaca treats that as 1%, not 100%.
     Alpaca REST requires no-slash for crypto (BTCUSD not BTC/USD).
     """
+    # SCHEDULED REAL-ACCOUNT MUTATION REQUIRES AN EXPLICIT CAPABILITY.
+    # platform_mode permits risk REDUCTION in every mode, deliberately, so
+    # that real capital is never trapped behind a training flag. That is a
+    # statement about the action, not authorisation to reach into a
+    # brokerage account on the desk's own initiative. See lib/external_account.
+    from lib.external_account import (REDUCES,
+                                      assert_may_manage_external_account)
+    assert_may_manage_external_account(
+        'close_position', exposure_effect=REDUCES, identity=symbol)
+
     client = get_trading_client()
     s = symbol.upper().strip().replace("/", "")
     try:
@@ -489,6 +499,16 @@ def partial_close_position(symbol: str, qty: float):
     applies to the percentage field; qty is unambiguous). Caller is
     responsible for cancelling/resubmitting any bracket stop/target legs
     for the reduced remaining qty afterward."""
+    # SCHEDULED REAL-ACCOUNT MUTATION REQUIRES AN EXPLICIT CAPABILITY.
+    # platform_mode permits risk REDUCTION in every mode, deliberately, so
+    # that real capital is never trapped behind a training flag. That is a
+    # statement about the action, not authorisation to reach into a
+    # brokerage account on the desk's own initiative. See lib/external_account.
+    from lib.external_account import (REDUCES,
+                                      assert_may_manage_external_account)
+    assert_may_manage_external_account(
+        'partial_close_position', exposure_effect=REDUCES, identity=symbol)
+
     from alpaca.trading.requests import ClosePositionRequest
     client = get_trading_client()
     s = symbol.upper().strip().replace("/", "")
@@ -511,6 +531,16 @@ def cancel_open_orders_for_symbol(symbol: str):
     Fixed by listing open orders unfiltered and matching on the normalized
     (slash-stripped) symbol, which is format-agnostic in both directions.
     """
+    # SCHEDULED REAL-ACCOUNT MUTATION REQUIRES AN EXPLICIT CAPABILITY.
+    # platform_mode permits risk REDUCTION in every mode, deliberately, so
+    # that real capital is never trapped behind a training flag. That is a
+    # statement about the action, not authorisation to reach into a
+    # brokerage account on the desk's own initiative. See lib/external_account.
+    from lib.external_account import (REDUCES,
+                                      assert_may_manage_external_account)
+    assert_may_manage_external_account(
+        'cancel_open_orders_for_symbol', exposure_effect=REDUCES, identity=symbol)
+
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus

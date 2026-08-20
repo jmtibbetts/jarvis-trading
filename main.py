@@ -154,8 +154,13 @@ async def lifespan(app_: FastAPI):
         from lib.platform_mode import current_mode as _platform_mode
         from lib import runtime_mode as _RMOD
         _runtime_explicit = bool(os.getenv("JARVIS_RUNTIME_MODE"))
-        _broker = "configured" if (os.getenv("ALPACA_API_KEY")
-                                   and os.getenv("ALPACA_API_SECRET")) else "absent"
+        from lib.external_account import connector_enabled, management_enabled
+        # CREDENTIALS ARE NOT A CAPABILITY. Report what is switched ON, not
+        # what happens to be configured -- conflating the two is what made a
+        # risk-reducing job look authorised.
+        _broker = ("connector=%s management=%s" % (
+            "on" if connector_enabled() else "off",
+            "on" if management_enabled() else "off"))
         try:
             from app.database import DB_PATH as _DB_PATH
             _db = str(_DB_PATH)

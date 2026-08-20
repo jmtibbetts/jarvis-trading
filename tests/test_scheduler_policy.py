@@ -88,14 +88,46 @@ class VirtualOnlyBlocksRealRiskIncreasingWorkTests(unittest.TestCase):
                               platform_mode=platform)
             self.assertTrue(d["allowed"], platform)
 
-    def test_closing_real_exposure_survives_virtual_only(self):
-        """The asymmetry. Trapping real capital behind a training flag would
-        make the guard the cause of the loss."""
+    def test_the_platform_is_not_what_blocks_risk_reduction(self):
+        """The asymmetry, stated at the right level.
+
+        Trapping real capital behind a training flag would make the guard
+        the cause of the loss, so PLATFORM MODE never blocks reduction.
+        What gates these jobs is a separate capability -- whether the
+        operator has activated external account management at all -- and
+        the refusal must say so rather than blaming the platform.
+        """
+        import os
         for job in ("guardian", "positions"):
             d = JC.policy_for(job, runtime_mode="FULL_VIRTUAL",
                               platform_mode="VIRTUAL_ONLY")
-            self.assertTrue(d["allowed"],
-                            f"{job} could not close real exposure")
+            if not d["allowed"]:
+                self.assertNotIn("platform", (d["blocked_reason"] or "").lower(),
+                                 f"{job} was blocked by the PLATFORM, which "
+                                 f"would re-create the trapped-capital trap")
+                self.assertIn("management", d["blocked_reason"])
+
+    def test_activation_of_account_management_is_what_permits_them(self):
+        """With the capability explicitly on, the same jobs are permitted
+        under exactly the same VIRTUAL_ONLY platform."""
+        import os
+        old = {k: os.environ.get(k) for k in
+               ("JARVIS_ENABLE_EXTERNAL_BROKER_CONNECTOR",
+                "JARVIS_ENABLE_EXTERNAL_ACCOUNT_MANAGEMENT")}
+        try:
+            for k in old:
+                os.environ[k] = "1"
+            for job in ("guardian", "positions"):
+                d = JC.policy_for(job, runtime_mode="FULL_VIRTUAL",
+                                  platform_mode="VIRTUAL_ONLY")
+                self.assertTrue(d["allowed"],
+                                f"{job} stayed blocked with the capability on")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class NotificationsRequireTheirOwnSwitchTests(unittest.TestCase):

@@ -215,13 +215,22 @@ def policy_for(job_id: str, *, runtime_mode: str, platform_mode: str,
                 f"platform mode {platform_mode} forbids increasing real "
                 f"exposure"}
     if cls == REAL_ACCOUNT_RISK_REDUCING:
-        # Permitted under VIRTUAL_ONLY on purpose. See the class comment:
-        # refusing to close real exposure would trap real capital behind a
-        # training flag. Still requires a broker to exist at all.
-        return {"job": job_id, "side_effect_class": cls, "allowed": True,
-                "blocked_reason": None,
-                "note": "risk-reducing actions stay permitted so real "
-                        "exposure can always be closed"}
+        # PERMISSION TO REDUCE RISK IS NOT ACTIVATION OF ACCOUNT MANAGEMENT.
+        #
+        # platform_mode permits risk reduction in every mode on purpose, so
+        # real capital is never trapped behind a training flag. That says
+        # the ACTION is allowed. It does not say a scheduled job should
+        # start reaching into a brokerage account the moment normal
+        # FULL_VIRTUAL operation begins -- credentials in .env and old
+        # positions at the broker are not a request to manage them.
+        from lib.external_account import connector_enabled, management_enabled
+        active = connector_enabled() and management_enabled()
+        return {"job": job_id, "side_effect_class": cls, "allowed": active,
+                "blocked_reason": None if active else
+                "external account management is not enabled; the job may "
+                "observe but must not mutate the broker account",
+                "note": "risk reduction stays PERMITTED as an action — this "
+                        "gate is about activation, not permission"}
     if cls == EXTERNAL_NOTIFICATION:
         return {"job": job_id, "side_effect_class": cls,
                 "allowed": bool(notifications_enabled),

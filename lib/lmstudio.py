@@ -869,6 +869,21 @@ def _call_anthropic(prompt: str, system: str, max_tokens: int,
             stats['prompt_tokens'] = usage.get('input_tokens')
             stats['completion_tokens'] = usage.get('output_tokens')
             stats['finish_reason'] = data.get('stop_reason')
+            # SAME TRUTHFUL ATTRIBUTION AS THE OPENAI-COMPAT PATH.
+            #
+            # The Messages response carries a top-level `model` beside
+            # the `usage` and `stop_reason` already read here, and that
+            # is authoritative for what actually served the request.
+            # Read DEFENSIVELY: if the field is ever absent,
+            # actual_model stays None rather than being back-filled
+            # from the request, because a provider that names no model
+            # has not confirmed one.
+            #
+            # No substitution behaviour is assumed for this provider.
+            # When requested and served agree, model_substituted is
+            # simply False, which is the honest answer, not a claim.
+            record_model_attribution(stats, data.get('model'),
+                                     cfg.get('platform'))
         return data['content'][0]['text']
     except httpx.TimeoutException:
         # Same rule as the OpenAI-compat path: slow is not down.

@@ -262,6 +262,11 @@ def dex_close(payload: dict = Body(...)):
     if payload.get("price_usd") in (None, ""):
         return {"error": "price_usd is required — the exit needs a price"}
 
+    # THE ECONOMIC ACTION IS DECLARED, NOT INFERRED. An urgent exit may
+    # rationally outbid a normal one, so the caller names which this is and
+    # the fee ceiling follows from that — never from how aggressively the
+    # bid happens to land. An unrecognised action is refused by
+    # close_dex_position rather than quietly widening a ceiling.
     return close_dex_position(
         str(payload["position_id"]),
         float(payload["price_usd"]),
@@ -270,6 +275,7 @@ def dex_close(payload: dict = Body(...)):
         reason=str(payload.get("reason") or "manual"),
         sol_price_usd=float(payload.get("sol_price_usd") or 0.0),
         concentrated=bool(payload.get("concentrated")),
+        exit_action=str(payload.get("exit_action") or "NORMAL_EXIT"),
     )
 
 

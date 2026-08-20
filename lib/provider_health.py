@@ -177,7 +177,20 @@ def record(provider: str, capability: str, *, status: str,
     fields.update(rate_limit_from_headers(headers))
 
     try:
+        from sqlalchemy import text
         with get_db() as db:
+            # TELEMETRY MUST NEVER BLOCK THE CALLER, and on SQLite it can:
+            # this opens a SECOND connection, so a caller already holding
+            # the write lock makes this wait out the engine's 30s busy
+            # timeout. That is not a deadlock anybody notices — it is a
+            # process that mysteriously takes half a minute per call, which
+            # is exactly how it was found, twice.
+            #
+            # A quarter second, then give up. Losing a health row is a small
+            # honest cost; stalling a fee estimate to record one is not, and
+            # the surrounding try/except already treats failure as
+            # acceptable.
+            db.execute(text("PRAGMA busy_timeout = 250"))
             row = db.query(ProviderHealth).filter(
                 ProviderHealth.provider == provider,
                 ProviderHealth.capability == capability).first()

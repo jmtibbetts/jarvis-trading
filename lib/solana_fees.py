@@ -180,10 +180,16 @@ ENTRY = "ENTRY"
 PROFIT_EXIT = "PROFIT_EXIT"
 URGENT_RISK_REDUCTION = "URGENT_RISK_REDUCTION"
 
+URGENT_RISK_EXIT = "URGENT_RISK_EXIT"
+
 _ACTION_ALIAS = {
     ENTRY: NORMAL_ENTRY,
     PROFIT_EXIT: NORMAL_EXIT,
     URGENT_RISK_REDUCTION: URGENT_EXIT,
+    # Spelled both ways in operator-facing material. One set of rules, so
+    # the alias resolves rather than becoming a second policy with its own
+    # ceilings that could drift apart from this one.
+    URGENT_RISK_EXIT: URGENT_EXIT,
 }
 
 # WHICH PRIORITY LEVELS AN ACTION MAY SELECT. This is the ONLY coupling

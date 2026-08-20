@@ -223,7 +223,19 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
             notes=sizing["reason"],
         )
         session.add(pos)
-        pf.cash_usd = float(pf.cash_usd or 0) - amount
+        # THE NETWORK FEE IS CHARGED, NOT MERELY RECORDED.
+        #
+        # `entry_network_fee_usd` was stored on the position and then
+        # subtracted from nothing: cash fell by the notional alone, so gas
+        # was measured, displayed, reported in total_costs_usd — and never
+        # paid by anyone. A cost that appears in the evidence but not in
+        # the balance is the exact shape of "the bot learns profit because
+        # the simulator omitted a cost".
+        #
+        # Charged ONCE, here, at the moment it is incurred. The exit
+        # charges its own leg separately; neither charges the other's.
+        entry_network_fee_usd = float(q["network_fee_usd"] or 0.0)
+        pf.cash_usd = float(pf.cash_usd or 0) - amount - entry_network_fee_usd
         pf.updated_at = _now()
         session.flush()
 
@@ -263,13 +275,24 @@ EXIT_NO_MARK = "NO_MARK_PRICE"
 def exit_quote(pos, *, price_usd: float | None = None,
                reserve_usd: float | None = None,
                sol_price_usd: float = 0.0,
-               concentrated: bool = False) -> dict:
+               concentrated: bool = False,
+               priority_lamports: int | None = None) -> dict:
     """What this position would actually realise if it were closed now.
 
     Never falls back to the mark. An exit that cannot be routed returns
     `executable_value_usd = None` with a reason — substituting the mark
     would record a perfect escape from the exact situation that loses real
     money, and a model that rewards illiquidity teaches the desk to seek it.
+
+    `priority_lamports` IS THE AUTHORIZED BID when a settlement is being
+    priced. This is the ONE exit pricer — close_dex_position() and
+    summary() both call it — so it takes the network cost as an argument
+    rather than choosing one: settlement passes a measured, authorized bid,
+    while VALUATION passes nothing and gets the static default. The result
+    says which happened in `network_fee_source`, because a valuation that
+    silently reused a measured settlement fee, or a settlement that
+    silently reused a valuation default, would both be lies of the same
+    shape.
     """
     from lib.dex_swap_math import quote_swap
 
@@ -300,7 +323,10 @@ def exit_quote(pos, *, price_usd: float | None = None,
     res = float(reserve_usd if reserve_usd is not None
                 else (pos.pool_reserve_usd_at_entry or 0))
     q = quote_swap(mark_value, res, dex=pos.dex,
-                   sol_price_usd=sol_price_usd, concentrated=concentrated)
+                   sol_price_usd=sol_price_usd, concentrated=concentrated,
+                   priority_lamports=priority_lamports)
+    fee_source = ("AUTHORIZED_BID" if priority_lamports is not None
+                  else "STATIC_VALUATION_DEFAULT")
     if not q.get("ok"):
         return {**base, "status": EXIT_UNPRICEABLE,
                 "reason": q.get("reason") or "no route could price this exit"}
@@ -314,6 +340,7 @@ def exit_quote(pos, *, price_usd: float | None = None,
         "pool_fee_usd": q["pool_fee_usd"],
         "network_fee_usd": q["network_fee_usd"],
         "network_fee_sol": q.get("network_fee_sol"),
+        "network_fee_source": fee_source,
         "depth_confidence": q.get("depth_confidence"),
         "depth_model": q.get("depth_model"),
         # What the mid-price multiplication overstates the position by.
@@ -324,15 +351,121 @@ def exit_quote(pos, *, price_usd: float | None = None,
     }
 
 
+# Default priority level per exit action. PRIORITY AND ACTION ARE
+# ORTHOGONAL: these say how hard to bid, while the action says which
+# economic ceiling applies. A NORMAL_EXIT bidding HIGH is still bounded by
+# NORMAL_EXIT economics — that pairing exists here precisely to keep the
+# two dimensions visibly independent.
+EXIT_PRIORITY_LEVEL = {
+    "NORMAL_EXIT": "HIGH",
+    "URGENT_EXIT": "VERY_HIGH",
+    "SEVERE_RISK_EXIT": "MAX_ACCEPTANCE",
+}
+
+
 def close_dex_position(position_id: str, price_usd: float, *,
                        reserve_usd: float | None = None,
                        reason: str = "manual", sol_price_usd: float = 0.0,
-                       concentrated: bool = False, db=None) -> dict:
+                       concentrated: bool = False,
+                       exit_action: str = "NORMAL_EXIT",
+                       priority_level: str | None = None,
+                       priority_lamports: int | None = None,
+                       fee_fetch=None,
+                       db=None) -> dict:
     """Simulate the sell. The exit is priced against pool depth too —
     getting IN cheaply and being unable to get OUT is the characteristic
-    on-chain failure, and a book that ignores exit impact never shows it."""
+    on-chain failure, and a book that ignores exit impact never shows it.
+
+    THE EXIT MEASURES ITS OWN NETWORK COST. Until Phase 6.3 this path
+    priced gas from `dex_swap_math.DEFAULT_PRIORITY_LAMPORTS` while the
+    entry measured the live fee market, so the simulator could learn
+    "expensive to get in, cheap to get out" — an asymmetry that exists
+    nowhere on chain, and that flatters exactly the trades a real desk
+    finds hardest to close.
+
+    `exit_action` selects the ECONOMIC policy (NORMAL_EXIT / URGENT_EXIT /
+    SEVERE_RISK_EXIT). It is never inferred from how aggressively we bid.
+    """
     from app.database import DexPosition, DexTrade, get_db
+    from lib import dex_network_cost as NC
+    from lib import solana_fees as SF
     from lib.dex_swap_math import quote_swap
+
+    # ── MEASURE FIRST, OUTSIDE ANY WRITE TRANSACTION ────────────────────
+    #
+    # A standing invariant of this ledger: no provider call may happen
+    # while a write transaction is open. It is not merely slow — the
+    # provider-health write it triggers opens a SECOND connection, which
+    # then waits on the first for the full 30s SQLite busy timeout. That
+    # failure does not announce itself; it just makes everything stall.
+    #
+    # So the position's identity is read in a SHORT read-only step, the
+    # network is measured with no transaction held, and only then does the
+    # write begin.
+    action = SF.resolve_action_policy(exit_action)
+    if action is None or action == SF.NORMAL_ENTRY:
+        return {"error": f"unknown exit action {exit_action!r}"}
+    level = priority_level or EXIT_PRIORITY_LEVEL.get(action, "HIGH")
+
+    def _identity(session):
+        pos = session.query(DexPosition).filter(
+            DexPosition.id == position_id).first()
+        if pos is None or pos.status != "Open":
+            return None
+        return {"mint": pos.mint, "pool_address": pos.pool_address,
+                "qty": float(pos.qty_tokens or 0),
+                "mark": float(price_usd or 0)}
+
+    if db is not None:
+        ident = _identity(db)
+    else:
+        with get_db() as _read:
+            ident = _identity(_read)
+    if ident is None:
+        return {"error": "position not found or already closed"}
+
+    bid = priority_lamports
+    network_cost = None
+    fee_authorization = None
+    if bid is None:
+        priced = NC.price_transaction(
+            action=action, priority_level=level,
+            mint=ident["mint"], pool_address=ident["pool_address"],
+            sol_price_usd=sol_price_usd,
+            notional_usd=ident["qty"] * ident["mark"],
+            fetch=fee_fetch)
+        network_cost = NC.fee_provenance(priced)
+        fee_authorization = priced["authorization"]
+        if not priced["ok"]:
+            # AN EXIT REFUSED ON COST IS STILL AN OPEN POSITION, and it is
+            # a risk event rather than a free one. NORMAL_EXIT fails closed
+            # on an unknown fee for the same reason an entry does: a cost
+            # nobody measured is not a cost of zero.
+            return {"error": "exit_network_fee_refused",
+                    "state": "EXIT_PENDING_FEE_REFUSED",
+                    "position_id": position_id,
+                    "reason": priced["refusal_reason"],
+                    "detail": priced["detail"],
+                    "network_cost": network_cost}
+        bid = priced["priority_lamports_for_quote"]
+
+        # THE FEE PAYER MUST SURVIVE ITS OWN TRANSACTION. Checked only
+        # where a persisted SOL wallet exists — that is the authority when
+        # there is one, and the autonomous path always has one. A book
+        # running without a wallet is not granted imaginary gas either: it
+        # is charged the fee in USD below, exactly once.
+        from lib import dex_wallet as DW
+        if DW.initialized():
+            gas = DW.gas_state(fee_authorization=fee_authorization)
+            if not gas.get("can_transact"):
+                return {"error": "exit_insufficient_gas",
+                        "state": "EXIT_PENDING_INSUFFICIENT_GAS",
+                        "position_id": position_id,
+                        "reason": gas.get("reason"),
+                        "detail": ("the fee payer cannot fund this exit; "
+                                   "selling the last SOL needed to execute "
+                                   "the sale is not an executable exit"),
+                        "gas": gas, "network_cost": network_cost}
 
     def _run(session):
         pos = session.query(DexPosition).filter(
@@ -346,7 +479,8 @@ def close_dex_position(position_id: str, price_usd: float, *,
         # number until you sold it and a different one afterwards — and
         # the discrepancy would look like slippage rather than a bug.
         eq = exit_quote(pos, price_usd=price_usd, reserve_usd=reserve_usd,
-                        sol_price_usd=sol_price_usd, concentrated=concentrated)
+                        sol_price_usd=sol_price_usd, concentrated=concentrated,
+                        priority_lamports=bid)
         gross_out = float(eq["mark_value_usd"])
         q = {"ok": eq["status"] == EXIT_OK,
              "reason": eq.get("reason"),
@@ -396,12 +530,19 @@ def close_dex_position(position_id: str, price_usd: float, *,
             net_fee = q["network_fee_usd"]
 
         notional = float(pos.notional_usd or 0)
+        entry_net_fee = float(pos.entry_network_fee_usd or 0)
         gross_pnl = gross_out - notional
         costs = (float(pos.entry_pool_fee_usd or 0)
                  + float(pos.entry_impact_usd or 0)
-                 + float(pos.entry_network_fee_usd or 0)
+                 + entry_net_fee
                  + pool_fee + net_fee + (gross_out - proceeds - pool_fee - net_fee))
-        net_pnl = proceeds - notional
+        # NET P&L PAYS FOR THE CHAIN. `proceeds - notional` counted the
+        # pool's fee and the price impact (both already inside proceeds)
+        # and silently omitted BOTH network legs — so a round trip could
+        # report a profit it had not actually made. Each leg is subtracted
+        # exactly once: the entry's fee was charged against cash at open
+        # and is carried on the position, the exit's is charged here.
+        net_pnl = proceeds - notional - entry_net_fee - net_fee
 
         opened = pos.opened_at
         hold_min = None
@@ -431,7 +572,10 @@ def close_dex_position(position_id: str, price_usd: float, *,
         pos.current_price_usd = float(price_usd)
         pos.updated_at = _now()
 
-        pf.cash_usd = float(pf.cash_usd or 0) + proceeds
+        # Cash receives the proceeds less THIS leg's network fee. The
+        # entry's fee already left the balance at open; subtracting it
+        # again here would charge the same lamports twice.
+        pf.cash_usd = float(pf.cash_usd or 0) + proceeds - net_fee
         pf.realized_pnl_usd = float(pf.realized_pnl_usd or 0) + net_pnl
         pf.total_trades = int(pf.total_trades or 0) + 1
         if net_pnl >= 0:
@@ -446,7 +590,17 @@ def close_dex_position(position_id: str, price_usd: float, *,
         return {"ok": True, "net_pnl_usd": round(net_pnl, 6),
                 "gross_pnl_usd": round(gross_pnl, 6),
                 "total_costs_usd": round(costs, 6),
-                "exit_impact_pct": exit_impact, "proceeds_usd": round(proceeds, 6)}
+                "exit_impact_pct": exit_impact,
+                "proceeds_usd": round(proceeds, 6),
+                # ENTRY AND EXIT NETWORK COSTS STAY SEPARATE EVIDENCE.
+                # Summed, they cannot answer whether getting in or getting
+                # out was the expensive half.
+                "entry_network_fee_usd": round(entry_net_fee, 6),
+                "exit_network_fee_usd": round(net_fee, 6),
+                "exit_action": action,
+                "exit_priority_level": level,
+                "network_fee_source": eq.get("network_fee_source"),
+                "network_cost": network_cost}
 
     if db is not None:
         return _run(db)

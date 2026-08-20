@@ -50,7 +50,8 @@ class UnpriceableExitTests(unittest.TestCase):
         with patch("lib.dex_swap_math.quote_swap",
                    return_value={"ok": False, "reason": "no route"}):
             return opened, dex_paper.close_dex_position(
-                position_id=opened["position_id"], price_usd=1.0, db=session)
+                position_id=opened["position_id"], price_usd=1.0,
+                sol_price_usd=200.0, fee_fetch=_fee_fetch, db=session)
 
     def test_an_unpriceable_exit_does_not_close_the_position(self):
         from app.database import DexPosition, get_db
@@ -112,7 +113,8 @@ class UnpriceableExitTests(unittest.TestCase):
                        return_value={"ok": False, "reason": "no route"}):
                 from lib import dex_paper
                 dex_paper.close_dex_position(
-                    position_id=opened["position_id"], price_usd=1.0, db=db)
+                    position_id=opened["position_id"], price_usd=1.0,
+                    sol_price_usd=200.0, fee_fetch=_fee_fetch, db=db)
             self.assertAlmostEqual(float(get_portfolio(db).cash_usd or 0), before)
             db.rollback()
 
@@ -129,7 +131,8 @@ class PriceableExitStillWorksTests(unittest.TestCase):
                 fee_fetch=_fee_fetch, db=db)
             self.assertNotIn("error", opened, opened)
             closed = dex_paper.close_dex_position(
-                position_id=opened["position_id"], price_usd=1.2, db=db)
+                position_id=opened["position_id"], price_usd=1.2,
+                sol_price_usd=200.0, fee_fetch=_fee_fetch, db=db)
             self.assertNotIn("error", closed, closed)
             self.assertIn("net_pnl_usd", closed)
             # Costs were charged: net is below the gross price move.

@@ -42,6 +42,17 @@ DEFAULT_MAX_IMPACT_PCT = 2.0
 MIN_POOL_RESERVE_USD = 25_000.0
 
 
+# WHICH POOL ACTUALLY PAID THE GAS. Solana fees are paid in SOL, so when a
+# persisted wallet exists it is the fee payer and the SOL leaves it. A book
+# running without one has no SOL to consume, and the USD side carries the
+# cost instead — still exactly once, and named so the two are never
+# mistaken for each other. THE ASSET THAT PAYS A COST MUST LOSE THAT ASSET;
+# where that asset does not exist, the cost is still paid, by the pool that
+# does.
+SOL_WALLET_PAYS = "SOL_WALLET"
+USD_BOOK_PAYS = "USD_BOOK_NO_WALLET"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -172,6 +183,24 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
         bid = priced["priority_lamports_for_quote"]
         network_cost = NC.fee_provenance(priced)
 
+        # THE FEE PAYER MUST BE ABLE TO PAY, and the refusal must NAME
+        # ITSELF. The gas debit at settlement raises FeeAccountingInvariant
+        # rather than clamping — correct, but an exception escaping
+        # open_dex_position would break this function's contract that every
+        # refusal comes back as a named reason. So the wallet is checked
+        # here, before anything is committed, exactly as the exit does.
+        from lib import dex_wallet as DW
+        if DW.initialized():
+            gas = DW.gas_state(fee_authorization=priced["authorization"])
+            if not gas.get("can_transact"):
+                return {"error": "entry_insufficient_gas",
+                        "state": "ENTRY_REFUSED_INSUFFICIENT_GAS",
+                        "reason": gas.get("reason"),
+                        "detail": ("the fee payer cannot fund this entry; a "
+                                   "wallet that cannot pay for a transaction "
+                                   "cannot make one"),
+                        "gas": gas, "network_cost": network_cost}
+
     def _run(session):
         pf = get_portfolio(session)
         if float(price_usd or 0) <= 0:
@@ -202,6 +231,23 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
             return {"error": (f"impact {q['price_impact_pct']:.2f}% exceeds "
                               f"the {max_impact_pct()}% cap"), "quote": q}
 
+        # ONE ECONOMIC EVENT. The gas debit joins THIS transaction rather
+        # than opening its own: settling them separately would let a crash
+        # between the two leave gas charged for a position that does not
+        # exist, or a position that never paid for itself.
+        #
+        # Nothing has been charged before this point, which is what makes
+        # every refusal above free — a swap rejected before it reaches the
+        # chain consumes no gas.
+        from lib import dex_wallet as DW
+        fee_settlement = (SOL_WALLET_PAYS if DW.initialized(session)
+                          else USD_BOOK_PAYS)
+        if fee_settlement == SOL_WALLET_PAYS:
+            DW.charge_network_fee(
+                network_fee_sol=float(q["network_fee_sol"] or 0.0),
+                leg="ENTRY", db=session,
+                context={"mint": mint, "notional_usd": amount})
+
         # Tokens are bought with what SURVIVES the costs, at the average
         # price achieved — not at the quoted spot, which nobody got.
         received = q["received_usd"]
@@ -223,19 +269,28 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
             notes=sizing["reason"],
         )
         session.add(pos)
-        # THE NETWORK FEE IS CHARGED, NOT MERELY RECORDED.
+        # THE ASSET THAT PAYS THE FEE IS THE ONE THAT LOSES IT.
         #
-        # `entry_network_fee_usd` was stored on the position and then
-        # subtracted from nothing: cash fell by the notional alone, so gas
-        # was measured, displayed, reported in total_costs_usd — and never
-        # paid by anyone. A cost that appears in the evidence but not in
-        # the balance is the exact shape of "the bot learns profit because
-        # the simulator omitted a cost".
+        # Solana gas is paid in SOL. When a persisted wallet exists it is
+        # the fee payer, and the debit happens there — not against USD
+        # cash, which bought no gas. Charging both pools would take the
+        # same expense out of the book twice; charging neither is how this
+        # started, with a fee that was measured, stored, reported and paid
+        # by nobody.
         #
-        # Charged ONCE, here, at the moment it is incurred. The exit
-        # charges its own leg separately; neither charges the other's.
+        # `fee_settlement` names which pool actually paid, so the two
+        # configurations are never confused for one another.
         entry_network_fee_usd = float(q["network_fee_usd"] or 0.0)
-        pf.cash_usd = float(pf.cash_usd or 0) - amount - entry_network_fee_usd
+        pf.cash_usd = float(pf.cash_usd or 0) - amount
+        if fee_settlement == SOL_WALLET_PAYS:
+            # Debited from the wallet OUTSIDE this transaction (see above):
+            # the SOL is already gone, and cash must not pay for it again.
+            pass
+        else:
+            # NO PERSISTED WALLET, so there is no SOL to consume and the USD
+            # book carries the cost. The expense is still paid exactly once,
+            # and the record says which pool paid it.
+            pf.cash_usd = float(pf.cash_usd or 0) - entry_network_fee_usd
         pf.updated_at = _now()
         session.flush()
 
@@ -245,7 +300,10 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
         return {"ok": True, "position_id": pos.id, "qty_tokens": qty,
                 "avg_entry_price_usd": avg_entry, "notional_usd": amount,
                 "quote": q, "sizing": sizing,
-                "priority_lamports": bid, "network_cost": network_cost}
+                "priority_lamports": bid, "network_cost": network_cost,
+                "network_fee_sol": q.get("network_fee_sol"),
+                "network_fee_usd": q.get("network_fee_usd"),
+                "fee_settlement": fee_settlement}
 
     if db is not None:
         return _run(db)
@@ -529,6 +587,16 @@ def close_dex_position(position_id: str, price_usd: float, *,
             pool_fee = q["pool_fee_usd"]
             net_fee = q["network_fee_usd"]
 
+        # THE EXIT'S OWN GAS LEG, charged once, atomically with the close.
+        from lib import dex_wallet as DW
+        fee_settlement = (SOL_WALLET_PAYS if DW.initialized(session)
+                          else USD_BOOK_PAYS)
+        if fee_settlement == SOL_WALLET_PAYS:
+            DW.charge_network_fee(
+                network_fee_sol=float(eq.get("network_fee_sol") or 0.0),
+                leg="EXIT", db=session,
+                context={"position_id": pos.id, "action": action})
+
         notional = float(pos.notional_usd or 0)
         entry_net_fee = float(pos.entry_network_fee_usd or 0)
         gross_pnl = gross_out - notional
@@ -536,12 +604,13 @@ def close_dex_position(position_id: str, price_usd: float, *,
                  + float(pos.entry_impact_usd or 0)
                  + entry_net_fee
                  + pool_fee + net_fee + (gross_out - proceeds - pool_fee - net_fee))
-        # NET P&L PAYS FOR THE CHAIN. `proceeds - notional` counted the
-        # pool's fee and the price impact (both already inside proceeds)
-        # and silently omitted BOTH network legs — so a round trip could
-        # report a profit it had not actually made. Each leg is subtracted
-        # exactly once: the entry's fee was charged against cash at open
-        # and is carried on the position, the exit's is charged here.
+        # NET P&L ATTRIBUTES THE CHAIN COST, whichever pool paid it.
+        # `proceeds - notional` counted the pool fee and the price impact
+        # (both already inside proceeds) and silently omitted BOTH network
+        # legs, so a round trip could report a profit it had not made.
+        #
+        # This is ATTRIBUTION, not a second charge: the USD value of the
+        # SOL consumed. The SOL itself left the wallet above, once.
         net_pnl = proceeds - notional - entry_net_fee - net_fee
 
         opened = pos.opened_at
@@ -572,10 +641,13 @@ def close_dex_position(position_id: str, price_usd: float, *,
         pos.current_price_usd = float(price_usd)
         pos.updated_at = _now()
 
-        # Cash receives the proceeds less THIS leg's network fee. The
-        # entry's fee already left the balance at open; subtracting it
-        # again here would charge the same lamports twice.
-        pf.cash_usd = float(pf.cash_usd or 0) + proceeds - net_fee
+        # Cash receives the proceeds. The gas left the SOL wallet above
+        # when there is one — taking it out of cash as well would charge
+        # the same lamports to two different pools. Without a wallet the
+        # USD side is the only pool there is, so it pays.
+        pf.cash_usd = float(pf.cash_usd or 0) + proceeds
+        if fee_settlement == USD_BOOK_PAYS:
+            pf.cash_usd = float(pf.cash_usd or 0) - net_fee
         pf.realized_pnl_usd = float(pf.realized_pnl_usd or 0) + net_pnl
         pf.total_trades = int(pf.total_trades or 0) + 1
         if net_pnl >= 0:
@@ -600,6 +672,8 @@ def close_dex_position(position_id: str, price_usd: float, *,
                 "exit_action": action,
                 "exit_priority_level": level,
                 "network_fee_source": eq.get("network_fee_source"),
+                "fee_settlement": fee_settlement,
+                "exit_network_fee_sol": eq.get("network_fee_sol"),
                 "network_cost": network_cost}
 
     if db is not None:
@@ -672,16 +746,80 @@ def summary(db=None, *, sol_price_usd: float = 0.0) -> dict:
             })
 
         cash = float(pf.cash_usd or 0)
+
+        # ── POOL EXECUTABILITY AND GAS EXECUTABILITY ARE DIFFERENT
+        # QUESTIONS, and flattening them answers neither.
+        #
+        #   pool  — what can the AMM actually return for these tokens?
+        #   gas   — can the fee payer afford to send the transaction?
+        #
+        # A position can have perfect pool liquidity and be unexecutable
+        # because the wallet holds no SOL. Reporting it as freely
+        # executable would be a lie of a different shape from the mark
+        # overstatement this function already refuses to make.
+        #
+        # NO PROVIDER CALL HAPPENS HERE. A summary is a UI refresh; making
+        # it measure the live fee market would turn every page load into a
+        # provider storm. What is reported instead is the STATIC operability
+        # floor, labelled as such — a live measured fee is obtained at
+        # settlement, and only there.
+        from lib import dex_wallet as DW
+        from lib.dex_swap_math import spendable_native
+        wallet_present = DW.initialized(session)
+        gas_view = {
+            "wallet_present": wallet_present,
+            "basis": "STATIC_POLICY_ONLY",
+            "note": ("an operability floor, not a fee quote. The live fee "
+                     "market is measured at settlement; a summary must not "
+                     "generate provider traffic."),
+        }
+        if wallet_present:
+            sol_available = DW.balance(DW.SOL_MINT, session)["available"]
+            floor = spendable_native(sol_available)
+            gas_view.update({
+                "sol_available": sol_available,
+                "operability_reserve_sol": floor["execution_reserve_sol"],
+                "can_cover_operability_floor": bool(floor["can_transact"]),
+                "reason": floor.get("reason"),
+            })
+        else:
+            gas_view.update({
+                "sol_available": None,
+                "can_cover_operability_floor": None,
+                "reason": ("no persisted wallet; the USD book carries gas "
+                           "costs and there is no SOL balance to constrain "
+                           "execution"),
+            })
+
+        # Blocked by gas is NOT the same as worth nothing. The pool value
+        # stays reported; what changes is whether it can be reached today.
+        gas_blocked = (wallet_present
+                       and gas_view.get("can_cover_operability_floor") is False)
+
         return {
             "starting_usd": float(pf.starting_usd or 0),
             "cash_usd": round(cash, 2),
             "open_positions": len(open_rows),
 
+            # Two dimensions, kept apart on purpose.
+            "gas": gas_view,
+            "gas_blocked": gas_blocked,
+            "executable_after_all_constraints_usd": (
+                round(cash, 2) if gas_blocked
+                else round(cash + executable_total, 2)),
+            "gas_blocked_pool_value_usd": (round(executable_total, 2)
+                                           if gas_blocked else 0.0),
+
             # Display / reference.
             "open_value_mark_usd": round(mark_total, 2),
             "equity_mark_usd": round(cash + mark_total, 2),
 
-            # THE AUTHORITY. Cash plus what the open book could realise.
+            # POOL EXECUTABILITY. Cash plus what the AMM could return.
+            # It deliberately does NOT subtract a network fee: gas is paid
+            # in SOL from the wallet, not out of the pool's output, and the
+            # per-row network fee below is a STATIC display figure that must
+            # never reach this total. See
+            # test_dex_ledger_authority.test_O_* for the proof.
             "open_value_executable_usd": round(executable_total, 2),
             "equity_executable_usd": round(cash + executable_total, 2),
             "known_executable_equity_usd": round(cash + executable_total, 2),

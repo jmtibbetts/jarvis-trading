@@ -794,6 +794,85 @@ def settle_swap_success(*, input_mint: str, input_qty: float,
     return result
 
 
+def charge_network_fee(*, network_fee_sol: float, leg: str,
+                       context: dict | None = None,
+                       db=None,
+                       user_id: str | None = None) -> dict:
+    """Consume the SOL that pays for one transaction leg. Exactly once.
+
+    THE ASSET THAT PAYS A COST MUST ACTUALLY LOSE THAT ASSET. The wallet
+    was being consulted as an authority — "can you afford this?" — and then
+    never debited, so the same 5 SOL could authorise an unlimited number of
+    transactions forever. A gate that never charges is not a ledger; it is
+    a permission slip that renews itself.
+
+    This is the ONE narrow primitive for a fee-only debit. `settle_swap_*`
+    remains the primitive for a full asset exchange; this exists because
+    the USD position book performs the exchange in its own units and needs
+    only the gas leg settled here.
+
+    GUARDED UPDATE, not read-then-write, for the same reason as
+    settle_swap_success: two concurrent spenders must serialize on the row
+    rather than both reading the same available quantity.
+
+    `db` JOINS THE CALLER'S TRANSACTION, and callers that have one should
+    pass it. The gas debit and the position it pays for are ONE economic
+    event: settling them in two transactions would allow a crash between
+    them to leave gas charged for a position that does not exist, or a
+    position that never paid. It also avoids a second connection
+    contending with the caller's own write lock.
+
+    A fee larger than the wallet holds is a CONTRADICTION, not a balance to
+    clamp. `max(0, balance - fee)` would charge less than the chain took
+    and leave the book richer than reality by the shortfall.
+    """
+    from sqlalchemy import text as _text
+
+    from app.database import DEFAULT_USER_ID, get_db
+    uid = user_id or DEFAULT_USER_ID
+    fee_sol = float(network_fee_sol or 0.0)
+    if fee_sol < 0 or fee_sol != fee_sol:
+        raise SwapRejected("INVALID_NETWORK_FEE", f"fee={network_fee_sol}")
+    if fee_sol == 0.0:
+        return {"charged_sol": 0.0, "leg": leg, "sol_total_after": None,
+                "note": "a zero fee is not a debit"}
+
+    def _charge(session):
+        hit = session.execute(_text(
+            "UPDATE dex_balances SET total_quantity = total_quantity - :fee, "
+            "updated_at = :now WHERE user_id = :uid AND mint = :mint AND "
+            "(total_quantity - reserved_quantity) + 1e-12 >= :fee"),
+            {"fee": fee_sol, "now": _now(), "uid": uid,
+             "mint": SOL_MINT}).rowcount
+        if hit != 1:
+            available = balance(SOL_MINT, session, user_id=uid)["available"]
+            raise FeeAccountingInvariant({
+                "reason": FEE_EXCEEDS_AVAILABLE,
+                "leg": leg,
+                "actual_network_fee_sol": fee_sol,
+                "available_sol": available,
+                "shortfall_sol": max(0.0, fee_sol - available),
+                "context": context or {},
+                "detail": ("the chain charged more gas than the wallet "
+                           "holds; clamping would leave the book richer "
+                           "than reality by the shortfall"),
+            })
+        sol_after = session.execute(_text(
+            "SELECT total_quantity FROM dex_balances WHERE user_id = :uid "
+            "AND mint = :mint"), {"uid": uid, "mint": SOL_MINT}).scalar()
+        return float(sol_after or 0.0)
+
+    if db is not None:
+        sol_after = _charge(db)
+    else:
+        with get_db() as session:
+            sol_after = _charge(session)
+    logger.info("[DexWallet] GAS %.9f SOL charged for %s leg", fee_sol, leg)
+    return {"charged_sol": fee_sol, "leg": leg,
+            "sol_total_after": sol_after,
+            "context": context or {}}
+
+
 def settle_swap_failure(*, network_fee_sol: float, reached_chain: bool,
                         estimated_fee_sol: float | None = None,
                         reason: str | None = None,

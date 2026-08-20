@@ -375,6 +375,12 @@ def providers_health():
         # phase and nothing looked wrong, because getRecentPrioritizationFees
         # answered every time.
         "solana_fee_estimator": SF.fee_estimator_health(),
+        # TELEMETRY LOSS IS NOT ALLOWED TO BE INVISIBLE. Health writes give
+        # up after 250ms rather than blocking economic execution behind
+        # SQLite's write lock; a non-zero count here means some
+        # observations are missing and a provider may look healthier, or
+        # staler, than it is.
+        "dropped_health_writes": PH.dropped_writes(),
     }
 
 

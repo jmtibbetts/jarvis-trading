@@ -68,6 +68,54 @@ _SECRET_PATTERNS = (
 )
 
 
+# ── Dropped writes. TELEMETRY MAY BE BEST-EFFORT; ITS LOSS MAY NOT BE
+# INVISIBLE. `record` deliberately gives up after 250ms rather than holding
+# up economic execution behind SQLite's write lock — but a health row that
+# silently vanishes is how a dead primary provider comes to look healthy,
+# which is the exact failure this module exists to prevent.
+#
+# In-memory and bounded: this is a counter, not a second telemetry system,
+# and it is surfaced through the existing provider-health API rather than a
+# new one.
+_dropped: dict = {"count": 0, "last_at": None, "last_error": None,
+                  "by_provider": {}}
+
+
+def record_drop(provider: str, capability: str, error: str) -> None:
+    """A health write that did not land. Counted, never swallowed silently."""
+    _dropped["count"] += 1
+    _dropped["last_at"] = _utc()
+    _dropped["last_error"] = sanitize(str(error), 200)
+    key = f"{provider}/{capability}"
+    _dropped["by_provider"][key] = _dropped["by_provider"].get(key, 0) + 1
+    logger.warning("[ProviderHealth] DROPPED health write for %s/%s (%s) — "
+                   "telemetry lost, execution unaffected", provider,
+                   capability, str(error)[:120])
+
+
+def dropped_writes() -> dict:
+    """How much health telemetry was lost, and when. For the Ops surface."""
+    return {
+        "count": _dropped["count"],
+        "last_at": _dropped["last_at"],
+        "last_error": _dropped["last_error"],
+        "by_provider": dict(_dropped["by_provider"]),
+        "any_dropped": _dropped["count"] > 0,
+        "meaning": ("health writes give up after 250ms rather than blocking "
+                    "economic execution; a non-zero count means some health "
+                    "observations are missing and a provider's status may be "
+                    "staler than it looks"),
+    }
+
+
+def reset_dropped_writes() -> None:
+    """Test seam. Never called by runtime."""
+    _dropped["count"] = 0
+    _dropped["last_at"] = None
+    _dropped["last_error"] = None
+    _dropped["by_provider"] = {}
+
+
 def _utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -214,8 +262,10 @@ def record(provider: str, capability: str, *, status: str,
                 row.last_failure_at = now
             db.commit()
     except Exception as exc:                        # noqa: BLE001
-        logger.debug("[ProviderHealth] could not record %s/%s: %s",
-                     provider, capability, exc)
+        # NOT SILENT. The write is abandoned so execution never waits on
+        # telemetry, and the abandonment is counted so a missing health
+        # record cannot be mistaken for a healthy provider.
+        record_drop(provider, capability, exc)
     return fields
 
 

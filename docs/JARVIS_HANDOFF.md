@@ -798,10 +798,16 @@ or in any test, log or payload.
 | **CoinGecko** | present | demo `/ping` 200 | **DEMO, not Pro** — pro host replies "use api.coingecko.com" | KEEP_SPECIALIZED |
 | **AllRates** | present | `/rate` 200 via Bearer | free tier, 300-request LIFETIME cap | KEEP_SECONDARY |
 | **FRED / EIA / OpenFIGI** | present | series / v2 / v3 mapping, all 200 | free | KEEP_SPECIALIZED |
-| **Tavily / Stocklake** | present | MCP `initialize` 200 | working | KEEP_SPECIALIZED |
+| **Tavily / Stocklake** | present | MCP `initialize` 200 — **5** and **17** tools | working | KEEP_SPECIALIZED |
+| **Exa / Firecrawl** | **absent — and not needed** | MCP `initialize` 200 **KEYLESS**, **2** and **3** tools live | free tier | KEEP_SPECIALIZED |
 | **LunarCrush** | present | **HTTP 402** | credential VALID, **subscription inactive** | DEFER — do not repurchase without review |
-| **Massive MCP** | n/a | **401 on every auth style** | `mcp.massive.com` wants a JWT; `MASSIVE_API_KEY` is a REST key | REPAIR_CONFIGURATION |
-| Exa / Firecrawl | **absent** | — | in `.env.example` only | DEFER |
+| **Massive MCP** | n/a | **401 on every auth style, 0 tools** | `mcp.massive.com` wants a JWT; `MASSIVE_API_KEY` is a REST key | REPAIR_CONFIGURATION |
+
+> **A missing key is not proof a provider is unavailable.** Exa and
+> Firecrawl were first classified NOT_CONFIGURED purely because
+> `EXA_API_KEY` / `FIRECRAWL_API_KEY` are unset — then answered keyless with
+> working tools. Five of the six MCP servers are live; only Massive's is
+> dead. Probe before classifying, in both directions.
 
 ### Misconfigurations found (none corrected in place — evidence only)
 

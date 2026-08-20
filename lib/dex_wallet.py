@@ -14,9 +14,16 @@ per-call limit), and it can never initialise, replace or stand in for the
 ledger. A wallet nobody funded is empty, and execution against an empty
 wallet is refused rather than imagined into solvency.
 
-VIRTUAL VALUE HAS PROVENANCE. Balances appear only through fund_wallet(),
-which writes the credit and its DexFundingEvent in one transaction, naming
-the authority that authorised it. Reading a wallet never funds it.
+VIRTUAL VALUE HAS PROVENANCE, AND PROVENANCE IS NOT AUTHORIZATION. Balances
+appear only through fund_wallet(), which writes the credit and its
+DexFundingEvent in one transaction, naming the authority that authorised it.
+Reading a wallet never funds it.
+
+But naming an authority was never the same as HAVING one. fund_wallet used
+to fund on `authority in FUNDING_AUTHORITIES`, so any caller anywhere could
+mint capital by typing the string TEST_FIXTURE. It now takes a sealed
+FundingGrant that only an issuer can produce, and each issuer checks
+something real — see the funding-authority section below.
 
 GAS IS A BALANCE, NOT A DEDUCTION FROM OUTPUT. SOL pays for transactions.
 Modelling gas as a synthetic haircut on the tokens received hides the state
@@ -51,8 +58,10 @@ the legacy pre-cutover dex economy is never consulted.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -77,12 +86,162 @@ def _row(db, user_id: str, mint: str):
 
 
 # ── Funding authorities. Every credit names one. ────────────────────────
+#
+# PROVENANCE IS NOT AUTHORIZATION. Naming an authority records WHY value
+# appeared; it does not establish that anyone was entitled to create it.
+# The first version checked `authority in FUNDING_AUTHORITIES` and funded
+# on that basis, which meant any caller anywhere — the autonomous DEX, a
+# scheduler job, an API handler — could mint virtual capital by typing the
+# five-letter string TEST_FIXTURE. The enum was the whole gate.
+#
+# So authority is now a CAPABILITY, not a label. fund_wallet() accepts only
+# a sealed FundingGrant, and a grant can only come from an issuer that
+# checked something real:
+#
+#   CONFIGURED_VIRTUAL_ENDOWMENT  issue_endowment_grant() — the mint and
+#                                 quantity must MATCH the configured
+#                                 training-account policy exactly, so this
+#                                 authority cannot mint an arbitrary
+#                                 amount even from inside this module.
+#   OPERATOR_GRANT                issue_operator_grant() — requires an
+#                                 approval secret the operator configured
+#                                 out of band. No secret configured means
+#                                 no operator-grant workflow exists, and
+#                                 the authority is simply UNAVAILABLE
+#                                 rather than pretended into existence.
+#   TEST_FIXTURE                  issue_test_fixture_grant() — refuses
+#                                 outside a pytest process. Under pytest,
+#                                 app.database already refuses to open the
+#                                 operator database at all, so a fixture
+#                                 grant can only ever credit a throwaway
+#                                 one. The two guards compose into: TEST
+#                                 FIXTURES CANNOT TOUCH CANONICAL MONEY.
 CONFIGURED_VIRTUAL_ENDOWMENT = "CONFIGURED_VIRTUAL_ENDOWMENT"
 OPERATOR_GRANT = "OPERATOR_GRANT"
 TEST_FIXTURE = "TEST_FIXTURE"
 
 FUNDING_AUTHORITIES = (CONFIGURED_VIRTUAL_ENDOWMENT, OPERATOR_GRANT,
                        TEST_FIXTURE)
+
+# The operator's out-of-band approval for a manual grant. Absent by design:
+# there is no operator-grant workflow yet, and an authority with no workflow
+# should be closed, not open with a friendly name.
+OPERATOR_GRANT_APPROVAL_ENV = "JARVIS_DEX_OPERATOR_GRANT_APPROVAL"
+
+# Set by conftest.py before any application import. app.database raises
+# outright if this is set and the path resolves to the operator database.
+UNDER_PYTEST_ENV = "JARVIS_UNDER_PYTEST"
+
+
+class FundingAuthorizationError(RuntimeError):
+    """Virtual value was requested by a caller that could not authorise it."""
+
+
+# Unforgeable only in the sense that matters: a caller cannot construct a
+# grant by accident, by deserialising one, or by naming an authority. It is
+# module-private, and a structural test asserts no canonical runtime module
+# reaches for it.
+_GRANT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class FundingGrant:
+    """An authorised creation of virtual value. Only an issuer makes one."""
+    authority: str
+    mint: str
+    quantity: float
+    reason: str
+    actor: str
+    issued_at: str
+    symbol: str | None = None
+    policy_version: str | None = None
+    provenance: dict = field(default_factory=dict)
+    seal: object = None
+
+    def __post_init__(self):
+        if self.seal is not _GRANT_SEAL:
+            raise FundingAuthorizationError(
+                "a FundingGrant may only be created by an issuer in "
+                "lib.dex_wallet; constructing one directly is exactly the "
+                "'the enum is the authorization' defect this replaced")
+        if self.authority not in FUNDING_AUTHORITIES:
+            raise FundingAuthorizationError(
+                f"unknown funding authority {self.authority!r}")
+        qty = float(self.quantity)
+        if qty <= 0 or qty != qty:
+            raise FundingAuthorizationError(
+                f"funding quantity {self.quantity!r} is not positive")
+
+
+def _seal(authority: str, *, mint: str, quantity: float, reason: str,
+          actor: str, symbol: str | None = None,
+          policy_version: str | None = None,
+          provenance: dict | None = None) -> FundingGrant:
+    return FundingGrant(
+        authority=authority, mint=mint, quantity=float(quantity),
+        reason=reason, actor=actor, issued_at=_now(), symbol=symbol,
+        policy_version=policy_version,
+        provenance={**(provenance or {}), "issuer_actor": actor},
+        seal=_GRANT_SEAL)
+
+
+def operator_grant_workflow_available() -> bool:
+    """Is there an operator-grant workflow at all? Currently: no."""
+    return bool((os.getenv(OPERATOR_GRANT_APPROVAL_ENV) or "").strip())
+
+
+def issue_operator_grant(*, mint: str, quantity: float, reason: str,
+                         actor: str, approval: str,
+                         symbol: str | None = None,
+                         provenance: dict | None = None) -> FundingGrant:
+    """A grant the operator explicitly authorised, or nothing at all.
+
+    The approval is compared against a secret only the operator can set,
+    with a constant-time comparison. Until one is configured this raises
+    for every caller, which is the honest state of a workflow that does not
+    exist yet — better than an enum value that reads like permission.
+    """
+    expected = (os.getenv(OPERATOR_GRANT_APPROVAL_ENV) or "").strip()
+    if not expected:
+        raise FundingAuthorizationError(
+            f"OPERATOR_GRANT is unavailable: no operator-grant workflow is "
+            f"configured ({OPERATOR_GRANT_APPROVAL_ENV} is unset). The "
+            f"authority exists as a provenance label for a workflow that "
+            f"has not been built; it is not a way to create value.")
+    if not hmac.compare_digest(str(approval or ""), expected):
+        raise FundingAuthorizationError(
+            "OPERATOR_GRANT refused: the supplied approval does not match "
+            "the configured operator approval")
+    if not str(actor or "").strip():
+        raise FundingAuthorizationError(
+            "OPERATOR_GRANT refused: an operator grant must name the actor "
+            "that authorised it")
+    return _seal(OPERATOR_GRANT, mint=mint, quantity=quantity, reason=reason,
+                 actor=str(actor).strip(), symbol=symbol,
+                 provenance={**(provenance or {}),
+                             "approval_source": OPERATOR_GRANT_APPROVAL_ENV})
+
+
+def issue_test_fixture_grant(*, mint: str, quantity: float,
+                             reason: str = "test fixture",
+                             symbol: str | None = None) -> FundingGrant:
+    """Fixture money, and ONLY inside a test process.
+
+    Composes with app.database's unconditional refusal to open the operator
+    database under pytest: outside pytest this raises, and inside pytest the
+    only database reachable is a throwaway. There is no configuration that
+    satisfies both, which is the point.
+    """
+    if os.getenv(UNDER_PYTEST_ENV) != "1":
+        raise FundingAuthorizationError(
+            f"TEST_FIXTURE is not a funding authority outside a test "
+            f"process ({UNDER_PYTEST_ENV} is not set). Canonical runtime — "
+            f"the autonomous DEX, the scheduler, API execution, the "
+            f"production CLI — cannot create virtual value this way.")
+    return _seal(TEST_FIXTURE, mint=mint, quantity=quantity, reason=reason,
+                 actor="pytest", symbol=symbol,
+                 provenance={"under_pytest": True})
+
 
 ENDOWMENT_ENV = "JARVIS_DEX_VIRTUAL_ENDOWMENT"
 ENDOWMENT_POLICY_VERSION = "dex_endowment_v1"
@@ -156,51 +315,91 @@ def configured_endowment() -> dict:
     return out
 
 
-def fund_wallet(*, mint: str, quantity: float, authority: str, reason: str,
-                symbol: str | None = None, policy_version: str | None = None,
-                provenance: dict | None = None,
-                user_id: str | None = None) -> dict:
-    """Create virtual economic value, with provenance. The ONLY way to.
+def issue_endowment_grant(*, mint: str, quantity: float,
+                          symbol: str | None = None) -> FundingGrant:
+    """A grant for the CONFIGURED training endowment, and nothing else.
+
+    The mint and quantity are checked against the configured policy rather
+    than trusted from the caller, so this authority cannot be used to mint
+    an arbitrary amount even from inside this module. An endowment that
+    does not match what was configured is not an endowment.
+    """
+    policy = configured_endowment()
+    if not policy:
+        raise FundingAuthorizationError(
+            f"CONFIGURED_VIRTUAL_ENDOWMENT is unavailable: nothing is "
+            f"configured in {ENDOWMENT_ENV}. An unconfigured endowment is "
+            f"an empty wallet, not a default one.")
+    if mint not in policy:
+        raise FundingAuthorizationError(
+            f"{mint!r} is not in the configured endowment policy")
+    if float(policy[mint]) != float(quantity):
+        raise FundingAuthorizationError(
+            f"endowment for {mint!r} is {policy[mint]!r} in {ENDOWMENT_ENV}, "
+            f"not {quantity!r}; the configured policy is the authority")
+    return _seal(CONFIGURED_VIRTUAL_ENDOWMENT, mint=mint, quantity=quantity,
+                 reason=f"configured training endowment via {ENDOWMENT_ENV}",
+                 actor=ENDOWMENT_ENV, symbol=symbol,
+                 policy_version=ENDOWMENT_POLICY_VERSION,
+                 provenance={"env": ENDOWMENT_ENV})
+
+
+def fund_wallet(grant: FundingGrant, *, user_id: str | None = None) -> dict:
+    """Create virtual economic value from an AUTHORISED grant. The only way.
+
+    Takes a sealed FundingGrant rather than an authority string, so that
+    "which authority is this?" and "was this authorised?" stop being the
+    same question. A caller who has a grant has already passed the issuer's
+    check; a caller who only has the word TEST_FIXTURE has nothing.
 
     Balance and funding event are written in one transaction: a credit
-    without its reason, or a reason without its credit, would each be a
-    lie of a different kind.
+    without its reason, or a reason without its credit, would each be a lie
+    of a different kind.
     """
     import json
 
     from app.database import (DEFAULT_USER_ID, DexBalance, DexFundingEvent,
                               get_db)
-    if authority not in FUNDING_AUTHORITIES:
-        raise ValueError(f"unknown funding authority {authority!r}; "
-                         f"virtual value may not be created without one")
-    qty = float(quantity)
-    if qty <= 0 or qty != qty:
-        raise ValueError(f"funding quantity {quantity!r} is not positive")
+    if not isinstance(grant, FundingGrant) or grant.seal is not _GRANT_SEAL:
+        raise FundingAuthorizationError(
+            "fund_wallet requires a sealed FundingGrant from an issuer "
+            "(issue_endowment_grant / issue_operator_grant / "
+            "issue_test_fixture_grant). Naming an authority is provenance, "
+            "not permission.")
+    mint = grant.mint
+    qty = float(grant.quantity)
+    symbol = grant.symbol or _SYMBOLS.get(mint, mint[:6])
     uid = user_id or DEFAULT_USER_ID
+
+    # The event carries the actor and the grant's issue time alongside the
+    # amount, asset, authority, reason and (row) id the table already held.
+    provenance = {**dict(grant.provenance or {}),
+                  "actor": grant.actor,
+                  "granted_at": grant.issued_at}
 
     with get_db() as db:
         row = _row(db, uid, mint)
         if row is None:
-            row = DexBalance(user_id=uid, mint=mint,
-                             symbol=symbol or _SYMBOLS.get(mint, mint[:6]),
+            row = DexBalance(user_id=uid, mint=mint, symbol=symbol,
                              total_quantity=0.0, reserved_quantity=0.0)
             db.add(row)
             db.flush()
         row.total_quantity = float(row.total_quantity or 0.0) + qty
         row.updated_at = _now()
-        db.add(DexFundingEvent(
-            user_id=uid, mint=mint,
-            symbol=symbol or _SYMBOLS.get(mint, mint[:6]),
-            quantity=qty, authority=authority, reason=reason,
-            policy_version=policy_version,
-            provenance_json=json.dumps(provenance or {}, default=str)))
+        event = DexFundingEvent(
+            user_id=uid, mint=mint, symbol=symbol,
+            quantity=qty, authority=grant.authority, reason=grant.reason,
+            policy_version=grant.policy_version,
+            provenance_json=json.dumps(provenance, default=str))
+        db.add(event)
         db.flush()
         total = float(row.total_quantity)
-    logger.warning("[DexWallet] FUNDED %.9g %s under %s — %s",
-                   qty, symbol or _SYMBOLS.get(mint, mint[:6]),
-                   authority, reason)
+        event_id = event.id
+    logger.warning("[DexWallet] FUNDED %.9g %s under %s by %s — %s",
+                   qty, symbol, grant.authority, grant.actor, grant.reason)
     return {"mint": mint, "credited": qty, "total_after": total,
-            "authority": authority}
+            "authority": grant.authority, "actor": grant.actor,
+            "event_id": event_id}
 
 
 def apply_configured_endowment(*, user_id: str | None = None) -> dict:
@@ -232,12 +431,7 @@ def apply_configured_endowment(*, user_id: str | None = None) -> dict:
 
     credited = {}
     for mint, qty in policy.items():
-        fund_wallet(mint=mint, quantity=qty,
-                    authority=CONFIGURED_VIRTUAL_ENDOWMENT,
-                    reason=f"configured training endowment via "
-                           f"{ENDOWMENT_ENV}",
-                    policy_version=ENDOWMENT_POLICY_VERSION,
-                    provenance={"env": ENDOWMENT_ENV},
+        fund_wallet(issue_endowment_grant(mint=mint, quantity=qty),
                     user_id=uid)
         credited[_SYMBOLS.get(mint, mint[:6])] = qty
     return {"funded": True, "credited": credited,
@@ -246,15 +440,26 @@ def apply_configured_endowment(*, user_id: str | None = None) -> dict:
 
 
 def funding_history(*, user_id: str | None = None) -> list[dict]:
-    """Every credit and its provenance."""
+    """Every credit and its provenance: who, what, how much, why, when."""
+    import json
+
     from app.database import DEFAULT_USER_ID, DexFundingEvent, get_db
     uid = user_id or DEFAULT_USER_ID
+
+    def _actor(raw) -> str | None:
+        try:
+            return (json.loads(raw or "{}") or {}).get("actor")
+        except (TypeError, ValueError):
+            return None
+
     with get_db() as db:
         rows = (db.query(DexFundingEvent)
                 .filter(DexFundingEvent.user_id == uid)
                 .order_by(DexFundingEvent.created_at).all())
-        return [{"mint": r.mint, "symbol": r.symbol,
+        return [{"event_id": r.id, "mint": r.mint, "symbol": r.symbol,
                  "quantity": float(r.quantity), "authority": r.authority,
+                 "actor": _actor(r.provenance_json),
+                 "policy_version": r.policy_version,
                  "reason": r.reason, "at": r.created_at} for r in rows]
 
 

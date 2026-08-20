@@ -37,9 +37,9 @@ def setUpModule():
     """
     from lib import dex_wallet as DW
     if not DW.initialized():
-        DW.fund_wallet(mint=DW.SOL_MINT, quantity=5.0,
-                       authority=DW.TEST_FIXTURE,
-                       reason="autotrade economics fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.SOL_MINT, quantity=5.0,
+            reason="autotrade economics fixture"))
 
 
 class _Enabled:

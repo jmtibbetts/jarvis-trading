@@ -356,6 +356,7 @@ def providers_health():
     Contains no credentials: error text is sanitised before it is stored.
     """
     from lib import provider_health as PH
+    from lib import solana_fees as SF
     rows = PH.snapshot()
     actionable = [r for r in rows if r.get("actionable")]
     by_status = {}
@@ -367,6 +368,13 @@ def providers_health():
         "actionable": actionable,
         "tracked": len(rows),
         "statuses": list(PH.STATUSES),
+        # A fallback HIERARCHY needs one thing the per-provider rows cannot
+        # show on their own: whether the second authority has been quietly
+        # covering for a first one that never works. Helius
+        # priorityLevel="high" returned -32602 on every call for an entire
+        # phase and nothing looked wrong, because getRecentPrioritizationFees
+        # answered every time.
+        "solana_fee_estimator": SF.fee_estimator_health(),
     }
 
 

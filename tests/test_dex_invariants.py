@@ -101,9 +101,8 @@ class VirtualValueRequiresProvenanceTests(unittest.TestCase):
         self.assertEqual(DW.balance(DW.USDC_MINT)["total"], 100.0)
 
     def test_funding_without_an_authority_is_refused(self):
-        with self.assertRaises(ValueError):
-            DW.fund_wallet(mint=DW.USDC_MINT, quantity=1.0,
-                           authority="BECAUSE_I_SAID_SO", reason="no")
+        with self.assertRaises(DW.FundingAuthorizationError):
+            DW.fund_wallet("BECAUSE_I_SAID_SO")
 
 
 class ACallerCannotInventAWalletTests(unittest.TestCase):
@@ -186,8 +185,9 @@ class ActualFeesAreNeverClampedTests(unittest.TestCase):
         _empty_wallet()
 
     def _fund_sol(self, amount):
-        DW.fund_wallet(mint=DW.SOL_MINT, quantity=amount,
-                       authority=DW.TEST_FIXTURE, reason="fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.SOL_MINT, quantity=amount,
+            reason="fixture"))
 
     def test_E_actual_above_estimate_but_within_balance_is_fully_charged(self):
         self._fund_sol(0.05)
@@ -319,10 +319,12 @@ class LedgerConservationTests(unittest.TestCase):
 
     def setUp(self):
         _empty_wallet()
-        DW.fund_wallet(mint=DW.SOL_MINT, quantity=1.0,
-                       authority=DW.TEST_FIXTURE, reason="fixture")
-        DW.fund_wallet(mint=DW.USDC_MINT, quantity=1_000.0,
-                       authority=DW.TEST_FIXTURE, reason="fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.SOL_MINT, quantity=1.0,
+            reason="fixture"))
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.USDC_MINT, quantity=1_000.0,
+            reason="fixture"))
 
     def _totals(self):
         return {b["mint"]: b["total"] for b in DW.balances()}
@@ -355,8 +357,9 @@ class LedgerConservationTests(unittest.TestCase):
 
     def test_a_fee_invariant_failure_conserves_everything(self):
         _empty_wallet()
-        DW.fund_wallet(mint=DW.SOL_MINT, quantity=0.001,
-                       authority=DW.TEST_FIXTURE, reason="fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.SOL_MINT, quantity=0.001,
+            reason="fixture"))
         before = self._totals()
         with self.assertRaises(DW.FeeAccountingInvariant):
             DW.settle_swap_failure(network_fee_sol=0.5, reached_chain=True)

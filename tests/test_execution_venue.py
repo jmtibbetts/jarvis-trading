@@ -53,9 +53,9 @@ def setUpModule():
     measuring that rather than wallet authority (covered elsewhere)."""
     from lib import dex_wallet as DW
     if not DW.initialized():
-        DW.fund_wallet(mint=DW.SOL_MINT, quantity=5.0,
-                       authority=DW.TEST_FIXTURE,
-                       reason="venue boundary fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.SOL_MINT, quantity=5.0,
+            reason="venue boundary fixture"))
 
 
 class _Mode:
@@ -228,8 +228,9 @@ class BoundaryIntegrityTests(unittest.TestCase):
             db.query(DexBalance).delete()
             db.query(DexFundingEvent).delete()
         # A funded wallet that holds no SOL: real ledger, empty of gas.
-        DW.fund_wallet(mint=DW.USDC_MINT, quantity=100.0,
-                       authority=DW.TEST_FIXTURE, reason="gas-test fixture")
+        DW.fund_wallet(DW.issue_test_fixture_grant(
+            mint=DW.USDC_MINT, quantity=100.0,
+            reason="gas-test fixture"))
         r = submit(plan(product="DEX_SPOT", symbol="SOL/USDC"),
                    venue_family=VIRTUAL_DEX, risk=risk(),
                    reserve_usd=500_000.0, gas_balance_sol=0.0)

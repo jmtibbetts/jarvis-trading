@@ -357,15 +357,24 @@ class FeePolicyEconomicsTests(unittest.TestCase):
     """§C/D/E/F — inclusion priority is economically aware and bounded."""
 
     def test_a_high_fee_destroys_a_thin_edge(self):
-        """§C/D: the bot must not pay $30 of priority to capture $5.
+        """§C/D: the bot must not spend a third of its edge on inclusion.
 
-        Magnitude check on the fixture itself: 20M micro-lamports/CU on a
-        400k-CU swap is 0.008 SOL of priority — inside the HIGH cap, so the
-        refusal below is the EDGE test firing, not the cap."""
-        est = _estimate(SF.HIGH, micro_per_cu=20_000_000.0)
+        Magnitude check on the fixture itself: 4M micro-lamports/CU on a
+        400k-CU swap is 0.0016 SOL of priority — inside the 0.002 SOL
+        NORMAL_EXIT ceiling, so the refusal below is the EDGE test firing,
+        not the cap.
+
+        RECALIBRATED WITH THE v2 POLICY, and the old numbers are worth
+        recording. This used to bid 20M micro-lamports/CU (0.008 SOL) against
+        a $5 edge, which was inside v1's 0.01 SOL ceiling. Under the
+        operator's actual willingness to pay it is four times the ceiling,
+        so the fixture started tripping the cap instead of the edge check
+        and stopped testing what it was written to test. The fee is now
+        $0.32 against a $1 edge — 32% of it, past the 25% policy cap."""
+        est = _estimate(SF.HIGH, micro_per_cu=4_000_000.0)
         self.assertFalse(est.capped, "fixture accidentally hit the cap")
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0,
-                                expected_edge_usd=5.0, notional_usd=1_000.0)
+                                expected_edge_usd=1.0, notional_usd=1_000.0)
         self.assertFalse(auth["ok"])
         self.assertEqual(auth["reason"], "FEE_DESTROYS_EDGE")
 

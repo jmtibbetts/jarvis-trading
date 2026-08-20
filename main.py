@@ -257,6 +257,29 @@ async def lifespan(app_: FastAPI):
     orderbook_tasks = start_orderbook_streams(on_update=_broadcast_orderbook_update)
     logger.info(f"[Server] Order book streams started — {len(orderbook_tasks)} connections (Binance + Coinbase)")
 
+    # Helius wallet intelligence — ONE read-only polling loop, gated on its
+    # OWN flag and deliberately OUTSIDE the scheduler branch below.
+    #
+    # The legacy scheduler owned this job and stays disabled, because it also
+    # executes signals, opens paper positions and manages the book. Wallet
+    # observation needs none of that: it reads an API and lands idempotent
+    # rows. Tying the two together is what forced a choice between "no wallet
+    # intelligence" and "the whole trading scheduler".
+    #
+    # OFF unless JARVIS_HELIUS_WALLET_POLLING_ENABLED says otherwise; start()
+    # makes that decision itself, so this call is safe in every posture.
+    try:
+        from lib import wallet_poller
+        _wp = wallet_poller.start()
+        if _wp.get("started"):
+            logger.info("[Server] Helius wallet polling ENABLED — every %ss",
+                        _wp.get("interval_seconds"))
+        else:
+            logger.info("[Server] Helius wallet polling off (%s)",
+                        _wp.get("reason"))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[Server] wallet poller not started: %s", e)
+
     # Kraken WebSocket: live bid/ask and the trade tape. Runs in its own
     # daemon thread rather than on this loop, because it self-heals across
     # reconnects and must never be able to stall request handling. Symbols
@@ -350,6 +373,14 @@ async def lifespan(app_: FastAPI):
 
     for task in orderbook_tasks:
         task.cancel()
+
+    # Stop the wallet poller before the rest: its sleep is interruptible, so
+    # this returns immediately unless a read is genuinely in flight.
+    try:
+        from lib import wallet_poller
+        logger.info("[Server] wallet poller: %s", wallet_poller.stop())
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[Server] wallet poller stop failed: %s", e)
 
     # Signal any in-flight LLM calls to abort
     try:

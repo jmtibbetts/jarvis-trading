@@ -19,6 +19,25 @@ from app.routers.common import *  # noqa: F401,F403
 router = APIRouter()
 
 
+# ── Wallet intelligence polling ──────────────────────────────────────────
+@router.get("/onchain/wallet-polling")
+def onchain_wallet_polling():
+    """Whether Helius wallet intelligence is polling, and what it last did.
+
+    Read-only. Carries no wallet address, no key and no credential-bearing
+    URL — provider error text is redacted before it reaches this payload,
+    because the upstream collector prefixes its own failure messages with
+    eight characters of a real wallet.
+
+    Counts are null rather than zero when a pass did not look: "we could not
+    reach the provider" and "we looked and the chain was quiet" are
+    different facts, and only one of them is about the market.
+    """
+    from lib import wallet_poller
+
+    return wallet_poller.status()
+
+
 # ── Wallet registry ──────────────────────────────────────────────────────
 @router.get("/onchain/wallets")
 def onchain_wallets(status: str = None, limit: int = 100):

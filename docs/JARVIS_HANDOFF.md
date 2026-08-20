@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `027d124`.*
+*Last measured: 2026-08-20, at code SHA `b58078d`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       027d124 (manual operator execution + build identity)
+    code SHA       b58078d (manual operator learning closure)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -305,6 +305,107 @@ component sum, in `venue_reconciliation`'s existing vocabulary
 `COMPONENT_ONLY`). A report is **never back-solved into a missing cost**, and
 an unexplained delta stays UNEXPLAINED — it is the honest measurement of what
 the cost model does not yet know about that venue.
+
+## 5c. Manual outcomes reaching LEARNING — the gate and the admission list
+
+`lib/manual_learning.py` projects a CLOSED manual trade into `trade_outcomes`,
+through the SAME writer the virtual book uses
+(`canonical_learning.insert_learning_row`), so both populations have one row
+shape and stay comparable.
+
+### The gate reads EVIDENCE, never a cost field
+
+`RealizedOutcome` stores costs as FLOATS. A fee nobody evidenced is
+indistinguishable IN THE ROW from a fee that was genuinely zero — and the
+bigger the missing fee, the better the trade looks. The canonical poison
+case, in the tests: **+$60 gross, outcome object reports net +$60 and WIN,
+real costs $62, so it was a LOSS.**
+
+So eligibility consults `trade.unknown_cost_categories()` — which costs this
+PRODUCT incurs (§6's authority) against what the legs and cost events
+actually evidence. Verdicts:
+
+    ELIGIBLE_COMPLETE
+    BLOCKED_OPEN_TRADE                        OPEN / PARTIALLY_CLOSED
+    BLOCKED_INVALID_STATE                     DRAFT / CANCELLED / ABANDONED
+    BLOCKED_INCOMPLETE_COSTS                  a real cost is unevidenced
+    BLOCKED_UNRECONCILED_CRITICAL_ECONOMICS   venue figure vs components
+    BLOCKED_NO_ECONOMICS
+
+**RE-DERIVED AT THE CONSUMER.** `manual_trades.learning_state` already carries
+`BLOCKED_INCOMPLETE_COSTS` from the producer and this does NOT trust it: a
+stored verdict describes a past evaluation, and a hand-edited or
+half-migrated row would carry a stale clean one. Pinned by forging `PENDING`
+directly in the database and watching the gate refuse anyway.
+
+Reconciliation materiality is POLICY, stated and versioned
+(`manual_reconciliation_policy_v1`): an unexplained gap above
+`max($0.05, 10% of |net|)` blocks; below it the residual is PRESERVED on the
+row, never absorbed. A venue-reported figure is never back-solved into a
+missing cost.
+
+### Admission is an ALLOWLIST — `lib/learning_population.py`
+
+`trade_outcomes.outcome_source` had two values and every consumer wrote its
+policy as a DENYLIST, `!= "replay"`. That is safe only while replay is the
+only thing worth excluding. A third population would have been admitted at
+FULL WEIGHT by six of them:
+
+    calibration          weight 1.0
+    expectancy           weight 1.0, and counted as raw_live
+    edge_cost_matrix     weight 1.0, and counted into n_live
+    strategy_lifecycle   replay=False — indistinguishable from live
+    jobs/paper_trading   the BOOTSTRAP certification gate
+    signal_accuracy      NO SOURCE FILTER AT ALL — and it feeds LLM prompts
+
+None would have raised or failed a test. All six now consult the authority.
+
+| profile | live | NULL | replay | manual_operator |
+|---|---|---|---|---|
+| `JARVIS_EXECUTION` | 1.0 | 1.0 | 0.5 | **excluded** |
+| `FORWARD_OBSERVED_CERTIFICATION` | 1.0 | 1.0 | excluded | **excluded** |
+| `OPERATOR_EXECUTION` | excluded | excluded | excluded | 1.0 |
+
+**AN UNCHARACTERISED SOURCE GETS WEIGHT `None`, NOT 1.0.** That inversion is
+the point: the denylist gave full weight to everything it had not been told
+to distrust, which is the wrong direction for a number that sizes positions.
+Existing weights are unchanged, and an AST test refuses a returning
+`!= "replay"`.
+
+`manual_operator` is excluded from JARVIS statistics not because it is
+untrustworthy — it is the most real evidence here — but because it answers a
+different question. Calibration asks how often JARVIS'S OWN selection wins;
+an outcome shaped by a person's entry timing, venue and exit discipline
+cannot answer it, and pooled the number describes neither.
+
+**It has a real reader**: `manual_learning.operator_population()`, reporting
+thesis-linked and independent trades APART. A learning row nothing reads is a
+log, not learning.
+
+### One trade, one row, forever
+
+The learning row's id IS the manual trade id, so `uq_trade_outcomes_canonical`
+makes one-trade-one-vote a database fact. Four legs and two funding events
+still make ONE row; corrections are not observations.
+
+**Correction after projection FAILS CLOSED** to `PENDING_REPROJECTION`: the
+stale row is neither silently revised nor duplicated. Re-projecting revises
+that single row IN PLACE.
+
+> **That is safe HERE and would NOT be safe for the virtual book.** Manual
+> rows feed no INCREMENTAL aggregate — pattern memory and regime performance
+> are excluded by admission — so revising one double-counts nothing. A
+> canonical outcome cannot be revised this way, because its first projection
+> already incremented those counters.
+
+### Percentages travel with their denominator
+
+    MARGIN                  collateral wholly OWN_CAPITAL
+    MARGIN_MIXED_CAPITAL    collateral partly promotional/borrowed
+    NULL / NULL             no evidenced collateral -> NO percentage at all
+
+$10k owned plus $10k of non-withdrawable credit is not $20k of equity, and
+the label is what stops the two being read alike.
 
 ### Corrections append, never overwrite
 
@@ -609,7 +710,7 @@ dead primary comes to look healthy.
 
 ## 11. Tests and CI
 
-    full suite   4,487 passed - 16 skipped - 0 failed, exit code 0 (027d124)
+    full suite   4,536 passed - 16 skipped - 0 failed, exit code 0 (b58078d)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
@@ -662,11 +763,25 @@ Never carry a red typecheck or a failing test as "pre-existing".
   code computes it. `estimate_cross_liquidation` still returns UNKNOWN for
   every venue, which is correct until a venue's maintenance tiers are
   evidenced.
-- **Nothing consumes a manual `RealizedOutcome` into the learning tables
-  yet.** It is built, persisted and gated (`PENDING` /
-  `BLOCKED_INCOMPLETE_COSTS`), and there is no projector equivalent to
-  `canonical_learning` for it. Deliberate: the projection is its own
-  reviewed step, and until it exists no manual result influences anything.
+- **Manual outcomes are projected but feed NO existing JARVIS statistic.**
+  Deliberate (§5c). Admitting them to cost calibration is the obvious next
+  candidate — real venue costs are the most valuable thing they carry — and
+  it needs promotion NORMALISATION first, or a temporary zero-fee window
+  becomes a global claim about that venue's schedule. Not started.
+- **`realized_outcome.finalize` classifies on a bare sign test**, so a
+  round trip whose costs cancel its gross to within float noise
+  (~1e-14) is recorded as a LOSS rather than BREAKEVEN. Observed while
+  building the manual poison case. It affects the VIRTUAL book identically
+  and is not manual-specific; changing the WIN/LOSS threshold is a
+  system-wide decision and was deliberately not made here.
+- **`_refresh_signal_accuracy_conn` still pools replay with live**, and has
+  no epoch filter. Both predate this work; only the manual exclusion was
+  added, because widening that change needs its own evidence.
+- **No supersession exists in canonical learning.** A corrected MANUAL
+  outcome revises its single row in place, which is safe only because
+  manual rows feed no incremental aggregate (§5c). A corrected VIRTUAL
+  outcome after APPLIED still reports `LEARNING_STATE_CORRUPT` and needs
+  operator repair — unchanged, and still the honest fail-closed answer.
 - **Host WHEA / `HOST_HARDWARE_UNSTABLE` remains unresolved** unless new
   evidence proves otherwise. It is a host-level concern and is not
   represented anywhere in this repository.
@@ -698,8 +813,10 @@ next, in no fixed order and none of them started:
   orderbook_stream, td_forex_stream. What is actually CONSUMED from each
   paid tier — Alpaca SIP, OPRA, Helius paid features, Kraken direct — is
   NOT established and is the audit's job.
-- **The Manual Trade Desk BACKEND is DONE (§5b).** What is not built:
-  monitoring of open manual positions, the learning projection, and the UI.
+- **The Manual Trade Desk BACKEND and its LEARNING CLOSURE are DONE**
+  (§5b, §5c). What is not built: monitoring of open manual positions, the
+  UI, and any admission of manual evidence into a JARVIS statistic — the
+  last of which needs promotion normalisation first (§12).
 
 ### Manual Trade Desk — UI, when it is built
 

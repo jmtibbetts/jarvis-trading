@@ -116,23 +116,29 @@ class MicroLamportsPerComputeUnitToLamportsTests(unittest.TestCase):
                 compute_unit_limit=400_000)
         self.assertIn("executable integer", str(ctx.exception))
 
-    def test_A6_only_one_module_speaks_micro_lamports(self):
-        """The conversion is centralised, so there is one place to be wrong.
+    def test_A6_only_one_module_performs_the_conversion(self):
+        """The CONVERSION is centralised, so there is one place to be wrong.
 
-        If a second module starts handling micro-lamports it must either
-        import this conversion or be caught here."""
+        Naming the unit is fine — lib/dex_network_cost passes the field
+        through, and a name that carries its unit is the point. What must
+        not spread is the ARITHMETIC: a second module dividing by 1e6 is a
+        second place for a 1000x error to live."""
         import pathlib
+        import re
         root = pathlib.Path(SF.__file__).resolve().parent.parent
+        divisor = re.compile(r"/\s*(1_000_000\b|1e6\b|1000000\b)")
         offenders = []
         for folder in ("lib", "app"):
             for path in (root / folder).rglob("*.py"):
                 if path.name == "solana_fees.py":
                     continue
-                text = path.read_text(encoding="utf-8", errors="ignore").lower()
-                if "micro_lamport" in text or "microlamport" in text:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                low = text.lower()
+                if ("micro_lamport" in low or "microlamport" in low) \
+                        and divisor.search(text):
                     offenders.append(str(path.relative_to(root)))
         self.assertEqual(offenders, [],
-                         "micro-lamport arithmetic escaped lib/solana_fees.py")
+                         "micro-lamport ARITHMETIC escaped lib/solana_fees.py")
 
 
 class FractionalProviderEstimateTests(unittest.TestCase):
@@ -163,19 +169,19 @@ class FractionalProviderEstimateTests(unittest.TestCase):
         est = SF.estimate_network_fee(SF.NORMAL, fetch=_fetch(self.RAW),
                                       record_health=False)
         self.assertTrue(est.ok)
-        self.assertEqual(est.compute_unit_price_micro_lamports,
+        self.assertEqual(est.executable_compute_unit_price_micro_lamports,
                          self.EXECUTABLE)
         # RECOMPUTE from the persisted record and get the same fee back.
         recomputed = SF.priority_fee_lamports(
             compute_unit_price_micro_lamports=(
-                est.compute_unit_price_micro_lamports),
+                est.executable_compute_unit_price_micro_lamports),
             compute_unit_limit=est.compute_unit_limit)
-        self.assertEqual(recomputed, est.priority_fee_lamports)
+        self.assertEqual(recomputed, est.measured_priority_fee_lamports)
 
     def test_the_truncated_price_is_explicitly_not_what_is_stored(self):
         est = SF.estimate_network_fee(SF.NORMAL, fetch=_fetch(self.RAW),
                                       record_health=False)
-        self.assertNotEqual(est.compute_unit_price_micro_lamports,
+        self.assertNotEqual(est.executable_compute_unit_price_micro_lamports,
                             int(self.RAW))
 
     def test_truncation_can_only_ever_under_bid(self):
@@ -224,7 +230,7 @@ class FractionalProviderEstimateTests(unittest.TestCase):
         est = SF.estimate_network_fee(SF.NORMAL, fetch=fallback_only,
                                       record_health=False)
         self.assertEqual(est.quality, SF.MEASURED_RPC_FALLBACK)
-        self.assertEqual(est.compute_unit_price_micro_lamports,
+        self.assertEqual(est.executable_compute_unit_price_micro_lamports,
                          self.EXECUTABLE)
 
 
@@ -315,7 +321,7 @@ class UnsafeMaxArithmeticTests(unittest.TestCase):
             # It must NOT have been priced off unsafeMax: either the
             # fallback served it, or it refused outright.
             self.assertNotEqual(est.quality, SF.MEASURED_HELIUS)
-            self.assertLess(est.total_network_fee_sol, 1.0)
+            self.assertLess(est.measured_total_network_fee_sol, 1.0)
         finally:
             SF._HELIUS_LEVEL.clear()
             SF._HELIUS_LEVEL.update(original)
@@ -351,9 +357,8 @@ class WorkedExamplesPreserveUnitMathTests(unittest.TestCase):
         self.assertEqual(est.compute_unit_limit_source,
                          SF.DEFAULT_BUDGET_ASSUMPTION)
         expected_priority = _ceil_oracle(micro_per_cu, 400_000)   # 4,938
-        self.assertEqual(est.priority_fee_lamports, expected_priority)
-        self.assertFalse(est.capped, "the normal example must not be capped")
-        self.assertEqual(est.total_network_fee_lamports,
+        self.assertEqual(est.measured_priority_fee_lamports, expected_priority)
+        self.assertEqual(est.measured_total_network_fee_lamports,
                          expected_priority + SF.PROTOCOL_BASE_FEE_LAMPORTS)
         self.assertAlmostEqual(
             est.total_network_fee_sol,
@@ -369,27 +374,37 @@ class WorkedExamplesPreserveUnitMathTests(unittest.TestCase):
                                       fetch=_fetch(micro_per_cu),
                                       record_health=False)
         self.assertTrue(est.ok)
-        self.assertEqual(est.provenance["measured_priority_fee_lamports"],
+        self.assertEqual(est.measured_priority_fee_lamports,
                          _ceil_oracle(micro_per_cu, 400_000))
-        self.assertEqual(est.compute_unit_price_micro_lamports, 5_000_000)
-        # Inside the 0.0035 SOL severe ceiling, so it is priced not capped.
-        self.assertFalse(est.capped)
-        self.assertAlmostEqual(est.total_network_fee_sol, 0.002005, places=9)
+        self.assertEqual(
+            est.executable_compute_unit_price_micro_lamports, 5_000_000)
+        self.assertAlmostEqual(est.measured_total_network_fee_sol, 0.002005,
+                               places=9)
+        # Inside the 0.0035 SOL severe ceiling, so the bid equals the
+        # measurement and nothing was capped.
+        auth = SF.authorize_fee(est, action=SF.SEVERE_RISK_EXIT,
+                                sol_price_usd=200.0)
+        self.assertTrue(auth.allowed)
+        self.assertFalse(auth.bid_below_measured_requirement)
+        self.assertEqual(auth.authorized_bid_lamports,
+                         est.measured_total_network_fee_lamports)
 
     def test_E2_max_acceptance_is_still_capped_by_operator_policy(self):
         est = SF.estimate_network_fee(SF.MAX_ACCEPTANCE,
                                       fetch=_fetch(200_000_000.0),
                                       record_health=False)
-        self.assertTrue(est.capped)
-        self.assertLessEqual(est.total_network_fee_lamports,
+        auth = SF.authorize_fee(est, action=SF.SEVERE_RISK_EXIT,
+                                sol_price_usd=200.0)
+        self.assertTrue(auth.bid_below_measured_requirement)
+        self.assertLessEqual(auth.authorized_bid_lamports,
                              POLICY.caps_for(POLICY.SEVERE_RISK_EXIT)
                              ["max_total_network_fee_lamports"])
-        self.assertAlmostEqual(est.total_network_fee_sol,
+        self.assertAlmostEqual(auth.authorized_bid_sol,
                                POLICY.EMERGENCY_TOTAL_CEILING_SOL, places=9)
-        # The measurement survives next to the cap; capping does not erase
-        # what the network said.
-        self.assertGreater(est.provenance["measured_priority_fee_lamports"],
-                           est.priority_fee_lamports)
+        # THE MEASUREMENT SURVIVES NEXT TO THE BID. Capping decides what we
+        # pay; it does not edit what the network said.
+        self.assertGreater(est.measured_total_network_fee_lamports,
+                           auth.authorized_bid_lamports)
 
     def test_E3_the_default_budget_stays_labelled_an_assumption(self):
         """simulateTransaction is unavailable; 400k CU must not harden."""
@@ -454,8 +469,8 @@ class OperatorFeePolicyDefaultsTests(unittest.TestCase):
         hot = SF.estimate_network_fee(SF.NORMAL, fetch=_fetch(50_000_000.0),
                                       record_health=False)
         after = POLICY.caps_for(POLICY.NORMAL_ENTRY)
-        self.assertNotEqual(cold.priority_fee_lamports,
-                            hot.provenance["measured_priority_fee_lamports"])
+        self.assertNotEqual(cold.measured_priority_fee_lamports,
+                            hot.measured_priority_fee_lamports)
         self.assertEqual(before["max_total_network_fee_lamports"],
                          after["max_total_network_fee_lamports"])
 
@@ -500,12 +515,14 @@ class OperatorFeePolicyDefaultsTests(unittest.TestCase):
         """Live estimate above policy -> REFUSE. Never widen the policy."""
         est = SF.estimate_network_fee(SF.NORMAL, fetch=_fetch(50_000_000.0),
                                       record_health=False)
-        self.assertTrue(est.capped)
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0)
-        self.assertFalse(auth["ok"])
-        self.assertEqual(auth["reason"], "FEE_EXCEEDS_AUTHORISED_POLICY")
-        self.assertGreater(auth["measured_total_network_fee_lamports"],
-                           auth["policy_total_cap_lamports"])
+        self.assertFalse(auth.allowed)
+        self.assertEqual(auth.refusal_reason, "FEE_EXCEEDS_AUTHORISED_POLICY")
+        self.assertTrue(auth.bid_below_measured_requirement)
+        self.assertEqual(auth.authorized_bid_lamports, 0,
+                         "a refused entry must not carry a bid")
+        self.assertGreater(auth.measured_total_network_fee_lamports,
+                           auth.operator_total_fee_limit_lamports)
         # And the ceiling is exactly where it was.
         self.assertEqual(POLICY.caps_for(POLICY.NORMAL_ENTRY)
                          ["max_total_network_fee_lamports"], 2_000_000)
@@ -519,10 +536,12 @@ class OperatorFeePolicyDefaultsTests(unittest.TestCase):
             est = SF.estimate_network_fee(SF.NORMAL,
                                           fetch=_fetch(500_000_000.0),
                                           record_health=False)
-            self.assertTrue(est.capped)
-            self.assertEqual(est.provenance["binding_cap"],
+            auth = SF.authorize_fee(est, action=SF.NORMAL_EXIT,
+                                    sol_price_usd=200.0)
+            self.assertTrue(auth.bid_below_measured_requirement)
+            self.assertEqual(auth.binding_constraint,
                              "TOTAL_NETWORK_FEE_CEILING")
-            self.assertLessEqual(est.total_network_fee_lamports, 2_000_000)
+            self.assertLessEqual(auth.authorized_bid_lamports, 2_000_000)
         finally:
             os.environ.pop(key, None) if old is None else os.environ.__setitem__(key, old)
 

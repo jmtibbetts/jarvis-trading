@@ -159,9 +159,14 @@ class ACallerCannotInventAWalletTests(unittest.TestCase):
             quantity_unit = "TOKENS"; instrument_id = None
             order_type = "market"
 
+        def _fee_fetch(method, params):
+            if method == "getPriorityFeeEstimate":
+                return {"priorityFeeEstimate": 1_000.0}
+            return [{"prioritizationFee": 1_000.0}]
+
         sub = VirtualDexAdapter().submit(
             _Plan(), reserve_usd=100_000.0, sol_price_usd=200.0,
-            gas_balance_sol=0.25)
+            gas_balance_sol=0.25, fee_fetch=_fee_fetch)
         self.assertTrue(sub.accepted, sub.detail)
         gas = sub.provenance["gas"] if "gas" in sub.provenance else None
         # The cap is recorded even on the accepted path.
@@ -261,8 +266,19 @@ class FeeCapsArePolicyNotNetworkTruthTests(unittest.TestCase):
         self.assertNotIn("_MAX_PRIORITY_LAMPORTS", src)
 
     def test_J_caps_resolve_through_configuration(self):
-        from lib.solana_fees import priority_cap_lamports, MAX_ACCEPTANCE
-        cap, source = priority_cap_lamports(MAX_ACCEPTANCE)
+        """Caps resolve from the ACTION, and only from the action.
+
+        REWRITTEN WHEN THE COUPLING WAS REMOVED. This used to ask for
+        `priority_cap_lamports(MAX_ACCEPTANCE)` — a PRIORITY LEVEL — and
+        expect SEVERE_RISK_EXIT economics back, because a table mapped one
+        onto the other. That coupling meant an ENTRY selecting HIGH priority
+        silently inherited EXIT caps, and it looked harmless only because
+        the two absolute ceilings happened to be equal. Caps now come from
+        the action alone; see test_dex_canonical_fee_integration for the
+        orthogonality proof.
+        """
+        from lib.solana_fees import priority_cap_lamports
+        cap, source = priority_cap_lamports(POLICY.SEVERE_RISK_EXIT)
         self.assertEqual(cap,
                          POLICY.caps_for(POLICY.SEVERE_RISK_EXIT)
                          ["max_priority_fee_lamports"])

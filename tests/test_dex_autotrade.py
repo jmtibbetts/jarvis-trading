@@ -20,9 +20,40 @@ import os
 import unittest
 
 from lib.dex_autotrade import (DISABLED, IMPACT_TOO_HIGH, INSUFFICIENT_GAS,
-                               MIN_NET_R, NEGATIVE_NET_EXPECTANCY, NO_ROUTE,
-                               POOL_TOO_THIN, copyability_gap,
-                               evaluate_candidate)
+                               MIN_NET_R, NEGATIVE_NET_EXPECTANCY,
+                               NETWORK_FEE_REFUSED, NETWORK_FEE_UNKNOWN,
+                               NO_ROUTE, POOL_TOO_THIN, copyability_gap)
+from lib.dex_autotrade import evaluate_candidate as _evaluate_candidate
+
+
+# THE COST GATE NOW MEASURES THE LIVE FEE MARKET, so these tests must supply
+# one. They are about autotrade ECONOMICS — which refusal fires, and on what
+# grounds — not about fee estimation, which test_solana_fee_units_and_authority
+# and test_dex_canonical_fee_integration cover directly.
+#
+# A hermetic test must never reach real Helius, so the estimator is injected
+# rather than defaulted. 1,000 micro-lamports/CU on the 400k-CU budget is 400
+# lamports of priority plus the 5,000-lamport base = 0.0000054 SOL, far inside
+# every operator ceiling, so the fee is never what refuses these candidates.
+def _fee_fetch(micro_per_cu=1_000.0):
+    def go(method, params):
+        if method == "getPriorityFeeEstimate":
+            return {"priorityFeeEstimate": micro_per_cu}
+        return [{"prioritizationFee": micro_per_cu}]
+    return go
+
+
+def evaluate_candidate(candidate, **kw):
+    """Defaults an injected estimator and a real SOL price.
+
+    A SOL price is now load-bearing rather than decorative: an entry may not
+    skip the percentage caps its own policy declares, so a fee it cannot
+    value in USD is a refusal. `sol_price_usd=0.0` describes a world where
+    SOL is worthless, which is not the world these tests mean to describe.
+    """
+    kw.setdefault("fee_fetch", _fee_fetch())
+    kw.setdefault("sol_price_usd", 200.0)
+    return _evaluate_candidate(candidate, **kw)
 
 
 def setUpModule():

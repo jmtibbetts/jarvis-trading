@@ -53,6 +53,18 @@ ALREADY_HOLDING = "ALREADY_HOLDING"
 DEPTH_UNKNOWN = "DEPTH_UNKNOWN"
 DISABLED = "DISABLED"
 
+# The network cost refused this trade. TWO distinct lessons, kept apart:
+# the estimator could not say what inclusion costs, versus it said so and
+# the answer exceeded what the operator authorised. The first is a sensor
+# failure, the second a real market condition, and collapsing them would
+# hide a dead estimator behind "the fees were too high".
+NETWORK_FEE_UNKNOWN = "NETWORK_FEE_UNKNOWN"
+NETWORK_FEE_REFUSED = "NETWORK_FEE_REFUSED"
+
+# An autonomous ENTRY bids NORMAL. Aggression is for shedding risk; an
+# entry that needs to outbid the market is an entry that can wait.
+ENTRY_PRIORITY_LEVEL = "NORMAL"
+
 # A thesis must clear this AFTER every DEX cost, not before.
 MIN_NET_R = 0.05
 
@@ -65,7 +77,8 @@ def enabled() -> bool:
 
 def evaluate_candidate(candidate: dict, *, gas_balance_sol: float | None = None,
                        sol_price_usd: float = 0.0,
-                       cash_usd: float = 0.0) -> dict:
+                       cash_usd: float = 0.0,
+                       fee_fetch=None) -> dict:
     """Decide whether one surging token is worth a virtual DEX position.
 
     Every refusal names itself. "Skipped" as a single bucket would hide
@@ -140,8 +153,36 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float | None = None,
                            else NO_ROUTE),
                 "detail": sizing.get("reason"), "sizing": sizing}
 
+    # ── WHAT DOES INCLUSION ACTUALLY COST RIGHT NOW? ────────────────────
+    #
+    # THE DEFECT THIS CLOSES. This gate used to price its network fee from
+    # quote_swap's DEFAULT_PRIORITY_LAMPORTS — a 100,000-lamport constant —
+    # so the cost that decided whether a trade cleared MIN_NET_R had no
+    # relationship to the live fee market. The estimator existed, was
+    # tested, and was called by nothing. A cost model disconnected from the
+    # execution path is how a simulator manufactures edge: it clears trades
+    # the real fee market would have refused.
+    #
+    # The measurement is made against the accounts THIS swap writes, so it
+    # is about this transaction rather than about the network in general.
+    from lib import dex_network_cost as NC
+    priced = NC.price_transaction(
+        action="NORMAL_ENTRY", priority_level=ENTRY_PRIORITY_LEVEL,
+        mint=mint, pool_address=candidate.get("pool_address"),
+        sol_price_usd=sol_price_usd,
+        notional_usd=sizing["size_usd"], fetch=fee_fetch)
+    if not priced["ok"]:
+        # A REFUSAL IS NOT A LOSS, and it is not a NO_ROUTE either. The
+        # route is fine; the operator did not authorise what it costs.
+        unknown = priced["refusal_reason"] == "FEE_ESTIMATE_UNKNOWN"
+        return {**out,
+                "reason": NETWORK_FEE_UNKNOWN if unknown else NETWORK_FEE_REFUSED,
+                "detail": priced["detail"],
+                "network_cost": NC.fee_provenance(priced)}
+
     q = quote_swap(sizing["size_usd"], reserve, dex=candidate.get("dex"),
                    sol_price_usd=sol_price_usd,
+                   priority_lamports=priced["priority_lamports_for_quote"],
                    concentrated=bool(candidate.get("concentrated")))
     if not q.get("ok"):
         return {**out, "reason": NO_ROUTE, "detail": q.get("reason")}
@@ -183,6 +224,12 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float | None = None,
         "cost_usd": cost_usd, "cost_r": cost_r,
         "gross_r": gross_r, "net_r": net_r,
         "gas": gas, "quote": q, "sizing": sizing,
+        # The measured/authorized network cost travels with the decision.
+        # An eligible candidate carries the evidence its gate was decided
+        # on, so a later reconciliation can ask whether the fee we planned
+        # for was the fee the chain charged.
+        "network_cost": NC.fee_provenance(priced),
+        "priority_lamports": priced["priority_lamports_for_quote"],
         "detail": (f"${sizing['size_usd']:,.0f} at "
                    f"{q['price_impact_pct']:.2f}% impact, "
                    f"depth {adj['depth_confidence']}"),
@@ -192,6 +239,7 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float | None = None,
 def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
              gas_balance_sol: float | None = None,
              sol_price_usd: float = 0.0,
+             fee_fetch=None,
              db=None) -> dict:
     """One autonomous pass: surging tokens -> evaluated -> opened.
 
@@ -227,6 +275,15 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
         pf = get_portfolio(session)
         cash = cash_usd if cash_usd is not None else float(pf.cash_usd or 0)
 
+        # NOTHING THAT TALKS TO A PROVIDER MAY RUN INSIDE THE WRITE
+        # TRANSACTION. `evaluate_candidate` now measures the live fee market
+        # and records provider health, and the health write opens a SECOND
+        # connection — which would then wait on this one for the full 30s
+        # SQLite busy timeout. That failure does not announce itself; it
+        # just makes everything mysteriously slow. Committing here releases
+        # the write lock so each evaluation runs against a quiet database.
+        session.commit()
+
         # persist=False: the scheduled sampler owns surge history, and an
         # autotrade pass must not become a second writer of the baseline.
         surge = scan_and_score(limit=40, persist=False)
@@ -237,7 +294,8 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
             ev = evaluate_candidate(
                 {**tok, "risk_usd": None},
                 gas_balance_sol=gas_balance_sol,
-                sol_price_usd=sol_price_usd, cash_usd=cash)
+                sol_price_usd=sol_price_usd, cash_usd=cash,
+                fee_fetch=fee_fetch)
             if not ev.get("eligible"):
                 r = ev.get("reason") or "UNKNOWN"
                 stats["refused"][r] = stats["refused"].get(r, 0) + 1
@@ -248,6 +306,11 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
                 pool_address=tok.get("pool_address"), dex=tok.get("dex"),
                 reserve_usd=ev["reserve_usd"], price_usd=ev["price_usd"],
                 size_usd=ev["size_usd"], sol_price_usd=sol_price_usd,
+                # THE GATE'S FEE IS THE POSITION'S FEE. Re-measuring here
+                # would book the entry at a different network cost from the
+                # one its expectancy gate cleared, and the discrepancy would
+                # be invisible.
+                priority_lamports=ev["priority_lamports"],
                 db=session)
             if opened.get("error"):
                 stats["refused"]["OPEN_REFUSED"] = \

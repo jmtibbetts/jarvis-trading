@@ -245,7 +245,7 @@ def quote_swap_native(amount_in: float, reserve_in: float, reserve_out: float,
 
 def quote_swap(amount_usd: float, reserve_usd: float, *,
                dex: str | None = None, fee_bps: int | None = None,
-               priority_lamports: int = DEFAULT_PRIORITY_LAMPORTS,
+               priority_lamports: int | None = None,
                sol_price_usd: float = 0.0,
                concentrated: bool = False) -> dict:
     """Price one swap of `amount_usd` against a pool holding `reserve_usd`.
@@ -254,7 +254,18 @@ def quote_swap(amount_usd: float, reserve_usd: float, *,
     part of a bad fill was the fee and which was your own size, and those
     have completely different remedies — one is the pool's price, the other
     is a reason to trade smaller.
+
+    `priority_lamports` IS THE CALLER'S DECISION, NOT THIS MODULE'S. Every
+    canonical DEX path passes the AUTHORIZED BID from lib.dex_network_cost,
+    derived from a live measurement. The static default survives ONLY for
+    legacy and diagnostic callers, and it is resolved HERE at call time
+    rather than bound as a default argument — a default argument is
+    evaluated once at import, which would make the constant unpatchable and
+    would make the discrimination test that proves canonical execution does
+    NOT depend on it impossible to write.
     """
+    if priority_lamports is None:
+        priority_lamports = DEFAULT_PRIORITY_LAMPORTS
     amount_usd = float(amount_usd or 0)
     reserve_usd = float(reserve_usd or 0)
     if amount_usd <= 0:

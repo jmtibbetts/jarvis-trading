@@ -662,26 +662,34 @@ def system_version():
     honest deploy. What must agree is the contract.
     """
     import os
-    import subprocess
-    from pathlib import Path
 
     from app.version import VERSION
+    from lib import build_identity as BI
     from lib.external_account import connector_enabled, management_enabled
     from lib.platform_mode import current_mode as platform_current
     from lib.runtime_mode import current_mode as runtime_current
 
-    repo = Path(__file__).resolve().parent.parent.parent
-    try:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=repo,
-            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-    except Exception:                                    # noqa: BLE001
-        # A container without .git is a normal deployment, not a fault.
-        commit = os.getenv("JARVIS_BUILD_COMMIT") or "unknown"
+    # BUILD IDENTITY IS CAPTURED AT IMPORT, NOT AT REQUEST TIME.
+    #
+    # This used to run `git rev-parse HEAD` on every call, which reports
+    # what the REPOSITORY is on rather than what this process loaded. On
+    # 2026-08-20 a server running ae5bab9 reported ac77450 because the repo
+    # had advanced underneath it — a deploy check asking "are you running
+    # the new code?" was answered "yes" by a server running the old code.
+    #
+    # `backend_commit` now means the loaded code, which is what every
+    # consumer already believed it meant. The live repository HEAD is still
+    # reported, under a name that says what it is.
+    identity = BI.describe()
 
     return {
         "app_version": VERSION,
-        "backend_commit": commit,
+        "backend_commit": identity["loaded_backend_commit"],
+        "loaded_backend_commit": identity["loaded_backend_commit"],
+        "repository_head_commit": identity["repository_head_commit"],
+        "code_matches_repository_head":
+            identity["code_matches_repository_head"],
+        "build_identity_source": identity["identity_source"],
         "api_schema_version": API_SCHEMA_VERSION,
         "started_at": _STARTED_AT,
         "platform_mode": platform_current(),

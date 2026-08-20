@@ -45,7 +45,8 @@ def _fresh_wallet(sol=1.0, usdc=10_000.0):
 
 def _estimate(policy=SF.HIGH, micro_per_cu=5_000.0):
     return SF.estimate_network_fee(
-        policy, fetch=lambda m, p: {"priorityFeeEstimate": micro_per_cu})
+        policy, record_health=False,
+        fetch=lambda m, p: {"priorityFeeEstimate": micro_per_cu})
 
 
 class LedgerBasicsTests(unittest.TestCase):
@@ -271,9 +272,16 @@ class CallerFictionCannotOverrideTheLedgerTests(unittest.TestCase):
             quantity_unit = "TOKENS"; instrument_id = None
             order_type = "market"
 
+        def _fee_fetch(method, params):
+            if method == "getPriorityFeeEstimate":
+                return {"priorityFeeEstimate": 1_000.0}
+            return [{"prioritizationFee": 1_000.0}]
+
         sub = VirtualDexAdapter().submit(
             _Plan(), reserve_usd=100_000.0, sol_price_usd=200.0,
-            gas_balance_sol=99.0)          # the fiction
+            gas_balance_sol=99.0,          # the fiction
+            fee_fetch=_fee_fetch)
+        # The fee is measurable and affordable; the LEDGER is what refuses.
         self.assertFalse(sub.accepted,
                          "a caller-typed 99 SOL overrode an empty wallet")
         self.assertEqual(sub.reason, "INSUFFICIENT_GAS")
@@ -314,11 +322,11 @@ class DynamicFeeAuthorityTests(unittest.TestCase):
         src = inspect.getsource(solana_fees)
         # The estimate itself must come from the fetch path.
         est = _estimate(SF.HIGH, micro_per_cu=1_000.0)
-        self.assertEqual(est.priority_fee_lamports,
+        self.assertEqual(est.measured_priority_fee_lamports,
                          int(1_000.0 * SF.DEFAULT_SWAP_COMPUTE_UNITS / 1e6),
                          "the estimate is not driven by the live fetch")
-        # The CEILING now lives in policy, not in the estimator — see
-        # test_dex_invariants for the full separation suite.
+        # The CEILING lives in policy and is applied by authorize_fee, never
+        # by the estimator — see test_dex_canonical_fee_integration.
         self.assertIn("priority_cap_lamports", src)
 
     def test_the_estimate_drives_the_required_balance(self):
@@ -345,12 +353,13 @@ class DynamicFeeAuthorityTests(unittest.TestCase):
         refuses. Not zero, not 0.03, not the caller's number."""
         def dead(method, params):
             raise RuntimeError("down")
-        est = SF.estimate_network_fee(SF.NORMAL, fetch=dead)
+        est = SF.estimate_network_fee(SF.NORMAL, fetch=dead,
+                                      record_health=False)
         self.assertFalse(est.ok)
         self.assertEqual(est.quality, SF.UNKNOWN)
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0)
-        self.assertFalse(auth["ok"])
-        self.assertEqual(auth["reason"], "FEE_ESTIMATE_UNKNOWN")
+        self.assertFalse(auth.allowed)
+        self.assertEqual(auth.refusal_reason, "FEE_ESTIMATE_UNKNOWN")
 
 
 class FeePolicyEconomicsTests(unittest.TestCase):
@@ -372,30 +381,32 @@ class FeePolicyEconomicsTests(unittest.TestCase):
         and stopped testing what it was written to test. The fee is now
         $0.32 against a $1 edge — 32% of it, past the 25% policy cap."""
         est = _estimate(SF.HIGH, micro_per_cu=4_000_000.0)
-        self.assertFalse(est.capped, "fixture accidentally hit the cap")
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0,
                                 expected_edge_usd=1.0, notional_usd=1_000.0)
-        self.assertFalse(auth["ok"])
-        self.assertEqual(auth["reason"], "FEE_DESTROYS_EDGE")
+        self.assertFalse(auth.allowed)
+        self.assertFalse(auth.bid_below_measured_requirement,
+                         "fixture hit the absolute ceiling, not the edge cap")
+        self.assertEqual(auth.refusal_reason, "FEE_DESTROYS_EDGE")
 
     def test_a_cheap_fee_passes_the_same_edge(self):
         est = _estimate(SF.NORMAL, micro_per_cu=100.0)
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0,
                                 expected_edge_usd=5.0, notional_usd=1_000.0)
-        self.assertTrue(auth["ok"], auth)
+        self.assertTrue(auth.allowed, auth.detail)
 
     def test_entry_may_not_select_max_acceptance(self):
         """§E's flip side: aggression is for risk REDUCTION."""
         est = _estimate(SF.MAX_ACCEPTANCE, micro_per_cu=1_000.0)
         auth = SF.authorize_fee(est, action=SF.ENTRY, sol_price_usd=200.0)
-        self.assertFalse(auth["ok"])
-        self.assertEqual(auth["reason"], "POLICY_NOT_PERMITTED_FOR_ACTION")
+        self.assertFalse(auth.allowed)
+        self.assertEqual(auth.refusal_reason,
+                         "POLICY_NOT_PERMITTED_FOR_ACTION")
 
     def test_urgent_risk_reduction_may_select_max_acceptance(self):
         est = _estimate(SF.MAX_ACCEPTANCE, micro_per_cu=1_000.0)
         auth = SF.authorize_fee(est, action=SF.URGENT_RISK_REDUCTION,
                                 sol_price_usd=200.0)
-        self.assertTrue(auth["ok"])
+        self.assertTrue(auth.allowed)
 
     def test_max_acceptance_still_obeys_the_hard_cap(self):
         """§F: an estimator screaming an absurd number is capped, and the
@@ -403,25 +414,33 @@ class FeePolicyEconomicsTests(unittest.TestCase):
         # 200M u/CU * 400k CU = 0.08 SOL of priority — well past the
         # 0.05 SOL MAX_ACCEPTANCE ceiling.
         est = _estimate(SF.MAX_ACCEPTANCE, micro_per_cu=200_000_000.0)
-        self.assertTrue(est.capped)
-        cap, _source = SF.priority_cap_lamports(SF.MAX_ACCEPTANCE)
-        self.assertEqual(est.priority_fee_lamports, cap)
-        self.assertLessEqual(est.total_sol, 0.06,
-                             "MAX_ACCEPTANCE exceeded its own ceiling")
+        # THE MEASUREMENT IS UNTOUCHED — capping is the authorization's job,
+        # and an estimate rewritten to the ceiling would destroy the only
+        # evidence that the market had moved past it.
+        self.assertGreater(est.measured_total_network_fee_sol, 0.06)
+        auth = SF.authorize_fee(est, action=SF.URGENT_RISK_REDUCTION,
+                                sol_price_usd=200.0)
+        self.assertTrue(auth.allowed, "an exit may still bid the ceiling")
+        self.assertTrue(auth.bid_below_measured_requirement)
+        cap, _source = SF.total_cap_lamports(SF.URGENT_RISK_REDUCTION)
+        self.assertEqual(auth.authorized_bid_lamports, cap)
+        self.assertLessEqual(auth.authorized_bid_sol, 0.06,
+                             "the authorized bid exceeded its own ceiling")
 
     def test_the_emergency_fallback_is_bounded(self):
         """Even with a dead estimator, an urgent exit pays the named cap,
         not 'whatever it takes'."""
         def dead(m, p):
             raise RuntimeError("down")
-        est = SF.estimate_network_fee(SF.MAX_ACCEPTANCE, fetch=dead)
+        est = SF.estimate_network_fee(SF.MAX_ACCEPTANCE, fetch=dead,
+                                      record_health=False)
         auth = SF.authorize_fee(est, action=SF.URGENT_RISK_REDUCTION,
                                 sol_price_usd=200.0)
-        self.assertTrue(auth["ok"])
+        self.assertTrue(auth.allowed)
         from lib.solana_fee_policy import emergency_fallback_lamports
         expected, _src = emergency_fallback_lamports()
-        self.assertEqual(auth["fee_lamports"], expected)
-        self.assertEqual(auth["policy"], "EMERGENCY_FALLBACK")
+        self.assertEqual(auth.authorized_bid_lamports, expected)
+        self.assertEqual(auth.binding_constraint, "EMERGENCY_FALLBACK")
 
 
 class EstimateVsActualReconciliationTests(unittest.TestCase):

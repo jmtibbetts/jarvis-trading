@@ -132,10 +132,45 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
                       signal_id: str | None = None,
                       sol_price_usd: float = 0.0,
                       concentrated: bool = False,
+                      priority_lamports: int | None = None,
+                      fee_fetch=None,
                       db=None) -> dict:
-    """Simulate a buy. Every refusal names its own reason."""
+    """Simulate a buy. Every refusal names its own reason.
+
+    `priority_lamports` IS THE AUTHORIZED BID, handed down by the caller
+    that measured it (lib.dex_autotrade, through lib.dex_network_cost).
+    When it is absent this function MEASURES for itself rather than
+    reaching for the static default: an entry priced off a 100,000-lamport
+    constant is priced off nothing, and it would silently disagree with the
+    gate that approved it.
+    """
     from app.database import DexPosition, get_db
+    from lib import dex_network_cost as NC
     from lib.dex_swap_math import quote_swap
+
+    # MEASURED BEFORE THE TRANSACTION OPENS, NEVER INSIDE IT.
+    #
+    # This is a standing invariant of the DEX ledger: no provider, LLM or
+    # network call may happen while a write transaction is open. Pricing
+    # inside `_run` broke it twice over — an RPC round trip held the SQLite
+    # write lock, and the provider-health write it triggers opens a SECOND
+    # connection that then waits on the first for the full 30s busy timeout.
+    # The result was not a deadlock that announced itself; it was a suite
+    # that got mysteriously slow.
+    priced = None
+    network_cost = None
+    bid = priority_lamports
+    if bid is None:
+        priced = NC.price_transaction(
+            action="NORMAL_ENTRY", priority_level="NORMAL",
+            mint=mint, pool_address=pool_address,
+            sol_price_usd=sol_price_usd, notional_usd=size_usd,
+            fetch=fee_fetch)
+        if not priced["ok"]:
+            return {"error": f"network fee refused: {priced['detail']}",
+                    "network_cost": NC.fee_provenance(priced)}
+        bid = priced["priority_lamports_for_quote"]
+        network_cost = NC.fee_provenance(priced)
 
     def _run(session):
         pf = get_portfolio(session)
@@ -154,8 +189,12 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
                     "sizing": sizing}
 
         amount = sizing["size_usd"]
+        # The authorized bid was established above, outside this
+        # transaction. DYNAMIC, never the static constant: an entry priced
+        # off a 100,000-lamport default is priced off nothing.
         q = quote_swap(amount, reserve_usd, dex=dex,
-                       sol_price_usd=sol_price_usd, concentrated=concentrated)
+                       sol_price_usd=sol_price_usd,
+                       priority_lamports=bid, concentrated=concentrated)
         if not q.get("ok"):
             return {"error": f"swap quote failed: {q.get('reason')}"}
         if q["price_impact_pct"] > max_impact_pct():
@@ -193,7 +232,8 @@ def open_dex_position(*, mint: str, symbol: str | None, pool_address: str | None
                     f"cost={q['total_cost_pct']:.2f}% bound_by={sizing['bound_by']}")
         return {"ok": True, "position_id": pos.id, "qty_tokens": qty,
                 "avg_entry_price_usd": avg_entry, "notional_usd": amount,
-                "quote": q, "sizing": sizing}
+                "quote": q, "sizing": sizing,
+                "priority_lamports": bid, "network_cost": network_cost}
 
     if db is not None:
         return _run(db)

@@ -179,6 +179,25 @@ class ExecutionResult:
     network_fees_usd: float | None = None
     funding_or_carry_usd: float | None = None
 
+    # ── Network cost: MEASURED vs AUTHORIZED vs ACTUAL ───────────────────
+    # THREE DIFFERENT LIFECYCLE FACTS. Collapsing any two destroys the only
+    # evidence that would distinguish them:
+    #
+    #   measured    what the fee market indicated at decision time
+    #   authorized  a DECISION, which may deliberately sit BELOW the
+    #               measurement when policy capped the bid
+    #   actual      accounting truth, and the ONLY one ever charged
+    #
+    # A capped bid that got included anyway and an accurate estimate look
+    # identical once merged, so they are never merged. None means "not
+    # established" and must never be read as zero — a fee nobody measured is
+    # not a free transaction. `network_fees_usd` above remains the modelled
+    # charge for this fill and is unchanged.
+    measured_network_fee_lamports: int | None = None
+    authorized_network_fee_lamports: int | None = None
+    actual_network_fee_lamports: int | None = None
+    fee_provenance: dict | None = None
+
     # ── Lifecycle timestamps. None means "did not happen", never "0". ────
     submitted_at: str | None = None
     first_fill_at: str | None = None

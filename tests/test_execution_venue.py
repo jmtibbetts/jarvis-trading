@@ -58,6 +58,19 @@ def setUpModule():
             reason="venue boundary fixture"))
 
 
+
+# THE DEX ADAPTER NOW MEASURES THE LIVE FEE MARKET before it will submit, so
+# these boundary tests inject an estimator. A hermetic test must never reach
+# real Helius, and a missing HELIUS_API_KEY would otherwise turn every DEX
+# submission into a fee refusal — hiding the boundary behaviour under test.
+def fee_fetch(micro_per_cu=1_000.0):
+    def go(method, params):
+        if method == "getPriorityFeeEstimate":
+            return {"priorityFeeEstimate": micro_per_cu}
+        return [{"prioritizationFee": micro_per_cu}]
+    return go
+
+
 class _Mode:
     def __init__(self, value):
         self.value = value
@@ -208,7 +221,8 @@ class BoundaryIntegrityTests(unittest.TestCase):
                                 quote=quote()),
             VIRTUAL_DEX: submit(plan(product="DEX_SPOT", symbol="SOL/USDC"),
                                 venue_family=VIRTUAL_DEX, risk=risk(),
-                                reserve_usd=500_000.0, gas_balance_sol=1.0),
+                                reserve_usd=500_000.0, gas_balance_sol=1.0,
+                                sol_price_usd=200.0, fee_fetch=fee_fetch()),
         }
         for fam, r in results.items():
             self.assertEqual(r.venue_family, fam)
@@ -233,8 +247,12 @@ class BoundaryIntegrityTests(unittest.TestCase):
             reason="gas-test fixture"))
         r = submit(plan(product="DEX_SPOT", symbol="SOL/USDC"),
                    venue_family=VIRTUAL_DEX, risk=risk(),
-                   reserve_usd=500_000.0, gas_balance_sol=0.0)
+                   reserve_usd=500_000.0, gas_balance_sol=0.0,
+                   sol_price_usd=200.0, fee_fetch=fee_fetch())
         self.assertFalse(r.accepted)
+        # The fee is measurable and affordable by policy; what refuses here
+        # is the LEDGER, which holds no SOL. Fee authority runs first now, so
+        # this also proves a healthy estimator does not mask an empty wallet.
         self.assertEqual(r.reason, "INSUFFICIENT_GAS")
         self.assertEqual(r.provenance["gas_authority"], "PERSISTED_WALLET")
 

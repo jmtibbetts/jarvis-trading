@@ -134,6 +134,29 @@ _DEFAULTS = {a: _defaults_for(a) for a in ACTIONS}
 EMERGENCY_FALLBACK_ENV = "JARVIS_SOL_FEE_EMERGENCY_FALLBACK_LAMPORTS"
 
 
+# Headroom added to a MEASURED unitsConsumed before requesting a compute
+# limit. Policy, not measurement: a transaction that requests exactly what
+# one simulation used reverts as soon as pool state shifts under it. Named
+# and configurable so it can never be a blind multiplier buried in a
+# constant — and it applies ONLY to a measured number, never to the
+# DEFAULT_BUDGET_ASSUMPTION, which is already conservative.
+COMPUTE_HEADROOM_PCT_ENV = "JARVIS_SOL_COMPUTE_HEADROOM_PCT"
+_COMPUTE_HEADROOM_PCT_DEFAULT = 20.0
+
+
+def compute_headroom_pct() -> float:
+    """Percentage headroom over measured unitsConsumed. Policy, not truth."""
+    raw = os.getenv(COMPUTE_HEADROOM_PCT_ENV)
+    if raw and raw.strip():
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning("[SolFeePolicy] %s=%r is not numeric; using %.1f",
+                           COMPUTE_HEADROOM_PCT_ENV, raw,
+                           _COMPUTE_HEADROOM_PCT_DEFAULT)
+    return _COMPUTE_HEADROOM_PCT_DEFAULT
+
+
 def _env_key(action: str, field: str) -> str:
     return f"JARVIS_SOL_FEE_{action}_{field.upper()}"
 

@@ -516,7 +516,8 @@ def balances(db=None, *, user_id: str | None = None) -> list[dict]:
         return _run(session)
 
 
-def gas_state(*, priority_lamports: int = 0, fee_estimate=None, db=None,
+def gas_state(*, priority_lamports: int = 0, fee_estimate=None,
+              fee_authorization=None, db=None,
               user_id: str | None = None) -> dict:
     """Gas capability from the PERSISTED SOL balance, never an argument.
 
@@ -539,6 +540,49 @@ def gas_state(*, priority_lamports: int = 0, fee_estimate=None, db=None,
     """
     from lib.dex_swap_math import spendable_native
     sol = balance(SOL_MINT, db, user_id=user_id)
+
+    # THE RESERVE IS WHAT WE WOULD ACTUALLY PAY. A FeeAuthorization is the
+    # strongest answer available: it is the AUTHORIZED BID, which may sit
+    # deliberately below the measurement when policy capped it. Reserving
+    # the raw measurement would hold back SOL for a fee we are not
+    # permitted to pay; reserving a static floor would hold back a number
+    # unrelated to the transaction.
+    if fee_authorization is not None and getattr(fee_authorization,
+                                                 "allowed", False):
+        from lib.solana_fees import lamports_to_sol
+        immediate_sol = lamports_to_sol(
+            int(fee_authorization.authorized_bid_lamports))
+        floor = spendable_native(sol["available"])
+        operability_sol = floor["execution_reserve_sol"]
+        required = immediate_sol + operability_sol
+        available = sol["available"]
+        gas = {
+            "balance_sol": available,
+            "immediate_transaction_reserve_sol": immediate_sol,
+            "future_operability_reserve_sol": operability_sol,
+            "execution_reserve_sol": required,
+            "max_spendable_sol": max(0.0, available - required),
+            "can_transact": available >= required,
+            "reason": (None if available >= required else
+                       f"balance {available:.9f} SOL is below the "
+                       f"{immediate_sol:.9f} authorized network fee plus the "
+                       f"{operability_sol:.9f} operability reserve"),
+            "reserve_basis": "AUTHORIZED_FEE_BID",
+            "authorized_bid_lamports": int(
+                fee_authorization.authorized_bid_lamports),
+            "measured_total_network_fee_lamports": (
+                fee_authorization.measured_total_network_fee_lamports),
+            "bid_below_measured_requirement": bool(
+                fee_authorization.bid_below_measured_requirement),
+            "action_policy": fee_authorization.action_policy,
+            "priority_level": fee_authorization.priority_level,
+            "fee_estimate_quality": fee_authorization.quality,
+            "fee_estimate_context": fee_authorization.context_quality,
+        }
+        gas["source"] = "PERSISTED_WALLET"
+        gas["wallet_sol_total"] = sol["total"]
+        gas["wallet_sol_reserved"] = sol["reserved"]
+        return gas
 
     if fee_estimate is not None and getattr(fee_estimate, "ok", False):
         immediate_sol = float(fee_estimate.total_lamports) / 1e9

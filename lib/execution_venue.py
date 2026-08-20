@@ -211,6 +211,11 @@ class VirtualDexAdapter(ExecutionVenue):
     def submit(self, plan, *, risk=None, reserve_usd=None,
                sol_price_usd: float = 0.0,
                gas_balance_sol: float | None = None,
+               fee_action: str = "NORMAL_ENTRY",
+               priority_level: str = "NORMAL",
+               pool_address: str | None = None,
+               mint: str | None = None,
+               fee_fetch=None,
                **kw) -> VenueSubmission:
         from lib import dex_wallet as DW
         from lib.dex_swap_math import quote_swap
@@ -239,7 +244,43 @@ class VirtualDexAdapter(ExecutionVenue):
                             "caller_supplied_ignored": (
                                 float(gas_balance_sol)
                                 if gas_balance_sol is not None else None)})
-        gas = DW.gas_state()
+        # ── WHAT DOES THIS TRANSACTION COST RIGHT NOW? ──────────────────
+        #
+        # THE DEFECT THIS CLOSES. `DW.gas_state()` with no estimate answers
+        # STATIC_POLICY_ONLY — an operability floor derived from the
+        # protocol base fee — and `quote_swap` below then priced the network
+        # fee from a 100,000-lamport constant. Neither number had any
+        # relationship to the live fee market, and the ExecutionResult
+        # carried the constant onward into RealizedOutcome as though it were
+        # a measured cost.
+        #
+        # STATIC GAS MAY NOT BECOME CANONICAL EXECUTION TRUTH. The fee is
+        # measured here or the submission is refused: there is no path where
+        # the estimator fails and a default quietly takes over.
+        from lib import dex_network_cost as NC
+        priced = NC.price_transaction(
+            action=fee_action, priority_level=priority_level,
+            mint=mint or getattr(plan, "mint", None),
+            pool_address=pool_address,
+            sol_price_usd=sol_price_usd,
+            notional_usd=float(plan.notional
+                               or (float(plan.qty or 0) * float(plan.entry or 0))
+                               or 0.0),
+            fetch=fee_fetch)
+        network_cost = NC.fee_provenance(priced)
+        if not priced["ok"]:
+            return VenueSubmission(
+                False, self.family,
+                priced["refusal_reason"] or "NETWORK_FEE_REFUSED",
+                priced["detail"],
+                provenance={"gas_authority": "PERSISTED_WALLET",
+                            "network_cost": network_cost})
+
+        # THE RESERVE IS THE AUTHORIZED BID — not the raw measurement, and
+        # not a static floor. What the wallet must hold is what we would
+        # actually pay, and if policy refused the market price there is no
+        # bid to reserve for.
+        gas = DW.gas_state(fee_authorization=priced["authorization"])
         gas_authority = "PERSISTED_WALLET"
         if gas_balance_sol is not None:
             # Conservative per-call limit only: it may shrink what the
@@ -266,7 +307,8 @@ class VirtualDexAdapter(ExecutionVenue):
 
         notional = float(plan.notional or (plan.qty * plan.entry))
         q = quote_swap(notional, float(reserve_usd),
-                       sol_price_usd=sol_price_usd)
+                       sol_price_usd=sol_price_usd,
+                       priority_lamports=priced["priority_lamports_for_quote"])
         if not q.get("ok"):
             return VenueSubmission(False, self.family, "NO_ROUTE",
                                    q.get("reason"))
@@ -299,11 +341,23 @@ class VirtualDexAdapter(ExecutionVenue):
             explicit_fees_usd=float(q.get("pool_fee_usd") or 0.0),
             network_fees_usd=float(q.get("network_fee_usd") or 0.0),
             price_model="DEX_XYK_POOL",
-            provenance={"quote": q, "gas_authority": gas_authority},
+            # MEASURED, AUTHORIZED and ACTUAL are three different facts and
+            # travel separately. `network_fees_usd` above is the modelled
+            # charge for this simulated fill; the two lamport figures record
+            # what the network indicated and what policy permitted, so a
+            # later reconciliation can tell an accurate estimate from a
+            # capped bid that got included anyway.
+            measured_network_fee_lamports=priced[
+                "measured_total_network_fee_lamports"],
+            authorized_network_fee_lamports=priced["authorized_bid_lamports"],
+            fee_provenance=network_cost,
+            provenance={"quote": q, "gas_authority": gas_authority,
+                        "network_cost": network_cost},
         )
         out = VenueSubmission(True, self.family,
                               provenance={"quote": q,
                                           "gas_authority": gas_authority,
+                                          "network_cost": network_cost,
                                           "gas_paid_separately": True})
         out.execution = res
         return out

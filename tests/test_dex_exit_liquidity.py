@@ -24,6 +24,17 @@ import unittest
 from unittest.mock import patch
 
 
+
+# ENTRY NOW MEASURES THE LIVE FEE MARKET before it will book a position, so
+# these exit tests inject an estimator. They are about EXIT liquidity; a
+# hermetic test must never reach real Helius, and an unmeasurable fee would
+# refuse the entry these tests need in order to have something to exit.
+def _fee_fetch(method, params):
+    if method == "getPriorityFeeEstimate":
+        return {"priorityFeeEstimate": 1_000.0}
+    return [{"prioritizationFee": 1_000.0}]
+
+
 class UnpriceableExitTests(unittest.TestCase):
     def _open_then_fail_exit(self, session):
         """Open a position, then make every exit quote fail."""
@@ -32,7 +43,8 @@ class UnpriceableExitTests(unittest.TestCase):
         opened = dex_paper.open_dex_position(
             mint="TestMint111", symbol="TEST", pool_address="Pool111",
             dex="raydium", reserve_usd=500_000.0, price_usd=1.0,
-            size_usd=1_000.0, db=session)
+            size_usd=1_000.0, sol_price_usd=200.0,
+            fee_fetch=_fee_fetch, db=session)
         self.assertNotIn("error", opened, opened)
 
         with patch("lib.dex_swap_math.quote_swap",
@@ -113,7 +125,8 @@ class PriceableExitStillWorksTests(unittest.TestCase):
             opened = dex_paper.open_dex_position(
                 mint="TestMint222", symbol="TEST2", pool_address="Pool222",
                 dex="raydium", reserve_usd=500_000.0, price_usd=1.0,
-                size_usd=1_000.0, db=db)
+                size_usd=1_000.0, sol_price_usd=200.0,
+                fee_fetch=_fee_fetch, db=db)
             self.assertNotIn("error", opened, opened)
             closed = dex_paper.close_dex_position(
                 position_id=opened["position_id"], price_usd=1.2, db=db)

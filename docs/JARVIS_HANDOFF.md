@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `8bdfe3f`.*
+*Last measured: 2026-08-20, at code SHA `571ac14`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       8bdfe3f749756c2af566669eacc1d609bebcd190
+    code SHA       571ac14 (manual operator execution)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -177,6 +177,119 @@ Execution authority by product:
 
 Cross-venue evidence may inform analysis. It may never silently become
 target-product execution authority.
+
+## 5b. Manual operator execution — MANUAL_OPERATOR
+
+A trade the OPERATOR placed by hand at a venue this program cannot reach.
+`lib/venue_capabilities.py` already called that `UI_ONLY`: a missing
+execution API is a fact about the venue, not a defect here, and manual
+execution is a FIRST-CLASS MODE rather than failed automation.
+
+`lib/execution_mode.py` is the taxonomy. It answers the one question neither
+existing vocabulary could — **did this program place the order, or did the
+human?** — and it IMPORTS `VIRTUAL_CEX` / `VIRTUAL_DEX` / `SHADOW` from
+`execution_venue` rather than retyping them, so a second vocabulary cannot
+fork off the first.
+
+| mode | submitted_by_jarvis | real money | may move virtual cash |
+|---|---|---|---|
+| VIRTUAL_CEX / VIRTUAL_DEX | yes | no | yes |
+| SHADOW | no | no | no |
+| MANUAL_OPERATOR | **no** | **yes** | **no** |
+| LIVE_AUTONOMOUS | yes | yes | no — **refused, see below** |
+
+**LIVE_AUTONOMOUS is a graduation state, not a feature flag.** It exists so
+nothing needs renaming when it is earned; `assert_executable()` refuses it
+unconditionally, at the call site, so re-adding it to a table or an enum
+cannot quietly enable it.
+
+    lib/execution_mode.py      the mode axis
+    lib/manual_execution.py    dataclasses, validation, deterministic economics
+    lib/manual_trade_store.py  persistence + lifecycle (imports NO book writer)
+    lib/account_economics.py   account entitlements, capital ownership
+    app/routers/manual.py      /api/manual/*
+    manual_trades / _legs / _cost_events / _corrections
+
+### What it refuses to do
+
+- **Never claims JARVIS submitted.** `submitted_by_jarvis` is False on the
+  mode, on every response and in every outcome's provenance. There is no
+  submit path and no adapter — AST-asserted, not merely absent.
+- **Never fabricates a thesis.** An independent trade carries `thesis_id`
+  NULL and `recommendation` NULL, and that is a COMPLETE record. A
+  DISAGREEMENT keeps the link: JARVIS said short, the operator went long,
+  both are stored. A schema requiring agreement would discard the most
+  informative case there is.
+- **Never rewrites the recommendation to match the execution.**
+  `RecommendationSnapshot` is frozen and is explicitly NOT correctable. The
+  gap between recommended and actual entry is the whole measurement of
+  execution quality; averaging it away leaves a system that cannot tell a
+  bad thesis from a late entry.
+- **Never turns UNKNOWN into zero.** Costs are `float | None`; an
+  unevidenced fee makes net P&L None. WHICH costs a product can incur comes
+  from `product_cost_profile`, so §6's forbidden inferences hold — 50x
+  leverage still borrows nothing.
+- **One thesis does not vote twice.** Scale-ins, partial exits, funding and
+  rebates are facts WITHIN one trade. One trade → one `thesis_id` → at most
+  one `RealizedOutcome` → one `OPERATOR` arm (a new member of
+  `trade_thesis.ARMS`), so `sample_count` still counts DISTINCT THESES.
+- **Never touches the virtual economy.** Own tables, no paper/dex writer
+  imported. Measured against the REAL operator DB: a full lifecycle left
+  every virtual table at 0 and cash at exactly 100000.0.
+
+### Declared-absent costs — the one deliberate escape
+
+The UNKNOWN rule would otherwise make every equity trade permanently
+unknowable (`SEC_TAF_WHERE_APPLICABLE` is conditional), which pressures a
+future maintainer into weakening the rule itself. So an operator may DECLARE
+a category not charged — a promotional zero-fee window is a FACT. A
+declaration is evidence, is recorded, and declaring a category that also
+carries a charge REFUSES rather than picking a winner.
+
+### Learning is blocked, not faked, when costs are incomplete
+
+`RealizedOutcome` stores floats, so an unevidenced fee necessarily lands as
+0.0 and the net reads BETTER than the trade was. The outcome is still
+written — real history, worth inspecting — marked
+`BLOCKED_INCOMPLETE_COSTS`, and it does not vote until the evidence arrives.
+Supplying the missing cost later re-derives it and unblocks it.
+**THE BOT MUST NEVER LEARN THAT IT MADE MONEY BECAUSE A COST WAS NEVER
+ENTERED.**
+
+### Account economics — a public schedule is not an effective fee
+
+`lib/venues.py` stays PUBLIC and untouched. Account entitlements (fee tier,
+volume discount, maker rebate, promotion, waiver, credit) live in
+`account_economics` and are applied as a COMPUTED VIEW keeping both
+`public_usd` and `effective_usd`. A schedule edited to match one account's
+promotion stops describing the venue, and every other consumer inherits a
+discount it does not have.
+
+- **A PROMOTION MUST HAVE AN END.** One without `effective_until` refuses —
+  an unbounded "temporary" waiver keeps discounting after it has expired.
+- **An entitlement modifies only the categories it NAMES.** Zero commission
+  does not make spread, funding, gas or a liquidation penalty free, and the
+  untouched categories are reported.
+- **PROMOTIONAL CREDIT IS NOT OWNED CAPITAL**, and capital of UNKNOWN kind
+  fails closed to NOT owned. Unproven money counted as equity inflates the
+  book and every return computed against it.
+
+### Reconciliation — neither side wins
+
+A venue-reported realized figure is preserved as its OWN fact beside the
+component sum, in `venue_reconciliation`'s existing vocabulary
+(`RECONCILED` / `UNEXPLAINED_VENUE_COST` / `MODEL_INCOMPLETE` /
+`COMPONENT_ONLY`). A report is **never back-solved into a missing cost**, and
+an unexplained delta stays UNEXPLAINED — it is the honest measurement of what
+the cost model does not yet know about that venue.
+
+### Corrections append, never overwrite
+
+Operators mistype; statements settle late. `manual_trade_corrections` keeps
+the previous value, the new value, the author, the evidence and the time. A
+corrected book that cannot show what it used to say cannot explain why the
+original disagreed. A correction that would break the book is refused with
+the original intact.
 
 ## 6. Product-aware financing — the forbidden inferences
 
@@ -473,8 +586,8 @@ dead primary comes to look healthy.
 
 ## 11. Tests and CI
 
-    full suite   4,405 passed - 16 skipped - 0 failed, exit code 0 (8bdfe3f)
-    Ubuntu CI    all six jobs green (run 32396589065)
+    full suite   4,483 passed - 16 skipped - 0 failed, exit code 0 (571ac14)
+    Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
 
@@ -503,6 +616,34 @@ Never carry a red typecheck or a failing test as "pre-existing".
 - **BTCC accounting / funding / cross-margin liquidation details remain
   UNKNOWN** wherever not backed by authoritative realized evidence. Do not
   infer them from other venues.
+- **`RealizedOutcome` has no dedicated liquidation-fee field.** A manual
+  `LIQUIDATION_FEE` or `OTHER_VERIFIED_COST` is folded into `commission_usd`
+  and the exact dollars are recorded in
+  `provenance["cost_category_map"]`, so the fold is auditable and
+  reversible. Dropping them would understate the trade; adding a field would
+  ripple into the persisted schema and the learning projection's validation.
+  Worth revisiting, deliberately.
+- **No option product exists.** `lib/instruments.py` carries no option
+  contract identity, so `manual_execution` REFUSES `OPTION` rather than
+  recording it as a near-miss product with the wrong economics. Manual
+  option trades cannot be recorded until that identity exists.
+- **Manual trades ARCHIVE rather than copy on a canonical epoch cutover.**
+  Classified `ARCHIVE_ONLY_ECONOMIC`. Unlike everything else in that class
+  the case is genuinely arguable — the retired simulator neither produced
+  nor corrupted them — but copying money-bearing rows into a fresh book is
+  the one mistake a cutover cannot undo, and their thesis links point at
+  signals that do NOT cross. **Promoting them to a COPY class is an operator
+  decision and has not been made.**
+- **No manual position MONITORING exists yet.** The data model supports it
+  (open quantity, stop/target distance, funding, liquidation inputs) and no
+  code computes it. `estimate_cross_liquidation` still returns UNKNOWN for
+  every venue, which is correct until a venue's maintenance tiers are
+  evidenced.
+- **Nothing consumes a manual `RealizedOutcome` into the learning tables
+  yet.** It is built, persisted and gated (`PENDING` /
+  `BLOCKED_INCOMPLETE_COSTS`), and there is no projector equivalent to
+  `canonical_learning` for it. Deliberate: the projection is its own
+  reviewed step, and until it exists no manual result influences anything.
 - **Host WHEA / `HOST_HARDWARE_UNSTABLE` remains unresolved** unless new
   evidence proves otherwise. It is a host-level concern and is not
   represented anywhere in this repository.
@@ -524,10 +665,40 @@ next, in no fixed order and none of them started:
   ledger stop being separate economies.
 - **Provider entitlement audit** — what is actually being CONSUMED from
   already-paid Alpaca/Helius/Kraken access, before any new provider is
-  considered.
-- **Manual Trade Desk** — operator-executed trades on venues without usable
-  execution APIs, linked back to the originating thesis. A missing live
-  execution API is not a defect; manual execution is a first-class mode.
+  considered. Inventory taken 2026-08-20 (repo/config/runtime only, nothing
+  probed): keys configured for Alpaca, Helius, Kraken, CoinGecko,
+  LunarCrush, TwelveData, Massive, Stocklake, AllRates, Tavily, OpenFIGI,
+  FRED, EIA. **Measured live: LunarCrush returns HTTP 402 — the credential
+  is valid and the subscription is inactive**, so it is configured and
+  unusable. CoinGecko and LunarCrush are already-held keys, NOT new
+  purchases. WebSocket consumers are bitnomial, kraken_stream,
+  orderbook_stream, td_forex_stream. What is actually CONSUMED from each
+  paid tier — Alpaca SIP, OPRA, Helius paid features, Kraken direct — is
+  NOT established and is the audit's job.
+- **The Manual Trade Desk BACKEND is DONE (§5b).** What is not built:
+  monitoring of open manual positions, the learning projection, and the UI.
+
+### Manual Trade Desk — UI, when it is built
+
+**ADDITIVE. The existing design language is kept, not rebuilt.** The front
+end is Svelte 5 runes, `frontend/src/lib/`. A desk fits the existing shape
+with no new patterns:
+
+    sections/ManualDesk.svelte    a new section beside VirtualCex/VirtualDex
+    stores/section.svelte.ts      add `manualdesk` to SectionId + SECTIONS
+    components/NavRail.svelte     one icon; it belongs in the existing
+                                  "Virtual Trading" group renamed to cover
+                                  real manual execution, or its own group
+    lib/api.ts                    hand-mirrored types for /api/manual/*
+
+Reusable as-is: `Panel`, `KpiTile`, `StateBadge`, `StateNote`, `Pill`,
+`ColumnChooser`, `VirtualList`, `EdgeCostMatrix`. Panel-level popout and the
+command palette work for free. `GET /api/manual/vocabulary` exists so the
+entry form never invents a product, unit, state or evidence rank.
+
+Two things the UI must not do: show a manual position inside the virtual
+book's exposure or equity curve, and render an UNKNOWN cost as 0.00 —
+`StateNote` already carries the "not measured" idiom used elsewhere.
 
 UI work is ADDITIVE when it comes: the existing Command Center design
 language is kept, not rebuilt. The scheduler stays OFF, and autonomy is

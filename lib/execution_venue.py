@@ -209,10 +209,11 @@ class VirtualDexAdapter(ExecutionVenue):
         return product == "DEX_SPOT"
 
     def submit(self, plan, *, risk=None, reserve_usd=None,
-               sol_price_usd: float = 0.0, gas_balance_sol: float = 0.0,
+               sol_price_usd: float = 0.0,
+               gas_balance_sol: float | None = None,
                **kw) -> VenueSubmission:
         from lib import dex_wallet as DW
-        from lib.dex_swap_math import quote_swap, spendable_native
+        from lib.dex_swap_math import quote_swap
         from lib.virtual_orders import ExecutionResult
 
         # THE PERSISTED WALLET IS THE ECONOMIC AUTHORITY (P0-3).
@@ -223,14 +224,35 @@ class VirtualDexAdapter(ExecutionVenue):
         # is recorded as provenance only. The legacy argument survives
         # SOLELY for callers running without a wallet (old tests, ad-hoc
         # probes), where there is no persisted truth for it to override.
-        if DW.initialized():
-            gas = DW.gas_state()
-            gas_authority = "PERSISTED_WALLET"
-            if gas_balance_sol:
-                gas["caller_supplied_ignored"] = float(gas_balance_sol)
-        else:
-            gas = spendable_native(gas_balance_sol)
-            gas_authority = "LEGACY_CALLER_SUPPLIED"
+        # A CALLER CANNOT INVENT A WALLET. When no persisted wallet exists
+        # the answer is refusal, never the caller's number: trusting it
+        # would let an unfunded account execute by describing a balance it
+        # does not have. Funding is an explicit, provenanced event
+        # (lib.dex_wallet.fund_wallet), not a function argument.
+        if not DW.initialized():
+            return VenueSubmission(
+                False, self.family, "WALLET_NOT_FUNDED",
+                "no persisted DEX wallet exists; virtual balances are "
+                "created only by an explicit funding event, never by a "
+                "caller-supplied balance",
+                provenance={"gas_authority": "NONE_WALLET_UNFUNDED",
+                            "caller_supplied_ignored": (
+                                float(gas_balance_sol)
+                                if gas_balance_sol is not None else None)})
+        gas = DW.gas_state()
+        gas_authority = "PERSISTED_WALLET"
+        if gas_balance_sol is not None:
+            # Conservative per-call limit only: it may shrink what the
+            # ledger permits, never raise it. `is not None` rather than
+            # truthiness — an explicit 0.0 means "spend no gas", and
+            # reading that as "no cap" would grant the whole wallet.
+            gas["caller_supplied_limit"] = float(gas_balance_sol)
+            gas["max_spendable_sol"] = min(
+                float(gas["max_spendable_sol"]), float(gas_balance_sol))
+            if float(gas_balance_sol) <= 0.0:
+                gas["can_transact"] = False
+                gas["reason"] = ("the caller capped gas spending at "
+                                 f"{float(gas_balance_sol):.9f} SOL")
         if not gas.get("can_transact"):
             return VenueSubmission(False, self.family, "INSUFFICIENT_GAS",
                                    gas.get("reason"),

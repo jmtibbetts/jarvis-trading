@@ -46,6 +46,18 @@ def quote():
     return Quote(bid=99.95, ask=100.05, as_of="now", source="test")
 
 
+def setUpModule():
+    """The DEX adapter now requires a funded wallet: a caller-supplied
+    balance can no longer stand in for one. These boundary tests are about
+    PLAN SHAPE reaching every adapter, so the wallet is funded to keep them
+    measuring that rather than wallet authority (covered elsewhere)."""
+    from lib import dex_wallet as DW
+    if not DW.initialized():
+        DW.fund_wallet(mint=DW.SOL_MINT, quantity=5.0,
+                       authority=DW.TEST_FIXTURE,
+                       reason="venue boundary fixture")
+
+
 class _Mode:
     def __init__(self, value):
         self.value = value
@@ -205,21 +217,25 @@ class BoundaryIntegrityTests(unittest.TestCase):
     def test_the_dex_adapter_enforces_gas(self):
         """Two authorities, one rule: no gas, no swap.
 
-        With NO persisted wallet the legacy caller argument is honoured
-        (there is nothing for it to override). With a wallet present the
-        LEDGER answers and the caller's number is provenance only — that
-        side is pinned in test_dex_wallet_and_fees.
+        An UNFUNDED wallet is refused earlier and differently
+        (WALLET_NOT_FUNDED) — a caller cannot invent a balance. Here the
+        wallet exists and honestly holds nothing, so the refusal comes from
+        the ledger.
         """
-        from app.database import DexBalance, get_db
+        from app.database import DexBalance, DexFundingEvent, get_db
+        from lib import dex_wallet as DW
         with get_db() as db:
-            db.query(DexBalance).delete()          # force the legacy path
+            db.query(DexBalance).delete()
+            db.query(DexFundingEvent).delete()
+        # A funded wallet that holds no SOL: real ledger, empty of gas.
+        DW.fund_wallet(mint=DW.USDC_MINT, quantity=100.0,
+                       authority=DW.TEST_FIXTURE, reason="gas-test fixture")
         r = submit(plan(product="DEX_SPOT", symbol="SOL/USDC"),
                    venue_family=VIRTUAL_DEX, risk=risk(),
                    reserve_usd=500_000.0, gas_balance_sol=0.0)
         self.assertFalse(r.accepted)
         self.assertEqual(r.reason, "INSUFFICIENT_GAS")
-        self.assertEqual(r.provenance["gas_authority"],
-                         "LEGACY_CALLER_SUPPLIED")
+        self.assertEqual(r.provenance["gas_authority"], "PERSISTED_WALLET")
 
     def test_a_refusal_is_always_a_result_never_an_exception(self):
         for fam in (VIRTUAL_CEX, VIRTUAL_DEX, LIVE_KRAKEN):

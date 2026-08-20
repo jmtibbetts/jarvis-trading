@@ -30,9 +30,11 @@ from lib import solana_fees as SF
 
 def _fresh_wallet(sol=1.0, usdc=10_000.0):
     """A clean wallet in the test DB (conftest routes it to a temp file)."""
-    from app.database import DEFAULT_USER_ID, DexBalance, get_db
+    from app.database import (DEFAULT_USER_ID, DexBalance, DexFundingEvent,
+                              get_db)
     with get_db() as db:
         db.query(DexBalance).delete()
+        db.query(DexFundingEvent).delete()
         db.add(DexBalance(user_id=DEFAULT_USER_ID, mint=DW.SOL_MINT,
                           symbol="SOL", total_quantity=sol,
                           reserved_quantity=0.0))
@@ -51,17 +53,29 @@ class LedgerBasicsTests(unittest.TestCase):
     def setUp(self):
         _fresh_wallet()
 
-    def test_endowment_is_seeded_once_and_only_once(self):
-        from app.database import DexBalance, get_db
+    def test_funding_is_explicit_and_applied_once(self):
+        """The implicit 10k USDC + 1 SOL seed is gone. Value appears only
+        through a configured endowment, and only once — see
+        test_dex_invariants for the full provenance suite."""
+        import os
+        from app.database import DexBalance, DexFundingEvent, get_db
         with get_db() as db:
             db.query(DexBalance).delete()
+            db.query(DexFundingEvent).delete()
         self.assertFalse(DW.initialized())
-        first = DW.ensure_wallet()
-        second = DW.ensure_wallet()
-        self.assertTrue(first["created"])
-        self.assertFalse(second["created"], "the endowment was seeded twice")
-        self.assertEqual(DW.balance(DW.USDC_MINT)["total"],
-                         DW.STARTING_ENDOWMENT[DW.USDC_MINT])
+        old = os.environ.get(DW.ENDOWMENT_ENV)
+        os.environ[DW.ENDOWMENT_ENV] = "USDC:10000,SOL:1"
+        try:
+            first = DW.apply_configured_endowment()
+            second = DW.apply_configured_endowment()
+        finally:
+            if old is None:
+                os.environ.pop(DW.ENDOWMENT_ENV, None)
+            else:
+                os.environ[DW.ENDOWMENT_ENV] = old
+        self.assertTrue(first["funded"])
+        self.assertFalse(second["funded"], "the endowment was applied twice")
+        self.assertEqual(DW.balance(DW.USDC_MINT)["total"], 10_000.0)
 
     def test_available_is_derived_from_total_minus_reserved(self):
         from app.database import DexBalance, get_db
@@ -243,7 +257,10 @@ class CallerFictionCannotOverrideTheLedgerTests(unittest.TestCase):
     """§N — the original defect, pinned shut."""
 
     def setUp(self):
-        _fresh_wallet(sol=0.0)          # broke wallet, persisted truth
+        # A FUNDED but broke wallet: the ledger exists and says zero SOL.
+        # (An entirely unfunded wallet is refused earlier, with
+        # WALLET_NOT_FUNDED — covered in test_dex_invariants.)
+        _fresh_wallet(sol=0.0)
 
     def test_the_adapter_believes_the_wallet_not_the_caller(self):
         from lib.execution_venue import VirtualDexAdapter
@@ -261,7 +278,8 @@ class CallerFictionCannotOverrideTheLedgerTests(unittest.TestCase):
                          "a caller-typed 99 SOL overrode an empty wallet")
         self.assertEqual(sub.reason, "INSUFFICIENT_GAS")
         self.assertEqual(sub.provenance["gas_authority"], "PERSISTED_WALLET")
-        self.assertEqual(sub.provenance["gas"]["caller_supplied_ignored"],
+        # The caller value is recorded as a CAP, never as a source.
+        self.assertEqual(sub.provenance["gas"]["caller_supplied_limit"],
                          99.0)
 
     def test_autotrade_evaluation_shrinks_to_the_wallet(self):
@@ -299,7 +317,9 @@ class DynamicFeeAuthorityTests(unittest.TestCase):
         self.assertEqual(est.priority_fee_lamports,
                          int(1_000.0 * SF.DEFAULT_SWAP_COMPUTE_UNITS / 1e6),
                          "the estimate is not driven by the live fetch")
-        self.assertIn("_MAX_PRIORITY_LAMPORTS", src)
+        # The CEILING now lives in policy, not in the estimator — see
+        # test_dex_invariants for the full separation suite.
+        self.assertIn("priority_cap_lamports", src)
 
     def test_the_estimate_drives_the_required_balance(self):
         """§B: a hotter fee market raises what the wallet must hold."""
@@ -375,8 +395,8 @@ class FeePolicyEconomicsTests(unittest.TestCase):
         # 0.05 SOL MAX_ACCEPTANCE ceiling.
         est = _estimate(SF.MAX_ACCEPTANCE, micro_per_cu=200_000_000.0)
         self.assertTrue(est.capped)
-        self.assertEqual(est.priority_fee_lamports,
-                         SF._MAX_PRIORITY_LAMPORTS[SF.MAX_ACCEPTANCE])
+        cap, _source = SF.priority_cap_lamports(SF.MAX_ACCEPTANCE)
+        self.assertEqual(est.priority_fee_lamports, cap)
         self.assertLessEqual(est.total_sol, 0.06,
                              "MAX_ACCEPTANCE exceeded its own ceiling")
 
@@ -389,8 +409,9 @@ class FeePolicyEconomicsTests(unittest.TestCase):
         auth = SF.authorize_fee(est, action=SF.URGENT_RISK_REDUCTION,
                                 sol_price_usd=200.0)
         self.assertTrue(auth["ok"])
-        self.assertEqual(auth["fee_lamports"],
-                         SF.EMERGENCY_EXIT_FALLBACK_LAMPORTS)
+        from lib.solana_fee_policy import emergency_fallback_lamports
+        expected, _src = emergency_fallback_lamports()
+        self.assertEqual(auth["fee_lamports"], expected)
         self.assertEqual(auth["policy"], "EMERGENCY_FALLBACK")
 
 
@@ -420,13 +441,23 @@ class EstimateVsActualReconciliationTests(unittest.TestCase):
 class MigrationDoesNotRestoreLegacyTests(unittest.TestCase):
     """The endowment is a declaration, never a recovery."""
 
-    def test_the_fresh_wallet_is_the_declared_endowment(self):
-        from app.database import DexBalance, get_db
+    def test_an_unconfigured_wallet_stays_empty(self):
+        """No configuration, no value. The old implicit seed would have
+        created 10k USDC + 1 SOL here."""
+        import os
+        from app.database import DexBalance, DexFundingEvent, get_db
         with get_db() as db:
             db.query(DexBalance).delete()
-        DW.ensure_wallet()
-        b = {x["symbol"]: x["total"] for x in DW.balances()}
-        self.assertEqual(b, {"USDC": 10_000.0, "SOL": 1.0})
+            db.query(DexFundingEvent).delete()
+        old = os.environ.get(DW.ENDOWMENT_ENV)
+        os.environ.pop(DW.ENDOWMENT_ENV, None)
+        try:
+            out = DW.apply_configured_endowment()
+        finally:
+            if old is not None:
+                os.environ[DW.ENDOWMENT_ENV] = old
+        self.assertFalse(out["funded"])
+        self.assertEqual(DW.balances(), [])
 
     def test_no_code_path_reads_the_legacy_dex_portfolio_for_balances(self):
         """The legacy pre-cutover dex economy (cash 10,720.77) must never

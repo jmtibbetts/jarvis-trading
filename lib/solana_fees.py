@@ -70,12 +70,21 @@ POLICIES = (ECONOMY, NORMAL, HIGH, VERY_HIGH, MAX_ACCEPTANCE)
 # maps to veryHigh — the most aggressive PRACTICAL level. Helius also
 # exposes unsafeMax; it is named unsafe by its own provider and exists to
 # win auctions, not to price them, so it is deliberately not selected.
+# CAPITALISED, because the API rejects anything else. Measured against
+# live Helius: priorityLevel="high" returns -32602 Invalid params while
+# "High" succeeds, so the lowercase spelling silently disabled the primary
+# authority and every estimate quietly came from the RPC fallback.
+#
+# MAX_ACCEPTANCE maps to VeryHigh, NOT UnsafeMax. Measured on the same
+# call, unsafeMax quoted 160,361,842,105 micro-lamports/CU -- about 64,000
+# SOL on a 400k-CU transaction. It is named unsafe by its own provider and
+# exists to win auctions, not to price them.
 _HELIUS_LEVEL = {
-    ECONOMY: "low",
-    NORMAL: "medium",
-    HIGH: "high",
-    VERY_HIGH: "veryHigh",
-    MAX_ACCEPTANCE: "veryHigh",
+    ECONOMY: "Low",
+    NORMAL: "Medium",
+    HIGH: "High",
+    VERY_HIGH: "VeryHigh",
+    MAX_ACCEPTANCE: "VeryHigh",
 }
 
 # getRecentPrioritizationFees fallback: percentile over recent slots.
@@ -87,28 +96,33 @@ _FALLBACK_PERCENTILE = {
     MAX_ACCEPTANCE: 0.95,
 }
 
-# ── Hard caps. EVERY policy is bounded — including MAX_ACCEPTANCE. ──────
-# Priority cap in lamports for the whole transaction. The MAX_ACCEPTANCE
-# cap of 0.05 SOL sits above the operator's observed ~0.03 SOL aggressive
-# cost — the observation calibrates the CEILING, it does not become the
-# price.
-_MAX_PRIORITY_LAMPORTS = {
-    ECONOMY: int(0.0005 * LAMPORTS_PER_SOL),
-    NORMAL: int(0.002 * LAMPORTS_PER_SOL),
-    HIGH: int(0.01 * LAMPORTS_PER_SOL),
-    VERY_HIGH: int(0.03 * LAMPORTS_PER_SOL),
-    MAX_ACCEPTANCE: int(0.05 * LAMPORTS_PER_SOL),
+# ── Caps come from POLICY, not from this module. ───────────────────────
+#
+# These used to be a constant table here, which read as though 0.05 SOL
+# were a property of Solana. It is not: it is an operator ceiling. A
+# MAXIMUM FEE IS A POLICY LIMIT, NOT A GAS PRICE, so the numbers live in
+# lib.solana_fee_policy where they are named, per-action, configurable and
+# versioned — and this module keeps doing the one thing it is for,
+# measuring what the network currently indicates.
+#
+# Priority policies map to the policy module's ACTION classes: a bid is
+# bounded by what the operator authorised for the action being taken.
+_POLICY_ACTION_FOR = {
+    ECONOMY: "NORMAL_ENTRY",
+    NORMAL: "NORMAL_ENTRY",
+    HIGH: "NORMAL_EXIT",
+    VERY_HIGH: "URGENT_EXIT",
+    MAX_ACCEPTANCE: "SEVERE_RISK_EXIT",
 }
 
-# Entry economics: a NEW position must not spend its edge on inclusion.
-MAX_FEE_PCT_OF_EDGE_FOR_ENTRY = 25.0
-# And never more than this share of the trade itself, edge aside.
-MAX_FEE_PCT_OF_NOTIONAL = 1.0
 
-# Emergency risk-reduction fallback: used ONLY when no live estimate exists
-# and the action reduces risk. Bounded and named — an urgent exit with a
-# dead estimator pays at most this, it does not pay "whatever".
-EMERGENCY_EXIT_FALLBACK_LAMPORTS = int(0.02 * LAMPORTS_PER_SOL)
+def priority_cap_lamports(policy: str) -> tuple[int, str]:
+    """The configured ceiling for this priority policy, with provenance."""
+    from lib.solana_fee_policy import caps_for
+    caps = caps_for(_POLICY_ACTION_FOR.get(policy, "NORMAL_ENTRY"))
+    return (int(caps["max_priority_fee_lamports"]),
+            f"{caps['policy_version']}/{caps['action']}")
+
 
 MAX_ESTIMATE_AGE_MS = 30_000
 
@@ -246,8 +260,10 @@ def estimate_network_fee(policy: str, *,
 
     priority_lamports = int(micro_per_cu * cu_limit / MICRO_LAMPORTS)
 
-    # HARD CAP — every policy, including MAX_ACCEPTANCE.
-    cap = _MAX_PRIORITY_LAMPORTS[policy]
+    # HARD CAP — every policy, including MAX_ACCEPTANCE. The ceiling is
+    # operator policy; the estimate above is network measurement. Capping
+    # does not change what the network said, only what we will pay.
+    cap, cap_source = priority_cap_lamports(policy)
     capped = priority_lamports > cap
     if capped:
         priority_lamports = cap
@@ -264,7 +280,9 @@ def estimate_network_fee(policy: str, *,
         estimate_age_ms=(time.perf_counter() - started) * 1000.0,
         reason=detail,
         provenance={"micro_lamports_per_cu_raw": micro_per_cu,
-                    "policy_cap_lamports": cap})
+                    "policy_cap_lamports": cap,
+                    "policy_cap_source": cap_source,
+                    "cap_is_policy_not_network_truth": True})
 
 
 # ── Economic authorization: is this fee worth paying for THIS action? ───
@@ -299,8 +317,11 @@ def authorize_fee(estimate: FeeEstimate, *, action: str,
     if not estimate.ok or estimate.quality == UNKNOWN:
         if action == URGENT_RISK_REDUCTION:
             # Bounded, named fallback — never "whatever it takes".
+            from lib.solana_fee_policy import emergency_fallback_lamports
+            fallback, fallback_source = emergency_fallback_lamports()
             return {"ok": True,
-                    "fee_lamports": EMERGENCY_EXIT_FALLBACK_LAMPORTS,
+                    "fee_lamports": fallback,
+                    "fallback_source": fallback_source,
                     "policy": "EMERGENCY_FALLBACK",
                     "quality": UNKNOWN,
                     "note": ("no live estimate; the separately configured "
@@ -320,27 +341,31 @@ def authorize_fee(estimate: FeeEstimate, *, action: str,
     fee_usd = estimate.total_usd(sol_price_usd)
 
     if action == ENTRY:
+        from lib.solana_fee_policy import caps_for
+        entry_caps = caps_for("NORMAL_ENTRY")
+        edge_cap = entry_caps["max_fee_pct_expected_edge"]
+        notional_cap = entry_caps["max_fee_pct_notional"]
         # A new position must not spend its edge on inclusion.
         if fee_usd is None:
             return {"ok": False, "reason": "FEE_USD_UNPRICEABLE",
                     "detail": "no SOL price to value the fee against edge"}
         if expected_edge_usd is not None and expected_edge_usd > 0:
             pct_of_edge = 100.0 * fee_usd / expected_edge_usd
-            if pct_of_edge > MAX_FEE_PCT_OF_EDGE_FOR_ENTRY:
+            if edge_cap is not None and pct_of_edge > edge_cap:
                 return {"ok": False, "reason": "FEE_DESTROYS_EDGE",
                         "detail": (f"network fee ${fee_usd:.4f} is "
                                    f"{pct_of_edge:.1f}% of the "
                                    f"${expected_edge_usd:.2f} expected edge "
-                                   f"(cap {MAX_FEE_PCT_OF_EDGE_FOR_ENTRY}%)"),
+                                   f"(policy cap {edge_cap}%)"),
                         "fee_usd": fee_usd}
         if notional_usd and notional_usd > 0:
             pct_of_notional = 100.0 * fee_usd / float(notional_usd)
-            if pct_of_notional > MAX_FEE_PCT_OF_NOTIONAL:
+            if notional_cap is not None and pct_of_notional > notional_cap:
                 return {"ok": False, "reason": "FEE_EXCEEDS_NOTIONAL_CAP",
                         "detail": (f"network fee ${fee_usd:.4f} is "
                                    f"{pct_of_notional:.2f}% of the "
                                    f"${notional_usd:.2f} trade "
-                                   f"(cap {MAX_FEE_PCT_OF_NOTIONAL}%)"),
+                                   f"(policy cap {notional_cap}%)"),
                         "fee_usd": fee_usd}
 
     return {"ok": True, "fee_lamports": estimate.total_lamports,

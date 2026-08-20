@@ -35,7 +35,15 @@ from pathlib import Path
 # is not stated reads as coverage.
 FULL_HASH_ROW_LIMIT = 200_000
 
-NEW_TABLE = "virtual_execution_commitments"
+# Tables this migration is EXPECTED to add. Additive-only migrations keep
+# appending here; anything added that is NOT listed is reported as a
+# surprise, because an unexpected new table is exactly what a review needs
+# to see rather than a check that quietly widens to accommodate it.
+EXPECTED_NEW_TABLES = {
+    "virtual_execution_commitments",     # P0 durable commit boundary
+    "dex_balances",                      # P0-3 virtual DEX wallet
+    "dex_funding_events",                # P0-3 virtual-value provenance
+}
 
 # Columns that boot-time repair passes re-stamp even when they recompute
 # the identical value. Excluded from the CONTENT fingerprint only, and any
@@ -157,8 +165,10 @@ def main(argv: list[str]) -> int:
 
     added = sorted(set(after) - set(before))
     removed = sorted(set(before) - set(after))
-    if added != [NEW_TABLE]:
-        problems.append(f"tables added: {added} (expected [{NEW_TABLE!r}])")
+    unexpected = [t for t in added if t not in EXPECTED_NEW_TABLES]
+    if unexpected:
+        problems.append(f"UNEXPECTED tables added: {unexpected} "
+                        f"(expected only {sorted(EXPECTED_NEW_TABLES)})")
     if removed:
         problems.append(f"tables REMOVED: {removed}")
 
@@ -174,8 +184,12 @@ def main(argv: list[str]) -> int:
             heartbeats.append(table)
 
     new_idx = sorted(set(after_idx) - set(before_idx))
-    if not any(i.startswith("ix_commitment") for i in new_idx):
-        problems.append(f"the new table's indexes were not created: {new_idx}")
+    # Only assert indexes for tables that actually appeared in THIS run —
+    # a database that already had the commitment table adds none.
+    if "virtual_execution_commitments" in added and not any(
+            i.startswith("ix_commitment") for i in new_idx):
+        problems.append(f"the commitment table's indexes were not "
+                        f"created: {new_idx}")
 
     if econ_before != econ_after:
         problems.append(f"the economy moved: {econ_before} -> {econ_after}")
@@ -192,7 +206,7 @@ def main(argv: list[str]) -> int:
 
     print(f"DATABASE          {path}")
     print(f"TABLES            {len(before)} -> {len(after)}")
-    print(f"TABLE ADDED       {added or 'none'}")
+    print(f"TABLES ADDED      {added or 'none'}")
     print(f"INDEXES ADDED     {new_idx or 'none'}")
     print(f"ECONOMY BEFORE    {econ_before}")
     print(f"ECONOMY AFTER     {econ_after}")

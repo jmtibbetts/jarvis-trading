@@ -8,10 +8,15 @@ simulation of a wallet, it is a simulation of whatever the caller wishes
 were true.
 
 Balances now live in one place, `dex_balances`, and every check and every
-settlement reads and mutates THAT. Caller-supplied balance arguments are
-accepted only as a legacy shim and can never raise what the ledger says —
-they are recorded in provenance and ignored as authority the moment a
-persisted wallet exists.
+settlement reads and mutates THAT. A caller-supplied balance is never an
+authority: it may only SHRINK what the ledger permits (a conservative
+per-call limit), and it can never initialise, replace or stand in for the
+ledger. A wallet nobody funded is empty, and execution against an empty
+wallet is refused rather than imagined into solvency.
+
+VIRTUAL VALUE HAS PROVENANCE. Balances appear only through fund_wallet(),
+which writes the credit and its DexFundingEvent in one transaction, naming
+the authority that authorised it. Reading a wallet never funds it.
 
 GAS IS A BALANCE, NOT A DEDUCTION FROM OUTPUT. SOL pays for transactions.
 Modelling gas as a synthetic haircut on the tokens received hides the state
@@ -47,6 +52,7 @@ the legacy pre-cutover dex economy is never consulted.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -57,27 +63,6 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 
 _SYMBOLS = {SOL_MINT: "SOL", USDC_MINT: "USDC", USDT_MINT: "USDT"}
-
-# THE DECLARED VIRTUAL ENDOWMENT. Applied only when a wallet has no rows at
-# all in the current epoch. 10,000 USDC matches the paper dex book's
-# declared start;
-# 1.0 SOL matches the operating assumption the old caller-supplied default
-# encoded — now stated once, here, instead of as a hidden keyword argument.
-STARTING_ENDOWMENT = {
-    USDC_MINT: 10_000.0,
-    SOL_MINT: 1.0,
-}
-
-# Swap outcomes.
-REJECTED_BEFORE_SUBMIT = "REJECTED_BEFORE_SUBMIT"
-FAILED_ON_CHAIN = "FAILED_ON_CHAIN"
-FAILED_BEFORE_CHAIN = "FAILED_BEFORE_CHAIN"
-SETTLED = "SETTLED"
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _rows(db, user_id: str):
     from app.database import DexBalance
@@ -91,28 +76,186 @@ def _row(db, user_id: str, mint: str):
             .first())
 
 
-def ensure_wallet(db=None, *, user_id: str | None = None) -> dict:
-    """Seed the declared endowment iff the wallet has no rows. Idempotent."""
-    from app.database import DEFAULT_USER_ID, DexBalance, get_db
+# ── Funding authorities. Every credit names one. ────────────────────────
+CONFIGURED_VIRTUAL_ENDOWMENT = "CONFIGURED_VIRTUAL_ENDOWMENT"
+OPERATOR_GRANT = "OPERATOR_GRANT"
+TEST_FIXTURE = "TEST_FIXTURE"
+
+FUNDING_AUTHORITIES = (CONFIGURED_VIRTUAL_ENDOWMENT, OPERATOR_GRANT,
+                       TEST_FIXTURE)
+
+ENDOWMENT_ENV = "JARVIS_DEX_VIRTUAL_ENDOWMENT"
+ENDOWMENT_POLICY_VERSION = "dex_endowment_v1"
+
+# Symbol -> mint, so an operator can write the policy in symbols.
+_MINTS_BY_SYMBOL = {"SOL": SOL_MINT, "USDC": USDC_MINT, "USDT": USDT_MINT}
+
+# Swap outcomes.
+REJECTED_BEFORE_SUBMIT = "REJECTED_BEFORE_SUBMIT"
+FAILED_ON_CHAIN = "FAILED_ON_CHAIN"
+FAILED_BEFORE_CHAIN = "FAILED_BEFORE_CHAIN"
+SETTLED = "SETTLED"
+
+# An actual fee larger than everything the wallet holds is not a balance to
+# clamp -- it is a contradiction between the model and the chain.
+FEE_EXCEEDS_AVAILABLE = "ACTUAL_FEE_EXCEEDS_AVAILABLE_BALANCE"
+
+
+class UnfundedWallet(Exception):
+    """Execution was attempted against a wallet nobody funded."""
+
+
+class FeeAccountingInvariant(Exception):
+    """An actual network fee could not be charged in full.
+
+    Raised rather than clamped. `max(0, balance - fee)` would charge less
+    than the chain took and leave the book richer than reality by the
+    shortfall -- the simulator making money because it failed to charge the
+    full economic cost. The shortfall is surfaced, never absorbed.
+    """
+
+    def __init__(self, detail: dict):
+        super().__init__(detail.get("reason") or FEE_EXCEEDS_AVAILABLE)
+        self.detail = detail
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def configured_endowment() -> dict:
+    """The endowment policy, parsed from configuration. Empty by default.
+
+    NO HIDDEN DEFAULT. If nothing is configured the answer is an empty
+    wallet, and autonomous execution refuses for insufficient balance --
+    which is the correct behaviour for an account nobody funded. The old
+    10,000 USDC + 1 SOL was an inherited caller assumption, not a decision,
+    and it is gone.
+
+    Format: "USDC:10000,SOL:1" -- symbols or raw mints, both accepted.
+    """
+    raw = (os.getenv(ENDOWMENT_ENV) or "").strip()
+    if not raw:
+        return {}
+    out: dict = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        name, _, qty = part.partition(":")
+        name = name.strip()
+        mint = _MINTS_BY_SYMBOL.get(name.upper(), name)
+        try:
+            amount = float(qty)
+        except ValueError:
+            logger.warning("[DexWallet] endowment entry %r has a "
+                           "non-numeric quantity; ignored", part)
+            continue
+        if amount > 0:
+            out[mint] = amount
+    return out
+
+
+def fund_wallet(*, mint: str, quantity: float, authority: str, reason: str,
+                symbol: str | None = None, policy_version: str | None = None,
+                provenance: dict | None = None,
+                user_id: str | None = None) -> dict:
+    """Create virtual economic value, with provenance. The ONLY way to.
+
+    Balance and funding event are written in one transaction: a credit
+    without its reason, or a reason without its credit, would each be a
+    lie of a different kind.
+    """
+    import json
+
+    from app.database import (DEFAULT_USER_ID, DexBalance, DexFundingEvent,
+                              get_db)
+    if authority not in FUNDING_AUTHORITIES:
+        raise ValueError(f"unknown funding authority {authority!r}; "
+                         f"virtual value may not be created without one")
+    qty = float(quantity)
+    if qty <= 0 or qty != qty:
+        raise ValueError(f"funding quantity {quantity!r} is not positive")
     uid = user_id or DEFAULT_USER_ID
 
-    def _run(session):
-        if _rows(session, uid).count() > 0:
-            return {"created": False}
-        for mint, qty in STARTING_ENDOWMENT.items():
-            session.add(DexBalance(
-                user_id=uid, mint=mint, symbol=_SYMBOLS.get(mint, mint[:6]),
-                total_quantity=float(qty), reserved_quantity=0.0,
-                updated_at=_now()))
-        logger.info("[DexWallet] fresh wallet seeded with the declared "
-                    "endowment: %s", {(_SYMBOLS.get(m, m[:6])): q
-                                      for m, q in STARTING_ENDOWMENT.items()})
-        return {"created": True}
+    with get_db() as db:
+        row = _row(db, uid, mint)
+        if row is None:
+            row = DexBalance(user_id=uid, mint=mint,
+                             symbol=symbol or _SYMBOLS.get(mint, mint[:6]),
+                             total_quantity=0.0, reserved_quantity=0.0)
+            db.add(row)
+            db.flush()
+        row.total_quantity = float(row.total_quantity or 0.0) + qty
+        row.updated_at = _now()
+        db.add(DexFundingEvent(
+            user_id=uid, mint=mint,
+            symbol=symbol or _SYMBOLS.get(mint, mint[:6]),
+            quantity=qty, authority=authority, reason=reason,
+            policy_version=policy_version,
+            provenance_json=json.dumps(provenance or {}, default=str)))
+        db.flush()
+        total = float(row.total_quantity)
+    logger.warning("[DexWallet] FUNDED %.9g %s under %s — %s",
+                   qty, symbol or _SYMBOLS.get(mint, mint[:6]),
+                   authority, reason)
+    return {"mint": mint, "credited": qty, "total_after": total,
+            "authority": authority}
 
-    if db is not None:
-        return _run(db)
-    with get_db() as session:
-        return _run(session)
+
+def apply_configured_endowment(*, user_id: str | None = None) -> dict:
+    """Fund a wallet from the CONFIGURED policy, once, if one exists.
+
+    Idempotent by funding event: a wallet that already has an endowment
+    event is not funded again. Returns what it did and why, including the
+    case where it deliberately did nothing.
+    """
+    from app.database import DEFAULT_USER_ID, DexFundingEvent, get_db
+    uid = user_id or DEFAULT_USER_ID
+    policy = configured_endowment()
+    if not policy:
+        return {"funded": False,
+                "reason": f"no {ENDOWMENT_ENV} configured — the wallet "
+                          f"stays empty and execution will refuse for "
+                          f"insufficient balance",
+                "authority": None}
+
+    with get_db() as db:
+        already = (db.query(DexFundingEvent)
+                   .filter(DexFundingEvent.user_id == uid,
+                           DexFundingEvent.authority
+                           == CONFIGURED_VIRTUAL_ENDOWMENT)
+                   .first())
+    if already is not None:
+        return {"funded": False, "reason": "endowment already applied",
+                "authority": CONFIGURED_VIRTUAL_ENDOWMENT}
+
+    credited = {}
+    for mint, qty in policy.items():
+        fund_wallet(mint=mint, quantity=qty,
+                    authority=CONFIGURED_VIRTUAL_ENDOWMENT,
+                    reason=f"configured training endowment via "
+                           f"{ENDOWMENT_ENV}",
+                    policy_version=ENDOWMENT_POLICY_VERSION,
+                    provenance={"env": ENDOWMENT_ENV},
+                    user_id=uid)
+        credited[_SYMBOLS.get(mint, mint[:6])] = qty
+    return {"funded": True, "credited": credited,
+            "authority": CONFIGURED_VIRTUAL_ENDOWMENT,
+            "policy_version": ENDOWMENT_POLICY_VERSION}
+
+
+def funding_history(*, user_id: str | None = None) -> list[dict]:
+    """Every credit and its provenance."""
+    from app.database import DEFAULT_USER_ID, DexFundingEvent, get_db
+    uid = user_id or DEFAULT_USER_ID
+    with get_db() as db:
+        rows = (db.query(DexFundingEvent)
+                .filter(DexFundingEvent.user_id == uid)
+                .order_by(DexFundingEvent.created_at).all())
+        return [{"mint": r.mint, "symbol": r.symbol,
+                 "quantity": float(r.quantity), "authority": r.authority,
+                 "reason": r.reason, "at": r.created_at} for r in rows]
 
 
 def initialized(db=None, *, user_id: str | None = None) -> bool:
@@ -403,44 +546,84 @@ def settle_swap_success(*, input_mint: str, input_qty: float,
 
 
 def settle_swap_failure(*, network_fee_sol: float, reached_chain: bool,
+                        estimated_fee_sol: float | None = None,
                         reason: str | None = None,
+                        estimator: str | None = None,
+                        priority_policy: str | None = None,
                         user_id: str | None = None) -> dict:
     """A swap that did NOT exchange assets.
 
-    reached_chain=True  -> the chain still charged gas. Debit it.
-    reached_chain=False -> died before submission. Nothing is charged —
-                           gas for a transaction that never existed would
-                           be the simulator inventing a cost.
+    reached_chain=False -> nothing is charged. Gas for a transaction that
+                           never existed would be an invented cost.
+    reached_chain=True  -> the chain took its fee. Debit it IN FULL.
+
+    NO CLAMP. This previously did `max(0, balance - fee)`, which quietly
+    charged only what was there: a 0.008 fee against a 0.005 balance
+    debited 0.005 and reported success, leaving the book 0.003 richer than
+    reality. That is the simulator making money by failing to charge the
+    full economic cost.
+
+    A fee larger than everything the wallet holds is not a balance to
+    round off -- it is a contradiction between the model and the chain,
+    because a real transaction could not have been submitted without a
+    solvent fee payer. It is surfaced as an invariant failure carrying
+    every number needed to reconcile it.
     """
+    from sqlalchemy import text as _text
+
     from app.database import DEFAULT_USER_ID, get_db
     uid = user_id or DEFAULT_USER_ID
     fee_sol = float(network_fee_sol or 0.0)
     if not reached_chain:
         return {"status": FAILED_BEFORE_CHAIN, "network_fee_sol": 0.0,
-                "reason": reason}
+                "estimated_fee_sol": estimated_fee_sol, "reason": reason}
     if fee_sol < 0:
         raise SwapRejected("INVALID_SETTLEMENT", f"fee={network_fee_sol}")
 
-    from sqlalchemy import text as _text
     with get_db() as db:
-        # Gas is owed even if it drives the balance to the floor: the chain
-        # already took it. One guarded statement, clamped at zero —
-        # negative SOL is not a thing.
+        # Guarded debit: charges the FULL fee or nothing at all.
         hit = db.execute(_text(
-            "UPDATE dex_balances SET total_quantity = CASE WHEN "
-            "total_quantity - :fee < 0 THEN 0 ELSE total_quantity - :fee END, "
-            "updated_at = :now WHERE user_id = :uid AND mint = :mint"),
+            "UPDATE dex_balances SET total_quantity = total_quantity - :fee, "
+            "updated_at = :now WHERE user_id = :uid AND mint = :mint AND "
+            "total_quantity + 1e-12 >= :fee"),
             {"fee": fee_sol, "now": _now(), "uid": uid,
              "mint": SOL_MINT}).rowcount
         if hit != 1:
-            raise SwapRejected("NO_SOL_BALANCE_ROW",
-                               "gas owed but the wallet has no SOL row")
+            available = float(db.execute(_text(
+                "SELECT total_quantity FROM dex_balances WHERE user_id = :uid "
+                "AND mint = :mint"), {"uid": uid, "mint": SOL_MINT}).scalar()
+                or 0.0)
+            detail = {
+                "reason": FEE_EXCEEDS_AVAILABLE,
+                "actual_fee_sol": fee_sol,
+                "estimated_fee_sol": estimated_fee_sol,
+                "available_sol": available,
+                "shortfall_sol": round(fee_sol - available, 12),
+                "estimator": estimator,
+                "priority_policy": priority_policy,
+                "transaction_state": FAILED_ON_CHAIN,
+                "note": ("a real transaction could not have been submitted "
+                         "with an insolvent fee payer; the model and the "
+                         "chain disagree and the difference is NOT absorbed"),
+            }
+            logger.error("[DexWallet] %s — fee %.9f SOL exceeds available "
+                         "%.9f SOL (shortfall %.9f)", FEE_EXCEEDS_AVAILABLE,
+                         fee_sol, available, detail["shortfall_sol"])
+            raise FeeAccountingInvariant(detail)
+
         after = float(db.execute(_text(
             "SELECT total_quantity FROM dex_balances WHERE user_id = :uid "
             "AND mint = :mint"), {"uid": uid, "mint": SOL_MINT}).scalar()
             or 0.0)
+
+    out = {"status": FAILED_ON_CHAIN, "network_fee_sol": fee_sol,
+           "estimated_fee_sol": estimated_fee_sol,
+           "sol_total_after": after, "reason": reason}
+    if estimated_fee_sol is not None:
+        # ESTIMATE AND ACTUAL BOTH SURVIVE. Replacing one with the other
+        # destroys the only evidence of whether a policy is priced right.
+        out["fee_estimate_miss_sol"] = round(fee_sol - float(estimated_fee_sol), 12)
     logger.warning("[DexWallet] FAILED on-chain swap consumed %.9f SOL gas "
                    "(%s); %.9f SOL remains", fee_sol,
                    reason or "no reason recorded", after)
-    return {"status": FAILED_ON_CHAIN, "network_fee_sol": fee_sol,
-            "sol_total_after": after, "reason": reason}
+    return out

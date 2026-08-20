@@ -25,6 +25,23 @@ from lib.dex_autotrade import (DISABLED, IMPACT_TOO_HIGH, INSUFFICIENT_GAS,
                                evaluate_candidate)
 
 
+def setUpModule():
+    """These tests are about autotrade ECONOMICS, and a funded wallet is
+    now their precondition.
+
+    `gas_balance_sol=1.0` used to BE the balance; it is now only a
+    conservative cap on a real ledger, so an unfunded wallet refuses before
+    any economics are computed. Funding here keeps each test measuring what
+    it was written to measure — wallet authority itself is covered in
+    test_dex_invariants.
+    """
+    from lib import dex_wallet as DW
+    if not DW.initialized():
+        DW.fund_wallet(mint=DW.SOL_MINT, quantity=5.0,
+                       authority=DW.TEST_FIXTURE,
+                       reason="autotrade economics fixture")
+
+
 class _Enabled:
     def __enter__(self):
         self.old = os.environ.get("DEX_AUTOTRADE_ENABLED")

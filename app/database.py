@@ -1558,6 +1558,36 @@ class DexBalance(Base):
     updated_at        = Column(String, default=now_iso)
 
 
+class DexFundingEvent(Base):
+    """Every creation of virtual economic value, and WHY it appeared.
+
+    VIRTUAL MONEY MUST HAVE PROVENANCE. An earlier version of the wallet
+    seeded 10,000 USDC and 1 SOL the moment anything touched it, because
+    those were the numbers an old caller default happened to use. Zero
+    prior DEX state does not prove a starting balance -- it proves there
+    was no starting balance. Balances now appear only through a row here,
+    naming the authority that authorised them.
+
+    A funding event is never inferred, never back-filled from a legacy
+    portfolio, and never created as a side effect of reading a wallet.
+    """
+    __tablename__ = "dex_funding_events"
+
+    id           = Column(String, primary_key=True, default=new_id)
+    user_id      = Column(String, default=DEFAULT_USER_ID, nullable=False,
+                          index=True)
+    mint         = Column(String, nullable=False)
+    symbol       = Column(String)
+    quantity     = Column(Float, nullable=False)
+
+    # CONFIGURED_VIRTUAL_ENDOWMENT | OPERATOR_GRANT | TEST_FIXTURE
+    authority    = Column(String, nullable=False)
+    reason       = Column(Text, nullable=False)
+    policy_version = Column(String)
+    provenance_json = Column(Text)
+    created_at   = Column(String, default=now_iso)
+
+
 class TelegramLinkToken(Base):
     __tablename__ = "telegram_link_tokens"
     id           = Column(String, primary_key=True, default=new_id)

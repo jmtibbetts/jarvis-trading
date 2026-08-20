@@ -63,7 +63,7 @@ def enabled() -> bool:
             in ("1", "true", "yes"))
 
 
-def evaluate_candidate(candidate: dict, *, gas_balance_sol: float = 0.0,
+def evaluate_candidate(candidate: dict, *, gas_balance_sol: float | None = None,
                        sol_price_usd: float = 0.0,
                        cash_usd: float = 0.0) -> dict:
     """Decide whether one surging token is worth a virtual DEX position.
@@ -102,18 +102,32 @@ def evaluate_candidate(candidate: dict, *, gas_balance_sol: float = 0.0,
     # holds is describing a wallet that does not exist, and believing it
     # was exactly how an impossible trade became executable.
     from lib import dex_wallet as DW
-    if DW.initialized():
-        wallet_sol = DW.balance(DW.SOL_MINT)["available"]
-        effective_sol = (min(float(gas_balance_sol), wallet_sol)
-                         if gas_balance_sol else wallet_sol)
-        gas = spendable_native(effective_sol)
-        gas["authority"] = "PERSISTED_WALLET"
-        gas["wallet_available_sol"] = wallet_sol
-        if gas_balance_sol and float(gas_balance_sol) > wallet_sol:
-            gas["caller_exceeded_wallet"] = float(gas_balance_sol)
-    else:
-        gas = spendable_native(gas_balance_sol)
-        gas["authority"] = "LEGACY_CALLER_SUPPLIED"
+    if not DW.initialized():
+        # A CALLER CANNOT INVENT A WALLET. Autonomous execution against an
+        # unfunded account refuses; it does not borrow the caller's opinion
+        # of a balance. Funding is an explicit provenanced event.
+        return {**out, "reason": INSUFFICIENT_GAS,
+                "detail": "no persisted DEX wallet exists; virtual balances "
+                          "are created only by an explicit funding event",
+                "gas": {"authority": "NONE_WALLET_UNFUNDED",
+                        "can_transact": False,
+                        "caller_supplied_ignored": (float(gas_balance_sol)
+                                                    if gas_balance_sol
+                                                    else None)}}
+    wallet_sol = DW.balance(DW.SOL_MINT)["available"]
+    # The caller value is a conservative CAP, never a source of value.
+    #
+    # `is not None`, NOT truthiness: an explicit 0.0 is a caller saying
+    # "spend no gas", which is a real instruction. Reading it as "no cap
+    # supplied" handed back the entire wallet — the opposite of what was
+    # asked, and in the permissive direction.
+    effective_sol = (min(float(gas_balance_sol), wallet_sol)
+                     if gas_balance_sol is not None else wallet_sol)
+    gas = spendable_native(effective_sol)
+    gas["authority"] = "PERSISTED_WALLET"
+    gas["wallet_available_sol"] = wallet_sol
+    if gas_balance_sol is not None and float(gas_balance_sol) > wallet_sol:
+        gas["caller_exceeded_wallet"] = float(gas_balance_sol)
     if not gas["can_transact"]:
         return {**out, "reason": INSUFFICIENT_GAS, "detail": gas["reason"],
                 "gas": gas}
@@ -200,7 +214,14 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
     # default of gas_balance_sol=1.0 was the exact fictional input P0-3
     # removes -- autonomous execution now defaults to the ledger.
     from lib import dex_wallet as DW
-    DW.ensure_wallet()
+    # Applies the CONFIGURED endowment if one is configured, and does
+    # nothing at all if none is -- in which case the wallet stays empty and
+    # every candidate is refused for insufficient balance. Reading or
+    # preparing a wallet never creates value.
+    funding = DW.apply_configured_endowment()
+    if not funding.get("funded"):
+        logger.info("[DexAutotrade] wallet funding: %s",
+                    funding.get("reason"))
 
     def _run(session):
         pf = get_portfolio(session)
@@ -215,7 +236,7 @@ def run_once(*, max_positions: int = 3, cash_usd: float | None = None,
             stats["scanned"] += 1
             ev = evaluate_candidate(
                 {**tok, "risk_usd": None},
-                gas_balance_sol=(gas_balance_sol or 0.0),
+                gas_balance_sol=gas_balance_sol,
                 sol_price_usd=sol_price_usd, cash_usd=cash)
             if not ev.get("eligible"):
                 r = ev.get("reason") or "UNKNOWN"

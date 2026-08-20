@@ -25,24 +25,44 @@ if (-not (Test-Path $venv)) {
     & py -3.12 -m venv $venv
 }
 
-# Activate + install
+# THE INTERPRETER IS NAMED, NOT INHERITED FROM PATH.
+#
+# This used to activate the venv and then call bare `python` and `pip`.
+# That works only while activation succeeded: `Activate.ps1` can fail
+# silently under a restrictive ExecutionPolicy, and this script does not
+# set $ErrorActionPreference, so execution continues either way. The next
+# bare `python` then resolves to whatever is first on PATH -- on this
+# machine that is the Microsoft Store shim in
+# %LOCALAPPDATA%\Microsoft\WindowsApps -- and every dependency lands in
+# the wrong interpreter while the output still reads like success.
+#
+# Naming the interpreter removes the dependency on activation entirely.
+$VenvPython = Join-Path $venv "Scripts\python.exe"
+if (-not (Test-Path $VenvPython)) {
+    Write-Host "  ERROR: no interpreter at $VenvPython after venv creation." -ForegroundColor Red
+    Write-Host "  Refusing to install into an unknown Python." -ForegroundColor Red
+    Read-Host "Press Enter to exit"; exit 1
+}
+
+# Activation is kept for the interactive shell it leaves behind; nothing
+# below depends on it.
 & "$venv\Scripts\Activate.ps1"
-& python -m pip install --upgrade pip --quiet
+& $VenvPython -m pip install --upgrade pip --quiet
 Write-Host "  Installing dependencies..." -ForegroundColor Yellow
-& pip install -r (Join-Path $RootDir "requirements.txt") --quiet
+& $VenvPython -m pip install -r (Join-Path $RootDir "requirements.txt") --quiet
 
 # TA-Lib wheel
-$talibCheck = python -c "import talib" 2>&1
+$talibCheck = & $VenvPython -c "import talib" 2>&1
 if ($LASTEXITCODE -ne 0) {
     $wheel = Join-Path $RootDir "ta_lib-0.6.8-cp312-cp312-win_amd64.whl"
     if (-not (Test-Path $wheel)) {
         Write-Host "  Downloading TA-Lib wheel..." -ForegroundColor Yellow
         Invoke-WebRequest -Uri "https://github.com/cgohlke/talib-build/releases/download/v0.6.8/ta_lib-0.6.8-cp312-cp312-win_amd64.whl" -OutFile $wheel
     }
-    & pip install $wheel --quiet
+    & $VenvPython -m pip install $wheel --quiet
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  TA-Lib wheel failed - falling back to 'ta'" -ForegroundColor Yellow
-        & pip install ta==0.11.0 --quiet
+        & $VenvPython -m pip install ta==0.11.0 --quiet
     } else {
         Write-Host "  TA-Lib 0.6.8 installed!" -ForegroundColor Green
     }

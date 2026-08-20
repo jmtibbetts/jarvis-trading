@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `e2eb266`.*
+*Last measured: 2026-08-20, at code SHA `f8853dd`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       e2eb266 (provider entitlement audit)
+    code SHA       f8853dd (Helius wallet polling)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -115,7 +115,8 @@ Verify the JSON and the expected key, never the status code alone.
 
     JARVIS_PLATFORM_MODE           VIRTUAL_ONLY
     JARVIS_RUNTIME_MODE            FULL_VIRTUAL   (explicit, not defaulted)
-    JARVIS_DISABLE_SCHEDULER       1  — no background jobs, no signal execution
+    JARVIS_DISABLE_SCHEDULER       1  — no trading jobs, no signal execution
+    Helius wallet polling          ON, independently gated (see 10c)
     external broker connector      OFF
     external account management    OFF
 
@@ -858,6 +859,53 @@ gateway, and no worker.
   timing.
 - **A queue is unnecessary at this scale**: 5 watched wallets.
 
+### 10c. Helius wallet polling — RUNNING, and separate from the scheduler
+
+`lib/wallet_poller.py` is one timer calling one existing function. The
+pipeline was complete and verified; nothing called it, because the legacy
+scheduler owned that job and **stays disabled** — it also executes signals,
+opens paper positions and manages the book. Wallet intelligence and live
+trading were a single switch; they are not any more.
+
+    JARVIS_HELIUS_WALLET_POLLING_ENABLED     true   (operator .env)
+    JARVIS_HELIUS_WALLET_POLL_INTERVAL_SECONDS  900
+
+- **OFF unless explicitly enabled, and a typo cannot fake it.** `bool("false")`
+  is True, so the flag is read against an ALLOWLIST — `1/true/yes/on/enabled`.
+  "false", "no", "0", "off", "disabled", "maybe" all leave it stopped.
+  Interval clamped to `[60, 86400]`; a malformed value falls back.
+- **900s is the cadence this job already had**, so it is what the existing
+  pagination, pacing and backfill budgets were sized against. Measured: a
+  pass over 5 wallets costs **5 provider calls** and takes **~20s** — two
+  orders of magnitude of headroom, so no pass can lap another.
+- **Overlap is refused, not queued.** One thread runs poll-then-sleep, and a
+  non-blocking lock turns any concurrent entry into a counted refusal.
+- **A FAILED pass is not an EMPTY pass.** On failure the counts stay `null`
+  rather than dropping to zero — "we could not reach Helius" and "we looked
+  and the chain was quiet" are different facts. A quiet chain still reports
+  `0`, because that IS a measurement.
+- **No address, key or credential reaches the status payload.** The collector
+  prefixes its own errors with `{address[:8]}…`, so the prefix is stripped
+  and anything else address-shaped is scrubbed to `<wallet>`.
+- **Independent of `JARVIS_DISABLE_SCHEDULER` in both directions** — the
+  poller never reads it, and `start()` sits OUTSIDE the scheduler branch in
+  `lifespan`, asserted on the AST.
+
+`GET /api/onchain/wallet-polling` reports enabled / running /
+last_started_at / last_completed_at / last_result / next_run_at / observed /
+inserted / deduplicated / provider_calls / last_error.
+
+**Verified live, twice, then again across a restart:**
+
+    pass 1   287 observed   287 inserted     0 deduplicated   5 calls
+    pass 2   287 observed     0 inserted   287 deduplicated   5 calls
+    restart  280 observed     0 inserted   280 deduplicated   5 calls
+
+Stored `helius:` events unchanged at **20,722** across the restart —
+restart safety comes from the existing `dedup_key`, not from any state the
+poller holds. The 287 genuine observations collected during verification
+were KEPT.
+
 ### Observability gaps (reported, not fixed)
 
 - **`provider_health` tracks 2 of 13 providers** — Helius' fee estimator and
@@ -875,7 +923,7 @@ gateway, and no worker.
 
 ## 11. Tests and CI
 
-    full suite   4,596 passed - 16 skipped - 0 failed, exit code 0 (e2eb266)
+    full suite   4,622 passed - 16 skipped - 0 failed, exit code 0 (f8853dd)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit

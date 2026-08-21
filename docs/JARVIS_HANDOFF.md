@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `f8853dd`.*
+*Last measured: 2026-08-20, at code SHA `975b874`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       f8853dd (Helius wallet polling)
+    code SHA       975b874 (wallet shadow intelligence + On-Chain Desk)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -906,6 +906,75 @@ restart safety comes from the existing `dedup_key`, not from any state the
 poller holds. The 287 genuine observations collected during verification
 were KEPT.
 
+### 10d. Wallet SHADOW intelligence — visible at `#onchain`
+
+`lib/wallet_event_classifier.py` + `lib/wallet_shadow_intel.py`. Stored
+transfers become classified economic events, deterministic theses or named
+refusals, forward checkpoints, and a source-isolated performance view — all
+rendered on the EXISTING On-Chain Desk.
+
+    http://127.0.0.1:3000/#onchain      Nav rail -> On-Chain Desk
+
+Six panels: Helius Wallet Polling · Wallet Intelligence — Classification ·
+Shadow Theses · Refusals · Forward Outcomes · Recent Classified Activity.
+Routes: `/api/onchain/shadow/{summary,events,theses,refusals}` and
+`POST /api/onchain/shadow/process`.
+
+**A TRANSFER IS NOT A TRADE.** The feed carries no program or instruction, so
+only a PAIRED SWAP can be established: one signature moving a quote asset out
+and a token in. Everything else stays `UNKNOWN_TRANSFER`.
+
+**MULTIPLE LEGS ARE NOT MULTIPLE VOTES.** Measured on the live store:
+
+    20,785 transfer legs -> 3,890 signatures -> 1,266 market observations
+    16.4 legs and 3.07 signatures per observation
+
+Wallets acting on the same token within `CLUSTER_WINDOW_SECONDS` (900) are ONE
+observation; all contributing wallets are kept as evidence. `uq_wse_cluster`
+makes it a database fact.
+
+**Live counts (2026-08-20):** 411 `CLASSIFIED_TRADING_EVENT`, 402
+`PARTIAL_EVIDENCE`, 321 `UNKNOWN`, 132 `CLASSIFIED_NON_TRADING_EVENT`.
+**0 eligible theses; all 1,266 refused** — 411 `UNKNOWN_WALLET_QUALITY`, 402
+`PARTIAL_TRANSACTION_EVIDENCE`, 321 `UNKNOWN_EVENT_TYPE`, 132
+`NON_TRADING_TRANSFER`. That is the gate working: **1 of 1,086 registry
+wallets carries a usable score**, and an unproven wallet is not a neutral one.
+Nothing was weakened to fill the theses table, and the page says so.
+
+> **TWO DEFECTS THE DATA AND THE TESTS FOUND — both produced confident wrong
+> answers.**
+>
+> **Native SOL is a 43-character pseudo-mint ending `…111`, one character
+> from WSOL's `…112`** — `NATIVE_SOL_PSEUDO_MINT`. It is **14,610 of 20,778
+> legs (70%)** and reports `symbol == "SOL"` in 100% of them, which is how it
+> was identified: by counting, not by recognising a prefix. Omitting it made
+> SOL the SUBJECT of ordinary SOL-for-token swaps and found 13 trades where
+> there are 1,883.
+>
+> **`all(... for l in legs if l.counterparty)` is vacuously TRUE** when no leg
+> has a counterparty, so every unknown-counterparty group was called a
+> `SELF_TRANSFER`. At least one counterparty must now be present.
+>
+> Also: taking `legs[0]` as the subject skewed the result **1,879 buys to 10
+> sells** — alphabetical order, not a market. The subject is the largest
+> non-quote leg. And 904 signatures move a quote asset OUT and a token OUT
+> with nothing back: no consideration observed, so not a sale.
+
+**Prices come from the existing snapshot store, near the EVENT** — never
+today's price, never the wallet's later exit. Missing stays missing, stale is
+refused by name, `UNRESOLVED` is never a loss, every return is shown before
+AND after an assumed 3% round trip, and no expectancy is stated below 20
+resolved samples.
+
+**Isolation by construction**: own tables (`wallet_shadow_events`,
+`wallet_shadow_outcomes`), `source = HELIUS_WALLET_INTELLIGENCE`,
+`execution_mode = SHADOW`, and **nothing written to `trade_outcomes`** — so no
+consumer has to remember to exclude it. Idempotent on `cluster_id`.
+
+**Browser-verified** against the live operator database: real counts, **zero
+full addresses or mints rendered**, missing shown as `UNKNOWN`/`—` never `0`,
+no console errors, every request 200, 3 fetches in a quiet 25s window.
+
 ### Observability gaps (reported, not fixed)
 
 - **`provider_health` tracks 2 of 13 providers** — Helius' fee estimator and
@@ -923,7 +992,7 @@ were KEPT.
 
 ## 11. Tests and CI
 
-    full suite   4,622 passed - 16 skipped - 0 failed, exit code 0 (f8853dd)
+    full suite   4,662 passed - 16 skipped - 0 failed, exit code 0 (975b874)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
@@ -1081,3 +1150,27 @@ earned through forward evidence rather than granted because code exists.
 - One concern per commit; do not mix documentation with code.
 - Read the actual implementation before trusting a description of it —
   including this document.
+
+## 15. Wallet shadow intelligence — remaining UNKNOWNs
+
+- **No wallet is scored, so no thesis can be justified.** 1 of 1,086 registry
+  rows carries a usable score. `wallet_scoring` exists and is a scheduler
+  job; the scheduler is off. Until wallets are measurable this desk is a
+  classification and refusal engine, which is the honest state.
+- **Forward outcomes cannot resolve yet.** `token_activity_snapshots` covers
+  a ~9-hour window on 2026-08-19 and only 45 of 556 event mints. With 0
+  eligible theses no checkpoints exist; when they do, most will be
+  UNRESOLVED until a price source runs forward. UNRESOLVED is not a loss.
+- **Swap-grade evidence is not collected.** `lib/wallet_swaps` implements a
+  full balance-delta classifier against `getTransaction` and has NO
+  production caller. Turning it on is a provider-load decision, not a
+  classification one, and would move most of the 723 `UNKNOWN_TRANSFER`
+  observations into real types. Not started.
+- **Historical rows carry no `watched_wallet`.** It is persisted from
+  `975b874` forward; every earlier row is `LEGACY_PARTIAL` and is never
+  back-filled.
+- **The 3% round-trip cost is an ASSUMPTION**, labelled one, not a
+  measurement of these pools.
+- **No bitmap screenshot was obtainable** — the Browser pane does not
+  composite in this environment. Verification was done against the live
+  rendered DOM: text, geometry, overflow, network and console.

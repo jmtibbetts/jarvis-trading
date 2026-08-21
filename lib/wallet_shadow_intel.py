@@ -247,6 +247,11 @@ def cluster(events: list) -> list:
 
 
 # ── Point-in-time wallet quality ─────────────────────────────────────────
+def _NON_COPYABLE_BEHAVIOURS():
+    from lib.wallet_behaviour import NON_COPYABLE_BEHAVIOURS
+    return NON_COPYABLE_BEHAVIOURS
+
+
 def _is_non_trader_entity(entity_type, status=None) -> bool:
     """Whether this row is a known NON-TRADER, by the canonical vocabulary.
 
@@ -276,6 +281,7 @@ def wallet_quality_snapshot(addresses: list) -> dict:
            "max_sample_count": 0, "measurable": False,
            "score_version": None, "score_at": None,
            "entities": [], "entity_types": [],
+           "non_copyable": [], "non_copyable_states": [],
            "as_of": _iso(_now()),
            "note": ("point-in-time as recorded on the registry row; an "
                     "unscored wallet is UNKNOWN, never neutral")}
@@ -295,12 +301,15 @@ def wallet_quality_snapshot(addresses: list) -> dict:
             WalletRegistry.win_rate, WalletRegistry.average_holding_period,
             WalletRegistry.wallet_score_version,
             WalletRegistry.last_score_update, WalletRegistry.measurable,
-            WalletRegistry.measurability_reason)
+            WalletRegistry.measurability_reason,
+            WalletRegistry.behaviour_state, WalletRegistry.copyability_state,
+            WalletRegistry.monitoring_purpose, WalletRegistry.score_source)
     keys = ("address", "smart_money_score", "alpha_score", "sample_count",
             "required_sample_count", "status", "entity_type",
             "confidence_score", "win_rate", "average_holding_period",
             "wallet_score_version", "last_score_update", "measurable",
-            "measurability_reason")
+            "measurability_reason", "behaviour_state", "copyability_state",
+            "monitoring_purpose", "score_source")
     try:
         with get_db() as db:
             found = {r[0]: dict(zip(keys, r)) for r in
@@ -338,6 +347,10 @@ def wallet_quality_snapshot(addresses: list) -> dict:
             "measurable": measurable,
             "measurability_reason": r["measurability_reason"],
             "quality": "KNOWN" if measurable else "UNKNOWN",
+            "behaviour": r.get("behaviour_state"),
+            "copyability": r.get("copyability_state"),
+            "purpose": r.get("monitoring_purpose"),
+            "score_source": r.get("score_source"),
         }
         out["wallets"].append(entry)
         # ENTITY IDENTITY IS NOT A SCORE. An exchange, router, pool or
@@ -347,6 +360,12 @@ def wallet_quality_snapshot(addresses: list) -> dict:
         if _is_non_trader_entity(r["entity_type"], r["status"]):
             out["entities"].append(entry["label"])
             out["entity_types"].append(r["entity_type"] or r["status"])
+        # A BEHAVIOURAL finding, read from the registry the lifecycle wrote.
+        # Kept separate from `entities` because it is a weaker claim: it
+        # says what the wallet does, not what it is.
+        if r.get("behaviour_state") in _NON_COPYABLE_BEHAVIOURS():
+            out["non_copyable"].append(entry["label"])
+            out["non_copyable_states"].append(r["behaviour_state"])
         if measurable:
             out["known"] += 1
             if out["best_score"] is None or (score or 0) > out["best_score"]:
@@ -448,6 +467,49 @@ def expected_costs(ctx: dict) -> dict:
     }
 
 
+# ── Derived validation state ─────────────────────────────────────────────
+#
+# `state` records what the GATE decided at the time, and it must stay
+# exactly as it was — it is the audit record of a decision made on the
+# evidence then available. But `ELIGIBLE` beside
+# `copyability_state=PROVIDER_CAPABILITY_UNAVAILABLE` reads as "validated",
+# and it is not: it means the gate passed and nothing could vouch for the
+# wallet. The validation state is DERIVED from both, so the original stays
+# untouched and the reader is not left to infer.
+VALIDATED_ELIGIBLE = "VALIDATED_ELIGIBLE"
+PROVISIONAL_ELIGIBLE = "PROVISIONAL_ELIGIBLE"
+NON_COPYABLE_REFUSED = "NON_COPYABLE_REFUSED"
+CONFIRMED_ENTITY_REFUSED = "CONFIRMED_ENTITY_REFUSED"
+GATE_REFUSED = "GATE_REFUSED"
+
+VALIDATION_STATES = (VALIDATED_ELIGIBLE, PROVISIONAL_ELIGIBLE,
+                     NON_COPYABLE_REFUSED, CONFIRMED_ENTITY_REFUSED,
+                     GATE_REFUSED)
+
+
+def validation_state(state, copyability_state) -> str:
+    """What this observation actually amounts to, right now.
+
+    PURE and DERIVED — it stores nothing and rewrites nothing, so a pick
+    reassessed after new evidence simply reads differently without its
+    decision-time record changing.
+    """
+    from lib import wallet_behaviour as WB
+
+    if state != STATE_ELIGIBLE:
+        return GATE_REFUSED
+    c = copyability_state
+    if c == WB.COPY_CONFIRMED_ENTITY:
+        return CONFIRMED_ENTITY_REFUSED
+    if c in (WB.COPY_MARKET_MAKING, WB.COPY_LIQUIDITY_OPERATION,
+             WB.COPY_CUSTODY, WB.COPY_COORDINATED):
+        return NON_COPYABLE_REFUSED
+    if c == WB.COPYABLE_EVIDENCE_SUPPORTED:
+        return VALIDATED_ELIGIBLE
+    # Unassessed, unresolved identity, or too little behaviour to say.
+    return PROVISIONAL_ELIGIBLE
+
+
 # ── The gate ─────────────────────────────────────────────────────────────
 def evaluate(events: list, *, wallet_quality=None, ctx=None) -> dict:
     """Deterministic eligibility for ONE cluster. Pure — no writes.
@@ -491,6 +553,16 @@ def evaluate(events: list, *, wallet_quality=None, ctx=None) -> dict:
     # It is checked BEFORE wallet quality on purpose: an exchange's flow can
     # score extremely well, and "measurable" is exactly what a busy custodial
     # wallet looks like. Skill is the wrong question to ask about it.
+    # A measured non-copyable pattern refuses a NEW pick outright. This is
+    # narrower than the entity gate above and says something different: the
+    # wallet may be entirely legitimate, and its economics still cannot be
+    # reproduced by a follower.
+    if wq.get("non_copyable"):
+        return refuse(EXCHANGE_OR_ENTITY_WALLET,
+                      f"contributing wallet(s) {', '.join(wq['non_copyable'])} "
+                      f"show {', '.join(sorted(set(wq['non_copyable_states'])))}"
+                      f" — real activity, but not copyable directional alpha")
+
     if wq.get("entities"):
         return refuse(EXCHANGE_OR_ENTITY_WALLET,
                       f"contributing wallet(s) {', '.join(wq['entities'])} "

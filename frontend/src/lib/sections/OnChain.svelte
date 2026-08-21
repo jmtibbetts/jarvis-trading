@@ -52,6 +52,11 @@
   let intel = $state<any | null>(null);
   let cycling = $state(false);
 
+  // WHAT each wallet is watched FOR, which is a different question from how
+  // good it is. A consolidation wallet can score 80 and still be worthless
+  // to copy, and until this was shown the desk could not say so.
+  let roles = $state<any | null>(null);
+
   async function loadAll() {
     // NO third argument. `load(key, fn, opts?)` takes `{ keepLast }` — the
     // old signature took the caller's previous value, and this call site
@@ -60,7 +65,7 @@
     // function called from an `$effect` that then WRITES all six made the
     // effect re-trigger itself. That is the measured 34-requests-in-10s
     // storm — fixed inside FeedTracker, still live here.
-    const [w, d, s, b, p, h, sh, se, st, ic] = await Promise.all([
+    const [w, d, s, b, p, h, sh, se, st, ic, wr] = await Promise.all([
       feeds.load("wallets", () => api.raw<any>("/onchain/wallets?limit=60")),
       feeds.load("discovery", () => api.raw<any>("/onchain/discovery/status")),
       feeds.load("surge", () => api.raw<any>("/onchain/surge?limit=15")),
@@ -71,9 +76,10 @@
       feeds.load("shadowEvents", () => api.raw<any>("/onchain/shadow/events?limit=40")),
       feeds.load("shadowTheses", () => api.raw<any>("/onchain/shadow/theses?limit=25")),
       feeds.load("intelCycle", () => api.raw<any>("/onchain/intel/cycle")),
+      feeds.load("walletRoles", () => api.raw<any>("/onchain/wallets/roles?limit=60")),
     ]);
     wallets = w; discovery = d; surge = s; book = b; protocols = p; helius = h;
-    shadow = sh; shadowEvents = se; shadowTheses = st; intel = ic;
+    shadow = sh; shadowEvents = se; shadowTheses = st; intel = ic; roles = wr;
   }
 
   async function runCycle() {
@@ -446,6 +452,67 @@
       {/if}
     </Panel>
 
+    <Panel title="Monitored Wallets — Purpose and Evidence"
+           status={feeds.status("walletRoles")}
+           meta="what each wallet is watched FOR · safe labels only">
+      {#if roles?.wallets?.length}
+        {@const cap = roles.identity_capability ?? {}}
+        <div class="chips" style="margin-bottom:10px">
+          <span class="chip"><b>{roles.counts?.ALPHA ?? 0}</b><em>ALPHA</em></span>
+          <span class="chip"><b>{roles.counts?.FLOW_CONTEXT ?? 0}</b><em>FLOW CONTEXT</em></span>
+          <span class="chip"><b>{roles.counts?.EVIDENCE_COLLECTION ?? 0}</b><em>EVIDENCE COLLECTION</em></span>
+        </div>
+        {#if cap.status && cap.status !== "HEALTHY"}
+          <div class="degraded" style="margin-bottom:10px">
+            <em>Identity capability {cap.status}{cap.http_status ? ` (HTTP ${cap.http_status})` : ""}</em>
+            — {cap.message}
+            <div class="note" style="margin-top:4px">
+              last probe {cap.last_probe_at ? new Date(cap.last_probe_at).toLocaleString() : "—"} ·
+              next eligible {cap.next_probe_at ? new Date(cap.next_probe_at).toLocaleString() : "—"}
+            </div>
+          </div>
+        {/if}
+        <table class="tbl">
+          <thead><tr>
+            <th>Wallet</th><th>Status</th><th>Purpose</th><th>Behaviour</th>
+            <th>Copyability</th><th class="num">Score</th><th>Score source</th>
+            <th class="num">History</th>
+          </tr></thead>
+          <tbody>
+            {#each roles.wallets as w2}
+              <tr>
+                <td class="sym">{w2.wallet}{#if w2.pinned}<span class="pin" title="pinned seed">📌</span>{/if}</td>
+                <td><Pill label={w2.status ?? "—"}
+                          tone={w2.status === "SMART_MONEY" || w2.status === "HIGH_CONVICTION" ? "good"
+                                : w2.status === "WATCH" ? "warm"
+                                : w2.status === "EXCLUDED_ENTITY" ? "bad" : "neutral"} /></td>
+                <td><Pill label={w2.purpose ?? "—"}
+                          tone={w2.purpose === "ALPHA" ? "good"
+                                : w2.purpose === "FLOW_CONTEXT" ? "warm" : "neutral"} /></td>
+                <td class="sym" title={w2.purpose_reason ?? ""}>{w2.behaviour ?? "—"}</td>
+                <td class="sym">{w2.copyability ?? "—"}</td>
+                <td class="num">{w2.score == null ? "—" : Number(w2.score).toFixed(1)}</td>
+                <td class="sym">{w2.score_source ?? "NOT YET SCORED"}</td>
+                <td class="num">{w2.history_records ?? 0}{w2.history_complete ? " ✓" : ""}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="note">
+          A BEHAVIOURAL FINDING IS NOT AN IDENTITY CLAIM. FLOW_CONTEXT means
+          the observed activity — consolidation, routing, market making — is
+          real and is not copyable directional alpha; it does not say who owns
+          the wallet, and no entity type is written from it. Those wallets
+          keep being observed so they can be re-evaluated, and are kept out of
+          the scarce deep-history budget reserved for alpha candidates.
+          “{'SHALLOW_TRANSFER_FALLBACK'}” means the score came from one page of
+          transfers, not a drained ledger.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("walletRoles")} noun="wallet roles" />
+      {/if}
+    </Panel>
+
     <Panel title="Wallet Intelligence — Classification" status={feeds.status("shadow")}
            meta="transfers → economic events → market observations">
       {#if shadow?.observations}
@@ -489,7 +556,8 @@
       {#if shadowTheses?.theses?.length}
         <table class="tbl">
           <thead><tr>
-            <th>Token</th><th>Dir</th><th class="num">Ref price</th>
+            <th>Token</th><th>Dir</th><th>Validation</th><th>Behaviour</th>
+            <th class="num">Ref price</th>
             <th class="num">Notional</th><th>Wallets</th><th>Outcomes</th>
           </tr></thead>
           <tbody>
@@ -498,6 +566,13 @@
                 <td class="sym" title={t.mint ?? ""}>{t.symbol ?? t.mint_abbrev}</td>
                 <td><Pill label={t.direction ?? "—"}
                           tone={t.direction === "BUY" ? "good" : "bad"} /></td>
+                <td title={t.copyability_reason ?? ""}>
+                  <Pill label={t.validation_state === "VALIDATED_ELIGIBLE" ? "VALIDATED"
+                               : t.validation_state === "PROVISIONAL_ELIGIBLE" ? "PROVISIONAL"
+                               : t.validation_state ?? "—"}
+                        tone={t.validated ? "good" : t.provisional ? "warm" : "bad"} />
+                </td>
+                <td class="sym" title={t.copyability_state ?? ""}>{t.behaviour_state ?? "—"}</td>
                 <td class="num">{t.reference_price_usd == null ? "UNKNOWN"
                   : `$${Number(t.reference_price_usd).toPrecision(4)}`}</td>
                 <td class="num">{usd(t.notional_usd)}</td>
@@ -532,6 +607,13 @@
         <StateNote status={feeds.status("shadowTheses")} noun="shadow theses" />
       {/if}
       <p class="note">
+          PROVISIONAL IS NOT VALIDATED. A pick is VALIDATED only when the
+          source wallet's identity is resolved AND its behaviour is
+          directional; while Helius identity is unavailable on this plan
+          nothing can reach that bar, so these stay PROVISIONAL and are kept
+          out of validated expectancy entirely. The original gate decision is
+          unchanged and still auditable — the validation column is derived
+          from it, not a rewrite of it.
         Shadow means shadow. These are measurements of what watching these
         wallets would have been worth — never permission to act, and never
         pooled with JARVIS execution, manual operator or virtual-book results.
@@ -563,6 +645,30 @@
                    emptyText="No refusals recorded — every observation passed the gate." />
       {:else}
         <StateNote status={feeds.status("shadow")} noun="refusals" />
+      {/if}
+    </Panel>
+
+    <Panel title="Outcome Populations"
+           status={feeds.status("shadow")}
+           meta="validated and provisional are never pooled">
+      {#if shadow}
+        <div class="stat-list">
+          <div class="stat"><span>Validated — resolved</span>
+            <b class="num">{shadow.validated_outcomes?.resolved ?? 0}</b></div>
+          <div class="stat"><span>Validated — unresolved</span>
+            <b class="num">{shadow.validated_outcomes?.unresolved ?? 0}</b></div>
+        </div>
+        <div class="sub">Provisional, by reason</div>
+        <div class="chips">
+          {#each Object.entries(shadow.provisional_outcomes ?? {}) as [k2, v2]}
+            <span class="chip"><b>{(v2 as any).resolved} / {(v2 as any).resolved + (v2 as any).unresolved}</b><em>{k2}</em></span>
+          {:else}
+            <span class="chip"><b>0</b><em>none</em></span>
+          {/each}
+        </div>
+        <p class="note">{shadow.expectancy_population}</p>
+      {:else}
+        <StateNote status={feeds.status("shadow")} noun="outcome populations" />
       {/if}
     </Panel>
 

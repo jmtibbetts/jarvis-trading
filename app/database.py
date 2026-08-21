@@ -976,6 +976,22 @@ class WalletRegistry(Base):
     # A 404 or an unlabelled result is NOT proof of "human trader". It means
     # no Helius label was available, and on-chain classification continues
     # afterwards. Identity is EVIDENCE, not omniscience.
+    #: WHAT THIS WALLET IS WATCHED FOR — which is not the same question as
+    #: how good it is. A consolidation wallet moving value across hundreds
+    #: of counterparties can score extremely well and still be worthless to
+    #: copy; keeping "is it skilled?" and "is it copyable?" in one field is
+    #: what let that wallet sit at WATCH with a score of 80.
+    #:
+    #: ALPHA               directional behaviour that may be copyable
+    #: FLOW_CONTEXT        real, useful activity that is NOT copyable alpha
+    #: EVIDENCE_COLLECTION not yet characterised; keep observing
+    monitoring_purpose = Column(String, index=True)
+    monitoring_reason  = Column(Text)
+    behaviour_state    = Column(String, index=True)
+    copyability_state  = Column(String, index=True)
+    behaviour_at       = Column(String)
+    score_source       = Column(String)
+
     identity_source     = Column(String)   # helius | cache | none
     identity_type       = Column(String)   # CEX | PROTOCOL | BRIDGE | ...
     identity_name       = Column(String)
@@ -2173,9 +2189,6 @@ def _migrate_columns():
         # venue fees). These columns carry the cost side of the ledger.
         # The registry is young and will gain columns as §141 lands; every
         # one goes here so an existing database picks it up without a drop.
-        "wallet_registry": [
-            ("label", "TEXT"),
-        ],
         "auto_sim_portfolios": [
             ("reset_at", "TEXT"),
         ],
@@ -2197,6 +2210,19 @@ def _migrate_columns():
             ("fee_basis",  "TEXT"),
         ],
         "wallet_registry": [
+            # A DUPLICATE `"wallet_registry"` KEY USED TO SIT ABOVE THIS ONE
+            # and, being a dict literal, was silently discarded — so
+            # `("label", "TEXT")` never ran on any existing database. It is
+            # merged here, where it executes.
+            ("label", "TEXT"),
+            # Monitoring PURPOSE, separate from status. Added with the
+            # behaviour/copyability layer.
+            ("monitoring_purpose", "TEXT"),
+            ("monitoring_reason", "TEXT"),
+            ("behaviour_state", "TEXT"),
+            ("copyability_state", "TEXT"),
+            ("behaviour_at", "TEXT"),
+            ("score_source", "TEXT"),
             # W4/W5. Existing alpha_score values were the wallet's own
             # realized return, not post-entry alpha; they move to
             # legacy_alpha_score so the two semantics never share a column.

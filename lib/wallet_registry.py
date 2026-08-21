@@ -318,6 +318,33 @@ DEGRADED = "DEGRADED"
 ARCHIVED = "ARCHIVED"
 EXCLUDED_ENTITY = "EXCLUDED_ENTITY"
 
+# ── MONITORING PURPOSE. Orthogonal to STATUS, and deliberately so. ──────
+#
+# STATUS answers "how proven is this wallet?" (CANDIDATE -> WATCH ->
+# SMART_MONEY). PURPOSE answers "what are we watching it FOR?". They are
+# different questions and collapsing them produced a real contradiction: a
+# wallet distributing tokens across 415 counterparties in under two hours
+# sat at WATCH with a smart-money score of 80, because the score measured
+# activity quality and nothing asked whether the activity was copyable.
+ALPHA = "ALPHA"                          # directional, possibly copyable
+FLOW_CONTEXT = "FLOW_CONTEXT"            # real activity, not copyable alpha
+EVIDENCE_COLLECTION = "EVIDENCE_COLLECTION"   # not yet characterised
+
+MONITORING_PURPOSES = frozenset({ALPHA, FLOW_CONTEXT, EVIDENCE_COLLECTION})
+
+#: Only ALPHA wallets may source a wallet-alpha shadow pick. FLOW_CONTEXT
+#: wallets are still observed — their flow informs market context — and
+#: EVIDENCE_COLLECTION wallets are still observed because that is the only
+#: way they ever stop being unknown. NOTHING here is an identity claim.
+ALPHA_PURPOSES = frozenset({ALPHA})
+
+#: A wallet removed from the alpha population must not become unobservable,
+#: or it can never gather the evidence that would let it return. Every
+#: purpose keeps a bounded observation budget; they differ in PRIORITY, not
+#: in whether they are looked at.
+OBSERVABLE_PURPOSES = MONITORING_PURPOSES
+
+
 # Wallets whose activity is worth spending API budget on every pass. These
 # are the PROVEN ones plus anything the operator pinned by hand.
 MONITORABLE_STATUSES = frozenset({WATCH, SMART_MONEY, HIGH_CONVICTION})
@@ -363,7 +390,17 @@ def get_monitorable_wallets(db=None, *, limit: int | None = None) -> list[str]:
         rows = (session.query(WalletRegistry)
                 .filter(~WalletRegistry.status.in_(tuple(NEVER_MONITOR_STATUSES)))
                 .filter(or_(WalletRegistry.status.in_(tuple(MONITORABLE_STATUSES)),
-                            WalletRegistry.pinned.is_(True)))
+                            WalletRegistry.pinned.is_(True),
+                            # FLOW_CONTEXT IS A PURPOSE, NOT AN EXILE. A
+                            # wallet demoted out of the alpha population for
+                            # its behaviour must keep receiving the cheap
+                            # transfer observations that would let it be
+                            # re-evaluated — otherwise the demotion is
+                            # permanent by construction and the wallet can
+                            # never recover even if its behaviour changes.
+                            # It is excluded from the expensive deep-history
+                            # queue, not from being looked at.
+                            WalletRegistry.monitoring_purpose == FLOW_CONTEXT))
                 .all())
         rank = {HIGH_CONVICTION: 0, SMART_MONEY: 1, WATCH: 2}
         rows.sort(key=lambda r: (rank.get(r.status, 3),

@@ -39,6 +39,14 @@ def onchain_wallet_polling():
 
 
 # ── Wallet shadow intelligence ───────────────────────────────────────────
+def _current_population(model):
+    """Everything currently monitored, whatever it is monitored for."""
+    from sqlalchemy import or_
+    return or_(model.status.in_(("WATCH", "SMART_MONEY", "HIGH_CONVICTION")),
+               model.pinned.is_(True),
+               model.monitoring_purpose == "FLOW_CONTEXT")
+
+
 def _current(model):
     """Only observations that still stand.
 
@@ -60,6 +68,23 @@ def _abbrev_mint(mint):
         return None
     m = str(mint)
     return f"{m[:5]}…{m[-4:]}" if len(m) > 12 else m
+
+
+def _validation(r) -> dict:
+    """The DERIVED reading of a stored decision. Nothing is rewritten."""
+    from lib import wallet_shadow_intel as SI
+
+    v = SI.validation_state(getattr(r, "state", None),
+                            getattr(r, "copyability_state", None))
+    return {
+        "validation_state": v,
+        "validated": v == SI.VALIDATED_ELIGIBLE,
+        "provisional": v == SI.PROVISIONAL_ELIGIBLE,
+        "gate_state": getattr(r, "state", None),
+        "copyability_state": getattr(r, "copyability_state", None),
+        "copyability_reason": getattr(r, "copyability_reason", None),
+        "behaviour_state": getattr(r, "behaviour_state", None),
+    }
 
 
 def _event_row(r, *, full_mint: bool = False) -> dict:
@@ -188,6 +213,9 @@ def onchain_shadow_theses(limit: int = 50):
         out = []
         for r in rows:
             item = _event_row(r, full_mint=True)
+            # DERIVED, never stored: the gate's own decision stays
+            # exactly as it was recorded.
+            item.update(_validation(r))
             item["outcomes"] = [{
                 "horizon": o.horizon, "due_at": o.due_at,
                 "status": o.status,
@@ -240,6 +268,66 @@ def onchain_shadow_process(limit: int = 20000, max_clusters: int = 2000):
 
 
 # ── Wallet registry ──────────────────────────────────────────────────────
+@router.get("/onchain/wallets/roles")
+def onchain_wallet_roles(limit: int = 60):
+    """The monitored population, with what each wallet is watched FOR.
+
+    Safe labels only — the address never leaves the database.
+    """
+    from app.database import WalletRegistry, get_db
+    from lib import wallet_registry as WR
+    from lib.wallet_shadow_intel import safe_label
+
+    with get_db() as db:
+        rows = (db.query(WalletRegistry)
+                .filter(_current_population(WalletRegistry))
+                .order_by(WalletRegistry.status.desc(),
+                          WalletRegistry.smart_money_score.desc())
+                .limit(max(1, min(limit, 200))).all())
+        out = [{
+            "wallet": safe_label(w.address),
+            "status": w.status,
+            "purpose": w.monitoring_purpose or "EVIDENCE_COLLECTION",
+            "purpose_reason": w.monitoring_reason,
+            "entity_type": w.entity_type,
+            "behaviour": w.behaviour_state,
+            "copyability": w.copyability_state,
+            "score": w.smart_money_score,
+            "score_source": w.score_source,
+            "sample_count": w.sample_count,
+            "history_records": w.history_records_loaded,
+            "history_complete": bool(w.history_backfill_complete),
+            "pinned": bool(w.pinned),
+            "behaviour_at": w.behaviour_at,
+            "last_score_update": w.last_score_update,
+        } for w in rows]
+    counts: dict = {}
+    for r in out:
+        counts[r["purpose"]] = counts.get(r["purpose"], 0) + 1
+    from lib import provider_health as PH
+    cap = PH.should_probe("helius", "wallet_batch_identity")
+    return {
+        "wallets": out, "counts": counts,
+        "purposes": sorted(WR.MONITORING_PURPOSES),
+        "identity_capability": {
+            "status": cap.get("status"),
+            "http_status": cap.get("last_http_status"),
+            "last_probe_at": cap.get("last_attempt_at"),
+            "next_probe_at": cap.get("next_probe_at"),
+            "message": ("Helius Wallet Identity is unavailable on the current "
+                        "plan. Wallet identity remains unresolved; behavioural "
+                        "evidence is used for provisional copyability only."
+                        if cap.get("status") == PH.PLAN_FORBIDDEN else
+                        cap.get("reason")),
+        },
+        "note": ("ALPHA wallets may source a shadow pick. FLOW_CONTEXT "
+                 "wallets are real activity that is not copyable alpha — "
+                 "still observed, never a pick. EVIDENCE_COLLECTION is not "
+                 "yet characterised. A behavioural finding is never an "
+                 "identity claim"),
+    }
+
+
 @router.get("/onchain/intel/cycle")
 def onchain_intel_cycle():
     """Everything the completed cycle produced, in one read.

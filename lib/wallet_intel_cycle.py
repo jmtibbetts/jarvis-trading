@@ -73,8 +73,63 @@ MAX_WALLETS_RESCORED = 12
 # signature needs a transaction read, so this is intentionally much smaller
 # than the transfer poll budget.  Progress is durable through the registry's
 # oldest-signature cursor and eventually reaches the beginning of history.
-HISTORY_WALLETS_PER_CYCLE = 1
+#: DEFAULT ONE. Raising it is an operational decision that must be made
+#: against measured provider headroom, so it is configuration rather than a
+#: constant — and it fails safe: anything missing, malformed, zero, negative
+#: or out of range falls back to 1 without raising.
+HISTORY_WALLETS_ENV = "JARVIS_HELIUS_HISTORY_WALLETS_PER_CYCLE"
+HISTORY_WALLETS_DEFAULT = 1
+HISTORY_WALLETS_MIN = 1
+HISTORY_WALLETS_MAX = 3
 HISTORY_PAGE_SIZE = 25
+
+#: THE WHOLE CYCLE'S HELIUS BUDGET, not just this stage's. Deep history is
+#: the most expendable work in the cycle: transfer polling is how new
+#: evidence arrives at all, enrichment is what makes it classifiable, and
+#: both must be able to run even when history cannot. So history is admitted
+#: only against what is left after the essential stages are reserved.
+MAX_HELIUS_CALLS_PER_CYCLE = 200
+RESERVED_FOR_POLLING = 30          # ~11 monitored wallets, up to 2 pages each
+RESERVED_FOR_ENRICHMENT = 60       # wallet_swap_enrichment's own hard cap
+RESERVED_FOR_SCORING = 12          # one transfers read per rescored wallet
+
+
+def history_wallets_per_cycle() -> int:
+    """How many wallets may advance their durable history this pass."""
+    import os as _os
+
+    raw = _os.getenv(HISTORY_WALLETS_ENV)
+    if raw is None:
+        return HISTORY_WALLETS_DEFAULT
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("[IntelCycle] %s is not an integer; using %d",
+                       HISTORY_WALLETS_ENV, HISTORY_WALLETS_DEFAULT)
+        return HISTORY_WALLETS_DEFAULT
+    if n < HISTORY_WALLETS_MIN or n > HISTORY_WALLETS_MAX:
+        logger.warning("[IntelCycle] %s=%d is outside %d..%d; clamping",
+                       HISTORY_WALLETS_ENV, n, HISTORY_WALLETS_MIN,
+                       HISTORY_WALLETS_MAX)
+        return min(max(n, HISTORY_WALLETS_MIN), HISTORY_WALLETS_MAX)
+    return n
+
+
+def history_call_budget() -> int:
+    """Calls history may spend after the essential stages are reserved."""
+    return max(0, MAX_HELIUS_CALLS_PER_CYCLE - RESERVED_FOR_POLLING
+               - RESERVED_FOR_ENRICHMENT - RESERVED_FOR_SCORING)
+
+
+#: One wallet page costs one getSignaturesForAddress plus one getTransaction
+#: per signature returned.
+def calls_per_history_wallet() -> int:
+    return 1 + HISTORY_PAGE_SIZE
+
+
+# Kept as a module attribute so existing readers and tests still resolve it;
+# the callable above is the authority.
+HISTORY_WALLETS_PER_CYCLE = HISTORY_WALLETS_DEFAULT
 
 #: WHO GETS THE SCARCE DEEP-HISTORY BUDGET, in priority order.
 #
@@ -153,6 +208,9 @@ _STATE: dict = {
     "history_records_loaded": None,
     "history_swaps_stored": None,
     "history_backfills_completed": None,
+    "history_wallets_configured": None,
+    "history_calls_spent": None,
+    "history_deferred_budget": None,
     "entries_promoted": None,
     "alpha_horizons_filled": None,
     "alpha_awaiting_price": None,
@@ -353,6 +411,10 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
         "history_records_loaded": (history or {}).get("records_loaded"),
         "history_swaps_stored": (history or {}).get("swaps"),
         "history_backfills_completed": (history or {}).get("completed"),
+        "history_wallets_configured": (history or {}).get(
+            "configured_wallets"),
+        "history_calls_spent": (history or {}).get("calls_spent"),
+        "history_deferred_budget": (history or {}).get("deferred_budget"),
         "entries_promoted": (alpha or {}).get("promoted"),
         "alpha_horizons_filled": (alpha or {}).get("horizons_filled"),
         "alpha_awaiting_price": (alpha or {}).get("awaiting_price"),
@@ -404,6 +466,11 @@ def _enrich() -> dict:
     return E.enrich_pending()
 
 
+def _lab(address) -> str:
+    a = str(address or "")
+    return f"{a[:4]}…{a[-4:]}" if len(a) > 10 else a
+
+
 def _backfill_history() -> dict:
     """Advance durable balance-delta history for pinned wallets.
 
@@ -418,14 +485,30 @@ def _backfill_history() -> dict:
     from app.database import engine, get_db
     from lib import wallet_swaps
 
+    wanted = history_wallets_per_cycle()
+    budget = history_call_budget()
+    per_wallet = calls_per_history_wallet()
+    affordable = budget // per_wallet if per_wallet else 0
     with engine.connect() as conn:
         rows = conn.execute(text(HISTORY_QUEUE_SQL),
-                            {"lim": HISTORY_WALLETS_PER_CYCLE}).fetchall()
+                            {"lim": wanted}).fetchall()
 
     out = {"wallets_attempted": 0, "records_loaded": 0, "swaps": 0,
            "not_trades": 0, "unvalued": 0, "completed": 0,
-           "page_size": HISTORY_PAGE_SIZE}
+           "page_size": HISTORY_PAGE_SIZE, "configured_wallets": wanted,
+           "affordable_wallets": affordable, "call_budget": budget,
+           "calls_per_wallet": per_wallet, "calls_spent": 0,
+           "deferred_budget": 0, "deferred": []}
     for address, oldest, _complete in rows:
+        # ADMISSION CHECK. If the remaining budget cannot fund a WHOLE page,
+        # the wallet is deferred to the next cycle rather than started and
+        # cut short — a half-read page whose cursor advanced would silently
+        # skip the signatures it never fetched.
+        if out["calls_spent"] + per_wallet > budget:
+            out["deferred_budget"] += 1
+            out["deferred"].append(_lab(address))
+            continue
+        out["calls_spent"] += per_wallet
         out["wallets_attempted"] += 1
         # Establish the newest/oldest cursor on the first pass; subsequent
         # passes continue backward from the durable oldest signature.
@@ -727,8 +810,13 @@ def status() -> dict:
         "transfers_observed": poll.get("observed"),
         "process_window_seconds": PROCESS_WINDOW_SECONDS,
         "max_wallets_rescored": MAX_WALLETS_RESCORED,
-        "history_wallets_per_cycle": HISTORY_WALLETS_PER_CYCLE,
+        "history_wallets_per_cycle": history_wallets_per_cycle(),
+        "history_wallets_env": HISTORY_WALLETS_ENV,
+        "history_wallets_bounds": [HISTORY_WALLETS_MIN, HISTORY_WALLETS_MAX],
         "history_page_size": HISTORY_PAGE_SIZE,
+        "history_call_budget": history_call_budget(),
+        "calls_per_history_wallet": calls_per_history_wallet(),
+        "max_helius_calls_per_cycle": MAX_HELIUS_CALLS_PER_CYCLE,
         "note": ("one bounded pass per wallet poll. It reads chain and "
                  "market data and writes shadow intelligence only: no "
                  "order, no signing, no cash movement, and no scheduler. "

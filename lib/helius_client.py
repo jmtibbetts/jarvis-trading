@@ -341,9 +341,17 @@ def health() -> dict:
     if not configured():
         out["detail"] = "HELIUS_API_KEY not set"
         return out
+    # THE WALLET-API PROBE USED `wallet_identity`, WHICH THIS PLAN FORBIDS.
+    # Measured on the live process: 187 health checks produced 187 identity
+    # calls and 187 HTTP 403s — every one guaranteed to fail before it was
+    # sent. `balances` is the same Wallet API surface, same auth, and is
+    # entitled, so it answers the reachability question the probe is
+    # actually asking without spending a call on a refusal.
+    def _wallet_api_probe():
+        return balances("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9")
+
     for name, fn in (("rpc", lambda: rpc("getHealth")),
-                     ("wallet_api", lambda: wallet_identity(
-                         "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"))):
+                     ("wallet_api", _wallet_api_probe)):
         started = time.time()
         try:
             fn()

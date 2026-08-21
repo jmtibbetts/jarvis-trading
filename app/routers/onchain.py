@@ -38,6 +38,192 @@ def onchain_wallet_polling():
     return wallet_poller.status()
 
 
+# ── Wallet shadow intelligence ───────────────────────────────────────────
+def _abbrev_mint(mint):
+    """A mint the operator can recognise; the full value ships separately so
+    a copy control can offer it deliberately rather than the table leaking
+    it into every screenshot."""
+    if not mint:
+        return None
+    m = str(mint)
+    return f"{m[:5]}…{m[-4:]}" if len(m) > 12 else m
+
+
+def _event_row(r, *, full_mint: bool = False) -> dict:
+    import json as _json
+
+    def _load(v, default=None):
+        try:
+            return _json.loads(v) if v else default
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "id": r.id,
+        "cluster_id": r.cluster_id,
+        "source": r.source,
+        "execution_mode": r.execution_mode,
+        "event_type": r.event_type,
+        "classification": r.classification,
+        "evidence_quality": r.evidence_quality,
+        "classification_reason": r.classification_reason,
+        "schema_compatibility": r.schema_compatibility,
+        "direction": r.direction,
+        # DISPLAY vs IDENTITY. The abbreviation is for the table; the full
+        # mint is offered explicitly, and a ticker is never either.
+        "mint_abbrev": _abbrev_mint(r.subject_mint),
+        "mint": r.subject_mint if full_mint else None,
+        # A MINT IS NOT A SYMBOL. `parse_transfers` falls back to the mint
+        # when the feed reports no symbol — which is most SPL tokens — so
+        # passing it through as `symbol` put the FULL 44-character address
+        # in a display column that was meant to be abbreviated. Null it, and
+        # the client falls back to `mint_abbrev` as intended.
+        "symbol": (r.subject_symbol
+                   if r.subject_symbol and r.subject_symbol != r.subject_mint
+                   else None),
+        "chain": r.chain,
+        "subject_amount": r.subject_amount,
+        "quote_symbol": r.quote_symbol,
+        "quote_amount": r.quote_amount,
+        "notional_usd": r.notional_usd,
+        # Safe labels only — never a full wallet address.
+        "wallets": _load(r.wallets_json, []),
+        "wallet_count": r.wallet_count,
+        "signature_count": r.signature_count,
+        "leg_count": r.leg_count,
+        "event_time": r.event_time,
+        "observed_at": r.observed_at,
+        "state": r.state,
+        "refusal_reason": r.refusal_reason,
+        "eligibility_reason": r.eligibility_reason,
+        "reference_price_usd": r.reference_price_usd,
+        "reference_price_source": r.reference_price_source,
+        "reference_price_at": r.reference_price_at,
+        "wallet_quality": _load(r.wallet_quality_json),
+        "market_context": _load(r.market_context_json),
+        "expected_cost": _load(r.expected_cost_json),
+        "thesis_id": r.thesis_id,
+        "horizons": _load(r.horizons_json, []),
+        "model_version": r.model_version,
+        "classifier_version": r.classifier_version,
+    }
+
+
+@router.get("/onchain/shadow/summary")
+def onchain_shadow_summary():
+    """Source-isolated Helius wallet intelligence, and the polling behind it.
+
+    SHADOW ONLY — no order was ever submitted. Kept apart from JARVIS
+    execution, manual operator results and both virtual books.
+    """
+    from lib import wallet_poller, wallet_shadow_intel as SI
+
+    perf = SI.performance()
+    return {
+        **perf,
+        "polling": wallet_poller.status(),
+        "policy": {
+            "cluster_window_seconds": SI.CLUSTER_WINDOW_SECONDS,
+            "price_max_age_seconds": SI.PRICE_MAX_AGE_SECONDS,
+            "min_notional_usd": SI.MIN_NOTIONAL_USD,
+            "min_liquidity_usd": SI.MIN_LIQUIDITY_USD,
+            "horizons": list(SI.HORIZONS),
+        },
+    }
+
+
+@router.get("/onchain/shadow/events")
+def onchain_shadow_events(state: str = None, event_type: str = None,
+                          limit: int = 50):
+    """Recent classified economic events — eligible AND refused.
+
+    Refused events are first-class here: they are how the operator sees
+    which evidence is missing rather than watching rows disappear.
+    """
+    from app.database import WalletShadowEvent, get_db
+
+    with get_db() as db:
+        q = db.query(WalletShadowEvent)
+        if state:
+            q = q.filter(WalletShadowEvent.state == state.upper())
+        if event_type:
+            q = q.filter(WalletShadowEvent.event_type == event_type.upper())
+        rows = q.order_by(WalletShadowEvent.event_time.desc()).limit(
+            max(1, min(int(limit), 200))).all()
+        out = [_event_row(r) for r in rows]
+    return {"events": out, "count": len(out),
+            "source": "HELIUS_WALLET_INTELLIGENCE",
+            "execution_mode": "SHADOW",
+            "disclaimer": "SHADOW INTELLIGENCE — NO ORDER SUBMITTED"}
+
+
+@router.get("/onchain/shadow/theses")
+def onchain_shadow_theses(limit: int = 50):
+    """Eligible shadow theses, with their forward checkpoints.
+
+    An empty list is a real answer — it means every event was refused, and
+    `/onchain/shadow/summary` says exactly why.
+    """
+    from app.database import (WalletShadowEvent, WalletShadowOutcome, get_db)
+
+    with get_db() as db:
+        rows = db.query(WalletShadowEvent).filter(
+            WalletShadowEvent.state == "ELIGIBLE").order_by(
+            WalletShadowEvent.event_time.desc()).limit(
+            max(1, min(int(limit), 200))).all()
+        out = []
+        for r in rows:
+            item = _event_row(r, full_mint=True)
+            item["outcomes"] = [{
+                "horizon": o.horizon, "due_at": o.due_at,
+                "status": o.status,
+                "checkpoint_at": o.checkpoint_at,
+                "checkpoint_price_usd": o.checkpoint_price_usd,
+                "gross_return_pct": o.gross_return_pct,
+                "estimated_cost_pct": o.estimated_cost_pct,
+                "net_return_pct": o.net_return_pct,
+                "unresolved_reason": o.unresolved_reason,
+            } for o in db.query(WalletShadowOutcome).filter(
+                WalletShadowOutcome.event_id == r.id).all()]
+            out.append(item)
+    return {"theses": out, "count": len(out),
+            "execution_mode": "SHADOW",
+            "disclaimer": "SHADOW INTELLIGENCE — NO ORDER SUBMITTED"}
+
+
+@router.get("/onchain/shadow/refusals")
+def onchain_shadow_refusals(limit: int = 12):
+    """Why events did not become theses, most common first."""
+    from sqlalchemy import text
+
+    from app.database import engine
+    from lib import wallet_shadow_intel as SI
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT refusal_reason, COUNT(*) c, MAX(event_time) latest "
+            "FROM wallet_shadow_events WHERE state='REFUSED' "
+            "GROUP BY refusal_reason ORDER BY c DESC LIMIT :lim"),
+            {"lim": max(1, min(int(limit), 50))}).fetchall()
+    return {"refusals": [{"reason": r[0] or "UNKNOWN", "count": r[1],
+                          "latest_event_time": r[2]} for r in rows],
+            "vocabulary": list(SI.REFUSAL_REASONS)}
+
+
+@router.post("/onchain/shadow/process")
+def onchain_shadow_process(limit: int = 20000, max_clusters: int = 2000):
+    """Re-classify stored observations. IDEMPOTENT — keyed on cluster id.
+
+    Read-only against every provider: it re-reads observations already
+    collected and writes only shadow rows. No order, no position, no cash.
+    """
+    from lib import wallet_shadow_intel as SI
+
+    stats = SI.process(limit=limit, max_clusters=max_clusters)
+    stats["outcomes"] = SI.resolve_outcomes(limit=2000)
+    return stats
+
+
 # ── Wallet registry ──────────────────────────────────────────────────────
 @router.get("/onchain/wallets")
 def onchain_wallets(status: str = None, limit: int = 100):

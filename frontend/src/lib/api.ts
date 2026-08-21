@@ -1959,6 +1959,8 @@ export const api = {
    * gets them the same ApiError classification as everything else.
    */
   raw: <T>(path: string) => get<T>(path),
+  /** The POST half of the same escape hatch, with the same error handling. */
+  rawPost: <T>(path: string, body?: unknown) => post<T>(path, body),
   signals: (status?: string, limit = 150) =>
     get<Signal[]>(`/signals${status ? `?status=${status}&limit=${limit}` : `?limit=${limit}`}`),
   threats: (limit = 60, filters?: { confirmation?: string; minReliability?: number }) => {

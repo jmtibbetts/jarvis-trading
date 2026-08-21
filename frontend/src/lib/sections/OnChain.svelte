@@ -37,6 +37,14 @@
   let riskScan = $state<any | null>(null);
   let riskBusy = $state(false);
 
+  // Helius wallet SHADOW intelligence. Read-only evidence: classified
+  // economic events, deterministic theses or truthful refusals, and forward
+  // outcomes where a price actually exists. No order is ever submitted.
+  let shadow = $state<any | null>(null);
+  let shadowEvents = $state<any | null>(null);
+  let shadowTheses = $state<any | null>(null);
+  let reclassing = $state(false);
+
   async function loadAll() {
     // NO third argument. `load(key, fn, opts?)` takes `{ keepLast }` — the
     // old signature took the caller's previous value, and this call site
@@ -45,15 +53,36 @@
     // function called from an `$effect` that then WRITES all six made the
     // effect re-trigger itself. That is the measured 34-requests-in-10s
     // storm — fixed inside FeedTracker, still live here.
-    const [w, d, s, b, p, h] = await Promise.all([
+    const [w, d, s, b, p, h, sh, se, st] = await Promise.all([
       feeds.load("wallets", () => api.raw<any>("/onchain/wallets?limit=60")),
       feeds.load("discovery", () => api.raw<any>("/onchain/discovery/status")),
       feeds.load("surge", () => api.raw<any>("/onchain/surge?limit=15")),
       feeds.load("book", () => api.dexBook()),
       feeds.load("protocols", () => api.raw<any>("/onchain/protocols")),
       feeds.load("helius", () => api.raw<any>("/helius/health")),
+      feeds.load("shadow", () => api.raw<any>("/onchain/shadow/summary")),
+      feeds.load("shadowEvents", () => api.raw<any>("/onchain/shadow/events?limit=40")),
+      feeds.load("shadowTheses", () => api.raw<any>("/onchain/shadow/theses?limit=25")),
     ]);
     wallets = w; discovery = d; surge = s; book = b; protocols = p; helius = h;
+    shadow = sh; shadowEvents = se; shadowTheses = st;
+  }
+
+  async function reclassify() {
+    if (reclassing) return;
+    reclassing = true;
+    try {
+      const r = await api.rawPost<any>("/onchain/shadow/process");
+      toastStore.ok(
+        `Re-classified ${r.events} events into ${r.clusters} observations — ` +
+        `${r.eligible} eligible, ${r.refused} refused`,
+      );
+      await loadAll();
+    } catch (e) {
+      toastStore.err(`Re-classification failed: ${e}`);
+    } finally {
+      reclassing = false;
+    }
   }
 
   $effect(() => {
@@ -107,6 +136,274 @@
     <KpiTile label="Excluded" value={String(c.excluded_entities ?? "—")} period="exchanges, pools, PDAs" />
     <KpiTile label="Smart Money" value={String(c.smart_money ?? 0)} period="none until measured" />
     <KpiTile label="DEX Equity" value={usd(book?.equity_executable_usd)} period="executable — what the book could realise" />
+    <KpiTile label="Observations"
+             value={shadow ? num(shadow.observations?.market_observations, 0) : "—"}
+             period="market events, after leg + copy suppression" />
+    <KpiTile label="Shadow Theses"
+             value={shadow ? String(shadow.eligible ?? 0) : "—"}
+             period="eligible — no order submitted" />
+    <KpiTile label="Refused"
+             value={shadow ? num(shadow.refused, 0) : "—"}
+             period="evidence missing, reasons kept" />
+  </div>
+
+  <!-- ── HELIUS WALLET SHADOW INTELLIGENCE ───────────────────────────────
+       Read-only. Every panel below distinguishes "we looked and found
+       nothing" from "we could not look", and labels every thesis as
+       SHADOW so nothing here can be mistaken for an order. -->
+  <div class="grid">
+    <Panel title="Helius Wallet Polling" status={feeds.status("shadow")}
+           meta={shadow?.polling?.enabled ? "read-only · on a timer" : "disabled"}>
+      {#if shadow?.polling}
+        {@const p = shadow.polling}
+        <div class="stat-list">
+          <div class="stat"><span>Polling</span>
+            <b><Pill label={p.enabled ? (p.running ? "ENABLED · RUNNING" : "ENABLED · IDLE") : "DISABLED"}
+                     tone={p.enabled && p.running ? "good" : p.enabled ? "warm" : "neutral"} /></b></div>
+          <div class="stat"><span>Interval</span><b class="num">{p.interval_seconds}s</b></div>
+          <div class="stat"><span>Watched wallets</span>
+            <b class="num">{p.subsystem?.wallets_watched ?? "—"}</b></div>
+          <div class="stat"><span>Last completed</span>
+            <b class="num">{p.last_completed_at ? new Date(p.last_completed_at).toLocaleTimeString() : "—"}</b></div>
+          <div class="stat"><span>Next run</span>
+            <b class="num">{p.next_run_at && p.next_run_at !== "imminent"
+              ? new Date(p.next_run_at).toLocaleTimeString() : (p.next_run_at ?? "—")}</b></div>
+          <div class="stat"><span>Last result</span>
+            <b><Pill label={p.last_result ?? "—"}
+                     tone={p.last_result === "POLL_OK" ? "good"
+                           : p.last_result === "POLL_FAILED" ? "bad" : "neutral"} /></b></div>
+          <!-- MISSING IS NOT ZERO: a pass that could not look reports null. -->
+          <div class="stat"><span>Observed / inserted / deduped</span>
+            <b class="num">{p.observed ?? "—"} / {p.inserted ?? "—"} / {p.deduplicated ?? "—"}</b></div>
+          <div class="stat"><span>Provider calls</span><b class="num">{p.provider_calls ?? "—"}</b></div>
+          <div class="stat"><span>Polls completed</span><b class="num">{p.polls_completed}</b></div>
+          <div class="stat"><span>Overlaps refused</span><b class="num">{p.polls_refused_overlapping}</b></div>
+        </div>
+        {#if p.last_error}
+          <div class="degraded" style="margin-top:10px">
+            <em>Last bounded error</em> — {p.last_error}
+          </div>
+        {/if}
+        <p class="note">
+          JARVIS POLLS; nothing listens. No webhook, no queue, no inbound
+          host. Counts read “—” when a pass did not look: a quiet chain and
+          an unreachable provider are different facts.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("shadow")} noun="Helius polling status" />
+      {/if}
+    </Panel>
+
+    <Panel title="Wallet Intelligence — Classification" status={feeds.status("shadow")}
+           meta="transfers → economic events → market observations">
+      {#if shadow?.observations}
+        {@const o = shadow.observations}
+        <div class="stat-list">
+          <div class="stat"><span>Transfer legs stored</span><b class="num">{num(o.transfer_legs, 0)}</b></div>
+          <div class="stat"><span>Signatures (economic events)</span><b class="num">{num(o.signatures, 0)}</b></div>
+          <div class="stat"><span>Market observations</span><b class="num">{num(o.market_observations, 0)}</b></div>
+          <div class="stat"><span>Legs per observation</span><b class="num">{num(o.legs_per_observation, 2)}</b></div>
+          <div class="stat"><span>Signatures per observation</span><b class="num">{num(o.signatures_per_observation, 2)}</b></div>
+        </div>
+        <div class="sub">By classification</div>
+        <div class="chips">
+          {#each shadow.by_classification ?? [] as c2}
+            <span class="chip"><b>{num(c2.count, 0)}</b><em>{c2.classification}</em></span>
+          {/each}
+        </div>
+        <div class="sub">Event types</div>
+        <div class="chips">
+          {#each (shadow.by_event_type ?? []).slice(0, 8) as t}
+            <span class="chip"><b>{num(t.count, 0)}</b><em>{t.event_type}</em></span>
+          {/each}
+        </div>
+        <p class="note">
+          MULTIPLE LEGS ARE NOT MULTIPLE VOTES. A routed swap arrives as
+          seven or eight transfers; wallets acting on the same token inside
+          {shadow.policy?.cluster_window_seconds ?? 900}s collapse again.
+          Both ratios above are that suppression, measured.
+        </p>
+        <button class="btn small outline" disabled={reclassing} onclick={reclassify}>
+          {reclassing ? "Re-classifying…" : "Re-classify stored observations"}
+        </button>
+      {:else}
+        <StateNote status={feeds.status("shadow")} noun="classification summary" />
+      {/if}
+    </Panel>
+
+    <Panel title="Shadow Theses" status={feeds.status("shadowTheses")}
+           meta="deterministic eligibility · measured, never acted on">
+      <div class="shadowbar">SHADOW INTELLIGENCE — NO ORDER SUBMITTED</div>
+      {#if shadowTheses?.theses?.length}
+        <table class="tbl">
+          <thead><tr>
+            <th>Token</th><th>Dir</th><th class="num">Ref price</th>
+            <th class="num">Notional</th><th>Wallets</th><th>Outcomes</th>
+          </tr></thead>
+          <tbody>
+            {#each shadowTheses.theses as t}
+              <tr>
+                <td class="sym" title={t.mint ?? ""}>{t.symbol ?? t.mint_abbrev}</td>
+                <td><Pill label={t.direction ?? "—"}
+                          tone={t.direction === "BUY" ? "good" : "bad"} /></td>
+                <td class="num">{t.reference_price_usd == null ? "UNKNOWN"
+                  : `$${Number(t.reference_price_usd).toPrecision(4)}`}</td>
+                <td class="num">{usd(t.notional_usd)}</td>
+                <td class="num">{t.wallet_count}</td>
+                <td>
+                  <div class="assets">
+                    {#each t.outcomes ?? [] as o}
+                      <span class="leg" class:unres={o.status !== "RESOLVED"}>
+                        {o.horizon}
+                        <em>{o.status === "RESOLVED"
+                          ? `${Number(o.net_return_pct).toFixed(1)}% net`
+                          : "UNRESOLVED"}</em>
+                      </span>
+                    {/each}
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else if shadow}
+        <!-- NOT an error, and not a blank panel. Every event was examined
+             and refused, and the reasons are in the next panel. -->
+        <div class="degraded">
+          <em>No eligible thesis</em> — all
+          {num(shadow.refused, 0)} market observations were examined and
+          refused. This is the gate working, not a failure: the reasons are
+          listed under Refusals, and nothing was fabricated to fill this
+          table.
+        </div>
+      {:else}
+        <StateNote status={feeds.status("shadowTheses")} noun="shadow theses" />
+      {/if}
+      <p class="note">
+        Shadow means shadow. These are measurements of what watching these
+        wallets would have been worth — never permission to act, and never
+        pooled with JARVIS execution, manual operator or virtual-book results.
+      </p>
+    </Panel>
+
+    <Panel title="Refusals" status={feeds.status("shadow")}
+           meta="why an observation did not become a thesis">
+      {#if shadow?.by_refusal_reason?.length}
+        <table class="tbl">
+          <thead><tr><th>Reason</th><th class="num">Count</th></tr></thead>
+          <tbody>
+            {#each shadow.by_refusal_reason as r}
+              <tr>
+                <td class="sym">{r.reason}</td>
+                <td class="num"><b>{num(r.count, 0)}</b></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="note">
+          Refusals are kept, not discarded — they measure classification
+          quality and name exactly which evidence is missing. UNKNOWN wallet
+          quality is a refusal, not a neutral score: an unproven wallet does
+          not get the benefit of the doubt.
+        </p>
+      {:else if shadow}
+        <StateNote status={feeds.status("shadow")} noun="refusals"
+                   emptyText="No refusals recorded — every observation passed the gate." />
+      {:else}
+        <StateNote status={feeds.status("shadow")} noun="refusals" />
+      {/if}
+    </Panel>
+
+    <Panel title="Forward Outcomes" status={feeds.status("shadow")}
+           meta="gross AND net of an assumed round trip">
+      {#if shadow && Object.keys(shadow.horizons ?? {}).length}
+        <table class="tbl">
+          <thead><tr>
+            <th>Horizon</th><th class="num">Resolved</th>
+            <th class="num">Unresolved</th><th class="num">Gross</th>
+            <th class="num">Net</th><th>Sample</th>
+          </tr></thead>
+          <tbody>
+            {#each Object.entries(shadow.horizons) as [h, cell]}
+              {@const v = cell as any}
+              <tr>
+                <td class="sym">{h}</td>
+                <td class="num">{v.resolved}</td>
+                <td class="num">{v.unresolved}</td>
+                <td class="num">{v.gross_return_pct == null ? "—" : `${v.gross_return_pct}%`}</td>
+                <td class="num">{v.net_return_pct == null ? "—" : `${v.net_return_pct}%`}</td>
+                <td>
+                  <Pill label={v.sample_sufficient ? "sufficient" : "too few"}
+                        tone={v.sample_sufficient ? "good" : "warm"} />
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else if shadow}
+        <div class="degraded">
+          <em>No forward outcomes yet</em> — checkpoints are created when a
+          thesis is eligible, and there are
+          {num(shadow.eligible, 0)}. UNRESOLVED is never counted as a loss.
+        </div>
+      {:else}
+        <StateNote status={feeds.status("shadow")} noun="forward outcomes" />
+      {/if}
+      <p class="note">
+        Returns are shown before AND after an assumed
+        {shadow?.estimated_round_trip_cost_pct ?? 3}% on-chain round trip.
+        Observed profit before costs is not edge, and no expectancy is stated
+        below {shadow?.min_sample_for_expectancy ?? 20} resolved observations.
+      </p>
+    </Panel>
+
+    <Panel title="Recent Classified Activity" status={feeds.status("shadowEvents")}
+           meta="real Helius observations — safe labels only">
+      {#if shadowEvents?.events?.length}
+        <!-- Seven columns do not fit a 557px panel at this breakpoint.
+             The table scrolls inside its own container rather than pushing
+             the page sideways — measured, not assumed. -->
+        <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr>
+            <th>Time</th><th>Type</th><th>Token</th><th class="num">Amount</th>
+            <th>Wallets</th><th>Legs</th><th>Verdict</th>
+          </tr></thead>
+          <tbody>
+            {#each shadowEvents.events.slice(0, 25) as e}
+              <tr>
+                <td class="num small">{e.event_time
+                  ? new Date(e.event_time).toLocaleString(undefined,
+                      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+                  : "—"}</td>
+                <td class="sym small">{e.event_type}</td>
+                <!-- Abbreviated by default. The backend nulls `symbol` when
+                     it is really the mint, so this can never widen into a
+                     full 44-character address. -->
+                <td class="sym small" title={e.classification_reason ?? ""}>
+                  {e.symbol ?? e.mint_abbrev ?? "UNKNOWN"}</td>
+                <td class="num">{e.subject_amount == null ? "UNKNOWN" : num(e.subject_amount, 2)}</td>
+                <td class="num">{e.wallet_count || "—"}</td>
+                <td class="num">{e.leg_count}</td>
+                <td>
+                  <Pill label={e.state === "ELIGIBLE" ? "ELIGIBLE" : (e.refusal_reason ?? "REFUSED")}
+                        tone={e.state === "ELIGIBLE" ? "good" : "neutral"} />
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        </div>
+        <p class="note">
+          Wallets appear as counts and safe labels; full addresses and mints
+          are never rendered by default. A transfer with no paired swap leg
+          stays UNKNOWN_TRANSFER rather than being called a trade.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("shadowEvents")} noun="classified events"
+                   emptyText="No classified events yet — run a re-classification pass." />
+      {/if}
+    </Panel>
   </div>
 
   <div class="grid">
@@ -435,4 +732,14 @@
   .leg em { font-style: normal; font-family: var(--mono); color: var(--ink-dim); font-size: 9.5px; }
   .leg.unres { border-color: var(--warm); color: var(--warm); }
   tr.hit td { background: color-mix(in srgb, var(--bad) 8%, transparent); }
+  /* The one thing that must never be missed on this panel. Worded, not
+     colour alone — a shadow thesis read as an order is the worst possible
+     misreading of this screen. */
+  /* Wide content scrolls in its own box; the page never scrolls sideways. */
+  .tblwrap { overflow-x: auto; }
+  .shadowbar { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+               color: var(--accent); border: 1px solid var(--accent-dim);
+               background: color-mix(in srgb, var(--accent) 8%, transparent);
+               border-radius: var(--radius-sm); padding: 5px 9px; margin-bottom: 9px;
+               text-align: center; font-weight: 600; }
 </style>

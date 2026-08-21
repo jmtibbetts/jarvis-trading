@@ -258,7 +258,7 @@ def _store(observations: list[dict]) -> int:
         except (TypeError, ValueError):
             ts = None
         try:
-            rows.append(event_to_dict(OnChainEvent(
+            row = event_to_dict(OnChainEvent(
                 meta=make_meta("helius", PARSER_VERSION, ts),
                 symbol=str(o.get("symbol") or "UNKNOWN"),
                 metric=f"wallet_transfer_{o['direction']}",
@@ -268,7 +268,25 @@ def _store(observations: list[dict]) -> int:
                 # counterparties; all four are needed for identity.
                 dedup_key=(f"helius:{o['signature']}:{o.get('mint')}"
                            f":{o.get('counterparty')}:{o['direction']}"),
-            )))
+            ))
+            # WHOSE WALLET THIS WAS. `parse_transfers` has always produced
+            # it and this dropped it, so a stored row said what moved and
+            # between whom but never for which watched wallet — and
+            # `direction` is stated RELATIVE to that wallet, so without it
+            # an "out" cannot be attributed. Classification needs it; rows
+            # written before this change carry None and are treated as
+            # LEGACY_PARTIAL rather than being guessed at.
+            #
+            # Deliberately NOT part of `dedup_key`: identity is still the
+            # transfer itself, so adding these cannot re-insert history.
+            #
+            # `event_to_dict` returns a FLAT dict and the store serializes
+            # the whole thing into `payload`, so these belong at the top
+            # level — there is no nested payload key to reach into.
+            row["watched_wallet"] = o.get("wallet")
+            row["mint"] = o.get("mint")
+            row["counterparty"] = o.get("counterparty")
+            rows.append(row)
         except Exception as e:
             logger.debug(f"[WalletActivity] row skipped: {e}")
     return get_store().append(rows) if rows else 0

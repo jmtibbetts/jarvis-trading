@@ -2982,6 +2982,120 @@ class ManualTradeCorrection(Base):
     corrected_at         = Column(String, nullable=False, default=now_iso)
 
 
+# ── HELIUS WALLET SHADOW INTELLIGENCE ────────────────────────────────────
+# One row per ECONOMIC OBSERVATION, not per transfer and not per wallet.
+# 20,778 stored transfer legs collapse to 3,882 signatures, and coordinated
+# wallets acting on the same token in the same window collapse again — a
+# cluster. Counting any of the finer grains would inflate the sample, which
+# is the one error this whole subsystem is built to avoid.
+class WalletShadowEvent(Base):
+    """A classified on-chain economic event, and what was decided about it.
+
+    SHADOW ONLY. No order, no position, no cash. The row records either an
+    eligible thesis or the deterministic reason one was refused — and the
+    refusals are the point as much as the theses, because they measure
+    classification quality, gate selectivity and what evidence is missing.
+    """
+    __tablename__ = "wallet_shadow_events"
+    __table_args__ = (
+        # ONE CLUSTER, ONE MARKET OBSERVATION — a database fact.
+        UniqueConstraint("cluster_id", name="uq_wse_cluster"),
+        Index("ix_wse_state", "state"),
+        Index("ix_wse_mint", "subject_mint"),
+        Index("ix_wse_time", "event_time"),
+    )
+
+    id                = Column(String, primary_key=True, default=new_id)
+    cluster_id        = Column(String, nullable=False)
+    source            = Column(String, nullable=False)   # HELIUS_WALLET_INTELLIGENCE
+    execution_mode    = Column(String, nullable=False)   # SHADOW
+
+    # ── Identity. A MINT, never a ticker. ────────────────────────────────
+    subject_mint      = Column(String)
+    subject_symbol    = Column(String)                   # display only
+    chain             = Column(String, nullable=False, default="solana")
+    direction         = Column(String)                   # BUY | SELL
+    event_type        = Column(String, nullable=False)
+    classification    = Column(String, nullable=False)
+    evidence_quality  = Column(String)
+    classification_reason = Column(Text)
+    schema_compatibility  = Column(String)
+
+    # ── The evidence behind the cluster ──────────────────────────────────
+    signatures_json   = Column(Text)      # every contributing signature
+    wallets_json      = Column(Text)      # contributing wallets (may be null)
+    signature_count   = Column(Integer, nullable=False, default=1)
+    wallet_count      = Column(Integer, nullable=False, default=0)
+    leg_count         = Column(Integer, nullable=False, default=0)
+    subject_amount    = Column(Float)
+    quote_mint        = Column(String)
+    quote_symbol      = Column(String)
+    quote_amount      = Column(Float)
+    notional_usd      = Column(Float)
+
+    event_time        = Column(String)
+    observed_at       = Column(String)
+
+    # ── Point-in-time snapshots, frozen. NEVER recomputed from today. ────
+    wallet_quality_json  = Column(Text)
+    market_context_json  = Column(Text)
+    expected_cost_json   = Column(Text)
+
+    # ── The verdict ──────────────────────────────────────────────────────
+    state             = Column(String, nullable=False)   # ELIGIBLE | REFUSED
+    refusal_reason    = Column(String)
+    eligibility_reason = Column(Text)
+    reference_price_usd   = Column(Float)
+    reference_price_source = Column(String)
+    reference_price_at    = Column(String)
+
+    thesis_id         = Column(String)
+    horizons_json     = Column(Text)
+
+    engine_epoch      = Column(String)
+    classifier_version = Column(String)
+    model_version     = Column(String, nullable=False)
+    created_at        = Column(String, nullable=False, default=now_iso)
+    updated_at        = Column(String, nullable=False, default=now_iso)
+
+
+class WalletShadowOutcome(Base):
+    """One forward checkpoint for one shadow thesis.
+
+    UNRESOLVED IS NOT A LOSS. A checkpoint with no qualifying price stays
+    UNRESOLVED forever rather than defaulting to zero, and the desk counts
+    it in the denominator so "we could not see" never reads as "it went
+    nowhere".
+    """
+    __tablename__ = "wallet_shadow_outcomes"
+    __table_args__ = (
+        UniqueConstraint("event_id", "horizon", name="uq_wso_event_horizon"),
+        Index("ix_wso_status", "status"),
+    )
+
+    id             = Column(String, primary_key=True, default=new_id)
+    event_id       = Column(String, nullable=False)
+    cluster_id     = Column(String, nullable=False)
+    horizon        = Column(String, nullable=False)      # 15m | 1h | 4h | 24h | 7d
+    due_at         = Column(String, nullable=False)
+
+    status         = Column(String, nullable=False)      # UNRESOLVED | RESOLVED | EXPIRED
+    checkpoint_at  = Column(String)
+    checkpoint_price_usd = Column(Float)
+    price_source   = Column(String)
+    price_age_seconds = Column(Float)
+
+    reference_price_usd = Column(Float)
+    gross_return_pct = Column(Float)
+    estimated_cost_pct = Column(Float)
+    net_return_pct   = Column(Float)
+
+    unresolved_reason = Column(String)
+    outcome_version  = Column(String, nullable=False)
+    created_at     = Column(String, nullable=False, default=now_iso)
+    updated_at     = Column(String, nullable=False, default=now_iso)
+
+
 class RecommendationCalibrationSample(Base):
     """One thesis's PREDICTION measured against real venue evidence.
 

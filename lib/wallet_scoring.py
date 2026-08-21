@@ -480,6 +480,34 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     return out
 
 
+def _ledger_rows_for(session, address) -> list:
+    """The durable balance-delta ledger for one wallet, or nothing.
+
+    THE LEDGER IS AN UPGRADE, NOT A DEPENDENCY, and the difference decides
+    what a failure here means. `wallet_trades` is stronger evidence than a
+    shallow transfer page — it survives restarts and bounded deep-history
+    backfills — but being unable to READ it says nothing about the wallet.
+
+    So this contains its own failure and returns nothing, which puts the
+    caller back on the transfer path. Letting it raise into the provider
+    handler instead would record PROVIDER_FAILURE for a database problem
+    and collapse four distinguishable evidence states — ZERO, INSUFFICIENT,
+    NO_VERIFIED and PROVIDER_FAILURE — into one.
+    """
+    from app.database import WalletTrade
+    from lib.wallet_swaps import LEDGER_VERSION
+
+    try:
+        return (session.query(WalletTrade)
+                .filter(WalletTrade.address == address,
+                        WalletTrade.ledger_version == LEDGER_VERSION)
+                .order_by(WalletTrade.opened_at.asc()).all()) or []
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug(f"[WalletScoring] ledger unavailable for "
+                     f"{str(address)[:8]}...: {e}")
+        return []
+
+
 def _score_one(w, *, session, transfers_fn, stats) -> str:
     """Measure ONE wallet from its own transfer history. Returns the outcome.
 
@@ -496,13 +524,8 @@ def _score_one(w, *, session, transfers_fn, stats) -> str:
     # wallet_swaps.sync_wallet_history.  The old path scored only the newest
     # 100 transfer legs, which cannot prove a round trip when the buy falls
     # on an older page.
-    from app.database import WalletTrade
-    ledger_rows = (session.query(WalletTrade)
-                   .filter(WalletTrade.address == w.address,
-                           WalletTrade.ledger_version ==
-                           "swap_v1_balance_delta")
-                   .order_by(WalletTrade.opened_at.asc()).all())
     raw = None
+    ledger_rows = _ledger_rows_for(session, w.address)
     try:
         if not ledger_rows:
             raw = transfers_fn(w.address, limit=100)

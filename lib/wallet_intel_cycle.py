@@ -507,10 +507,26 @@ def _apply_lifecycle() -> dict:
     This is deliberately a separate stage from scoring: arithmetic still
     cannot promote a wallet as a side effect.  It merely gives the lifecycle
     engine a production caller while the mixed scheduler remains disabled.
+
+    THE TRANSITION LIST IS REDACTED HERE, and it has to be. Every stage
+    result is stored in `_STATE["stages"]` and served verbatim by
+    `/api/onchain/intel/cycle`, and `wallet_lifecycle.run` reports
+    `{"address": w.address}` — the FULL address. The leak is dormant only
+    while nothing transitions, which is precisely the condition this stage
+    exists to end: the first promotion would publish real wallet addresses
+    to the desk and to anyone reading the API.
     """
     from lib import wallet_lifecycle
+    from lib.wallet_shadow_intel import safe_label
 
-    return wallet_lifecycle.run(limit=200)
+    out = dict(wallet_lifecycle.run(limit=200))
+    out["transitions"] = [
+        {"wallet": safe_label(t.get("address")),
+         "from": t.get("from"), "to": t.get("to"),
+         "reasons": t.get("reasons")}
+        for t in (out.get("transitions") or [])
+    ]
+    return out
 
 
 def _collect_prices() -> dict:

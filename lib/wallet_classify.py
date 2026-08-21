@@ -157,11 +157,32 @@ def resolve_identities(session, addresses: list[str], *,
     stale = [a for a, w in rows.items()
              if not identity_is_fresh(w.identity_checked_at, ttl_days=ttl_days)]
     stats = {"requested": len(addresses), "cached": len(rows) - len(stale),
-             "looked_up": 0, "labelled": 0, "unlabelled": 0, "errors": 0}
+             "looked_up": 0, "labelled": 0, "unlabelled": 0, "errors": 0,
+             "skipped_plan": 0, "capability": None,
+             "capability_reason": None}
     if not stale:
         return stats
 
     stale = stale[:max_lookups]
+
+    # ASK THE CAPABILITY BEFORE SPENDING THE CALL. Measured on this
+    # deployment: the same Helius key that serves transfers, balances and
+    # every RPC method returns 403 for identity, batch-identity and
+    # funded-by. Those are plan entitlements, and no amount of retrying
+    # changes a plan — so a cycle that asks every fifteen minutes forever is
+    # paying rate budget to be refused on a schedule.
+    from lib import provider_health as PH
+
+    gate = PH.should_probe("helius", "wallet_batch_identity")
+    stats["capability"] = gate["status"]
+    if not gate["allowed"]:
+        # SKIPPED, NOT FAILED. Nothing is known that was not known before,
+        # and — critically — no wallet becomes "independent" because we
+        # did not ask.
+        stats["skipped_plan"] = len(stale)
+        stats["capability_reason"] = gate["reason"]
+        return stats
+
     try:
         from lib.helius_client import batch_identity
         found = batch_identity(stale)
@@ -170,7 +191,11 @@ def resolve_identities(session, addresses: list[str], *,
         # already knew is not invalidated by a network problem.
         logger.debug(f"[WalletClassify] batch identity failed: {e}")
         stats["errors"] = len(stale)
+        stats["capability"] = PH.record_http_failure(
+            "helius", "wallet_batch_identity", e)
         return stats
+    PH.record("helius", "wallet_batch_identity", status=PH.HEALTHY,
+              http_status=200, rows=len(found or {}))
 
     stats["looked_up"] = len(stale)
     for addr in stale:

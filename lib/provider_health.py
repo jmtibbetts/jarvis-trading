@@ -50,15 +50,24 @@ STALE = "STALE"
 RATE_LIMITED = "RATE_LIMITED"
 AUTH_FAILED = "AUTH_FAILED"
 PAYMENT_REQUIRED = "PAYMENT_REQUIRED"
+#: The credential is VALID and this particular capability is not included in
+#: the plan. Measured on Helius: the same key that serves transfers, balances
+#: and every RPC method returns 403 for identity, batch-identity and
+#: funded-by. Calling that AUTH_FAILED sends the operator to regenerate a key
+#: that is working perfectly, and no amount of retrying can change the
+#: answer — which is why it also carries the longest probe backoff.
+PLAN_FORBIDDEN = "PLAN_FORBIDDEN"
 UNAVAILABLE = "UNAVAILABLE"
 DISABLED = "DISABLED"
 NOT_CONFIGURED = "NOT_CONFIGURED"
 
 STATUSES = (HEALTHY, DEGRADED, STALE, RATE_LIMITED, AUTH_FAILED,
+            PLAN_FORBIDDEN,
             PAYMENT_REQUIRED, UNAVAILABLE, DISABLED, NOT_CONFIGURED)
 
 # A status the operator must act on, as opposed to one that is merely a fact.
-ACTIONABLE = frozenset({AUTH_FAILED, PAYMENT_REQUIRED, RATE_LIMITED,
+ACTIONABLE = frozenset({AUTH_FAILED, PAYMENT_REQUIRED, PLAN_FORBIDDEN,
+                        RATE_LIMITED,
                         UNAVAILABLE, STALE, DEGRADED})
 
 _SECRET_PATTERNS = (
@@ -151,7 +160,10 @@ def classify_http(status_code: int | None, body: str | None = None) -> str:
             return PAYMENT_REQUIRED
         if "rate" in low and "limit" in low:
             return RATE_LIMITED
-        return AUTH_FAILED
+        # 401 is the KEY. 403 is the PLAN: the credential authenticated and
+        # was refused this capability. They demand opposite responses, so
+        # collapsing them into one status loses the only actionable part.
+        return AUTH_FAILED if status_code == 401 else PLAN_FORBIDDEN
     if 200 <= status_code < 300:
         return HEALTHY
     if 500 <= status_code:
@@ -196,6 +208,99 @@ def rate_limit_from_headers(headers) -> dict:
     if minute_remaining is not None:
         out["minute_remaining"] = str(minute_remaining)
     return out
+
+
+#: How long to wait before probing again, per status. A capability the plan
+#: does not include will not start being included because we asked more
+#: often, and every ask is a paid call against a rate budget.
+PROBE_BACKOFF_SECONDS = {
+    PLAN_FORBIDDEN: 24 * 3600,
+    AUTH_FAILED: 6 * 3600,
+    PAYMENT_REQUIRED: 6 * 3600,
+    NOT_CONFIGURED: 6 * 3600,
+    RATE_LIMITED: 900,
+    UNAVAILABLE: 600,
+    DEGRADED: 600,
+    STALE: 600,
+    DISABLED: 24 * 3600,
+    HEALTHY: 0,
+}
+
+
+def next_probe_after(status: str) -> int:
+    """Seconds to wait before this capability is worth another call."""
+    return int(PROBE_BACKOFF_SECONDS.get(status, 600))
+
+
+def should_probe(provider: str, capability: str, *, now=None) -> dict:
+    """May this capability be called right now, and why or why not?
+
+    READ-ONLY and NEVER RAISES — a telemetry lookup that can break a caller
+    is worse than no telemetry. An unknown capability is probeable: never
+    having asked is not a reason not to ask.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = now or datetime.now(timezone.utc)
+    out = {"provider": provider, "capability": capability,
+           "status": "NOT_PROBED", "allowed": True,
+           "reason": "no probe recorded yet", "last_attempt_at": None,
+           "last_success_at": None, "last_http_status": None,
+           "next_probe_at": None, "wait_seconds": 0}
+    try:
+        from sqlalchemy import text
+
+        from app.database import get_db
+        with get_db() as db:
+            row = db.execute(text(
+                "SELECT status, last_attempt_at, last_success_at, "
+                "       last_http_status "
+                "FROM provider_health WHERE provider=:p AND capability=:c"),
+                {"p": provider, "c": capability}).fetchone()
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("[ProviderHealth] should_probe unavailable: %s", e)
+        return out
+    if row is None:
+        return out
+
+    status, attempt, success, http = row
+    out.update(status=status or "NOT_PROBED", last_attempt_at=attempt,
+               last_success_at=success, last_http_status=http)
+    if status == HEALTHY or not attempt:
+        out["reason"] = "healthy" if status == HEALTHY else "never attempted"
+        return out
+
+    wait = next_probe_after(status)
+    if wait <= 0:
+        return out
+    try:
+        t = datetime.fromisoformat(str(attempt).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return out
+
+    nxt = t + timedelta(seconds=wait)
+    out["next_probe_at"] = nxt.isoformat()
+    if nxt > now:
+        out["allowed"] = False
+        out["wait_seconds"] = int((nxt - now).total_seconds())
+        out["reason"] = (f"{status} at {attempt}; not probed again for "
+                         f"{out['wait_seconds']}s")
+    else:
+        out["reason"] = f"{status}, backoff elapsed — worth one more attempt"
+    return out
+
+
+def record_http_failure(provider: str, capability: str, exc) -> str:
+    """Classify and persist one failed call from its exception. Returns the
+    status. Reads `.status` when the client provides one (HeliusError does),
+    so 401, 403, 429 and 5xx stay distinguishable all the way to the row."""
+    code = getattr(exc, "status", None)
+    status = classify_http(code, str(exc))
+    record(provider, capability, status=status, http_status=code,
+           error=str(exc))
+    return status
 
 
 def record(provider: str, capability: str, *, status: str,

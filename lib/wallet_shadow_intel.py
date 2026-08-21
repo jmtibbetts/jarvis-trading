@@ -561,6 +561,31 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
     from lib import wallet_event_classifier as C
     from lib.engine_epoch import ENGINE_EPOCH
 
+    def _copyability(addresses):
+        """The source wallet's copyability, cached per pass.
+
+        Behaviour is measured from evidence already stored, so this adds no
+        provider call and cannot be blocked by a plan entitlement.
+        """
+        if not addresses:
+            return None
+        try:
+            from lib import wallet_behaviour as WB
+            best = None
+            for a in addresses:
+                v = WB.copyability(a)
+                # The WEAKEST contributing wallet decides. One unverifiable
+                # wallet in a cluster makes the whole observation
+                # unverifiable.
+                if best is None or v["state"] != WB.COPYABLE_EVIDENCE_SUPPORTED:
+                    best = v
+                if v["state"] != WB.COPYABLE_EVIDENCE_SUPPORTED:
+                    break
+            return best
+        except Exception as e:                               # noqa: BLE001
+            logger.warning("[ShadowIntel] copyability unavailable: %s", e)
+            return None
+
     if enrichment_lookup is None and use_enrichment:
         try:
             from lib.wallet_swap_enrichment import lookup_factory
@@ -643,10 +668,26 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
                 "thesis_id": cid if eligible else None,
                 "horizons_json": _json(list(HORIZONS)) if eligible else None,
                 "engine_epoch": ENGINE_EPOCH,
+                "copyability_state": None, "copyability_reason": None,
+                "behaviour_state": None, "copyability_at": None,
                 "classifier_version": p.classifier_version,
                 "model_version": SHADOW_INTEL_VERSION,
                 "updated_at": now,
             }
+            if eligible:
+                # Only worth measuring for an observation that actually
+                # passed the gate — the rest already have a binding reason.
+                cop = _copyability(verdict.get("wallets") or [])
+                if cop:
+                    row["copyability_state"] = cop.get("state")
+                    row["copyability_reason"] = (cop.get("reason") or "")[:500]
+                    row["behaviour_state"] = cop.get("behaviour")
+                    row["copyability_at"] = now
+                    stats.setdefault("by_copyability", {})
+                    k = cop.get("state")
+                    stats["by_copyability"][k] = \
+                        stats["by_copyability"].get(k, 0) + 1
+
             for _s in verdict["signatures"]:
                 touched[_s] = cid
 
@@ -910,6 +951,18 @@ def performance() -> dict:
             "       AVG(net_return_pct) "
             "FROM wallet_shadow_outcomes GROUP BY horizon, status"
         )).fetchall()
+        # VALIDATED AND PROVISIONAL ARE NOT ONE POPULATION. An outcome from
+        # a wallet whose identity could never be resolved is real evidence
+        # about that wallet and is NOT evidence that following it would have
+        # worked — pooling them would let unverifiable wallets set the
+        # expectancy the desk reports.
+        copy_split = conn.execute(text(
+            "SELECT COALESCE(e.copyability_state,'UNASSESSED'), o.status, "
+            "       COUNT(*), AVG(o.gross_return_pct), AVG(o.net_return_pct) "
+            "FROM wallet_shadow_outcomes o "
+            "JOIN wallet_shadow_events e ON e.id = o.event_id "
+            f"WHERE {CURRENT_ONLY_E} "
+            "GROUP BY 1, 2")).fetchall()
         unresolved_reasons = conn.execute(text(
             "SELECT unresolved_reason, COUNT(*) FROM wallet_shadow_outcomes "
             "WHERE status <> 'RESOLVED' GROUP BY 1 ORDER BY 2 DESC"
@@ -937,11 +990,27 @@ def performance() -> dict:
                 f"{MIN_SAMPLE_FOR_EXPECTANCY} this desk will state an "
                 f"expectancy from")
 
+    VALIDATED = "COPYABLE_EVIDENCE_SUPPORTED"
+    validated = {"resolved": 0, "unresolved": 0}
+    provisional: dict = {}
+    for copy_state, status, n, _g, _net in copy_split:
+        bucket = (validated if copy_state == VALIDATED
+                  else provisional.setdefault(
+                      copy_state, {"resolved": 0, "unresolved": 0}))
+        bucket["resolved" if status == RESOLVED else "unresolved"] += n
+
     legs, sigs, clusters = (suppression[1] or 0, suppression[0] or 0,
                             suppression[2] or 0)
     return {
         "source": SOURCE,
         "execution_mode": EXECUTION_MODE,
+        "validated_outcomes": validated,
+        "provisional_outcomes": provisional,
+        "expectancy_population": (
+            "VALIDATED ONLY. A provisional outcome comes from a wallet whose "
+            "identity or behaviour is not yet supported by evidence; it is "
+            "kept, shown and audited, and it is never pooled into a "
+            "validated expectancy"),
         "observations": {
             "transfer_legs": legs,
             "signatures": sigs,

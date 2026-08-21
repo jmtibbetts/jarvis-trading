@@ -52,6 +52,15 @@ SOURCE = "HELIUS_WALLET_INTELLIGENCE"
 EXECUTION_MODE = "SHADOW"
 
 STATE_ELIGIBLE = "ELIGIBLE"
+CURRENT = "CURRENT"
+SUPERSEDED = "SUPERSEDED"
+
+#: THE canonical "this observation still stands" predicate. A superseded row
+#: is kept for provenance and must never be counted again — it is the SAME
+#: signatures under an older reading. `IS NULL` covers rows written before
+#: the column existed, which nothing has superseded.
+CURRENT_ONLY = "(revision_state = 'CURRENT' OR revision_state IS NULL)"
+CURRENT_ONLY_E = "(e.revision_state = 'CURRENT' OR e.revision_state IS NULL)"
 STATE_REFUSED = "REFUSED"
 
 # ── Refusal vocabulary ───────────────────────────────────────────────────
@@ -256,11 +265,30 @@ def wallet_quality_snapshot(addresses: list) -> dict:
     if not addresses:
         out["unknown"] = 0
         return out
+    # READ EVERY VALUE INSIDE THE SESSION. Holding the ORM instances past
+    # the `with` block worked only while nothing had written to the registry
+    # first; once the cycle rescores a wallet in an earlier stage, the
+    # instances come back EXPIRED and every attribute read raises
+    # DetachedInstanceError — which failed the whole classification pass for
+    # a reason that had nothing to do with classification.
+    cols = (WalletRegistry.address, WalletRegistry.smart_money_score,
+            WalletRegistry.alpha_score, WalletRegistry.sample_count,
+            WalletRegistry.required_sample_count, WalletRegistry.status,
+            WalletRegistry.entity_type, WalletRegistry.confidence_score,
+            WalletRegistry.win_rate, WalletRegistry.average_holding_period,
+            WalletRegistry.wallet_score_version,
+            WalletRegistry.last_score_update, WalletRegistry.measurable,
+            WalletRegistry.measurability_reason)
+    keys = ("address", "smart_money_score", "alpha_score", "sample_count",
+            "required_sample_count", "status", "entity_type",
+            "confidence_score", "win_rate", "average_holding_period",
+            "wallet_score_version", "last_score_update", "measurable",
+            "measurability_reason")
     try:
         with get_db() as db:
-            rows = db.query(WalletRegistry).filter(
-                WalletRegistry.address.in_(list(addresses))).all()
-            found = {r.address: r for r in rows}
+            found = {r[0]: dict(zip(keys, r)) for r in
+                     db.query(*cols).filter(
+                         WalletRegistry.address.in_(list(addresses))).all()}
     except Exception as e:                                   # noqa: BLE001
         logger.warning("[ShadowIntel] wallet quality unavailable: %s", e)
         found = {}
@@ -273,25 +301,25 @@ def wallet_quality_snapshot(addresses: list) -> dict:
                                    "reason": "not in the registry"})
             out["unknown"] += 1
             continue
-        score = r.smart_money_score if r.smart_money_score is not None \
-            else r.alpha_score
-        sample = int(r.sample_count or 0)
-        required = int(r.required_sample_count or 0)
-        measurable = bool(r.measurable) and score is not None
+        score = (r["smart_money_score"] if r["smart_money_score"] is not None
+                 else r["alpha_score"])
+        sample = int(r["sample_count"] or 0)
+        required = int(r["required_sample_count"] or 0)
+        measurable = bool(r["measurable"]) and score is not None
         entry = {
             "label": safe_label(addr),
-            "tier": r.status,
-            "entity_type": r.entity_type,
+            "tier": r["status"],
+            "entity_type": r["entity_type"],
             "score": score,
-            "confidence": r.confidence_score,
-            "win_rate": r.win_rate,
+            "confidence": r["confidence_score"],
+            "win_rate": r["win_rate"],
             "sample_count": sample,
             "required_sample_count": required,
-            "average_holding_period": r.average_holding_period,
-            "score_version": r.wallet_score_version,
-            "score_at": r.last_score_update,
+            "average_holding_period": r["average_holding_period"],
+            "score_version": r["wallet_score_version"],
+            "score_at": r["last_score_update"],
             "measurable": measurable,
-            "measurability_reason": r.measurability_reason,
+            "measurability_reason": r["measurability_reason"],
             "quality": "KNOWN" if measurable else "UNKNOWN",
         }
         out["wallets"].append(entry)
@@ -299,8 +327,8 @@ def wallet_quality_snapshot(addresses: list) -> dict:
             out["known"] += 1
             if out["best_score"] is None or (score or 0) > out["best_score"]:
                 out["best_score"] = score
-                out["score_version"] = r.wallet_score_version
-                out["score_at"] = r.last_score_update
+                out["score_version"] = r["wallet_score_version"]
+                out["score_at"] = r["last_score_update"]
         else:
             out["unknown"] += 1
         out["max_sample_count"] = max(out["max_sample_count"], sample)
@@ -456,7 +484,8 @@ def _json(v):
 
 
 def process(*, limit: int | None = None, since_ts: float | None = None,
-            max_clusters: int | None = None) -> dict:
+            max_clusters: int | None = None, enrichment_lookup=None,
+            use_enrichment: bool = True) -> dict:
     """Classify, cluster, gate and persist. REPEATABLE WITHOUT DOUBLE-VOTING.
 
     `cluster_id` is a UNIQUE column, so re-running updates the same row
@@ -469,16 +498,30 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
     from lib import wallet_event_classifier as C
     from lib.engine_epoch import ENGINE_EPOCH
 
+    if enrichment_lookup is None and use_enrichment:
+        try:
+            from lib.wallet_swap_enrichment import lookup_factory
+            enrichment_lookup = lookup_factory()
+        except Exception as e:                               # noqa: BLE001
+            # Enrichment is an UPGRADE, never a dependency. Without it the
+            # transfer reading stands exactly as it did before.
+            logger.warning("[ShadowIntel] enrichment unavailable: %s", e)
+            enrichment_lookup = None
+
     legs = load_legs(limit=limit, since_ts=since_ts)
-    events = C.classify_all(legs, entity_lookup=entity_lookup_factory())
+    events = C.classify_all(legs, entity_lookup=entity_lookup_factory(),
+                            enrichment_lookup=enrichment_lookup)
     clusters = cluster(events)
     if max_clusters:
         clusters = clusters[:int(max_clusters)]
 
     stats = {"legs": len(legs), "events": len(events),
              "clusters": len(clusters), "eligible": 0, "refused": 0,
-             "inserted": 0, "updated": 0, "by_refusal": {},
-             "by_event_type": {}, "by_classification": {}}
+             "inserted": 0, "updated": 0, "reclassified": 0,
+             "superseded": 0, "reference_price_preserved": 0,
+             "by_refusal": {}, "by_event_type": {}, "by_classification": {},
+             "enrichment_applied": enrichment_lookup is not None}
+    touched: dict = {}          # signature -> the cluster now holding it
 
     now = now_iso()
     with engine.begin() as conn:
@@ -541,10 +584,41 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
                 "model_version": SHADOW_INTEL_VERSION,
                 "updated_at": now,
             }
+            for _s in verdict["signatures"]:
+                touched[_s] = cid
+
             existing = conn.execute(text(
-                "SELECT id FROM wallet_shadow_events WHERE cluster_id=:c"),
+                "SELECT id, event_type, classification, evidence_quality, "
+                "       revision, reference_price_usd, "
+                "       reference_price_source, reference_price_at "
+                "FROM wallet_shadow_events WHERE cluster_id=:c"),
                 {"c": cid}).fetchone()
+
+            if existing and eligible and row["reference_price_usd"] is None \
+                    and existing[5] is not None:
+                # THE RECORD OF A PRICE OUTLIVES THE SNAPSHOT IT CAME FROM.
+                # `token_activity_snapshots` is pruned by age, so a reprocess
+                # weeks later would find nothing near the event and demote a
+                # thesis that was correctly admitted on evidence that DID
+                # exist at the time. Re-deriving a point-in-time fact from
+                # what happens to remain in the store is the same mistake as
+                # using today's price for an old event.
+                row["reference_price_usd"] = existing[5]
+                row["reference_price_source"] = existing[6]
+                row["reference_price_at"] = existing[7]
+                stats["reference_price_preserved"] += 1
+
             if existing:
+                if (existing[1] != row["event_type"]
+                        or existing[2] != row["classification"]):
+                    row["prior_event_type"] = existing[1]
+                    row["prior_classification"] = existing[2]
+                    row["prior_evidence_quality"] = existing[3]
+                    row["revision"] = int(existing[4] or 1) + 1
+                    stats["reclassified"] += 1
+                row["revision_state"] = CURRENT
+                row["superseded_by"] = None
+                row["superseded_at"] = None
                 sets = ", ".join(f"{k}=:{k}" for k in row if k != "cluster_id")
                 conn.execute(text(
                     f"UPDATE wallet_shadow_events SET {sets} "
@@ -554,6 +628,8 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
             else:
                 row["id"] = new_id()
                 row["created_at"] = now
+                row["revision_state"] = CURRENT
+                row["revision"] = 1
                 cols = list(row)
                 conn.execute(text(
                     f"INSERT INTO wallet_shadow_events ({', '.join(cols)}) "
@@ -565,7 +641,64 @@ def process(*, limit: int | None = None, since_ts: float | None = None,
                 _schedule_horizons(conn, event_id, cid,
                                    _parse(p.block_time),
                                    (m or {}).get("price_usd"), now)
+
+        stats["superseded"] = _supersede_moved(conn, touched, now)
     return stats
+
+
+def _supersede_moved(conn, touched: dict, now) -> int:
+    """Retire rows whose signatures now belong to a different cluster.
+
+    MULTIPLE LEGS ARE NOT MULTIPLE VOTES, and neither is one signature
+    classified twice. `cluster_key` hashes the event TYPE, so correcting a
+    classification necessarily mints a new cluster id; without this the
+    corrected observation would be ADDED to the uncorrected one and the desk
+    would count both.
+
+    A row is retired only when EVERY signature it holds has moved to a
+    cluster written by this same pass. A cluster still holding evidence
+    nobody reclassified is left exactly as it is.
+    """
+    import json as _json
+
+    from sqlalchemy import text
+
+    if not touched:
+        return 0
+    live = set(touched.values())
+    rows = conn.execute(text(
+        "SELECT id, cluster_id, signatures_json FROM wallet_shadow_events "
+        "WHERE revision_state = :cur OR revision_state IS NULL"),
+        {"cur": CURRENT}).fetchall()
+
+    retired = 0
+    for row_id, cid, sig_json in rows:
+        if cid in live:
+            continue
+        try:
+            sigs = _json.loads(sig_json or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not sigs:
+            continue
+        moved = {touched.get(s) for s in sigs}
+        if None in moved or not moved:
+            continue
+        conn.execute(text(
+            "UPDATE wallet_shadow_events SET revision_state=:sup, "
+            "superseded_by=:by, superseded_at=:now, updated_at=:now "
+            "WHERE id=:id"),
+            {"sup": SUPERSEDED, "by": sorted(x for x in moved if x)[0],
+             "now": now, "id": row_id})
+        # Its checkpoints describe an observation that no longer stands.
+        conn.execute(text(
+            "UPDATE wallet_shadow_outcomes SET status=:ex, "
+            "unresolved_reason=:r, updated_at=:now "
+            "WHERE event_id=:id AND status=:un"),
+            {"ex": EXPIRED, "un": UNRESOLVED, "now": now, "id": row_id,
+             "r": "the observation was superseded by a reclassification"})
+        retired += 1
+    return retired
 
 
 def _schedule_horizons(conn, event_id, cluster_id, event_time, ref_price,
@@ -691,22 +824,24 @@ def performance() -> dict:
 
     with engine.connect() as conn:
         totals = conn.execute(text(
-            "SELECT state, COUNT(*) FROM wallet_shadow_events GROUP BY state"
+            f"SELECT state, COUNT(*) FROM wallet_shadow_events "
+            f"WHERE {CURRENT_ONLY} GROUP BY state"
         )).fetchall()
         refusals = conn.execute(text(
-            "SELECT refusal_reason, COUNT(*) FROM wallet_shadow_events "
-            "WHERE state='REFUSED' GROUP BY refusal_reason ORDER BY 2 DESC"
+            f"SELECT refusal_reason, COUNT(*) FROM wallet_shadow_events "
+            f"WHERE state='REFUSED' AND {CURRENT_ONLY} "
+            f"GROUP BY refusal_reason ORDER BY 2 DESC"
         )).fetchall()
         by_type = conn.execute(text(
-            "SELECT event_type, COUNT(*) FROM wallet_shadow_events "
-            "GROUP BY event_type ORDER BY 2 DESC")).fetchall()
+            f"SELECT event_type, COUNT(*) FROM wallet_shadow_events "
+            f"WHERE {CURRENT_ONLY} GROUP BY event_type ORDER BY 2 DESC")).fetchall()
         by_class = conn.execute(text(
-            "SELECT classification, COUNT(*) FROM wallet_shadow_events "
-            "GROUP BY classification ORDER BY 2 DESC")).fetchall()
+            f"SELECT classification, COUNT(*) FROM wallet_shadow_events "
+            f"WHERE {CURRENT_ONLY} GROUP BY classification ORDER BY 2 DESC")).fetchall()
         suppression = conn.execute(text(
-            "SELECT COALESCE(SUM(signature_count),0), "
-            "       COALESCE(SUM(leg_count),0), COUNT(*) "
-            "FROM wallet_shadow_events")).fetchone()
+            f"SELECT COALESCE(SUM(signature_count),0), "
+            f"       COALESCE(SUM(leg_count),0), COUNT(*) "
+            f"FROM wallet_shadow_events WHERE {CURRENT_ONLY}")).fetchone()
         horizons = conn.execute(text(
             "SELECT horizon, status, COUNT(*), AVG(gross_return_pct), "
             "       AVG(net_return_pct) "

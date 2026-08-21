@@ -70,6 +70,13 @@ DUST_OR_SPAM = "DUST_OR_SPAM"
 PROTOCOL_INTERACTION = "PROTOCOL_INTERACTION"
 UNKNOWN_TRANSFER = "UNKNOWN_TRANSFER"
 
+#: Only FULL-TRANSACTION evidence can establish these two. The transfers
+#: feed reports no `err` and no net balance, so a failed swap and a
+#: one-sided move are invisible to it — which is exactly how a failed
+#: transaction used to be indistinguishable from a completed one.
+FAILED_TRANSACTION = "FAILED_TRANSACTION"
+NON_ECONOMIC_TRANSACTION = "NON_ECONOMIC_TRANSACTION"
+
 EVENT_TYPES = (
     TOKEN_BUY, TOKEN_SELL, POSITION_INCREASE, POSITION_REDUCTION, FULL_EXIT,
     STABLECOIN_INFLOW, STABLECOIN_OUTFLOW, EXCHANGE_DEPOSIT,
@@ -84,6 +91,7 @@ TRADING_EVENT_TYPES = frozenset({TOKEN_BUY, TOKEN_SELL})
 
 #: Positively identified as something other than a market action.
 NON_TRADING_EVENT_TYPES = frozenset({
+    FAILED_TRANSACTION, NON_ECONOMIC_TRANSACTION,
     STABLECOIN_INFLOW, STABLECOIN_OUTFLOW, EXCHANGE_DEPOSIT,
     EXCHANGE_WITHDRAWAL, BRIDGE_TRANSFER, STAKING_DEPOSIT,
     STAKING_WITHDRAWAL, LIQUIDITY_ADD, LIQUIDITY_REMOVE, INTERNAL_TRANSFER,
@@ -101,13 +109,16 @@ CLASSIFICATION_STATES = (CLASSIFIED_TRADING_EVENT,
                          UNKNOWN)
 
 # ── Evidence quality, best first ─────────────────────────────────────────
+#: The transaction's own pre/post balances. Strictly stronger than the
+#: transfer rows: it nets routing hops, sees the fee, and sees `err`.
+BALANCE_DELTA_EVIDENCE = "BALANCE_DELTA_EVIDENCE"
 PAIRED_SWAP_LEGS = "PAIRED_SWAP_LEGS"
 COUNTERPARTY_ENTITY = "COUNTERPARTY_ENTITY"
 ASSET_IDENTITY = "ASSET_IDENTITY"
 SINGLE_LEG_ONLY = "SINGLE_LEG_ONLY"
 NO_EVIDENCE = "NO_EVIDENCE"
 
-EVIDENCE_RANK = (PAIRED_SWAP_LEGS, COUNTERPARTY_ENTITY, ASSET_IDENTITY,
+EVIDENCE_RANK = (BALANCE_DELTA_EVIDENCE, PAIRED_SWAP_LEGS, COUNTERPARTY_ENTITY, ASSET_IDENTITY,
                  SINGLE_LEG_ONLY, NO_EVIDENCE)
 
 # ── Historical compatibility (§19) ───────────────────────────────────────
@@ -243,11 +254,124 @@ def _entity_of(address: str | None, entity_lookup) -> dict:
         return {}
 
 
-def classify_group(legs: list, *, entity_lookup=None) -> ClassifiedEvent:
+def _swap_evidence_of(signature, enrichment_lookup) -> dict:
+    if not signature or enrichment_lookup is None:
+        return {}
+    try:
+        return enrichment_lookup(signature) or {}
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
+def canonical_subject_mint(mint: str | None) -> str | None:
+    """The swap ledger's SOL sentinel, back to a real mint identity.
+
+    `lib/wallet_swaps` canonicalises WSOL onto the literal string "SOL" so
+    that wrapping and unwrapping cancel — correct for computing a wallet's
+    net economics, and NOT a mint. Letting that string reach `subject_mint`
+    would put a ticker in a mint column, which is the exact confusion the
+    mint-only identity rule exists to prevent.
+
+    The merge is not reversible: once WSOL has been folded onto native SOL
+    the two are one number. So this resolves to the NATIVE SOL pseudo-mint
+    and the caller says so in its reason. Native SOL and WSOL remain
+    separate identities everywhere the transfer feed is the evidence.
+    """
+    from lib.wallet_swaps import NATIVE_SOL
+
+    if mint == NATIVE_SOL:
+        return NATIVE_SOL_PSEUDO_MINT
+    return mint
+
+
+def _from_swap_evidence(ev: dict, _out, legs: list):
+    """Full-transaction evidence, which OVERRIDES the transfer reading.
+
+    Returns None when the evidence says nothing usable, so the caller falls
+    back to the transfer legs rather than losing a classification it could
+    already make.
+    """
+    from lib import wallet_swaps as S
+
+    state = ev.get("state")
+    kind = ev.get("kind")
+    reason = ev.get("reason") or ""
+    n = len(legs)
+
+    if state == "REFUSED_NON_TRADING":
+        if ev.get("tx_success") is False:
+            # A FAILED TRANSACTION IS NOT A TRADE. The transfers feed
+            # reports the attempted movements and no error, so without this
+            # the wallet appears to have bought something it never received.
+            return _out(FAILED_TRANSACTION, CLASSIFIED_NON_TRADING_EVENT,
+                        BALANCE_DELTA_EVIDENCE,
+                        "the transaction FAILED on chain, so no value "
+                        "changed hands — the transfer rows describe an "
+                        "attempt, not an execution")
+        lowered = reason.lower()
+        if "lp deposit" in lowered:
+            etype = LIQUIDITY_ADD
+        elif "lp withdrawal" in lowered:
+            etype = LIQUIDITY_REMOVE
+        elif "quote-to-quote" in lowered:
+            etype = INTERNAL_TRANSFER
+        else:
+            etype = NON_ECONOMIC_TRANSACTION
+        return _out(etype, CLASSIFIED_NON_TRADING_EVENT,
+                    BALANCE_DELTA_EVIDENCE,
+                    f"net balance deltas over the whole transaction show "
+                    f"this is not a swap: {reason}")
+
+    base = canonical_subject_mint(ev.get("base_mint"))
+    quote = canonical_subject_mint(ev.get("quote_mint"))
+    merged = (ev.get("base_mint") == S.NATIVE_SOL
+              or ev.get("quote_mint") == S.NATIVE_SOL)
+    note = (" (the ledger folds WSOL onto native SOL so wrapping cancels; "
+            "the SOL leg is reported under the native pseudo-mint)"
+            if merged else "")
+
+    if state == "PARTIAL":
+        return _out(UNKNOWN_TRANSFER, PARTIAL_EVIDENCE,
+                    BALANCE_DELTA_EVIDENCE,
+                    f"balance deltas establish a real swap that cannot be "
+                    f"valued: {reason}. Direction without a priceable leg "
+                    f"is not a position{note}",
+                    subject_mint=base, subject_amount=ev.get("base_amount"),
+                    quote_mint=quote, quote_amount=ev.get("quote_amount"))
+
+    if state == "ENRICHED" and kind in (S.BUY, S.SELL):
+        if not base:
+            return None
+        side = TOKEN_BUY if kind == S.BUY else TOKEN_SELL
+        return _out(side, CLASSIFIED_TRADING_EVENT, BALANCE_DELTA_EVIDENCE,
+                    f"the transaction's own pre/post balances net to one "
+                    f"asset in and one out across {n} transfer leg(s): "
+                    f"{reason}{note}",
+                    subject_mint=base,
+                    subject_symbol=_quote_mints().get(base),
+                    direction="BUY" if kind == S.BUY else "SELL",
+                    subject_amount=ev.get("base_amount"),
+                    quote_mint=quote,
+                    quote_symbol=_quote_mints().get(quote),
+                    quote_amount=ev.get("quote_amount"))
+
+    return None
+
+
+def classify_group(legs: list, *, entity_lookup=None,
+                   enrichment_lookup=None) -> ClassifiedEvent:
     """Classify one signature's legs. DETERMINISTIC — no model, no market.
 
     `entity_lookup(address) -> {"entity_type", "entity_name", "is_protocol",
     "is_trader"}` is the registry, injected so this stays pure and testable.
+
+    `enrichment_lookup(signature) -> the swap verdict` is FULL-TRANSACTION
+    evidence from `lib/wallet_swap_enrichment`, injected the same way. When
+    it has an answer it WINS, because it is strictly better evidence: the
+    chain's own pre/post balances see the fee, net out routing hops, and
+    see whether the transaction actually succeeded — none of which appears
+    in a transfer row. When it has nothing, the transfer reading below
+    stands unchanged.
     """
     legs = sorted(legs, key=lambda x: (x.direction, str(x.mint or "")))
     sig = legs[0].signature
@@ -265,6 +389,12 @@ def classify_group(legs: list, *, entity_lookup=None) -> ClassifiedEvent:
             observed_ts=observed, schema_compatibility=compat,
             leg_count=len(legs), legs=[l.as_dict() for l in legs],
             parser_version=parser, **kw)
+
+    ev = _swap_evidence_of(sig, enrichment_lookup)
+    if ev:
+        upgraded = _from_swap_evidence(ev, _out, legs)
+        if upgraded is not None:
+            return upgraded
 
     ins = [l for l in legs if l.direction == "in"]
     outs = [l for l in legs if l.direction == "out"]
@@ -440,9 +570,11 @@ def classify_group(legs: list, *, entity_lookup=None) -> ClassifiedEvent:
                 counterparty_entity=etype)
 
 
-def classify_all(legs: list, *, entity_lookup=None) -> list:
+def classify_all(legs: list, *, entity_lookup=None,
+                 enrichment_lookup=None) -> list:
     """Every signature in `legs`, classified once."""
-    return [classify_group(g, entity_lookup=entity_lookup)
+    return [classify_group(g, entity_lookup=entity_lookup,
+                           enrichment_lookup=enrichment_lookup)
             for g in group_by_signature(legs).values()]
 
 

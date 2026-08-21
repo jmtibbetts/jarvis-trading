@@ -166,17 +166,26 @@ def _summarise_errors(result: dict) -> str | None:
 
 
 # ── One pass ─────────────────────────────────────────────────────────────
-def poll_once() -> dict:
+def poll_once(*, run_cycle: bool = True) -> dict:
     """One read-only collection pass. REFUSES to overlap another.
 
     Deliberately NOT gated on `polling_enabled()`: that flag governs whether
     JARVIS polls AUTOMATICALLY, and an explicitly invoked single read is not
     automatic polling. `start()` is the gated entry point.
 
-    Calls `wallet_activity.collect_once()` and nothing else. That function
-    never raises, but this is wrapped anyway — a context feed must not be
-    able to take the desk down, and a loop that dies silently is worse than
-    one that reports a failure.
+    Collection is `wallet_activity.collect_once()`. When it succeeds, the
+    bounded INTELLIGENCE CYCLE runs on what was collected — enrichment,
+    scoring, prices, classification, theses and outcomes — so the desk
+    completes itself from the poll rather than from an operator remembering
+    to call `POST /process`. The cycle is a separate module with its own
+    lock and its own budgets; this only starts it.
+
+    `run_cycle=False` polls WITHOUT interpreting, for a diagnostic read that
+    should not spend provider budget or write shadow rows.
+
+    Neither function raises, but both are wrapped anyway — a context feed
+    must not be able to take the desk down, and a loop that dies silently is
+    worse than one that reports a failure.
     """
     if not _RUN_LOCK.acquire(blocking=False):
         with _STATE_LOCK:
@@ -236,9 +245,26 @@ def poll_once() -> dict:
         })
         _STATE["polls_completed"] += 1
 
+    cycle = None
+    if run_cycle and not skipped:
+        # THE CYCLE'S FAILURE IS NOT THE POLL'S. The observations are
+        # already stored and true; an unreachable price provider must not
+        # turn a successful collection into a failed one.
+        try:
+            from lib import wallet_intel_cycle
+
+            if wallet_intel_cycle.cycle_enabled():
+                cycle = wallet_intel_cycle.run_once()
+        except Exception as e:                               # noqa: BLE001
+            logger.error("[WalletPoller] intelligence cycle failed: %s", e,
+                         exc_info=True)
+            cycle = {"ok": False, "result": "CYCLE_FAILED",
+                     "detail": _redact(f"{type(e).__name__}: {e}")}
+
     return {
         "ok": not skipped,
         "result": POLL_SKIPPED if skipped else POLL_OK,
+        "cycle": cycle,
         "observed": None if skipped else observed,
         "inserted": None if skipped else inserted,
         "deduplicated": None if skipped else deduped,

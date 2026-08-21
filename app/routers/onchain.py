@@ -39,6 +39,19 @@ def onchain_wallet_polling():
 
 
 # ── Wallet shadow intelligence ───────────────────────────────────────────
+def _current(model):
+    """Only observations that still stand.
+
+    A SUPERSEDED row holds the same signatures under a reading that full
+    transaction evidence has since corrected. Counting it beside its
+    replacement would be the double vote the cluster rules exist to
+    prevent, so every read path filters on this one predicate.
+    """
+    from sqlalchemy import or_
+    return or_(model.revision_state == "CURRENT",
+               model.revision_state.is_(None))
+
+
 def _abbrev_mint(mint):
     """A mint the operator can recognise; the full value ships separately so
     a copy control can offer it deliberately rather than the table leaking
@@ -143,7 +156,7 @@ def onchain_shadow_events(state: str = None, event_type: str = None,
     from app.database import WalletShadowEvent, get_db
 
     with get_db() as db:
-        q = db.query(WalletShadowEvent)
+        q = db.query(WalletShadowEvent).filter(_current(WalletShadowEvent))
         if state:
             q = q.filter(WalletShadowEvent.state == state.upper())
         if event_type:
@@ -168,6 +181,7 @@ def onchain_shadow_theses(limit: int = 50):
 
     with get_db() as db:
         rows = db.query(WalletShadowEvent).filter(
+            _current(WalletShadowEvent),
             WalletShadowEvent.state == "ELIGIBLE").order_by(
             WalletShadowEvent.event_time.desc()).limit(
             max(1, min(int(limit), 200))).all()
@@ -203,6 +217,7 @@ def onchain_shadow_refusals(limit: int = 12):
         rows = conn.execute(text(
             "SELECT refusal_reason, COUNT(*) c, MAX(event_time) latest "
             "FROM wallet_shadow_events WHERE state='REFUSED' "
+            "  AND (revision_state = 'CURRENT' OR revision_state IS NULL) "
             "GROUP BY refusal_reason ORDER BY c DESC LIMIT :lim"),
             {"lim": max(1, min(int(limit), 50))}).fetchall()
     return {"refusals": [{"reason": r[0] or "UNKNOWN", "count": r[1],
@@ -225,6 +240,52 @@ def onchain_shadow_process(limit: int = 20000, max_clusters: int = 2000):
 
 
 # ── Wallet registry ──────────────────────────────────────────────────────
+@router.get("/onchain/intel/cycle")
+def onchain_intel_cycle():
+    """Everything the completed cycle produced, in one read.
+
+    Four sections because they fail INDEPENDENTLY and the desk has to say
+    which one is holding everything up: the cycle itself, the swap
+    evidence, wallet-score coverage, and price coverage. A section that
+    cannot be measured reports UNAVAILABLE rather than zeroes.
+    """
+    from lib import wallet_intel_cycle, wallet_price_snapshots
+    from lib import wallet_scoring, wallet_swap_enrichment
+
+    def _safe(fn, label):
+        try:
+            return fn()
+        except Exception as e:                               # noqa: BLE001
+            return {"state": "UNAVAILABLE", "detail": f"{label}: {e}"[:200]}
+
+    out = {
+        "cycle": _safe(wallet_intel_cycle.status, "cycle"),
+        "swap_evidence": _safe(wallet_swap_enrichment.coverage, "enrichment"),
+        "wallet_scoring": _safe(wallet_scoring.coverage, "scoring"),
+        "price_coverage": _safe(wallet_price_snapshots.coverage, "prices"),
+        "quote_series": _safe(wallet_price_snapshots.quote_series_state,
+                              "quote series"),
+    }
+    out["note"] = ("the cycle runs at the end of each wallet poll. It reads "
+                   "chain and market data and writes shadow intelligence "
+                   "only — no order, no signing, no cash movement. A null "
+                   "count means that stage did not look")
+    return out
+
+
+@router.post("/onchain/intel/cycle/run")
+def onchain_intel_cycle_run(full: bool = False):
+    """Run one cycle NOW. DIAGNOSTIC ONLY — normal operation is automatic.
+
+    The desk does not need this: the poller runs the same cycle on its own
+    timer. It exists so an operator can force a pass after a code change
+    without waiting out the interval.
+    """
+    from lib import wallet_intel_cycle
+
+    return wallet_intel_cycle.run_once(full=bool(full))
+
+
 @router.get("/onchain/wallets")
 def onchain_wallets(status: str = None, limit: int = 100):
     """The wallet universe, with its lifecycle state.

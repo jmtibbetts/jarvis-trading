@@ -2121,6 +2121,18 @@ def _migrate_columns():
         # The gate experiment: both arms' verdicts, recorded at candidate
         # birth. Nullable — rows from before the experiment simply have no
         # verdicts, and the scoreboard only compares rows that carry both.
+        # Revision provenance for the shadow desk. Every existing row
+        # predates it and is CURRENT by default, which is true: nothing has
+        # superseded them.
+        "wallet_shadow_events": [
+            ("revision_state", "TEXT DEFAULT 'CURRENT'"),
+            ("revision", "INTEGER DEFAULT 1"),
+            ("superseded_by", "TEXT"),
+            ("superseded_at", "TEXT"),
+            ("prior_event_type", "TEXT"),
+            ("prior_classification", "TEXT"),
+            ("prior_evidence_quality", "TEXT"),
+        ],
         "execution_samples": [
             ("initial_stop_loss", "REAL"),
             ("approved_risk_usd", "REAL"),
@@ -3052,6 +3064,21 @@ class WalletShadowEvent(Base):
     thesis_id         = Column(String)
     horizons_json     = Column(Text)
 
+    #: REVISION PROVENANCE. `cluster_id` is derived from the event TYPE, so
+    #: the moment full-transaction evidence turns an UNKNOWN_TRANSFER into a
+    #: TOKEN_BUY the cluster identity changes and the old row would sit
+    #: beside the new one as a SECOND independent observation of the same
+    #: signatures — a double vote, produced by the one pass whose entire
+    #: purpose is to CORRECT a classification. The prior row is superseded
+    #: instead, and keeps saying what it used to claim.
+    revision_state    = Column(String, default="CURRENT", index=True)
+    revision          = Column(Integer, default=1)
+    superseded_by     = Column(String)
+    superseded_at     = Column(String)
+    prior_event_type  = Column(String)
+    prior_classification = Column(String)
+    prior_evidence_quality = Column(String)
+
     engine_epoch      = Column(String)
     classifier_version = Column(String)
     model_version     = Column(String, nullable=False)
@@ -3092,6 +3119,90 @@ class WalletShadowOutcome(Base):
 
     unresolved_reason = Column(String)
     outcome_version  = Column(String, nullable=False)
+    created_at     = Column(String, nullable=False, default=now_iso)
+    updated_at     = Column(String, nullable=False, default=now_iso)
+
+
+class WalletSwapEnrichment(Base):
+    """Full-transaction balance-delta evidence for ONE signature and wallet.
+
+    WHY THIS TABLE EXISTS. The Helius transfers feed carries no program and
+    no instruction, so it can establish a PAIRED SWAP and almost nothing
+    else — 723 of 1,266 market observations sat at UNKNOWN_TRANSFER for
+    exactly that reason. `lib/wallet_swaps` already decodes the real
+    evidence (the transaction's own pre/post balances) and had no
+    production caller. This is where that evidence lands so the classifier
+    can read it, and so a signature is fetched ONCE rather than on every
+    pass.
+
+    NOT a second ledger. `wallet_trades` remains the ledger of a wallet's
+    economic history for scoring; this row is the ENRICHMENT RECORD for one
+    observed signature — including the ones that turned out not to be
+    trades, which is the whole point. A signature that resolved to "failed
+    on chain" is a fact worth storing precisely so it is never fetched
+    again and never becomes a trade.
+
+    A FAILED TRANSACTION IS NOT A TRADE, a token outflow with no
+    consideration is not a sale, and a token inflow with no payment is not
+    a purchase. Each of those lands here as REFUSED_NON_TRADING with the
+    reason `lib/wallet_swaps.classify` gave, not as an absence.
+    """
+    __tablename__ = "wallet_swap_enrichment"
+    __table_args__ = (
+        UniqueConstraint("signature", "wallet_address",
+                         name="uq_wse_signature_wallet"),
+        Index("ix_wsen_state", "state"),
+        Index("ix_wsen_next_attempt", "state", "next_attempt_at"),
+    )
+
+    id             = Column(String, primary_key=True, default=new_id)
+    signature      = Column(String, nullable=False, index=True)
+    wallet_address = Column(String, nullable=False, index=True)
+
+    #: PENDING | ENRICHED | PARTIAL | RETRYABLE_FAILURE
+    #: | PERMANENTLY_UNRESOLVED | REFUSED_NON_TRADING
+    state          = Column(String, nullable=False, index=True)
+    refusal_reason = Column(String)
+
+    #: BUY | SELL | TOKEN_TOKEN | NOT_A_TRADE, from lib/wallet_swaps.
+    kind           = Column(String)
+    reason         = Column(Text)
+
+    #: EXACT MINTS. `lib/wallet_swaps` canonicalises WSOL onto the native
+    #: SOL sentinel so wrapping cancels; that sentinel is a QUOTE asset and
+    #: is never allowed to become a traded subject downstream.
+    base_mint      = Column(String, index=True)
+    base_amount    = Column(Float)
+    quote_mint     = Column(String)
+    quote_amount   = Column(Float)
+
+    notional_usd     = Column(Float)
+    quote_price_usd  = Column(Float)
+    entry_price_usd  = Column(Float)
+    entry_price_source = Column(String)
+    price_quality    = Column(String)
+    unvalued_reason  = Column(String)
+
+    #: Transaction identity and outcome, kept so the evidence is auditable.
+    tx_success     = Column(Boolean)
+    tx_error       = Column(String)
+    slot           = Column(Integer)
+    block_time     = Column(Float)
+    fee_sol        = Column(Float)
+
+    #: How strong the evidence is, and which decoder produced it.
+    evidence_quality = Column(String)
+    ledger_version   = Column(String)
+    parser_version   = Column(String)
+
+    #: Bounded retry state. A signature that cannot be read must not be
+    #: retried forever, and must never block the rest of the cycle.
+    attempts        = Column(Integer, nullable=False, default=0)
+    last_error      = Column(String)
+    next_attempt_at = Column(String, index=True)
+
+    first_seen_at  = Column(String, nullable=False, default=now_iso)
+    enriched_at    = Column(String)
     created_at     = Column(String, nullable=False, default=now_iso)
     updated_at     = Column(String, nullable=False, default=now_iso)
 

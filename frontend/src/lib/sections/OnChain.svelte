@@ -45,6 +45,13 @@
   let shadowTheses = $state<any | null>(null);
   let reclassing = $state(false);
 
+  // The bounded intelligence cycle that runs at the end of every wallet
+  // poll: swap enrichment, wallet alpha, scoring, prices, classification,
+  // theses and outcomes. Four sections because they fail INDEPENDENTLY and
+  // the desk has to be able to say which one is holding everything up.
+  let intel = $state<any | null>(null);
+  let cycling = $state(false);
+
   async function loadAll() {
     // NO third argument. `load(key, fn, opts?)` takes `{ keepLast }` — the
     // old signature took the caller's previous value, and this call site
@@ -53,7 +60,7 @@
     // function called from an `$effect` that then WRITES all six made the
     // effect re-trigger itself. That is the measured 34-requests-in-10s
     // storm — fixed inside FeedTracker, still live here.
-    const [w, d, s, b, p, h, sh, se, st] = await Promise.all([
+    const [w, d, s, b, p, h, sh, se, st, ic] = await Promise.all([
       feeds.load("wallets", () => api.raw<any>("/onchain/wallets?limit=60")),
       feeds.load("discovery", () => api.raw<any>("/onchain/discovery/status")),
       feeds.load("surge", () => api.raw<any>("/onchain/surge?limit=15")),
@@ -63,9 +70,29 @@
       feeds.load("shadow", () => api.raw<any>("/onchain/shadow/summary")),
       feeds.load("shadowEvents", () => api.raw<any>("/onchain/shadow/events?limit=40")),
       feeds.load("shadowTheses", () => api.raw<any>("/onchain/shadow/theses?limit=25")),
+      feeds.load("intelCycle", () => api.raw<any>("/onchain/intel/cycle")),
     ]);
     wallets = w; discovery = d; surge = s; book = b; protocols = p; helius = h;
-    shadow = sh; shadowEvents = se; shadowTheses = st;
+    shadow = sh; shadowEvents = se; shadowTheses = st; intel = ic;
+  }
+
+  async function runCycle() {
+    if (cycling) return;
+    cycling = true;
+    try {
+      const r = await api.rawPost<any>("/onchain/intel/cycle/run");
+      toastStore.ok(
+        `Cycle ${r.result} in ${r.duration_seconds}s — ` +
+        `${r.signatures_enriched ?? "—"} enriched, ` +
+        `${r.price_snapshots ?? "—"} prices, ` +
+        `${r.theses_created ?? "—"} theses`,
+      );
+      await loadAll();
+    } catch (e: any) {
+      toastStore.err(String(e?.message ?? e));
+    } finally {
+      cycling = false;
+    }
   }
 
   async function reclassify() {
@@ -191,6 +218,219 @@
         </p>
       {:else}
         <StateNote status={feeds.status("shadow")} noun="Helius polling status" />
+      {/if}
+    </Panel>
+
+    <Panel title="Intelligence Cycle" status={feeds.status("intelCycle")}
+           meta="one bounded pass per wallet poll">
+      {#if intel?.cycle}
+        {@const c = intel.cycle}
+        <div class="stat-list">
+          <div class="stat"><span>Cycle</span>
+            <b><Pill label={c.enabled ? (c.running ? "RUNNING" : "ENABLED · IDLE") : "DISABLED"}
+                     tone={c.enabled && c.running ? "good" : c.enabled ? "warm" : "neutral"} /></b></div>
+          <div class="stat"><span>Last result</span>
+            <b><Pill label={c.last_result ?? "NOT YET RUN"}
+                     tone={c.last_result === "CYCLE_OK" ? "good"
+                           : c.last_result === "CYCLE_PARTIAL" ? "warm"
+                           : c.last_result === "CYCLE_FAILED" ? "bad" : "neutral"} /></b></div>
+          <div class="stat"><span>Current stage</span>
+            <b class="num">{c.current_stage ?? "—"}</b></div>
+          <div class="stat"><span>Started / completed</span>
+            <b class="num">{c.last_started_at ? new Date(c.last_started_at).toLocaleTimeString() : "—"}
+              / {c.last_completed_at ? new Date(c.last_completed_at).toLocaleTimeString() : "—"}</b></div>
+          <div class="stat"><span>Duration</span>
+            <b class="num">{c.last_duration_seconds ?? "—"}s</b></div>
+          <div class="stat"><span>Next cycle</span>
+            <b class="num">{c.next_cycle_at && c.next_cycle_at !== "imminent"
+              ? new Date(c.next_cycle_at).toLocaleTimeString() : (c.next_cycle_at ?? "—")}</b></div>
+          <div class="stat"><span>Transfers collected</span>
+            <b class="num">{c.transfers_collected ?? "—"}</b></div>
+          <div class="stat"><span>Signatures enriched</span>
+            <b class="num">{c.signatures_enriched ?? "—"}</b></div>
+          <div class="stat"><span>Enrichment failures</span>
+            <b class="num">{c.enrichment_failures ?? "—"}</b></div>
+          <div class="stat"><span>Wallets rescored</span>
+            <b class="num">{c.wallets_rescored ?? "—"}</b></div>
+          <div class="stat"><span>Price snapshots</span>
+            <b class="num">{c.price_snapshots ?? "—"}</b></div>
+          <div class="stat"><span>Events processed</span>
+            <b class="num">{c.events_processed ?? "—"}</b></div>
+          <div class="stat"><span>Reclassified / superseded</span>
+            <b class="num">{c.events_reclassified ?? "—"} / {c.events_superseded ?? "—"}</b></div>
+          <div class="stat"><span>Theses created</span>
+            <b class="num">{c.theses_created ?? "—"}</b></div>
+          <div class="stat"><span>Outcomes resolved</span>
+            <b class="num">{c.outcomes_resolved ?? "—"}</b></div>
+          <div class="stat"><span>Cycles completed / failed</span>
+            <b class="num">{c.cycles_completed} / {c.cycles_failed}</b></div>
+        </div>
+        {#if c.stages && Object.keys(c.stages).length}
+          <div class="sub">Stages</div>
+          <div class="chips">
+            {#each (c.stage_order ?? []) as s2}
+              {@const st2 = c.stages[s2]}
+              <span class="chip"><b>{st2?.state ?? "—"}</b><em>{s2}</em></span>
+            {/each}
+          </div>
+        {/if}
+        {#if c.last_error}
+          <div class="degraded" style="margin-top:10px">
+            <em>Bounded stage error</em> — {c.last_error}
+          </div>
+        {/if}
+        <p class="note">
+          NOT A SCHEDULER. The cycle owns no timer: it runs at the END of
+          each wallet poll, so the next cycle is the next poll. A stage that
+          fails is recorded and the rest still run — an unreachable price
+          provider must not stop outcome resolution that needs no provider.
+          A “—” means that stage did not look.
+        </p>
+        <button class="btn small outline" disabled={cycling} onclick={runCycle}>
+          {cycling ? "Running…" : "Run one cycle now (diagnostic)"}
+        </button>
+      {:else}
+        <StateNote status={feeds.status("intelCycle")} noun="intelligence cycle status" />
+      {/if}
+    </Panel>
+
+    <Panel title="Swap Evidence" status={feeds.status("intelCycle")}
+           meta="full-transaction balance deltas">
+      {#if intel?.swap_evidence?.state === "MEASURED"}
+        {@const s3 = intel.swap_evidence}
+        <div class="stat-list">
+          <div class="stat"><span>Pending enrichment</span>
+            <b class="num">{s3.pending_candidates ?? "—"}</b></div>
+          <div class="stat"><span>Enriched</span>
+            <b class="num">{s3.by_state?.ENRICHED ?? 0}</b></div>
+          <div class="stat"><span>Partial (unvaluable swap)</span>
+            <b class="num">{s3.by_state?.PARTIAL ?? 0}</b></div>
+          <div class="stat"><span>Retryable failures</span>
+            <b class="num">{s3.by_state?.RETRYABLE_FAILURE ?? 0}</b></div>
+          <div class="stat"><span>Permanently unresolved</span>
+            <b class="num">{s3.by_state?.PERMANENTLY_UNRESOLVED ?? 0}</b></div>
+          <div class="stat"><span>Refused — not a trade</span>
+            <b class="num">{s3.by_state?.REFUSED_NON_TRADING ?? 0}</b></div>
+          <div class="stat"><span>Classified buys / sells</span>
+            <b class="num">{s3.classified_buys} / {s3.classified_sells}</b></div>
+          <div class="stat"><span>Budget — signatures / calls</span>
+            <b class="num">{s3.budget_signatures} / {s3.budget_calls}</b></div>
+          <div class="stat"><span>Max attempts</span>
+            <b class="num">{s3.max_attempts}</b></div>
+        </div>
+        <p class="note">
+          A FAILED TRANSACTION IS NOT A TRADE. The transfers feed reports the
+          attempted movements and no error, so only the transaction’s own
+          pre/post balances can tell a completed swap from one that reverted,
+          a token inflow with no payment from a purchase, or an LP deposit
+          from a sale. Each of those lands as REFUSED — a stored answer, not
+          an absence, so the signature is never bought twice.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("intelCycle")} noun="swap evidence" />
+      {/if}
+    </Panel>
+
+    <Panel title="Wallet-Score Coverage" status={feeds.status("intelCycle")}
+           meta="an unproven wallet is not a neutral one">
+      {#if intel?.wallet_scoring?.state === "MEASURED"}
+        {@const w2 = intel.wallet_scoring}
+        <div class="stat-list">
+          <div class="stat"><span>Registry wallets</span>
+            <b class="num">{num(w2.registry_wallets, 0)}</b></div>
+          <div class="stat"><span>Watched wallets</span>
+            <b class="num">{num(w2.watched_wallets, 0)}</b></div>
+          <div class="stat"><span>Wallets scored</span>
+            <b class="num">{num(w2.scored, 0)}</b></div>
+          <div class="stat"><span>Score coverage</span>
+            <b class="num">{w2.coverage_pct ?? "—"}%</b></div>
+          <div class="stat"><span>Insufficient evidence</span>
+            <b class="num">{num(w2.insufficient_evidence, 0)}</b></div>
+          <div class="stat"><span>With resolved samples</span>
+            <b class="num">{num(w2.with_resolved_samples, 0)}</b></div>
+          <div class="stat"><span>Never analysed</span>
+            <b class="num">{num(w2.never_analysed, 0)}</b></div>
+          <div class="stat"><span>Provider failures</span>
+            <b class="num">{num(w2.failed, 0)}</b></div>
+          <div class="stat"><span>Round trips required</span>
+            <b class="num">{w2.min_trades_for_score}</b></div>
+          <div class="stat"><span>Score version</span>
+            <b class="num">{w2.score_version}</b></div>
+          <div class="stat"><span>Last scoring update</span>
+            <b class="num">{w2.last_scoring_update
+              ? new Date(w2.last_scoring_update).toLocaleString() : "—"}</b></div>
+        </div>
+        {#if w2.by_measurability_reason && Object.keys(w2.by_measurability_reason).length}
+          <div class="sub">Why not measurable</div>
+          <div class="chips">
+            {#each Object.entries(w2.by_measurability_reason) as [r2, n2]}
+              <span class="chip"><b>{n2}</b><em>{r2}</em></span>
+            {/each}
+          </div>
+        {/if}
+        <p class="note">
+          BOOTSTRAPPED FROM {w2.bootstrap_population}, not from JARVIS
+          theses. A wallet’s own entries and what the token did next are one
+          population; how a JARVIS thesis derived from that wallet performed
+          is a different one, measured separately and never fed back. That
+          separation is what stops “needs a score to make a thesis, needs a
+          thesis to get a score”. An unscored wallet stays UNKNOWN — it is
+          never given a neutral score to get an event through the gate.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("intelCycle")} noun="wallet-score coverage" />
+      {/if}
+    </Panel>
+
+    <Panel title="Price Coverage" status={feeds.status("intelCycle")}
+           meta="exact mints · missing stays missing">
+      {#if intel?.price_coverage?.state === "MEASURED"}
+        {@const pc = intel.price_coverage}
+        <div class="stat-list">
+          <div class="stat"><span>Event mints</span>
+            <b class="num">{num(pc.event_mints, 0)}</b></div>
+          <div class="stat"><span>Priced mints</span>
+            <b class="num">{num(pc.priced_mints, 0)}</b></div>
+          <div class="stat"><span>Fresh (within {pc.fresh_window_seconds}s)</span>
+            <b class="num">{num(pc.fresh_mints, 0)}</b></div>
+          <div class="stat"><span>Stale mints</span>
+            <b class="num">{num(pc.stale_mints, 0)}</b></div>
+          <div class="stat"><span>Unpriced mints</span>
+            <b class="num">{num(pc.unpriced_mints, 0)}</b></div>
+          <div class="stat"><span>Pending collection</span>
+            <b class="num">{pc.pending_mints ?? "—"}</b></div>
+          <div class="stat"><span>Due checkpoints</span>
+            <b class="num">{num(pc.due_checkpoints, 0)}</b></div>
+          <div class="stat"><span>Resolved checkpoints</span>
+            <b class="num">{num(pc.resolved_checkpoints, 0)}</b></div>
+          <div class="stat"><span>Unresolved checkpoints</span>
+            <b class="num">{num(pc.unresolved_checkpoints, 0)}</b></div>
+          <div class="stat"><span>Snapshot rows</span>
+            <b class="num">{num(pc.snapshot_rows, 0)}</b></div>
+          <div class="stat"><span>Last collection</span>
+            <b class="num">{pc.last_snapshot_at
+              ? new Date(pc.last_snapshot_at).toLocaleString() : "—"}</b></div>
+        </div>
+        {#if intel?.quote_series?.series?.length}
+          <div class="sub">Quote assets</div>
+          <div class="chips">
+            {#each intel.quote_series.series as qs}
+              <span class="chip"><b>{qs.state}</b><em>{qs.symbol}
+                {qs.age_hours != null ? `· ${qs.age_hours}h old` : ""}</em></span>
+            {/each}
+          </div>
+        {/if}
+        <p class="note">
+          A TICKER IS NOT A MINT and today’s price is not the price then.
+          Snapshots are requested for exact mints — due checkpoints first,
+          then new event references — and a mint the provider does not cover
+          produces NO ROW rather than a zero. The quote series above is
+          separate and it gates everything: a SOL-quoted round trip cannot be
+          valued at all while SOL itself is stale, which is why no wallet
+          could be scored while that series sat 39.8 hours behind.
+        </p>
+      {:else}
+        <StateNote status={feeds.status("intelCycle")} noun="price coverage" />
       {/if}
     </Panel>
 

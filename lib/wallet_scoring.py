@@ -360,6 +360,242 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     return out
 
 
+def _score_one(w, *, transfers_fn, stats) -> str:
+    """Measure ONE wallet from its own transfer history. Returns the outcome.
+
+    Extracted verbatim from `score_registry_wallets` so that the targeted
+    pass and the sweep share ONE implementation. A second scoring function
+    would be a second wallet score, and the whole point of a score is that
+    everyone means the same thing by it.
+    """
+    from app.database import now_iso
+
+    stats["attempted"] += 1
+    now = now_iso()
+    try:
+        raw = transfers_fn(w.address, limit=100)
+    except Exception as e:
+        # PROVIDER FAILURE — NOT a measurement of zero. Every count already
+        # on this row is LEFT INTACT: overwriting a known qualified_trades=12
+        # with 0 because Helius timed out destroys evidence and calls the
+        # result a measurement. Only the run's own outcome is recorded, and
+        # last_score_update is deliberately not touched so the existing
+        # score keeps its real age.
+        logger.debug(f"[WalletScoring] {w.address[:8]}...: {e}")
+        w.analysis_status = "FAILED"
+        w.analysis_error = f"{type(e).__name__}: {str(e)[:160]}"
+        w.last_analysis_at = now
+        stats["errors"] += 1
+        return "FAILED"
+
+    legs = raw if isinstance(raw, list) else (
+        (raw or {}).get("transfers") or (raw or {}).get("data") or [])
+    if not legs:
+        # A SUCCESSFUL read that found nothing. This IS a measurement — of
+        # zero — and is a different fact from the failure above.
+        w.analysis_status = "NO_VERIFIED_TRADES"
+        w.measurability_reason = "NO_TRANSFER_HISTORY"
+        w.measurable = False
+        w.sample_count = 0
+        w.required_sample_count = MIN_TRADES_FOR_SCORE
+        w.last_analysis_at = now
+        w.analysis_error = None
+        stats["no_transfers"] += 1
+        return "NO_VERIFIED_TRADES"
+
+    rec = reconstruct_trades(legs)
+    s = score_wallet(rec)
+    w.last_score_update = now
+
+    # THE STATISTICS LIFECYCLE READS MUST BE THE STATISTICS SCORING WRITES.
+    # Written BEFORE the measurability gate on purpose: a wallet with 3 round
+    # trips is not measurable, but "3 of 15" is the true and useful answer to
+    # "why is this not smart money?" — skipping the write left it
+    # indistinguishable from a wallet with none.
+    m = s.get("metrics") or {}
+    w.qualified_trades = s["trades_scored"]
+    w.winning_trades = s["winning_trades"]
+    w.losing_trades = s["losing_trades"]
+    w.win_rate = m.get("win_rate")
+    w.profit_factor = m.get("profit_factor")
+    w.average_trade_size = m.get("average_size_usd")
+    w.median_trade_size = m.get("median_size_usd")
+    w.largest_trade = m.get("largest_size_usd")
+    w.unpriced_trades = rec.get("unpriced")
+    w.sample_count = s["trades_scored"]
+    w.required_sample_count = MIN_TRADES_FOR_SCORE
+    w.last_analysis_at = now
+    w.analysis_error = None
+
+    if not s["measurable"]:
+        # INSUFFICIENT — distinct from zero and from failure. The counts
+        # above are already persisted and true, so the diagnostic reads
+        # "3 of 15" rather than "0 of 15", and the scores stay NULL because
+        # the sample does not support them.
+        w.measurable = False
+        w.analysis_status = ("INSUFFICIENT" if s["trades_scored"]
+                             else "NO_VERIFIED_TRADES")
+        w.measurability_reason = (
+            "INSUFFICIENT_QUALIFIED_TRADES" if s["trades_scored"]
+            else "NO_VERIFIED_TRADES")
+        stats["not_measurable"] += 1
+        return w.analysis_status
+
+    w.measurable = True
+    w.analysis_status = "MEASURED"
+    w.measurability_reason = None
+    w.smart_money_score = s["smart_money_score"]
+    # alpha_score stays NULL until W5 measures post-entry horizons. Writing
+    # the realized return here is what made the missing capability invisible
+    # for so long.
+    w.alpha_score = s["alpha_score"]
+    w.legacy_alpha_score = s["legacy_alpha_score"]
+    w.copy_score = s["copy_score"]
+    w.confidence_score = s["confidence_score"]
+    w.wallet_score_version = SCORE_VERSION
+    if s.get("whale_score") is not None:
+        w.whale_score = s["whale_score"]
+    # SCORING DECIDES NOTHING. lib/wallet_lifecycle owns transitions,
+    # reading these scores plus the observation evidence.
+    stats["scored"] += 1
+    return "MEASURED"
+
+
+def _empty_stats() -> dict:
+    return {"attempted": 0, "scored": 0, "not_measurable": 0,
+            "no_transfers": 0, "errors": 0}
+
+
+#: WHAT THE SCORE IS LEARNED FROM, and why that is not circular.
+#
+# There are TWO populations here and only one of them is used to score a
+# wallet:
+#
+#   A. THE WALLET'S OWN economic events and what happened next. That is
+#      what `reconstruct_trades` builds — round trips from the wallet's own
+#      transfer history, priced from its own execution — and it needs no
+#      JARVIS thesis to exist. This is what a wallet score measures.
+#
+#   B. JARVIS SHADOW THESES derived from that wallet. A separate
+#      population, measured separately in `wallet_shadow_outcomes`, and
+#      never fed back into the wallet score.
+#
+# The circular failure — a wallet needs a score to produce a thesis, a
+# thesis needs an outcome to score the wallet — only appears if B is used
+# to compute A. It is not. A wallet becomes measurable purely from its own
+# history, which is why scoring can bootstrap from a standing start with
+# zero theses in the table.
+SCORE_BOOTSTRAP_POPULATION = "OBSERVED_WALLET_ECONOMIC_EVENTS"
+
+
+def coverage(db=None) -> dict:
+    """How much of the registry carries a usable score, and why not.
+
+    An UNSCORED wallet is not a low-scoring one, and the difference is the
+    whole reason a thesis can be refused for UNKNOWN_WALLET_QUALITY. The
+    breakdown below is what makes that refusal legible instead of blank.
+    """
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    out = {"registry_wallets": 0, "watched_wallets": 0, "scored": 0,
+           "insufficient_evidence": 0, "with_resolved_samples": 0,
+           "never_analysed": 0, "failed": 0,
+           "coverage_pct": None, "score_version": SCORE_VERSION,
+           "min_trades_for_score": MIN_TRADES_FOR_SCORE,
+           "bootstrap_population": SCORE_BOOTSTRAP_POPULATION,
+           "last_scoring_update": None, "by_analysis_status": {},
+           "by_measurability_reason": {}, "state": "MEASURED"}
+    try:
+        with engine.connect() as conn:
+            out["registry_wallets"] = conn.execute(text(
+                "SELECT COUNT(*) FROM wallet_registry")).scalar() or 0
+            out["watched_wallets"] = conn.execute(text(
+                "SELECT COUNT(*) FROM wallet_registry WHERE pinned=1")
+            ).scalar() or 0
+            out["scored"] = conn.execute(text(
+                "SELECT COUNT(*) FROM wallet_registry WHERE measurable=1 "
+                "AND (smart_money_score IS NOT NULL "
+                "     OR alpha_score IS NOT NULL)")).scalar() or 0
+            out["with_resolved_samples"] = conn.execute(text(
+                "SELECT COUNT(*) FROM wallet_registry "
+                "WHERE COALESCE(sample_count,0) > 0")).scalar() or 0
+            out["last_scoring_update"] = conn.execute(text(
+                "SELECT MAX(last_score_update) FROM wallet_registry"
+            )).scalar()
+            for st, n in conn.execute(text(
+                    "SELECT COALESCE(analysis_status,'NEVER_ANALYSED'), "
+                    "COUNT(*) FROM wallet_registry GROUP BY 1 ORDER BY 2 DESC"
+            )).fetchall():
+                out["by_analysis_status"][st] = n
+            for rs, n in conn.execute(text(
+                    "SELECT measurability_reason, COUNT(*) FROM "
+                    "wallet_registry WHERE measurability_reason IS NOT NULL "
+                    "GROUP BY 1 ORDER BY 2 DESC")).fetchall():
+                out["by_measurability_reason"][rs] = n
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning("[WalletScoring] coverage unavailable: %s", e)
+        out["state"] = "UNAVAILABLE"
+        out["detail"] = str(e)[:200]
+        return out
+
+    st = out["by_analysis_status"]
+    out["never_analysed"] = st.get("NEVER_ANALYSED", 0)
+    out["failed"] = st.get("FAILED", 0)
+    out["insufficient_evidence"] = (st.get("INSUFFICIENT", 0)
+                                    + st.get("NO_VERIFIED_TRADES", 0))
+    if out["registry_wallets"]:
+        out["coverage_pct"] = round(
+            100.0 * out["scored"] / out["registry_wallets"], 2)
+    return out
+
+
+def score_wallets(addresses, *, db=None, limit: int = 50,
+                  transfers_fn=None) -> dict:
+    """Rescore NAMED wallets. Bounded, and the only ones that changed.
+
+    The sweep below selects a population by status; this selects by
+    address, so a cycle can rescore exactly the wallets whose evidence
+    moved instead of walking 1,086 registry rows every fifteen minutes.
+    Same model, same thresholds, same version — see `_score_one`.
+    """
+    from app.database import WalletRegistry, get_db
+
+    wanted = [a for a in dict.fromkeys(addresses or []) if a]
+    stats = _empty_stats()
+    stats["requested"] = len(wanted)
+    stats["skipped_not_in_registry"] = 0
+    stats["population"] = SCORE_BOOTSTRAP_POPULATION
+    stats["score_version"] = SCORE_VERSION
+    if not wanted:
+        return stats
+
+    cap = max(1, min(int(limit), 200))
+    wanted = wanted[:cap]
+
+    if transfers_fn is None:
+        from lib.helius_client import transfers as transfers_fn
+
+    def _run(session):
+        rows = (session.query(WalletRegistry)
+                .filter(WalletRegistry.address.in_(wanted))
+                .filter(~WalletRegistry.status.in_(
+                    ("EXCLUDED_ENTITY", "ARCHIVED")))
+                .all())
+        found = {r.address for r in rows}
+        stats["skipped_not_in_registry"] = len(
+            [a for a in wanted if a not in found])
+        for w in rows:
+            _score_one(w, transfers_fn=transfers_fn, stats=stats)
+        return stats
+
+    if db is not None:
+        return _run(db)
+    with get_db() as _db:
+        return _run(_db)
+
+
 def score_registry_wallets(limit: int = 25, db=None) -> dict:
     """Fetch transfers for unscored candidates and record what they show.
 
@@ -388,110 +624,11 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
                     WalletRegistry.wallet_score_version.is_(None),
                     WalletRegistry.wallet_score_version != SCORE_VERSION))
                 .limit(max(1, min(limit, 200))).all())
-        stats = {"attempted": 0, "scored": 0, "not_measurable": 0,
-                 "no_transfers": 0, "errors": 0}
+        stats = _empty_stats()
+        stats["population"] = SCORE_BOOTSTRAP_POPULATION
+        stats["score_version"] = SCORE_VERSION
         for w in rows:
-            stats["attempted"] += 1
-            now = __import__("app.database", fromlist=["now_iso"]).now_iso()
-            try:
-                raw = transfers(w.address, limit=100)
-            except Exception as e:
-                # PROVIDER FAILURE — NOT a measurement of zero. Every count
-                # already on this row is LEFT INTACT: overwriting a known
-                # qualified_trades=12 with 0 because Helius timed out
-                # destroys evidence and calls the result a measurement.
-                # Only the run's own outcome is recorded, and
-                # last_score_update is deliberately not touched so the
-                # existing score keeps its real age.
-                logger.debug(f"[WalletScoring] {w.address[:8]}…: {e}")
-                w.analysis_status = "FAILED"
-                w.analysis_error = f"{type(e).__name__}: {str(e)[:160]}"
-                w.last_analysis_at = now
-                stats["errors"] += 1
-                continue
-
-            legs = raw if isinstance(raw, list) else (
-                (raw or {}).get("transfers") or (raw or {}).get("data") or [])
-            if not legs:
-                # A SUCCESSFUL read that found nothing. This IS a
-                # measurement — of zero — and is a different fact from the
-                # failure above.
-                w.analysis_status = "NO_VERIFIED_TRADES"
-                w.measurability_reason = "NO_TRANSFER_HISTORY"
-                w.measurable = False
-                w.sample_count = 0
-                w.required_sample_count = MIN_TRADES_FOR_SCORE
-                w.last_analysis_at = now
-                w.analysis_error = None
-                stats["no_transfers"] += 1
-                continue
-            rec = reconstruct_trades(legs)
-            s = score_wallet(rec)
-            w.last_score_update = __import__("app.database", fromlist=["now_iso"]).now_iso()
-
-            # THE STATISTICS LIFECYCLE READS MUST BE THE STATISTICS SCORING
-            # WRITES. Every column here already existed on WalletRegistry and
-            # every value was already computed by score_wallet — but nothing
-            # wrote them, so `wallet.qualified_trades or 0` in
-            # wallet_lifecycle evaluated to 0 for every wallet ever scored and
-            # the SMART_MONEY gate (>= 15 qualified trades) was unreachable by
-            # construction. Schema, producer and consumer all correct; the
-            # assignment between them simply absent.
-            #
-            # Written BEFORE the measurability gate on purpose. A wallet with
-            # 3 round trips is not measurable, but "3 of 15" is the true and
-            # useful answer to "why is this not smart money?" — skipping the
-            # write left it indistinguishable from a wallet with none.
-            m = s.get("metrics") or {}
-            w.qualified_trades = s["trades_scored"]
-            w.winning_trades = s["winning_trades"]
-            w.losing_trades = s["losing_trades"]
-            w.win_rate = m.get("win_rate")
-            w.profit_factor = m.get("profit_factor")
-            w.average_trade_size = m.get("average_size_usd")
-            w.median_trade_size = m.get("median_size_usd")
-            w.largest_trade = m.get("largest_size_usd")
-            w.unpriced_trades = rec.get("unpriced")
-            w.sample_count = s["trades_scored"]
-            w.required_sample_count = MIN_TRADES_FOR_SCORE
-            w.last_analysis_at = now
-            w.analysis_error = None
-
-            if not s["measurable"]:
-                # INSUFFICIENT — distinct from zero and from failure. The
-                # counts above are already persisted and true, so the
-                # diagnostic reads "3 of 15" rather than "0 of 15", and the
-                # scores stay NULL because the sample does not support them.
-                w.measurable = False
-                w.analysis_status = ("INSUFFICIENT" if s["trades_scored"]
-                                     else "NO_VERIFIED_TRADES")
-                w.measurability_reason = (
-                    "INSUFFICIENT_QUALIFIED_TRADES" if s["trades_scored"]
-                    else "NO_VERIFIED_TRADES")
-                stats["not_measurable"] += 1
-                continue
-
-            w.measurable = True
-            w.analysis_status = "MEASURED"
-            w.measurability_reason = None
-            w.smart_money_score = s["smart_money_score"]
-            # alpha_score stays NULL until W5 measures post-entry horizons.
-            # Writing the realized return here is what made the missing
-            # capability invisible for so long.
-            w.alpha_score = s["alpha_score"]
-            w.legacy_alpha_score = s["legacy_alpha_score"]
-            w.copy_score = s["copy_score"]
-            w.confidence_score = s["confidence_score"]
-            w.wallet_score_version = SCORE_VERSION
-            if s.get("whale_score") is not None:
-                w.whale_score = s["whale_score"]
-            # SCORING DECIDES NOTHING. This used to write `w.status =
-            # "WATCH"` inline, which made promotion a side effect of
-            # measurement and was the ONLY lifecycle write in the codebase —
-            # so SMART_MONEY and HIGH_CONVICTION were unreachable states.
-            # lib/wallet_lifecycle owns transitions now, reading these
-            # scores plus the observation evidence.
-            stats["scored"] += 1
+            _score_one(w, transfers_fn=transfers, stats=stats)
         return stats
 
     if db is not None:

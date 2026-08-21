@@ -537,6 +537,8 @@ def _score_one(w, *, session, transfers_fn, stats) -> str:
         # last_score_update is deliberately not touched so the existing
         # score keeps its real age.
         logger.debug(f"[WalletScoring] {w.address[:8]}...: {e}")
+        # A provider failure leaves score_source alone: the last real score
+        # still came from whatever evidence produced it.
         w.analysis_status = "FAILED"
         w.analysis_error = f"{type(e).__name__}: {str(e)[:160]}"
         w.last_analysis_at = now
@@ -562,6 +564,14 @@ def _score_one(w, *, session, transfers_fn, stats) -> str:
 
     rec = (reconstruct_ledger_trades(legs) if ledger_rows
            else reconstruct_trades(legs))
+    # SAY WHICH EVIDENCE PRODUCED THE NUMBER. A score from one shallow
+    # transfer page and a score from a drained balance-delta ledger are not
+    # the same claim, and the desk was showing them identically.
+    w.score_source = (
+        ("DURABLE_LEDGER_COMPLETE"
+         if getattr(w, "history_backfill_complete", 0) else
+         "DURABLE_LEDGER_PARTIAL") if ledger_rows
+        else "SHALLOW_TRANSFER_FALLBACK")
     s = score_wallet(rec)
     w.last_score_update = now
 

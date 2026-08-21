@@ -103,13 +103,42 @@ def evaluate(wallet, alpha: dict | None = None,
     # flow happens to score well was promotable into WATCH and from there
     # into the monitored population that produces wallet-alpha picks.
     # Entity classification is not something a good score can outrank.
+    from lib.wallet_behaviour import NON_COPYABLE_BEHAVIOURS
     from lib.wallet_classify import NON_TRADER_ENTITIES
 
     etype = str(getattr(wallet, "entity_type", None) or "").upper()
     if etype in NON_TRADER_ENTITIES or getattr(wallet, "is_protocol", False):
         return {"status": "EXCLUDED_ENTITY", "changed": current != "EXCLUDED_ENTITY",
                 "reasons": [f"classified {etype or 'PROTOCOL'} — entity flow is "
-                            f"not copyable trader alpha, whatever it scores"]}
+                            f"not copyable trader alpha, whatever it scores"],
+                "purpose": "FLOW_CONTEXT",
+                "purpose_reason": "confirmed entity identity"}
+
+    # ── MEASURED NON-COPYABLE BEHAVIOUR ─────────────────────────────────
+    #
+    # This is a BEHAVIOURAL finding, not an identity one, so it must NOT
+    # write EXCLUDED_ENTITY and must NOT set entity_type. What it does is
+    # narrower and honest: the wallet stops being watched FOR ALPHA, keeps
+    # every observation it has, keeps being observed as flow context, and
+    # can come back the moment its behaviour changes.
+    #
+    # It is checked before the promotion ladder because the ladder reads
+    # only score and sample size — which is exactly how a wallet
+    # distributing across 415 counterparties reached WATCH at 80.
+    behaviour = str(getattr(wallet, "behaviour_state", None) or "")
+    copyability = str(getattr(wallet, "copyability_state", None) or "")
+    if behaviour and behaviour in NON_COPYABLE_BEHAVIOURS:
+        demote = current in ("WATCH", "SMART_MONEY", "HIGH_CONVICTION")
+        return {
+            "status": "CANDIDATE" if demote else current,
+            "changed": demote,
+            "reasons": [f"observed {behaviour}: real activity, but not "
+                        f"copyable directional alpha. Kept as flow context "
+                        f"with its evidence intact — this is a statement "
+                        f"about behaviour, not about who owns the wallet"],
+            "purpose": "FLOW_CONTEXT",
+            "purpose_reason": f"behaviour {behaviour}",
+        }
 
     sm = wallet.smart_money_score
     conf = wallet.confidence_score or 0.0
@@ -147,7 +176,9 @@ def evaluate(wallet, alpha: dict | None = None,
     # ── promotion: strictly one tier at a time ───────────────────────────
     if sm is None:
         return {"status": current, "changed": False,
-                "reasons": ["unmeasured — no smart money score yet"]}
+                "reasons": ["unmeasured — no smart money score yet"],
+                "purpose": "EVIDENCE_COLLECTION",
+                "purpose_reason": "no score yet"}
 
     target = current
 
@@ -205,7 +236,16 @@ def evaluate(wallet, alpha: dict | None = None,
             target = "HIGH_CONVICTION"
             reasons.append("cleared every HIGH_CONVICTION gate")
 
-    return {"status": target, "changed": target != current, "reasons": reasons}
+    # A directional or not-yet-characterised wallet is watched FOR ALPHA
+    # once it is proven enough to be promoted; below that it is still
+    # gathering the evidence that would prove it.
+    purpose = ("ALPHA" if target in ("WATCH", "SMART_MONEY", "HIGH_CONVICTION")
+               else "EVIDENCE_COLLECTION")
+    preason = (f"behaviour {behaviour or 'unassessed'}"
+               + (f", copyability {copyability}" if copyability else ""))
+    return {"status": target, "changed": target != current,
+            "reasons": reasons, "purpose": purpose,
+            "purpose_reason": preason}
 
 
 def run(limit: int = 200, db=None) -> dict:
@@ -228,6 +268,14 @@ def run(limit: int = 200, db=None) -> dict:
             alpha = alpha_for_wallet(session, w.address)
             copy = copyability(session, w.address)
             verdict = evaluate(w, alpha, copy)
+            if verdict.get("purpose") and \
+                    w.monitoring_purpose != verdict["purpose"]:
+                # The ROLE can change without the STATUS changing, and it
+                # must be recorded when it does — that is the whole point.
+                w.monitoring_purpose = verdict["purpose"]
+                w.monitoring_reason = verdict.get("purpose_reason")
+                stats.setdefault("purpose_changes", 0)
+                stats["purpose_changes"] += 1
             if not verdict["changed"]:
                 stats["unchanged"] += 1
                 continue
@@ -237,6 +285,9 @@ def run(limit: int = 200, db=None) -> dict:
             except ValueError:
                 up = False
             w.status = after
+            if verdict.get("purpose"):
+                w.monitoring_purpose = verdict["purpose"]
+                w.monitoring_reason = verdict.get("purpose_reason")
             # Alpha earned by observation belongs on the row, so the UI and
             # the promotion rule read the same number.
             if alpha.get("measurable"):

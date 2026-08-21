@@ -43,7 +43,8 @@ CYCLE_VERSION = "wallet_intel_cycle_v1"
 # Stage names, in order. These are what the desk shows as "current stage".
 STAGES = ("ENRICH_SWAP_EVIDENCE", "BACKFILL_WALLET_HISTORY",
           "COLLECT_PRICE_SNAPSHOTS", "RESOLVE_WALLET_ALPHA",
-          "RESCORE_AFFECTED_WALLETS", "APPLY_WALLET_LIFECYCLE",
+          "RESCORE_AFFECTED_WALLETS", "ASSESS_WALLET_BEHAVIOUR",
+          "APPLY_WALLET_LIFECYCLE",
           "PROCESS_SHADOW_EVENTS", "RESOLVE_OUTCOMES", "REFRESH_SUMMARIES")
 
 #: How many holder observations may be tested against the ledger per pass.
@@ -74,6 +75,56 @@ MAX_WALLETS_RESCORED = 12
 # oldest-signature cursor and eventually reaches the beginning of history.
 HISTORY_WALLETS_PER_CYCLE = 1
 HISTORY_PAGE_SIZE = 25
+
+#: WHO GETS THE SCARCE DEEP-HISTORY BUDGET, in priority order.
+#
+# It used to be `WHERE pinned=1`, which meant a promoted WATCH wallet — the
+# only kind that can produce a pick — could never acquire a durable ledger
+# and was scored forever from a single shallow transfer page.
+#
+#   1  a wallet that has ALREADY produced a pick and has no durable ledger
+#      (its pick is provisional partly because of that)
+#   2  alpha-purpose wallets with no durable ledger at all
+#   3  pinned operator seeds, which must never be starved
+#   4  alpha wallets already partly backfilled
+#   5  wallets still gathering evidence
+#
+# EXCLUDED ENTIRELY: confirmed entities, and FLOW_CONTEXT wallets — their
+# behaviour is already measured and no amount of extra history makes a
+# consolidation wallet copyable. They keep their cheap transfer polling.
+#
+# Ties break on `last_deep_backfill_at` so the queue rotates and nothing at
+# a given priority can starve anything else at that priority.
+HISTORY_QUEUE_SQL = """
+    SELECT r.address, r.history_oldest_signature,
+           COALESCE(r.history_backfill_complete, 0)
+    FROM wallet_registry r
+    WHERE COALESCE(r.history_backfill_complete, 0) = 0
+      AND r.status NOT IN ('EXCLUDED_ENTITY', 'ARCHIVED')
+      AND COALESCE(r.monitoring_purpose, 'EVIDENCE_COLLECTION')
+          <> 'FLOW_CONTEXT'
+      AND (r.pinned = 1
+           OR r.status IN ('WATCH', 'SMART_MONEY', 'HIGH_CONVICTION'))
+    ORDER BY
+      CASE
+        WHEN EXISTS (SELECT 1 FROM wallet_shadow_events e
+                     WHERE e.state = 'ELIGIBLE'
+                       AND e.wallets_json LIKE
+                           '%' || substr(r.address, 1, 4) || '%'
+                                || substr(r.address, -4) || '%')
+             AND NOT EXISTS (SELECT 1 FROM wallet_trades t
+                             WHERE t.address = r.address) THEN 0
+        WHEN COALESCE(r.monitoring_purpose, '') = 'ALPHA'
+             AND NOT EXISTS (SELECT 1 FROM wallet_trades t
+                             WHERE t.address = r.address) THEN 1
+        WHEN r.pinned = 1 THEN 2
+        WHEN COALESCE(r.monitoring_purpose, '') = 'ALPHA' THEN 3
+        ELSE 4
+      END,
+      COALESCE(r.last_deep_backfill_at, '') ASC,
+      r.address
+    LIMIT :lim
+"""
 
 _RUN_LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
@@ -106,7 +157,12 @@ _STATE: dict = {
     "alpha_horizons_filled": None,
     "alpha_awaiting_price": None,
     "wallets_rescored": None,
+    "wallets_assessed": None,
+    "alpha_wallets": None,
+    "flow_context_wallets": None,
+    "evidence_collection_wallets": None,
     "wallets_promoted": None,
+    "purpose_changes": None,
     "wallets_demoted": None,
     "price_snapshots": None,
     "mints_considered": None,
@@ -243,6 +299,14 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
         # run this decision later, but that scheduler is intentionally off.
         # Without this stage a newly proven candidate never enters WATCH and
         # therefore is never polled for the evidence needed by shadow picks.
+        # Behaviour is recomputed from stored evidence BEFORE the lifecycle
+        # reads it. The order is the point: the lifecycle decides a wallet's
+        # role from its behaviour, so a stale behaviour row would keep a
+        # consolidation wallet in the alpha population for another cycle.
+        behaviour = _run_stage(
+            "ASSESS_WALLET_BEHAVIOUR", _assess_behaviour,
+            skipped_reason=None if score else "disabled by caller")
+
         lifecycle = _run_stage(
             "APPLY_WALLET_LIFECYCLE", _apply_lifecycle,
             skipped_reason=None if score else "disabled by caller")
@@ -294,7 +358,13 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
         "alpha_awaiting_price": (alpha or {}).get("awaiting_price"),
         "wallets_rescored": (scoring or {}).get("scored"),
         "wallets_attempted": (scoring or {}).get("attempted"),
+        "wallets_assessed": (behaviour or {}).get("assessed"),
+        "alpha_wallets": (behaviour or {}).get("alpha"),
+        "flow_context_wallets": (behaviour or {}).get("flow_context"),
+        "evidence_collection_wallets": (behaviour or {}).get(
+            "evidence_collection"),
         "wallets_promoted": (lifecycle or {}).get("promoted"),
+        "purpose_changes": (lifecycle or {}).get("purpose_changes"),
         "wallets_demoted": (lifecycle or {}).get("demoted"),
         "price_snapshots": (pricing or {}).get("snapshots"),
         "mints_considered": (pricing or {}).get("requested"),
@@ -349,15 +419,8 @@ def _backfill_history() -> dict:
     from lib import wallet_swaps
 
     with engine.connect() as conn:
-        rows = conn.execute(text(
-            "SELECT address, history_oldest_signature, "
-            "COALESCE(history_backfill_complete,0) "
-            "FROM wallet_registry "
-            "WHERE pinned=1 "
-            "  AND status NOT IN ('EXCLUDED_ENTITY','ARCHIVED') "
-            "  AND COALESCE(history_backfill_complete,0)=0 "
-            "ORDER BY COALESCE(last_deep_backfill_at,'') ASC, address "
-            "LIMIT :lim"), {"lim": HISTORY_WALLETS_PER_CYCLE}).fetchall()
+        rows = conn.execute(text(HISTORY_QUEUE_SQL),
+                            {"lim": HISTORY_WALLETS_PER_CYCLE}).fetchall()
 
     out = {"wallets_attempted": 0, "records_loaded": 0, "swaps": 0,
            "not_trades": 0, "unvalued": 0, "completed": 0,
@@ -382,6 +445,75 @@ def _backfill_history() -> dict:
                     "FROM wallet_registry WHERE address=:a"),
                     {"a": address}).scalar()
             out["completed"] += int(bool(complete))
+    return out
+
+
+def _assess_behaviour(*, limit: int = 40) -> dict:
+    """Recompute behaviour and copyability, and persist both.
+
+    Costs NO provider call — everything is measured from evidence already
+    stored — so this can run every cycle for the whole monitored population
+    without a budget. What it writes is deliberately narrow: a behavioural
+    finding and a copyability verdict, never an entity_type and never a
+    status. The lifecycle owns status; this only tells it what it is
+    looking at.
+    """
+    from sqlalchemy import text
+
+    from app.database import WalletRegistry, get_db, now_iso
+    from lib import wallet_behaviour as WB
+    from lib import wallet_registry as WR
+
+    out = {"assessed": 0, "changed": 0, "alpha": 0, "flow_context": 0,
+           "evidence_collection": 0, "by_behaviour": {},
+           "by_copyability": {}}
+    with get_db() as db:
+        rows = (db.query(WalletRegistry)
+                .filter(~WalletRegistry.status.in_(
+                    ("EXCLUDED_ENTITY", "ARCHIVED")))
+                .filter(text("(status IN ('WATCH','SMART_MONEY',"
+                             "'HIGH_CONVICTION') OR pinned=1)"))
+                .limit(max(1, min(int(limit), 200))).all())
+        for w in rows:
+            try:
+                prof = WB.profile(w.address)
+                beh = WB.classify(prof)
+                cop = WB.copyability(w.address, prof=prof, behaviour=beh,
+                                     registry_row={
+                                         "status": w.status,
+                                         "entity_type": w.entity_type,
+                                         "is_protocol": w.is_protocol,
+                                         "identity_source": w.identity_source,
+                                         "identity_type": w.identity_type})
+            except Exception as e:                           # noqa: BLE001
+                logger.debug("[IntelCycle] behaviour failed for %s: %s",
+                             str(w.address)[:8], e)
+                continue
+            out["assessed"] += 1
+            if (w.behaviour_state != beh["behaviour"]
+                    or w.copyability_state != cop["state"]):
+                out["changed"] += 1
+            w.behaviour_state = beh["behaviour"]
+            w.copyability_state = cop["state"]
+            w.behaviour_at = now_iso()
+            out["by_behaviour"][beh["behaviour"]] = \
+                out["by_behaviour"].get(beh["behaviour"], 0) + 1
+            out["by_copyability"][cop["state"]] = \
+                out["by_copyability"].get(cop["state"], 0) + 1
+
+    # Report the population split the desk shows.
+    from sqlalchemy import text as _t
+
+    from app.database import engine
+    with engine.connect() as c:
+        for purpose, n in c.execute(_t(
+                "SELECT COALESCE(monitoring_purpose,'EVIDENCE_COLLECTION'), "
+                "COUNT(*) FROM wallet_registry WHERE status IN "
+                "('WATCH','SMART_MONEY','HIGH_CONVICTION') OR pinned=1 "
+                "GROUP BY 1")).fetchall():
+            key = {WR.ALPHA: "alpha", WR.FLOW_CONTEXT: "flow_context"}.get(
+                purpose, "evidence_collection")
+            out[key] = out.get(key, 0) + n
     return out
 
 
@@ -417,6 +549,9 @@ def _rescore(started_dt, *, max_wallets=None) -> dict:
         # wallet was previously labelled NO_VERIFIED_TRADES/INSUFFICIENT.
         # Such labels describe the old evidence and must not permanently
         # exclude the wallet from rescoring.
+        # A durable-history pass changes the ledger, which changes the
+        # score, the behaviour, the copyability and therefore the role.
+        # Rescoring alone would leave the other three stale.
         for (addr,) in conn.execute(text(
                 "SELECT address FROM wallet_registry "
                 "WHERE last_history_sync_at >= :s"), {"s": since}).fetchall():

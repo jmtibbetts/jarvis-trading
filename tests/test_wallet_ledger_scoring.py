@@ -528,9 +528,16 @@ def test_the_stage_order_is_the_one_the_evidence_requires():
     assert order == [
         "ENRICH_SWAP_EVIDENCE", "BACKFILL_WALLET_HISTORY",
         "COLLECT_PRICE_SNAPSHOTS", "RESOLVE_WALLET_ALPHA",
-        "RESCORE_AFFECTED_WALLETS", "APPLY_WALLET_LIFECYCLE",
+        "RESCORE_AFFECTED_WALLETS",
+        # Behaviour is recomputed from the refreshed evidence BEFORE the
+        # lifecycle decides what the wallet is watched for.
+        "ASSESS_WALLET_BEHAVIOUR", "APPLY_WALLET_LIFECYCLE",
         "PROCESS_SHADOW_EVENTS", "RESOLVE_OUTCOMES", "REFRESH_SUMMARIES",
     ]
+    assert order.index("RESCORE_AFFECTED_WALLETS") < order.index(
+        "ASSESS_WALLET_BEHAVIOUR")
+    assert order.index("ASSESS_WALLET_BEHAVIOUR") < order.index(
+        "APPLY_WALLET_LIFECYCLE")
     # Prices must be current BEFORE anything values a SOL-quoted trade.
     assert order.index("COLLECT_PRICE_SNAPSHOTS") < order.index(
         "RESOLVE_WALLET_ALPHA")

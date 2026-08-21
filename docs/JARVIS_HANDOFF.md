@@ -1252,20 +1252,26 @@ fed back into A — pinned by a test that greps for ACCESS, not vocabulary.
 `score_registry_wallets` and `score_wallets` both delegate to one
 `_score_one`, so there is one wallet score and not two.
 
-### Measured before -> after, one real cycle on the operator database
+### Measured before -> after, on the operator database
 
-    market observations (current)     1,266 -> 1,283   (29 superseded)
-    BALANCE_DELTA_EVIDENCE events         0 -> 16
-    enrichment rows                       0 -> 68      (all NOT_A_TRADE)
-    wallets with a usable score           1 -> 2
-    registry NEVER_ANALYSED           1,060 -> 1,022
-    registry NO_VERIFIED_TRADES          16 -> 55
-    event mints priced                   45 -> 166
-    event mints FRESH (<3600s)            0 -> 154
-    snapshot rows                    10,779 -> 11,097
-    SOL/USD 1H staleness              39.8h -> 0.35h
+Before is the state at `e69c38d`; after is three real cycles later, two of
+them fired automatically by the poller with no manual call.
+
+    market observations (current)     1,266 -> 1,286   (31 superseded)
+    BALANCE_DELTA_EVIDENCE events         0 -> 17
+    enrichment rows                       0 -> 71      (all NOT_A_TRADE)
+    wallets with a usable score           1 -> 6       (still climbing)
+    registry NEVER_ANALYSED           1,060 -> ~1,010  (falls each cycle)
+    event mints priced                   45 -> 165
+    event mints FRESH (<3600s)            0 -> 153
+    snapshot rows                    10,779 -> 11,183
+    SOL/USD 1H staleness              39.8h -> under 1h
     eligible theses                       0 -> 0
     resolved outcomes                     0 -> 0
+
+**The scoring numbers are a MOVING FLOOR, not a final state.** 12 wallets
+are rescored per cycle and the registry has 1,086 rows, so coverage climbs
+on its own for many hours yet. Re-measure rather than quoting these.
 
 New event types only full-transaction evidence can establish:
 `NON_ECONOMIC_TRANSACTION` 10, `LIQUIDITY_ADD` 6, `EXCHANGE_WITHDRAWAL` 1,
@@ -1290,7 +1296,8 @@ Two binding constraints, both measured, neither weakened:
    CLOSED round trips is unreachable for an accumulator. Deeper paging does
    not help — `fully_drained` is already true.
 
-The 2 scored wallets are discovered candidates, not watched ones.
+Every scored wallet so far is a DISCOVERED CANDIDATE, not a watched one —
+which is why coverage rising does not move the thesis count at all.
 
 ## 16. Wallet intelligence — remaining UNKNOWNs
 
@@ -1325,6 +1332,12 @@ The 2 scored wallets are discovered candidates, not watched ones.
   computes. Left unproduced rather than approximated.
 - **The 3% round trip is still an ASSUMPTION**, labelled `ASSUMPTION`, and
   gross is shown beside net.
+- **`JARVIS_HELIUS_WALLET_POLLING_ENABLED` is NOT in `/proc/<pid>/environ`.**
+  It is read from `.env` at runtime, so checking the process environment
+  alone shows only `JARVIS_PLATFORM_MODE`, `JARVIS_RUNTIME_MODE` and
+  `JARVIS_DISABLE_SCHEDULER` and would suggest polling is off. It is not:
+  `/api/onchain/wallet-polling` reports `enabled: true, running: true`, and
+  that surface is the authority.
 - **No bitmap screenshot is obtainable** — the Browser pane does not
   composite in this environment. Verified against the live rendered DOM
   instead: text, geometry (4 panels at 557px, none clipped), network (all

@@ -363,29 +363,51 @@ def market_context(mint: str | None, at) -> dict:
         ctx["state"] = UNKNOWN_TOKEN_IDENTITY
         return ctx
     when = _parse(at) or _now()
+    # SELECT THE COLUMNS, NOT THE ENTITY. `get_db()` commits on the way out,
+    # and a commit EXPIRES every instance the session loaded; closing it then
+    # detaches them. So reading `row.captured_at` after this block asks a
+    # detached instance to refresh itself, which raises DetachedInstanceError
+    # and failed the whole classification stage.
+    #
+    # It only ever fired when a mint actually HAD snapshots, so it stayed
+    # invisible while prices were collected AFTER processing and most subject
+    # mints had no rows to iterate. Collecting prices first — which is
+    # correct, because a SOL-quoted event cannot be valued otherwise — made
+    # `rows` non-empty and the latent defect immediate.
+    #
+    # A column tuple owns its values outright and cannot expire, which is the
+    # same idiom `lib/token_price_history` already uses against this table.
     try:
         with get_db() as db:
-            rows = db.query(TokenActivitySnapshot).filter(
-                TokenActivitySnapshot.mint == mint).all()
+            rows = (db.query(TokenActivitySnapshot.captured_at,
+                             TokenActivitySnapshot.price_usd,
+                             TokenActivitySnapshot.liquidity_usd,
+                             TokenActivitySnapshot.volume_h1,
+                             TokenActivitySnapshot.volume_h24,
+                             TokenActivitySnapshot.symbol,
+                             TokenActivitySnapshot.network)
+                    .filter(TokenActivitySnapshot.mint == mint,
+                            TokenActivitySnapshot.price_usd.isnot(None))
+                    .all())
     except Exception as e:                                   # noqa: BLE001
         logger.warning("[ShadowIntel] snapshot lookup failed: %s", e)
         rows = []
     best, best_gap = None, None
-    for r in rows:
-        t = _parse(r.captured_at)
-        if t is None or r.price_usd is None:
+    for row in rows:
+        t = _parse(row[0])
+        if t is None or row[1] is None:
             continue
         gap = abs((t - when).total_seconds())
         if best_gap is None or gap < best_gap:
-            best, best_gap = r, gap
+            best, best_gap = row, gap
     if best is None:
         return ctx
     ctx.update({
-        "price_usd": best.price_usd, "price_source": "token_activity_snapshot",
-        "price_at": best.captured_at, "price_age_seconds": best_gap,
-        "liquidity_usd": best.liquidity_usd, "volume_h1": best.volume_h1,
-        "volume_h24": best.volume_h24, "symbol": best.symbol,
-        "network": best.network,
+        "price_usd": best[1], "price_source": "token_activity_snapshot",
+        "price_at": best[0], "price_age_seconds": best_gap,
+        "liquidity_usd": best[2], "volume_h1": best[3],
+        "volume_h24": best[4], "symbol": best[5],
+        "network": best[6],
         "state": "FRESH" if best_gap <= PRICE_MAX_AGE_SECONDS else STALE_PRICE,
     })
     return ctx

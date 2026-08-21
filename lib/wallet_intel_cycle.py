@@ -604,6 +604,15 @@ def status() -> dict:
 
 
 def _reset_for_tests() -> None:
+    # RELEASE THE RUN LOCK TOO. Resetting the reported state while leaving
+    # the lock held makes the next `run_once` return CYCLE_ALREADY_RUNNING,
+    # so a test that asserts on a cycle result passes or fails depending on
+    # which test ran before it.
+    if _RUN_LOCK.locked():
+        try:
+            _RUN_LOCK.release()
+        except RuntimeError:                                 # noqa: PERF203
+            pass
     with _STATE_LOCK:
         for k in list(_STATE):
             if isinstance(_STATE[k], int) and not isinstance(_STATE[k], bool):

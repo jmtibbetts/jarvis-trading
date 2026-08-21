@@ -247,6 +247,22 @@ def cluster(events: list) -> list:
 
 
 # ── Point-in-time wallet quality ─────────────────────────────────────────
+def _is_non_trader_entity(entity_type, status=None) -> bool:
+    """Whether this row is a known NON-TRADER, by the canonical vocabulary.
+
+    `lib/wallet_classify.NON_TRADER_ENTITIES` already names them — CEX,
+    BRIDGE, TREASURY, MARKET_MAKER, CUSTODY, DEX_ROUTER, LIQUIDITY_POOL,
+    VAULT, PDA, PROGRAM, TOKEN_ACCOUNT, BURN. This is the one place that
+    asks the question, so the gate and the lifecycle cannot disagree about
+    what an entity is.
+    """
+    from lib.wallet_classify import NON_TRADER_ENTITIES
+
+    if str(status or "").upper() in ("EXCLUDED_ENTITY", "ARCHIVED"):
+        return True
+    return str(entity_type or "").upper() in NON_TRADER_ENTITIES
+
+
 def wallet_quality_snapshot(addresses: list) -> dict:
     """Wallet evidence AS RECORDED, never invented.
 
@@ -259,6 +275,7 @@ def wallet_quality_snapshot(addresses: list) -> dict:
     out = {"wallets": [], "known": 0, "unknown": 0, "best_score": None,
            "max_sample_count": 0, "measurable": False,
            "score_version": None, "score_at": None,
+           "entities": [], "entity_types": [],
            "as_of": _iso(_now()),
            "note": ("point-in-time as recorded on the registry row; an "
                     "unscored wallet is UNKNOWN, never neutral")}
@@ -323,6 +340,13 @@ def wallet_quality_snapshot(addresses: list) -> dict:
             "quality": "KNOWN" if measurable else "UNKNOWN",
         }
         out["wallets"].append(entry)
+        # ENTITY IDENTITY IS NOT A SCORE. An exchange, router, pool or
+        # treasury can post an enormous, perfectly real "profit" that
+        # belongs to its customers or its routing flow, not to skill a
+        # follower could copy.
+        if _is_non_trader_entity(r["entity_type"], r["status"]):
+            out["entities"].append(entry["label"])
+            out["entity_types"].append(r["entity_type"] or r["status"])
         if measurable:
             out["known"] += 1
             if out["best_score"] is None or (score or 0) > out["best_score"]:
@@ -458,6 +482,23 @@ def evaluate(events: list, *, wallet_quality=None, ctx=None) -> dict:
 
     wq = wallet_quality if wallet_quality is not None else \
         wallet_quality_snapshot(wallets)
+
+    # EXCHANGE_OR_ENTITY_WALLET WAS A REFUSAL REASON THAT COULD NEVER FIRE.
+    # It was declared in REFUSAL_REASONS and no code path emitted it, so the
+    # desk showed zero entity refusals — which reads as "we checked and they
+    # were all independent traders" when nothing had ever been checked.
+    #
+    # It is checked BEFORE wallet quality on purpose: an exchange's flow can
+    # score extremely well, and "measurable" is exactly what a busy custodial
+    # wallet looks like. Skill is the wrong question to ask about it.
+    if wq.get("entities"):
+        return refuse(EXCHANGE_OR_ENTITY_WALLET,
+                      f"contributing wallet(s) {', '.join(wq['entities'])} "
+                      f"are classified "
+                      f"{', '.join(sorted(set(wq['entity_types'])))} — "
+                      f"entity flow is not copyable trader alpha, however "
+                      f"well it scores")
+
     if not wq.get("measurable"):
         reason = (INSUFFICIENT_WALLET_HISTORY
                   if wq.get("max_sample_count") else UNKNOWN_WALLET_QUALITY)

@@ -98,6 +98,19 @@ def evaluate(wallet, alpha: dict | None = None,
         return {"status": current, "changed": False,
                 "reasons": [f"{current} is terminal for lifecycle purposes"]}
 
+    # IDENTITY OVERRIDES SCORE. Promotion asked only "how well did it do?",
+    # never "what is it?" — so a router, pool, treasury or exchange whose
+    # flow happens to score well was promotable into WATCH and from there
+    # into the monitored population that produces wallet-alpha picks.
+    # Entity classification is not something a good score can outrank.
+    from lib.wallet_classify import NON_TRADER_ENTITIES
+
+    etype = str(getattr(wallet, "entity_type", None) or "").upper()
+    if etype in NON_TRADER_ENTITIES or getattr(wallet, "is_protocol", False):
+        return {"status": "EXCLUDED_ENTITY", "changed": current != "EXCLUDED_ENTITY",
+                "reasons": [f"classified {etype or 'PROTOCOL'} — entity flow is "
+                            f"not copyable trader alpha, whatever it scores"]}
+
     sm = wallet.smart_money_score
     conf = wallet.confidence_score or 0.0
     trades = wallet.qualified_trades or 0

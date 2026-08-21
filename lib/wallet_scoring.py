@@ -244,6 +244,126 @@ def reconstruct_trades(transfers: list[dict]) -> dict:
     }
 
 
+def reconstruct_ledger_trades(rows) -> dict:
+    """Build closed FIFO round trips from the canonical wallet ledger.
+
+    ``wallet_trades`` is produced from full transaction balance deltas.  It
+    is stronger evidence than pairing a shallow page of transfer records and
+    it survives restarts and bounded deep-history backfills.  A ledger row
+    with unknown USD value remains unpriced; it never becomes a zero-dollar
+    fill.
+    """
+    from datetime import datetime
+
+    def row_ts(row) -> float:
+        value = getattr(row, "opened_at", None)
+        if not value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
+
+    opens: dict[str, list[dict]] = {}
+    trades: list[dict] = []
+    unpriced = 0
+    unpriced_reasons: set[str] = set()
+
+    for row in sorted(rows or [], key=row_ts):
+        mint = getattr(row, "mint", None)
+        direction = str(getattr(row, "direction", "") or "").lower()
+        qty = _f(getattr(row, "quantity", None))
+        value_usd = getattr(row, "value_usd", None)
+        ts = row_ts(row)
+        if not mint or direction not in {"buy", "sell"} or qty <= 0:
+            continue
+        if value_usd is None or _f(value_usd) <= 0:
+            unpriced += 1
+            unpriced_reasons.add("ledger row has no authoritative USD value")
+            continue
+        value_usd = _f(value_usd)
+
+        if direction == "buy":
+            opens.setdefault(mint, []).append({
+                "qty": qty,
+                "cost_usd": value_usd,
+                "ts": ts,
+                "quote_symbol": getattr(row, "quote_mint", None),
+                "price_quality": getattr(row, "price_quality", None),
+            })
+            continue
+
+        lots = opens.get(mint) or []
+        if not lots:
+            # A sell whose acquisition predates the bounded history is not a
+            # closed round trip.  Deep backfill may supply the missing buy.
+            unpriced += 1
+            unpriced_reasons.add("sell has no earlier priced buy in ledger")
+            continue
+
+        remaining = qty
+        matched_qty = 0.0
+        cost_basis_usd = 0.0
+        opened_ts = None
+        qualities: set[str] = set()
+        while remaining > 1e-12 and lots:
+            lot = lots[0]
+            before_qty = lot["qty"]
+            take = min(remaining, before_qty)
+            fraction = take / before_qty if before_qty else 0.0
+            cost_take = lot["cost_usd"] * fraction
+            cost_basis_usd += cost_take
+            matched_qty += take
+            opened_ts = opened_ts or lot["ts"]
+            if lot.get("price_quality"):
+                qualities.add(lot["price_quality"])
+            lot["qty"] -= take
+            lot["cost_usd"] -= cost_take
+            remaining -= take
+            if lot["qty"] <= 1e-12:
+                lots.pop(0)
+
+        if matched_qty <= 0 or cost_basis_usd <= 0:
+            unpriced += 1
+            continue
+        # If only part of the sale could be matched, only the corresponding
+        # fraction of proceeds belongs to the proven round trip.
+        proceeds_usd = value_usd * (matched_qty / qty)
+        pnl_usd = proceeds_usd - cost_basis_usd
+        exit_quality = getattr(row, "price_quality", None)
+        if exit_quality:
+            qualities.add(exit_quality)
+        quality = ESTIMATED if ESTIMATED in qualities else MEASURED
+        trades.append({
+            "mint": mint,
+            "symbol": getattr(row, "token_symbol", None),
+            "cost_basis_usd": round(cost_basis_usd, 6),
+            "proceeds_usd": round(proceeds_usd, 6),
+            "pnl_usd": round(pnl_usd, 6),
+            "notional_usd": round(cost_basis_usd, 6),
+            "return_pct": round(pnl_usd / cost_basis_usd * 100.0, 4),
+            "quote_symbol": getattr(row, "quote_mint", None),
+            "quote_amount": getattr(row, "quote_amount", None),
+            "quote_price_usd": getattr(row, "quote_price_usd", None),
+            "entry_quote_symbols": [],
+            "price_source": getattr(row, "price_source", None),
+            "price_quality": quality,
+            "opened_ts": opened_ts,
+            "closed_ts": ts,
+            "hold_seconds": (ts - opened_ts) if opened_ts else None,
+        })
+
+    return {
+        "trades": trades,
+        "closed": len(trades),
+        "still_open": sum(len(v) for v in opens.values()),
+        "unpriced_legs": unpriced,
+        "unpriced_reasons": sorted(unpriced_reasons)[:5],
+        "source": "WALLET_TRADE_BALANCE_DELTA_LEDGER",
+    }
+
+
 def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     """The four scores, or an honest refusal.
 
@@ -360,7 +480,7 @@ def score_wallet(reconstruction: dict, *, portfolio_usd: float = 0.0) -> dict:
     return out
 
 
-def _score_one(w, *, transfers_fn, stats) -> str:
+def _score_one(w, *, session, transfers_fn, stats) -> str:
     """Measure ONE wallet from its own transfer history. Returns the outcome.
 
     Extracted verbatim from `score_registry_wallets` so that the targeted
@@ -372,8 +492,20 @@ def _score_one(w, *, transfers_fn, stats) -> str:
 
     stats["attempted"] += 1
     now = now_iso()
+    # Prefer the durable balance-delta ledger populated by
+    # wallet_swaps.sync_wallet_history.  The old path scored only the newest
+    # 100 transfer legs, which cannot prove a round trip when the buy falls
+    # on an older page.
+    from app.database import WalletTrade
+    ledger_rows = (session.query(WalletTrade)
+                   .filter(WalletTrade.address == w.address,
+                           WalletTrade.ledger_version ==
+                           "swap_v1_balance_delta")
+                   .order_by(WalletTrade.opened_at.asc()).all())
+    raw = None
     try:
-        raw = transfers_fn(w.address, limit=100)
+        if not ledger_rows:
+            raw = transfers_fn(w.address, limit=100)
     except Exception as e:
         # PROVIDER FAILURE — NOT a measurement of zero. Every count already
         # on this row is LEFT INTACT: overwriting a known qualified_trades=12
@@ -390,6 +522,8 @@ def _score_one(w, *, transfers_fn, stats) -> str:
 
     legs = raw if isinstance(raw, list) else (
         (raw or {}).get("transfers") or (raw or {}).get("data") or [])
+    if ledger_rows:
+        legs = ledger_rows
     if not legs:
         # A SUCCESSFUL read that found nothing. This IS a measurement — of
         # zero — and is a different fact from the failure above.
@@ -403,7 +537,8 @@ def _score_one(w, *, transfers_fn, stats) -> str:
         stats["no_transfers"] += 1
         return "NO_VERIFIED_TRADES"
 
-    rec = reconstruct_trades(legs)
+    rec = (reconstruct_ledger_trades(legs) if ledger_rows
+           else reconstruct_trades(legs))
     s = score_wallet(rec)
     w.last_score_update = now
 
@@ -421,7 +556,7 @@ def _score_one(w, *, transfers_fn, stats) -> str:
     w.average_trade_size = m.get("average_size_usd")
     w.median_trade_size = m.get("median_size_usd")
     w.largest_trade = m.get("largest_size_usd")
-    w.unpriced_trades = rec.get("unpriced")
+    w.unpriced_trades = rec.get("unpriced_legs")
     w.sample_count = s["trades_scored"]
     w.required_sample_count = MIN_TRADES_FOR_SCORE
     w.last_analysis_at = now
@@ -587,7 +722,8 @@ def score_wallets(addresses, *, db=None, limit: int = 50,
         stats["skipped_not_in_registry"] = len(
             [a for a in wanted if a not in found])
         for w in rows:
-            _score_one(w, transfers_fn=transfers_fn, stats=stats)
+            _score_one(w, session=session, transfers_fn=transfers_fn,
+                       stats=stats)
         return stats
 
     if db is not None:
@@ -628,7 +764,8 @@ def score_registry_wallets(limit: int = 25, db=None) -> dict:
         stats["population"] = SCORE_BOOTSTRAP_POPULATION
         stats["score_version"] = SCORE_VERSION
         for w in rows:
-            _score_one(w, transfers_fn=transfers, stats=stats)
+            _score_one(w, session=session, transfers_fn=transfers,
+                       stats=stats)
         return stats
 
     if db is not None:

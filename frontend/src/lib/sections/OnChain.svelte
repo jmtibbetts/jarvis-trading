@@ -254,8 +254,16 @@
             <b class="num">{c.signatures_refused_non_trading ?? "—"}</b></div>
           <div class="stat"><span>Enrichment failures</span>
             <b class="num">{c.enrichment_failures ?? "—"}</b></div>
+          <div class="stat"><span>History wallets / records</span>
+            <b class="num">{c.history_wallets_attempted ?? "—"} / {c.history_records_loaded ?? "—"}</b></div>
+          <div class="stat"><span>History swaps stored</span>
+            <b class="num">{c.history_swaps_stored ?? "—"}</b></div>
+          <div class="stat"><span>Backfills completed</span>
+            <b class="num">{c.history_backfills_completed ?? "—"}</b></div>
           <div class="stat"><span>Wallets rescored</span>
             <b class="num">{c.wallets_rescored ?? "—"}</b></div>
+          <div class="stat"><span>Wallets promoted / demoted</span>
+            <b class="num">{c.wallets_promoted ?? "—"} / {c.wallets_demoted ?? "—"}</b></div>
           <div class="stat"><span>Price snapshots</span>
             <b class="num">{c.price_snapshots ?? "—"}</b></div>
           <div class="stat"><span>Events processed</span>

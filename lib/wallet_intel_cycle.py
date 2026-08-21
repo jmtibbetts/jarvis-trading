@@ -41,8 +41,9 @@ logger = logging.getLogger(__name__)
 CYCLE_VERSION = "wallet_intel_cycle_v1"
 
 # Stage names, in order. These are what the desk shows as "current stage".
-STAGES = ("ENRICH_SWAP_EVIDENCE", "RESOLVE_WALLET_ALPHA",
-          "RESCORE_AFFECTED_WALLETS", "COLLECT_PRICE_SNAPSHOTS",
+STAGES = ("ENRICH_SWAP_EVIDENCE", "BACKFILL_WALLET_HISTORY",
+          "COLLECT_PRICE_SNAPSHOTS", "RESOLVE_WALLET_ALPHA",
+          "RESCORE_AFFECTED_WALLETS", "APPLY_WALLET_LIFECYCLE",
           "PROCESS_SHADOW_EVENTS", "RESOLVE_OUTCOMES", "REFRESH_SUMMARIES")
 
 #: How many holder observations may be tested against the ledger per pass.
@@ -67,6 +68,13 @@ PROCESS_WINDOW_SECONDS = 3 * 24 * 3600
 #: Rescoring costs one provider call per wallet, so it is capped per cycle.
 MAX_WALLETS_RESCORED = 12
 
+# One watched wallet advances by one 25-signature page per cycle.  Each
+# signature needs a transaction read, so this is intentionally much smaller
+# than the transfer poll budget.  Progress is durable through the registry's
+# oldest-signature cursor and eventually reaches the beginning of history.
+HISTORY_WALLETS_PER_CYCLE = 1
+HISTORY_PAGE_SIZE = 25
+
 _RUN_LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
 
@@ -90,10 +98,16 @@ _STATE: dict = {
     "signatures_partial": None,
     "enrichment_failures": None,
     "enrichment_calls": None,
+    "history_wallets_attempted": None,
+    "history_records_loaded": None,
+    "history_swaps_stored": None,
+    "history_backfills_completed": None,
     "entries_promoted": None,
     "alpha_horizons_filled": None,
     "alpha_awaiting_price": None,
     "wallets_rescored": None,
+    "wallets_promoted": None,
+    "wallets_demoted": None,
     "price_snapshots": None,
     "mints_considered": None,
     "events_processed": None,
@@ -190,6 +204,21 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
             "ENRICH_SWAP_EVIDENCE", _enrich,
             skipped_reason=None if enrich else "disabled by caller")
 
+        # The scoring model needs complete economic lifecycles, not the
+        # newest transfer page.  Advance one pinned wallet's durable history
+        # cursor every cycle; the resulting wallet_trades ledger is what the
+        # scoring stage consumes.
+        history = _run_stage(
+            "BACKFILL_WALLET_HISTORY", _backfill_history,
+            skipped_reason=None if score else "disabled by caller")
+
+        # Prices must be current BEFORE alpha resolution and scoring.  The
+        # former ordering refreshed SOL after scoring and left every
+        # SOL-quoted round trip one cycle behind its own evidence.
+        pricing = _run_stage(
+            "COLLECT_PRICE_SNAPSHOTS", _collect_prices,
+            skipped_reason=None if prices else "disabled by caller")
+
         # E-bis. THE HONEST BOOTSTRAP, and the answer to the circular
         #    failure. A wallet needs evidence to be scored; requiring a
         #    JARVIS thesis for that evidence would mean no wallet is ever
@@ -210,11 +239,13 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
             lambda: _rescore(started_dt, max_wallets=max_wallets),
             skipped_reason=None if score else "disabled by caller")
 
-        # F. Prices for the exact mints that need one, strongest reason
-        #    first: due checkpoints, then new event references.
-        pricing = _run_stage(
-            "COLLECT_PRICE_SNAPSHOTS", _collect_prices,
-            skipped_reason=None if prices else "disabled by caller")
+        # Scoring measures; lifecycle decides.  The legacy scheduler used to
+        # run this decision later, but that scheduler is intentionally off.
+        # Without this stage a newly proven candidate never enters WATCH and
+        # therefore is never polled for the evidence needed by shadow picks.
+        lifecycle = _run_stage(
+            "APPLY_WALLET_LIFECYCLE", _apply_lifecycle,
+            skipped_reason=None if score else "disabled by caller")
 
         # G. + H. Classify, cluster, gate, persist. Idempotent on cluster_id.
         processing = _run_stage(
@@ -254,11 +285,17 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
         "signatures_partial": (enrichment or {}).get("partial"),
         "enrichment_failures": (enrichment or {}).get("failures"),
         "enrichment_calls": (enrichment or {}).get("provider_calls"),
+        "history_wallets_attempted": (history or {}).get("wallets_attempted"),
+        "history_records_loaded": (history or {}).get("records_loaded"),
+        "history_swaps_stored": (history or {}).get("swaps"),
+        "history_backfills_completed": (history or {}).get("completed"),
         "entries_promoted": (alpha or {}).get("promoted"),
         "alpha_horizons_filled": (alpha or {}).get("horizons_filled"),
         "alpha_awaiting_price": (alpha or {}).get("awaiting_price"),
         "wallets_rescored": (scoring or {}).get("scored"),
         "wallets_attempted": (scoring or {}).get("attempted"),
+        "wallets_promoted": (lifecycle or {}).get("promoted"),
+        "wallets_demoted": (lifecycle or {}).get("demoted"),
         "price_snapshots": (pricing or {}).get("snapshots"),
         "mints_considered": (pricing or {}).get("requested"),
         "events_processed": (processing or {}).get("clusters"),
@@ -297,6 +334,57 @@ def _enrich() -> dict:
     return E.enrich_pending()
 
 
+def _backfill_history() -> dict:
+    """Advance durable balance-delta history for pinned wallets.
+
+    The previous cycle called the full-transaction decoder only for recent
+    transfer observations, while scoring fetched one shallow transfer page.
+    That combination can never close a position whose acquisition is older
+    than the page.  This stage makes bounded, restart-safe progress through
+    the canonical ``wallet_swaps`` cursor instead.
+    """
+    from sqlalchemy import text
+
+    from app.database import engine, get_db
+    from lib import wallet_swaps
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT address, history_oldest_signature, "
+            "COALESCE(history_backfill_complete,0) "
+            "FROM wallet_registry "
+            "WHERE pinned=1 "
+            "  AND status NOT IN ('EXCLUDED_ENTITY','ARCHIVED') "
+            "  AND COALESCE(history_backfill_complete,0)=0 "
+            "ORDER BY COALESCE(last_deep_backfill_at,'') ASC, address "
+            "LIMIT :lim"), {"lim": HISTORY_WALLETS_PER_CYCLE}).fetchall()
+
+    out = {"wallets_attempted": 0, "records_loaded": 0, "swaps": 0,
+           "not_trades": 0, "unvalued": 0, "completed": 0,
+           "page_size": HISTORY_PAGE_SIZE}
+    for address, oldest, _complete in rows:
+        out["wallets_attempted"] += 1
+        # Establish the newest/oldest cursor on the first pass; subsequent
+        # passes continue backward from the durable oldest signature.
+        deep = bool(oldest)
+        with get_db() as db:
+            result = wallet_swaps.sync_wallet_history(
+                address, session=db, max_pages=1,
+                page_size=HISTORY_PAGE_SIZE, deep=deep)
+        out["records_loaded"] += int(result.get("inspected") or 0)
+        out["swaps"] += int(result.get("swaps") or 0)
+        out["not_trades"] += int(result.get("not_trades") or 0)
+        out["unvalued"] += int(result.get("unvalued") or 0)
+        if not result.get("error"):
+            with engine.connect() as conn:
+                complete = conn.execute(text(
+                    "SELECT COALESCE(history_backfill_complete,0) "
+                    "FROM wallet_registry WHERE address=:a"),
+                    {"a": address}).scalar()
+            out["completed"] += int(bool(complete))
+    return out
+
+
 def _rescore(started_dt, *, max_wallets=None) -> dict:
     """Rescore the wallets whose evidence moved, and nothing else.
 
@@ -325,6 +413,14 @@ def _rescore(started_dt, *, max_wallets=None) -> dict:
             addresses.append(addr)
 
     with engine.connect() as conn:
+        # A bounded history pass changes the durable ledger even when the
+        # wallet was previously labelled NO_VERIFIED_TRADES/INSUFFICIENT.
+        # Such labels describe the old evidence and must not permanently
+        # exclude the wallet from rescoring.
+        for (addr,) in conn.execute(text(
+                "SELECT address FROM wallet_registry "
+                "WHERE last_history_sync_at >= :s"), {"s": since}).fetchall():
+            add(addr)
         for (addr,) in conn.execute(text(
                 "SELECT DISTINCT wallet_address FROM wallet_swap_enrichment "
                 "WHERE updated_at >= :s"), {"s": since}).fetchall():
@@ -405,6 +501,18 @@ def _resolve_alpha() -> dict:
     return out
 
 
+def _apply_lifecycle() -> dict:
+    """Apply the existing, pure-evidence promotion rules.
+
+    This is deliberately a separate stage from scoring: arithmetic still
+    cannot promote a wallet as a side effect.  It merely gives the lifecycle
+    engine a production caller while the mixed scheduler remains disabled.
+    """
+    from lib import wallet_lifecycle
+
+    return wallet_lifecycle.run(limit=200)
+
+
 def _collect_prices() -> dict:
     """Quote assets FIRST, then the exact mints.
 
@@ -468,6 +576,8 @@ def status() -> dict:
         "transfers_observed": poll.get("observed"),
         "process_window_seconds": PROCESS_WINDOW_SECONDS,
         "max_wallets_rescored": MAX_WALLETS_RESCORED,
+        "history_wallets_per_cycle": HISTORY_WALLETS_PER_CYCLE,
+        "history_page_size": HISTORY_PAGE_SIZE,
         "note": ("one bounded pass per wallet poll. It reads chain and "
                  "market data and writes shadow intelligence only: no "
                  "order, no signing, no cash movement, and no scheduler. "

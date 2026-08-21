@@ -10,7 +10,7 @@ This is a CURRENT-STATE document. It is not a diary, a changelog, a
 transcript, or an archive of old prompts. Everything historical lives in
 `git log`. Keep it short enough to seed a fresh session.
 
-*Last measured: 2026-08-20, at code SHA `975b874`.*
+*Last measured: 2026-08-21, at code SHA `acca096`.*
 
 ---
 
@@ -21,7 +21,7 @@ transcript, or an archive of old prompts. Everything historical lives in
     active repo    /home/nullcode/jarvis-trading
     interpreter    .venv/bin/python  (never bare python3, never Windows Python)
     remote         origin -> github.com/jmtibbetts/jarvis-trading
-    code SHA       975b874 (wallet shadow intelligence + On-Chain Desk)
+    code SHA       acca096 (the wallet-intelligence cycle completes itself)
 
 **Never work in the Windows checkout at `C:\jarvis-trading-ai-python`.**
 Never push from it, never run `run.ps1` / `stop.ps1` / `setup.ps1`, never
@@ -992,7 +992,7 @@ no console errors, every request 200, 3 fetches in a quiet 25s window.
 
 ## 11. Tests and CI
 
-    full suite   4,662 passed - 16 skipped - 0 failed, exit code 0 (975b874)
+    full suite   4,732 passed - 16 skipped - 0 failed, exit code 0 (acca096)
     Ubuntu CI    all six jobs green
                  runtime contract - frontend typecheck+build - secret scan
                  - pytest - migration/bootstrap - dependency audit
@@ -1151,26 +1151,183 @@ earned through forward evidence rather than granted because code exists.
 - Read the actual implementation before trusting a description of it —
   including this document.
 
-## 15. Wallet shadow intelligence — remaining UNKNOWNs
+## 15. The wallet-intelligence cycle — measured 2026-08-21
 
-- **No wallet is scored, so no thesis can be justified.** 1 of 1,086 registry
-  rows carries a usable score. `wallet_scoring` exists and is a scheduler
-  job; the scheduler is off. Until wallets are measurable this desk is a
-  classification and refusal engine, which is the honest state.
-- **Forward outcomes cannot resolve yet.** `token_activity_snapshots` covers
-  a ~9-hour window on 2026-08-19 and only 45 of 556 event mints. With 0
-  eligible theses no checkpoints exist; when they do, most will be
-  UNRESOLVED until a price source runs forward. UNRESOLVED is not a loss.
-- **Swap-grade evidence is not collected.** `lib/wallet_swaps` implements a
-  full balance-delta classifier against `getTransaction` and has NO
-  production caller. Turning it on is a provider-load decision, not a
-  classification one, and would move most of the 723 `UNKNOWN_TRANSFER`
-  observations into real types. Not started.
-- **Historical rows carry no `watched_wallet`.** It is persisted from
-  `975b874` forward; every earlier row is `LEGACY_PARTIAL` and is never
-  back-filled.
-- **The 3% round-trip cost is an ASSUMPTION**, labelled one, not a
-  measurement of these pools.
-- **No bitmap screenshot was obtainable** — the Browser pane does not
-  composite in this environment. Verification was done against the live
-  rendered DOM: text, geometry, overflow, network and console.
+**THREE COMPONENTS WERE COMPLETE AND NOTHING CALLED THEM.** `wallet_swaps`
+decoded full transactions, `wallet_scoring` measured wallets and
+`wallet_alpha` measured post-entry moves — each finished, each tested, each
+reachable only from the disabled legacy scheduler. `lib/wallet_intel_cycle`
+is the caller.
+
+**IT IS NOT A SCHEDULER.** It owns no timer, no thread and no queue. It runs
+at the END of each wallet poll, inside `wallet_poller.poll_once`, so the
+next cycle is the next poll. Seven stages, in order:
+
+    ENRICH_SWAP_EVIDENCE      bounded getTransaction -> wallet_swaps
+    RESOLVE_WALLET_ALPHA      promote proven entries, fill due horizons
+    RESCORE_AFFECTED_WALLETS  only wallets whose evidence changed
+    COLLECT_PRICE_SNAPSHOTS   quote assets first, then exact mints
+    PROCESS_SHADOW_EVENTS     classify/reclassify, gate, persist
+    RESOLVE_OUTCOMES          checkpoints whose price is due AND exists
+    REFRESH_SUMMARIES         source-isolated performance
+
+A stage that fails is recorded and **the rest still run** — `CYCLE_PARTIAL`.
+An unreachable price provider must not stop outcome resolution that needs no
+provider. Measured: one live pass is ~75-80s.
+
+### The blocker the phase prompt did not name — and the one that mattered
+
+A watched wallet showed **225 transfer legs, 50 of them token-against-SOL,
+and ZERO scoreable round trips.** Not the wallet's behaviour:
+
+    lib/quote_valuation      MAX_BAR_DISTANCE_HOURS = 6
+    SOL/USD 1H last bar      2026-08-19T12:00Z
+    measured staleness       39.8 HOURS
+    SOL over that gap        $77.44 -> $89.40  (+15%)
+
+The hourly SOL series is filled by `lib/ohlcv.fetch_multi_timeframe`, which
+was a scheduler job. With the scheduler off it froze, so **every SOL-quoted
+round trip was unpriceable and therefore every wallet was unscoreable.** The
+guard was right to refuse; the input was missing. The cycle now refreshes it
+through the same canonical fetcher. **The 6-hour tolerance was NOT relaxed**
+— a stale quote still refuses to value a trade.
+
+Same root cause froze `token_activity_snapshots` at 2026-08-19T13:18Z.
+
+### Bounded, everywhere
+
+    enrichment      40 signatures + 60 provider calls per cycle
+                    3 attempts, backoff 300s/1800s/7200s, 0.12s spacing
+                    7-day age limit; older signatures are left alone
+    scoring         12 wallets per cycle, selected by CHANGED EVIDENCE
+    prices          120 mints per cycle, 30 per call, 4 calls
+    processing      3-day leg window, not a 20,785-row replay
+
+Enrichment states: `PENDING` `ENRICHED` `PARTIAL` `RETRYABLE_FAILURE`
+`PERMANENTLY_UNRESOLVED` `REFUSED_NON_TRADING`. **ENRICHED and
+REFUSED_NON_TRADING are both ANSWERS** — "this was a buy" and "this was a
+failed transaction" are equally final, and re-reading either spends a call
+to learn nothing. Idempotent on `uq_wse_signature_wallet`.
+
+### Reclassification supersedes — it does not vote twice
+
+`cluster_key` hashes the event TYPE. So the moment full-transaction evidence
+turns an `UNKNOWN_TRANSFER` into a `TOKEN_BUY`, the cluster identity
+**changes** and the old row would sit beside its own replacement as a second
+independent observation — a double vote produced by the one pass whose
+entire purpose is to correct a classification.
+
+Prior rows are `revision_state = SUPERSEDED`, keep `prior_event_type` /
+`prior_classification`, have their unresolved checkpoints EXPIRED, and are
+excluded from every read by one predicate (`CURRENT_ONLY`, `_current()` in
+the router). Measured on the live store: **7 signatures the transfers feed
+could not explain collapsed from 5 clusters to 2.**
+
+Also: a persisted `reference_price_usd` is PRESERVED on reprocess. Snapshots
+are pruned by age, so re-deriving a point-in-time fact from what happens to
+remain in the store would demote a thesis admitted on evidence that did
+exist — the same mistake as using today's price for an old event.
+
+### Prices use POOLS, not the cheaper token endpoint
+
+`include=top_pools` returns the same object `token_surge.snapshot_from_pool`
+already flattens, 30 mints per call. The token endpoint would be a third of
+the payload and would write rows with NULL transaction buckets — and
+`token_surge.baseline_from` coerces a missing `buys_m5` to **zero** when it
+takes the median, so every price-only row would drag a token's baseline down
+and manufacture a surge in the pass that feeds wallet discovery. A top pool
+returned for a mint on the QUOTE side is dropped rather than stored under
+the requested mint's identity.
+
+### The bootstrap is not circular
+
+    A. OBSERVED WALLET PERFORMANCE   the wallet's own entries and what the
+                                     token did next. `reconstruct_trades`
+                                     and `wallet_alpha`. Needs NO thesis.
+    B. JARVIS SHADOW PERFORMANCE     how a thesis derived from that wallet
+                                     did. `wallet_shadow_outcomes`.
+
+`SCORE_BOOTSTRAP_POPULATION = OBSERVED_WALLET_ECONOMIC_EVENTS`. B is never
+fed back into A — pinned by a test that greps for ACCESS, not vocabulary.
+`score_registry_wallets` and `score_wallets` both delegate to one
+`_score_one`, so there is one wallet score and not two.
+
+### Measured before -> after, one real cycle on the operator database
+
+    market observations (current)     1,266 -> 1,283   (29 superseded)
+    BALANCE_DELTA_EVIDENCE events         0 -> 16
+    enrichment rows                       0 -> 68      (all NOT_A_TRADE)
+    wallets with a usable score           1 -> 2
+    registry NEVER_ANALYSED           1,060 -> 1,022
+    registry NO_VERIFIED_TRADES          16 -> 55
+    event mints priced                   45 -> 166
+    event mints FRESH (<3600s)            0 -> 154
+    snapshot rows                    10,779 -> 11,097
+    SOL/USD 1H staleness              39.8h -> 0.35h
+    eligible theses                       0 -> 0
+    resolved outcomes                     0 -> 0
+
+New event types only full-transaction evidence can establish:
+`NON_ECONOMIC_TRANSACTION` 10, `LIQUIDITY_ADD` 6, `EXCHANGE_WITHDRAWAL` 1,
+`FAILED_TRANSACTION` 0 so far.
+
+**All 68 enriched signatures came back NOT a trade** — overwhelmingly "value
+arrived and nothing was paid". A token inflow with no payment is not a buy,
+and the transfers feed could not tell the difference.
+
+### Why ZERO theses is still the honest answer
+
+Two binding constraints, both measured, neither weakened:
+
+1. **1,261 of the original 1,266 observations carry NO wallet attribution.**
+   `watched_wallet` is persisted only from `975b874` forward; every earlier
+   row is `LEGACY_PARTIAL` with an empty `wallets_json`. `evaluate()` reads
+   contributing wallets from those rows, so even a perfectly scored wallet
+   cannot rescue them. Only NEW observations can ever qualify.
+2. **No watched wallet has closed a single round trip.** Measured across
+   fully-drained Helius history: one seed wallet has 26 OPEN positions and 0
+   closed; the others have 1-21 legs total. `MIN_TRADES_FOR_SCORE = 8`
+   CLOSED round trips is unreachable for an accumulator. Deeper paging does
+   not help — `fully_drained` is already true.
+
+The 2 scored wallets are discovered candidates, not watched ones.
+
+## 16. Wallet intelligence — remaining UNKNOWNs
+
+- **`wallet_trades` is still EMPTY (0 rows), so no observation has been
+  promoted to `VERIFIED_BUY_ENTRY` and no post-entry alpha exists.** The
+  chain is wired end to end — enrichment lands a ledger row from the same
+  fetch, `promote_holder_to_verified_entry` reads it, `wallet_alpha`
+  resolves horizons — but every signature enriched so far was NOT a trade,
+  so nothing has reached the ledger yet. **0 of 1,397 observations are
+  alpha-eligible** (900 `POOL_TX_SIGNER`, 497 `HOLDER_SNAPSHOT`). This is
+  the next thing to watch, not a thing to fix by loosening.
+- **The 5 watched wallets may simply not be worth watching.** 3 of 5 have
+  under 25 lifetime transfer legs. Whether the seed list should change is an
+  OPERATOR decision and has not been made.
+- **`SNAPSHOT_RETENTION_HOURS = 48` in `token_surge`.** `prune_snapshots`
+  runs inside `scan_and_score`, which is a scheduler job and therefore not
+  running — but if it ever runs it deletes price evidence older than 48h.
+  The persisted `reference_price_usd` survives it (above); a 7d checkpoint's
+  own due-time price would be collected fresh at due time, so the horizon is
+  reachable. **Not proven end to end, because no thesis exists yet.**
+- **`unpriced_trades` was never written.** `reconstruct_trades` returns
+  `unpriced_legs`; `_score_one` reads `rec.get("unpriced")`, which is always
+  None. Pre-existing, carried forward deliberately rather than fixed inside
+  a phase about something else. The column is null for every wallet.
+- **Helius `/v1/transfers` returns intermittent 502s.** 7 registry rows sit
+  at `analysis_status=FAILED` from exactly that. It is transient — the same
+  wallet succeeds on a later pass — and the cycle retries by round-robin on
+  `last_analysis_at`, so it self-heals. It is NOT a measurement of zero and
+  the existing counts are left intact.
+- **`POSITION_INCREASE` / `POSITION_REDUCTION` / `FULL_EXIT` are declared
+  and never produced.** They need holdings state across time, which nothing
+  computes. Left unproduced rather than approximated.
+- **The 3% round trip is still an ASSUMPTION**, labelled `ASSUMPTION`, and
+  gross is shown beside net.
+- **No bitmap screenshot is obtainable** — the Browser pane does not
+  composite in this environment. Verified against the live rendered DOM
+  instead: text, geometry (4 panels at 557px, none clipped), network (all
+  200), console (no errors), and redaction (**zero** base58 strings of 32+
+  characters anywhere in `document.body.innerText`).
+

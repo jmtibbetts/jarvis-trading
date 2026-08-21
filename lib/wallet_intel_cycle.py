@@ -85,6 +85,9 @@ _STATE: dict = {
     # Counts from the last pass. None means the stage did not look.
     "signatures_considered": None,
     "signatures_enriched": None,
+    "signatures_answered": None,
+    "signatures_refused_non_trading": None,
+    "signatures_partial": None,
     "enrichment_failures": None,
     "enrichment_calls": None,
     "entries_promoted": None,
@@ -235,6 +238,20 @@ def run_once(*, full: bool = False, enrich: bool = True, score: bool = True,
     counts = {
         "signatures_considered": (enrichment or {}).get("considered"),
         "signatures_enriched": (enrichment or {}).get("enriched"),
+        # AN ANSWER IS NOT A FAILURE. "40 considered, 0 enriched" reads as a
+        # broken pass; what actually happened on the live store is that all
+        # 47 signatures resolved to NOT a trade — value arrived and nothing
+        # was paid — which is a finding, and the whole reason the stage
+        # exists. Reporting only the trades would make the most common true
+        # outcome invisible.
+        "signatures_answered": (
+            None if not enrichment else
+            (enrichment.get("enriched", 0)
+             + enrichment.get("refused_non_trading", 0)
+             + enrichment.get("partial", 0))),
+        "signatures_refused_non_trading": (
+            (enrichment or {}).get("refused_non_trading")),
+        "signatures_partial": (enrichment or {}).get("partial"),
         "enrichment_failures": (enrichment or {}).get("failures"),
         "enrichment_calls": (enrichment or {}).get("provider_calls"),
         "entries_promoted": (alpha or {}).get("promoted"),

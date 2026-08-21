@@ -634,6 +634,20 @@ class TestCycle(unittest.TestCase):
         self.assertIn("Its failure is ITS failure", body)
         self.assertIn("CYCLE_PARTIAL", body)
 
+    def test_an_answer_is_not_counted_as_a_failure(self):
+        """"Not a trade" is a FINDING, and the most common true one.
+
+        Reporting only `signatures_enriched` beside `signatures_considered`
+        makes a pass that answered all 47 of its signatures read as a pass
+        that achieved nothing.
+        """
+        s = CY.status()
+        for key in ("signatures_answered", "signatures_refused_non_trading",
+                    "signatures_partial"):
+            self.assertIn(key, s)
+        page = src("frontend/src/lib/sections/OnChain.svelte")
+        self.assertIn("proven NOT a trade", page)
+
     def test_a_missing_counts_are_none_not_zero(self):
         s = CY.status()
         for key in ("signatures_enriched", "price_snapshots",

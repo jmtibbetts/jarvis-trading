@@ -246,8 +246,12 @@
               ? new Date(c.next_cycle_at).toLocaleTimeString() : (c.next_cycle_at ?? "—")}</b></div>
           <div class="stat"><span>Transfers collected</span>
             <b class="num">{c.transfers_collected ?? "—"}</b></div>
-          <div class="stat"><span>Signatures enriched</span>
+          <div class="stat"><span>Signatures considered / answered</span>
+            <b class="num">{c.signatures_considered ?? "—"} / {c.signatures_answered ?? "—"}</b></div>
+          <div class="stat"><span>— established as trades</span>
             <b class="num">{c.signatures_enriched ?? "—"}</b></div>
+          <div class="stat"><span>— proven NOT a trade</span>
+            <b class="num">{c.signatures_refused_non_trading ?? "—"}</b></div>
           <div class="stat"><span>Enrichment failures</span>
             <b class="num">{c.enrichment_failures ?? "—"}</b></div>
           <div class="stat"><span>Wallets rescored</span>

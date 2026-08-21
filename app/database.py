@@ -2125,6 +2125,10 @@ def _migrate_columns():
         # predates it and is CURRENT by default, which is true: nothing has
         # superseded them.
         "wallet_shadow_events": [
+            ("copyability_state", "TEXT"),
+            ("copyability_reason", "TEXT"),
+            ("behaviour_state", "TEXT"),
+            ("copyability_at", "TEXT"),
             ("revision_state", "TEXT DEFAULT 'CURRENT'"),
             ("revision", "INTEGER DEFAULT 1"),
             ("superseded_by", "TEXT"),
@@ -3071,6 +3075,17 @@ class WalletShadowEvent(Base):
     #: signatures — a double vote, produced by the one pass whose entire
     #: purpose is to CORRECT a classification. The prior row is superseded
     #: instead, and keeps saying what it used to claim.
+    #: COPYABILITY IS NOT ELIGIBILITY. The gate decides whether the evidence
+    #: supports a thesis; this records whether the SOURCE WALLET's observed
+    #: behaviour is something a follower could reproduce at all. A pick from
+    #: a wallet whose identity could never be resolved is kept, shown, and
+    #: excluded from validated expectancy — it is evidence about a wallet we
+    #: cannot yet vouch for, which is different from evidence we distrust.
+    copyability_state = Column(String, index=True)
+    copyability_reason = Column(Text)
+    behaviour_state = Column(String)
+    copyability_at = Column(String)
+
     revision_state    = Column(String, default="CURRENT", index=True)
     revision          = Column(Integer, default=1)
     superseded_by     = Column(String)

@@ -40,6 +40,9 @@ SNAPSHOT_COLLECTOR_VERSION = "wallet_price_snapshots_v1"
 
 #: GeckoTerminal accepts thirty addresses per multi-token request.
 MINTS_PER_CALL = 30
+#: How many mints travel in the status payload for diagnosis. The counts are
+#: the measurement; the list is a hint.
+DIAGNOSTIC_SAMPLE = 5
 #: Bounded per cycle. Four calls covers a whole cycle's priority set on the
 #: measured data and leaves the keyless rate budget to the surge scanner.
 MAX_CALLS_PER_CYCLE = 4
@@ -328,7 +331,8 @@ def collect(mints=None, *, limit: int | None = None,
     cap = int(limit if limit is not None else max_mints_per_cycle())
 
     stats = {"considered": 0, "requested": 0, "provider_calls": 0,
-             "snapshots": 0, "covered": [], "unsupported": [],
+             "snapshots": 0, "covered_count": 0, "unsupported_count": 0,
+             "covered_sample": [], "unsupported_sample": [],
              "by_reason": {}, "errors": [],
              "budget_calls": budget_calls, "budget_mints": cap,
              "version": SNAPSHOT_COLLECTOR_VERSION}
@@ -411,8 +415,24 @@ def collect(mints=None, *, limit: int | None = None,
                 covered.add(mint)
                 stats["snapshots"] += 1
 
-    stats["covered"] = sorted(covered)
-    stats["unsupported"] = sorted(set(wanted_order) - covered)
+    # BOUND THE PAYLOAD. `collect` is reported verbatim inside the cycle
+    # status, which is served on every desk refresh — and the full lists ran
+    # to ~120 mints with no consumer at all: the UI renders counts. These
+    # are public token mints, not wallet identities, so the concern is size
+    # rather than secrecy, but shipping an unbounded array nobody reads is
+    # still shipping it forever.
+    unsupported = sorted(set(wanted_order) - covered)
+    stats["covered_count"] = len(covered)
+    stats["unsupported_count"] = len(unsupported)
+    stats["covered_sample"] = sorted(covered)[:DIAGNOSTIC_SAMPLE]
+    stats["unsupported_sample"] = unsupported[:DIAGNOSTIC_SAMPLE]
+    stats["sample_note"] = (
+        f"first {DIAGNOSTIC_SAMPLE} of each, for diagnosis; the counts are "
+        f"the measurement")
+    # The full lists stay available to callers in-process (the cycle logs
+    # them) and simply do not travel in the status payload.
+    logger.info("[WalletPrices] covered=%d unsupported=%d", len(covered),
+                len(unsupported))
     return stats
 
 

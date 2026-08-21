@@ -444,10 +444,25 @@ def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
     identities: dict[str, dict] = {}
     cps = [r.get("counterparty") for r in valued if r.get("counterparty")]
     if cps:
-        try:
-            identities = helius_client.batch_identity(list(dict.fromkeys(cps)))
-        except Exception as e:
-            errors.append(f"batch-identity: {type(e).__name__}: {str(e)[:120]}")
+        # This route is hit on every page load. Without the capability gate
+        # a plan that does not include identity is asked — and refused —
+        # once per request, forever.
+        from lib import provider_health as PH
+        gate = PH.should_probe("helius", "wallet_batch_identity")
+        if not gate["allowed"]:
+            errors.append(f"batch-identity: skipped, {gate['status']} "
+                          f"({gate['reason']})")
+        else:
+            try:
+                identities = helius_client.batch_identity(
+                    list(dict.fromkeys(cps)))
+                PH.record("helius", "wallet_batch_identity",
+                          status=PH.HEALTHY, http_status=200,
+                          rows=len(identities or {}))
+            except Exception as e:
+                st = PH.record_http_failure(
+                    "helius", "wallet_batch_identity", e)
+                errors.append(f"batch-identity: {st}: {str(e)[:100]}")
 
     flows = wallet_intel.exchange_flows(valued, identities)
 
@@ -466,11 +481,24 @@ def wallet_intel_report(limit: int = _WALLET_INTEL_MAX_TRANSFERS):
 
     # ── 5. clusters. funded-by 404s legitimately and returns {} ──────────
     funding: dict[str, dict] = {}
-    for addr in watched:
-        try:
-            funding[addr] = helius_client.funded_by(addr)
-        except Exception as e:
-            errors.append(f"{addr[:8]}… funded-by: {type(e).__name__}: {str(e)[:120]}")
+    from lib import provider_health as PH
+    _fund_gate = PH.should_probe("helius", "wallet_funded_by")
+    if not _fund_gate["allowed"]:
+        errors.append(f"funded-by: skipped, {_fund_gate['status']} "
+                      f"({_fund_gate['reason']})")
+    else:
+        for addr in watched:
+            try:
+                funding[addr] = helius_client.funded_by(addr)
+            except Exception as e:
+                st = PH.record_http_failure("helius", "wallet_funded_by", e)
+                errors.append(f"{addr[:8]}… funded-by: {st}: {str(e)[:100]}")
+                # One refusal is the plan's answer for every address.
+                if st in (PH.PLAN_FORBIDDEN, PH.AUTH_FAILED):
+                    break
+        if funding:
+            PH.record("helius", "wallet_funded_by", status=PH.HEALTHY,
+                      http_status=200, rows=len(funding))
     clusters = wallet_intel.cluster_by_funder(funding, identities)
     cluster_map = {m: c["funder"] for c in clusters
                    if not c["is_infrastructure_funder"] and c["size"] > 1
